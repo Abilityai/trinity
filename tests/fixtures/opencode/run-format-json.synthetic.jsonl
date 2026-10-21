@@ -1,0 +1,15 @@
+# SYNTHETIC fixture (#2981, checkpoint B) — hand-written in the `part`-nested shape
+# `opencode run --format json` emits (events nest their payload under `part`).
+# It is REPLACED by a stream captured from the pinned v1.18.32 binary Before
+# merge (plan: Before merge → "Capture a real `opencode run --format json`
+# stream"). Lines starting with `#` are non-JSON on purpose: the parser must
+# drop and count them, never fail on them. File name is pinned by the tests.
+{"type": "step_start", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_1", "type": "step-start"}}
+{"type": "text", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_2", "type": "text", "text": "Let me check the file."}}
+{"type": "tool_use", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_3", "type": "tool", "callID": "call_abc123", "tool": "bash", "state": {"status": "completed", "input": {"command": "ls -la"}, "output": "total 0", "title": "ls -la", "time": {"start": 1, "end": 2}}}}
+{"type": "step_finish", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_4", "type": "step-finish", "reason": "tool-calls", "cost": 0.0012, "tokens": {"input": 1200, "output": 80, "reasoning": 20, "cache": {"read": 1000, "write": 100}}}}
+{"type": "step_start", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_5", "type": "step-start"}}
+{"type": "reasoning", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_6", "type": "reasoning", "text": "The directory is empty."}}
+{"type": "text", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_7", "type": "text", "text": "The directory "}}
+{"type": "text", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_8", "type": "text", "text": "is empty."}}
+{"type": "step_finish", "timestamp": 1760000000000, "sessionID": "ses_synthetic_01", "part": {"sessionID": "ses_synthetic_01", "messageID": "msg_1", "id": "prt_9", "type": "step-finish", "reason": "stop", "cost": 0.0008, "tokens": {"input": 1300, "output": 40, "reasoning": 0, "cache": {"read": 1200, "write": 0}}}}

@@ -670,3 +670,353 @@ def test_read_only_fails_open_on_a_corrupt_file(monkeypatch, tmp_path):
     monkeypatch.setattr(opencode_runtime, "_READ_ONLY_CONFIG", root)
     monkeypatch.setattr(opencode_runtime, "_LEGACY_READ_ONLY_CONFIG", tmp_path / "x")
     assert opencode_runtime._is_read_only() is False
+
+
+# ---------------------------------------------------------------------------
+# checkpoint B (#2981) — parser hardening: the `part`-nested stream shape,
+# failed-turn outcomes, the text-shaped tool-call detector, dropped lines,
+# and custom-provider cost semantics (ruling T6)
+# ---------------------------------------------------------------------------
+
+from pathlib import Path as _Path  # noqa: E402
+
+from agent_server.services.opencode_runtime import (  # noqa: E402
+    FINAL_ERROR,
+    FINAL_INCOMPLETE,
+    FINAL_TEXT_TOOL_CALL,
+    FINAL_TRUNCATED,
+    text_tool_call_shape,
+)
+
+# Pinned name: replaced by the captured stream Before merge, same path.
+_FIXTURE = (
+    _Path(__file__).resolve().parent.parent
+    / "fixtures" / "opencode" / "run-format-json.synthetic.jsonl"
+)
+_S = "ses_part_1"
+
+
+def _pev(event_type: str, part: dict | None = None, **top) -> dict:
+    """One `part`-nested event, the shape `opencode run --format json` emits."""
+    event = {"type": event_type, "timestamp": 1, "sessionID": _S}
+    event.update(top)
+    if part is not None:
+        event["part"] = {"sessionID": _S, "messageID": "msg_1", **part}
+    return event
+
+
+def _pstep(text: str, *, reason="stop", tokens=None, cost=None) -> list:
+    finish = {"type": "step-finish", "reason": reason}
+    if tokens is not None:
+        finish["tokens"] = tokens
+    if cost is not None:
+        finish["cost"] = cost
+    return [
+        _pev("step_start", {"type": "step-start"}),
+        _pev("text", {"type": "text", "text": text}),
+        _pev("step_finish", finish),
+    ]
+
+
+def _ptool(call_id="call_1", tool="bash", status="completed", output="ok") -> dict:
+    return _pev("tool_use", {
+        "type": "tool", "callID": call_id, "tool": tool,
+        "state": {"status": status, "input": {"command": "ls"}, "output": output},
+    })
+
+
+def test_fixture_file_is_named_and_declared_synthetic():
+    assert _FIXTURE.name == "run-format-json.synthetic.jsonl"
+    head = _FIXTURE.read_text().splitlines()[0].lower()
+    assert "synthetic" in head and "before" in _FIXTURE.read_text()[:600].lower()
+
+
+def test_part_nested_fixture_parses_text_tools_usage_and_cost(caplog):
+    """The fork read the flat shape while the real stream nests under `part`;
+    that is why cost and model were null on the fork. Everything below comes
+    out of `part.*`, with the ledger's model from the resolved `-m`."""
+    import logging
+    lines = _FIXTURE.read_text().splitlines()
+    with caplog.at_level(logging.WARNING, logger=opencode_runtime.logger.name):
+        text, log, metadata, raw, outcome = parse_opencode_jsonl(
+            lines, model="openrouter/qwen/qwen3-coder"
+        )
+    assert outcome == FINAL_OK
+    assert text == "The directory is empty."           # last step only, concatenated
+    assert metadata.session_id == "ses_synthetic_01"
+    tools = [e for e in log if e.type == "tool_use"]
+    assert [t.tool for t in tools] == ["bash"] and tools[0].id == "call_abc123"
+    assert tools[0].input == {"command": "ls -la"}
+    results = [e for e in log if e.type == "tool_result"]
+    assert results and results[0].output == "total 0" and results[0].success is True
+    assert metadata.tool_count == 1
+    assert metadata.input_tokens == 2500 and metadata.output_tokens == 120
+    assert metadata.cache_read_tokens == 2200
+    assert metadata.cost_usd == pytest.approx(0.0020)     # native sum, models.dev provider
+    assert len(raw) == 9                                   # six comment lines dropped
+    dropped = [r for r in caplog.records if "non-JSON" in r.getMessage()]
+    assert len(dropped) == 1 and "6" in dropped[0].getMessage()
+
+
+def test_part_nested_tool_use_reads_tool_callid_and_state():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}),
+        _ptool(call_id="call_9", tool="read", status="error", output="ENOENT"),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        *_pstep("could not read it"),
+    )
+    _text, log, metadata, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_OK
+    tool = next(e for e in log if e.type == "tool_use")
+    assert (tool.id, tool.tool, tool.input) == ("call_9", "read", {"command": "ls"})
+    result = next(e for e in log if e.type == "tool_result")
+    assert result.success is False and result.output == "ENOENT"
+    assert metadata.tool_count == 1
+
+
+def test_top_level_shape_still_parses():
+    """Flat (top-level) events remain accepted as the fallback."""
+    lines = _step("flat ok", tokens={"input": 10, "output": 5}, cost=0.5)
+    text, _log, metadata, _raw, outcome = parse_opencode_jsonl(lines)
+    assert (text, outcome) == ("flat ok", FINAL_OK)
+    assert metadata.input_tokens == 10 and metadata.cost_usd == pytest.approx(0.5)
+
+
+# -- outcome rules, one test each -------------------------------------------
+
+def test_ok_outcome_on_part_shaped_final_text():
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(_lines(*_pstep("hello")))
+    assert (text, outcome) == ("hello", FINAL_OK)
+
+
+def test_tools_only_outcome_on_part_shape():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "stop"}),
+    )
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert (text, outcome) == ("(Task completed)", FINAL_TOOLS_ONLY)
+
+
+def test_reasoning_only_outcome_on_part_shape():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}),
+        _pev("reasoning", {"type": "reasoning", "text": "thinking"}),
+        _pev("step_finish", {"type": "step-finish", "reason": "stop"}),
+    )
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert (text, outcome) == ("", FINAL_REASONING_ONLY)
+
+
+def test_empty_outcome_on_part_shape():
+    _t, _log, _m, _raw, outcome = parse_opencode_jsonl(_lines(*_pstep("")))
+    assert outcome == FINAL_EMPTY
+
+
+@pytest.mark.parametrize(
+    "final_text,shape",
+    [
+        ('<tool_call>{"name": "bash", "arguments": {"command": "ls"}}</tool_call>', "tool_call_tag"),
+        ('<function_call name="bash">{"command": "ls"}</function_call>', "function_call_tag"),
+        ('Sure. {"name": "bash", "arguments": {"command": "ls"}}', "name_arguments_object"),
+        ('{"tool_calls": [{"id": "c1", "function": {"name": "bash"}}]}', "tool_calls_array"),
+    ],
+)
+def test_text_tool_call_is_a_failed_turn_for_each_shape(final_text, shape):
+    """llama4:scout emitted its tool call as prose on the fork and the ledger
+    recorded success. A text-only final carrying a tool-call shape with zero
+    `tool_use` events is a failed turn, named."""
+    assert text_tool_call_shape(final_text) == shape
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(_lines(*_pstep(final_text)))
+    assert outcome == FINAL_TEXT_TOOL_CALL
+    assert text == "", "a text-shaped tool call must not be returned as the answer"
+
+
+def test_text_tool_call_detector_is_silent_once_real_tools_ran():
+    """The detector fires on ZERO `tool_use` events only: a model that ran a
+    real tool and then quoted a JSON object in its answer is fine."""
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        *_pstep('I ran it: {"name": "bash", "arguments": {"command": "ls"}}'),
+    )
+    _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_OK
+
+
+def test_plain_prose_is_not_a_text_tool_call():
+    assert text_tool_call_shape("The function name is bash and its arguments are few.") is None
+    assert text_tool_call_shape('{"name": "Alice"}') is None
+
+
+def test_error_event_fails_the_turn_even_with_text():
+    """Any `error` event in the stream fails the turn (decision 15) — the
+    message is read from the nested `error.data.message`."""
+    lines = _lines(
+        *_pstep("partial answer"),
+        _pev("error", error={"name": "APIError", "data": {"message": "upstream 502 Bad Gateway"}}),
+    )
+    text, _log, metadata, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_ERROR and text == ""
+    # The message itself, not a serialized blob that happens to contain it.
+    assert metadata.error_message == "upstream 502 Bad Gateway"
+
+
+def test_provider_5xx_after_tools_ran_is_not_laundered_into_task_completed():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        _pev("error", part={"error": {"data": {"message": "503 Service Unavailable from provider"}}}),
+    )
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_ERROR
+    assert text != "(Task completed)"
+
+
+def test_step_finish_length_is_a_failed_turn():
+    lines = _lines(*_pstep("truncated mid-sen", reason="length"))
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_TRUNCATED and text == ""
+
+
+def test_step_finish_tool_calls_with_no_following_step_is_a_failed_turn():
+    """`reason: tool-calls` promises another step; a stream that ends there
+    never produced the answer those tools were fetched for."""
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+    )
+    _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_INCOMPLETE
+
+
+def test_step_finish_tool_calls_followed_by_a_step_is_fine():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        *_pstep("done"),
+    )
+    _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_OK
+
+
+def test_a_started_step_clears_the_tool_calls_promise():
+    """The rule is "no following STEP", not "no following step_finish": a
+    stream that ends mid-step after `step_start` has kept its promise, and
+    the text rule decides the outcome."""
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        _pev("step_start", {"type": "step-start"}),
+        _pev("text", {"type": "text", "text": "answer"}),
+    )
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert (text, outcome) == ("answer", FINAL_OK)
+
+
+def test_dropped_lines_are_counted_and_logged_once(caplog):
+    import logging
+    lines = ["warming up...", "[info] model loaded", "42"] + _lines(*_pstep("ok"))
+    with caplog.at_level(logging.WARNING, logger=opencode_runtime.logger.name):
+        _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_OK
+    dropped = [r for r in caplog.records if "non-JSON" in r.getMessage()]
+    assert len(dropped) == 1, "one log line per turn, not one per dropped line"
+    assert "3" in dropped[0].getMessage()
+
+
+def test_clean_stream_logs_nothing_about_dropped_lines(caplog):
+    import logging
+    with caplog.at_level(logging.WARNING, logger=opencode_runtime.logger.name):
+        parse_opencode_jsonl(_lines(*_pstep("ok")))
+    assert not [r for r in caplog.records if "non-JSON" in r.getMessage()]
+
+
+# -- cost semantics (ruling T6) ---------------------------------------------
+
+def _provider_env(monkeypatch, models):
+    monkeypatch.setenv("AGENT_RUNTIME_PROVIDER", json.dumps({
+        "id": "local", "npm": "@ai-sdk/openai-compatible",
+        "base_url": "http://host.docker.internal:11434/v1",
+        "api_key_env": "LOCAL_API_KEY", "models": models,
+    }))
+
+
+def test_custom_provider_without_declared_cost_records_none_not_zero(monkeypatch, caplog):
+    """OpenCode prices a custom provider at $0; $0 is not "free", it is
+    "unknown". Loop budgets must see None."""
+    import logging
+    _provider_env(monkeypatch, {"qwen3:27b": {}})
+    with caplog.at_level(logging.WARNING, logger=opencode_runtime.logger.name):
+        _t, _log, metadata, _raw, outcome = parse_opencode_jsonl(
+            _lines(*_pstep("ok", cost=0.0, tokens={"input": 10, "output": 5})),
+            model="local/qwen3:27b",
+        )
+    assert outcome == FINAL_OK
+    assert metadata.cost_usd is None
+    assert metadata.input_tokens == 10, "tokens are still real; only the price is unknown"
+    warned = [r for r in caplog.records if "cost" in r.getMessage().lower()]
+    assert len(warned) == 1
+
+
+def test_custom_provider_with_declared_cost_keeps_the_native_sum(monkeypatch):
+    _provider_env(monkeypatch, {"qwen3:27b": {"cost": {"input": 0.1, "output": 0.2}}})
+    _t, _log, metadata, _raw, _o = parse_opencode_jsonl(
+        _lines(*_pstep("a", cost=0.01), *_pstep("b", cost=0.02)), model="local/qwen3:27b",
+    )
+    assert metadata.cost_usd == pytest.approx(0.03)
+
+
+def test_native_provider_cost_is_summed_even_when_a_custom_block_exists(monkeypatch):
+    """The custom block governs ITS provider id only; a models.dev route keeps
+    the native sum."""
+    _provider_env(monkeypatch, {"qwen3:27b": {}})
+    _t, _log, metadata, _raw, _o = parse_opencode_jsonl(
+        _lines(*_pstep("a", cost=0.01), *_pstep("b", cost=0.02)),
+        model="openrouter/qwen/qwen3-coder",
+    )
+    assert metadata.cost_usd == pytest.approx(0.03)
+
+
+# -- the end-to-end half: exit 0 is not a success for any failed outcome ----
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stream,expected_status,needle",
+    [
+        (_lines(*_pstep('<tool_call>{"name":"bash","arguments":{}}</tool_call>')), 500, "text_tool_call"),
+        (_lines(*_pstep("x", reason="length")), 500, "truncated"),
+        (_lines(_pev("step_start", {"type": "step-start"}), _ptool(),
+                _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"})), 500, "incomplete"),
+        (_lines(*_pstep("x"), _pev("error", error={"data": {"message": "upstream 502"}})), 500, "upstream 502"),
+        (_lines(*_pstep("x"), _pev("error", error={"data": {"message": "401 Unauthorized"}})), 503, "authentication"),
+        (_lines(*_pstep("x"), _pev("error", error={"data": {"message": "429 rate limit"}})), 429, "rate limit"),
+    ],
+)
+async def test_failed_outcomes_raise_on_exit_zero(monkeypatch, tmp_path, stream, expected_status, needle):
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    _install_fake_subprocess(monkeypatch, stdout_lines=stream, return_code=0)
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("task", model="openrouter/x/y")
+    assert exc.value.status_code == expected_status
+    assert needle in str(exc.value.detail).lower()
+
+
+@pytest.mark.asyncio
+async def test_execute_path_reads_part_shape_and_applies_cost_policy(monkeypatch, tmp_path):
+    """The subprocess reader and the unit entrypoint share one line parser:
+    part-nested usage lands on the ledger, the custom-provider policy applies,
+    and `model_name` stays the resolved `-m`."""
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    _provider_env(monkeypatch, {"qwen3:27b": {}})
+    stream = ["not json"] + _lines(*_pstep("done", cost=0.0, tokens={"input": 7, "output": 3}))
+    _install_fake_subprocess(monkeypatch, stdout_lines=stream)
+    text, _log, metadata, _sid = await runtime.execute_headless("task", model="local/qwen3:27b")
+    assert text == "done"
+    assert metadata.input_tokens == 7 and metadata.output_tokens == 3
+    assert metadata.cost_usd is None
+    assert metadata.model_name == "local/qwen3:27b"

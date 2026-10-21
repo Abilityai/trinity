@@ -14,16 +14,25 @@ emits a JSON-lines event stream.
 
 Event stream (measured against the pinned v1.18.32, #2981)
 ----------------------------------------------------------
+* Every line is ``{"type": ..., "sessionID": ..., "part": {...}}`` — the
+  payload is NESTED under ``part`` (``part.text``, ``part.tool`` /
+  ``part.callID`` / ``part.state``, ``part.tokens`` / ``part.cost`` /
+  ``part.reason``). The parser reads ``part`` first and falls back to the
+  same keys at the top level, because the lab fork read only the flat shape
+  and that is why its ledger showed cost and model as null (#2981).
 * ``step_start`` / ``step_finish`` bracket each LLM step. ``step_finish``
-  carries ``tokens: {input, output, reasoning, cache: {read, write}}`` and a
+  carries ``tokens: {input, output, reasoning, cache: {read, write}}``, a
   **native** ``cost`` — this runtime is ``cost_reporting="native"``, so there
   is deliberately NO pricing table here (the #2207 class: a hand-maintained
-  rate card that silently goes stale).
-* ``tool_use`` / ``text`` / ``reasoning`` / ``error``.
+  rate card that silently goes stale) — and a ``reason`` (``stop`` /
+  ``tool-calls`` / ``length``).
+* ``tool_use`` / ``text`` / ``reasoning`` / ``error`` (the error payload is
+  ``error.data.message`` or ``part.error``).
 * ``sessionID`` appears on EVERY line, so session capture does not depend on
   any one event type arriving.
 * There is **no separate result line**. The final response is the
   concatenation of the ``text`` parts belonging to the LAST step.
+* Non-JSON lines are dropped, counted and logged ONCE per turn.
 
 Two subset traps, both of which would silently inflate billing:
 ``tokens.reasoning`` is a SUBSET of ``tokens.output`` and ``tokens.cache.read``
@@ -41,11 +50,29 @@ policy, decided here and pinned by tests:
 ====================================  =========================================
 final state                           outcome
 ====================================  =========================================
+any ``error`` event in the stream     **FAIL** ``error`` (500; auth-shaped
+                                      message → 503, rate-shaped → 429)
+last ``step_finish.reason: length``   **FAIL** ``truncated`` (500)
+last ``step_finish.reason:
+tool-calls`` with no step after it    **FAIL** ``incomplete`` (500)
+text non-empty, zero ``tool_use``,
+text carries a tool-call shape        **FAIL** ``text_tool_call`` (500)
 text non-empty                        success
 text empty, reasoning non-empty       **FAIL** ``reasoning_only`` (500)
 text empty, no reasoning, tools ran   success, ``"(Task completed)"``
 text empty, nothing at all            **FAIL** ``empty_response`` (500)
 ====================================  =========================================
+
+The ``error`` row outranks the tools-ran row on purpose: a provider 5xx after
+the tools ran is a failed turn, never laundered into ``(Task completed)``. The
+``text_tool_call`` row is live too: ``llama4:scout`` emitted its tool call as
+prose (``<tool_call>…``) on the lab fork and the ledger recorded success.
+
+Cost (ruling T6): the native ``cost`` is summed for models.dev providers. A
+custom provider (the template's ``runtime.provider`` block, carried as
+``AGENT_RUNTIME_PROVIDER``) is priced by OpenCode at $0 unless the block
+declares ``models.<id>.cost`` — and $0 is "unknown", not "free", so without a
+declared cost ``cost_usd`` is ``None`` and one warning is logged per turn.
 
 The reasoning content is deliberately NOT promoted into the response. It is a
 model's scratchpad, not an answer; promoting it would launder a failed turn
@@ -489,11 +516,35 @@ class _OpenCodeParseState:
     seen_tool_ids: set = field(default_factory=set)
     reasoning_tokens: int = 0
     cache_write_tokens: int = 0
+    # Reason on the most recent `step_finish`, cleared by the next
+    # `step_start` — so at the end of the stream it says whether the last
+    # step promised a continuation (`tool-calls`) or was cut (`length`).
+    last_finish_reason: Optional[str] = None
+    error_seen: bool = False
+    dropped_lines: int = 0
+    first_dropped: Optional[str] = None
 
     def current_step(self) -> List[str]:
         if not self.step_texts:
             self.step_texts.append([])
         return self.step_texts[-1]
+
+
+def _part(event: dict) -> dict:
+    """The nested ``part`` payload, or ``{}`` for a flat event."""
+    part = event.get("part")
+    return part if isinstance(part, dict) else {}
+
+
+def _first_str(*sources: dict, keys: Tuple[str, ...]) -> Optional[str]:
+    """First non-empty string under any of ``keys`` across ``sources`` in order
+    (``part`` first, then the top level — the fallback direction)."""
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value:
+                return value
+    return None
 
 
 def _event_text(event: dict) -> str:
@@ -518,25 +569,42 @@ def _event_text(event: dict) -> str:
 
 
 def _tool_name(event: dict) -> str:
-    for key in ("tool", "name", "toolName"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return "Tool"
+    return _first_str(_part(event), event, keys=("tool", "name", "toolName")) or "Tool"
 
 
 def _tool_id(event: dict) -> str:
-    for key in ("id", "toolCallID", "callID", "tool_call_id"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            return value
-    return str(uuid.uuid4())
+    # `part.callID` is the tool CALL id; `part.id` is the part's own id and is
+    # only a fallback. Flat events keep the older spellings.
+    return (
+        _first_str(_part(event), keys=("callID", "toolCallID", "tool_call_id", "id"))
+        or _first_str(event, keys=("id", "toolCallID", "callID", "tool_call_id"))
+        or str(uuid.uuid4())
+    )
+
+
+def _tool_state(event: dict) -> dict:
+    for source in (_part(event), event):
+        blob = source.get("state")
+        if isinstance(blob, dict):
+            return blob
+    return {}
 
 
 def _record_tool(state: _OpenCodeParseState, event: dict) -> None:
     tool_id = _tool_id(event)
     name = _tool_name(event)
-    tool_input = event.get("input") or event.get("args") or event.get("arguments") or {}
+    part = _part(event)
+    state_blob = _tool_state(event)
+    tool_input = None
+    for source in (state_blob, part, event):
+        for key in ("input", "args", "arguments"):
+            if source.get(key) is not None:
+                tool_input = source[key]
+                break
+        if tool_input is not None:
+            break
+    if tool_input is None:
+        tool_input = {}
     if not isinstance(tool_input, dict):
         tool_input = {"value": tool_input}
 
@@ -560,18 +628,22 @@ def _record_tool(state: _OpenCodeParseState, event: dict) -> None:
 
     # OpenCode reports a tool_use with its outcome attached once it settles;
     # an event carrying neither an output nor a status is the start half only.
-    state_blob = event.get("state")
-    status = event.get("status")
-    if status is None and isinstance(state_blob, dict):
-        status = state_blob.get("status")
-    output = event.get("output") or event.get("result")
-    if output is None and isinstance(state_blob, dict):
-        output = state_blob.get("output")
+    status = state_blob.get("status")
+    if status is None:
+        status = part.get("status", event.get("status"))
+    output = state_blob.get("output")
+    if output is None:
+        output = part.get("output") or event.get("output") or event.get("result")
     if output is None and status is None:
         return
     if not isinstance(output, str):
         output = json.dumps(output, default=str) if output is not None else ""
-    is_error = status in ("error", "failed") or bool(event.get("error"))
+    is_error = (
+        status in ("error", "failed")
+        or bool(state_blob.get("error"))
+        or bool(part.get("error"))
+        or bool(event.get("error"))
+    )
     state.execution_log.append(
         ExecutionLogEntry(
             id=tool_id,
@@ -603,9 +675,15 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     ``tokens.input``. Both are recorded separately and NEITHER is added to any
     total — adding them is the double-count this runtime must not commit.
     """
-    tokens = event.get("tokens")
-    if not isinstance(tokens, dict):
-        tokens = (event.get("usage") or {}) if isinstance(event.get("usage"), dict) else {}
+    part = _part(event)
+    tokens: dict = {}
+    for source in (part, event):
+        for key in ("tokens", "usage"):
+            if isinstance(source.get(key), dict):
+                tokens = source[key]
+                break
+        if tokens:
+            break
     cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
 
     state.metadata.input_tokens += _as_int(tokens.get("input"))
@@ -614,11 +692,14 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     state.cache_write_tokens += _as_int(cache.get("write"))
     state.reasoning_tokens += _as_int(tokens.get("reasoning"))
 
-    cost = event.get("cost")
-    if cost is None and isinstance(event.get("usage"), dict):
-        cost = event["usage"].get("cost")
-    if isinstance(cost, (int, float)):
+    cost = part.get("cost", event.get("cost"))
+    if cost is None and isinstance(tokens.get("cost"), (int, float)):
+        cost = tokens["cost"]
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
         state.metadata.cost_usd = (state.metadata.cost_usd or 0.0) + float(cost)
+
+    reason = _first_str(part, event, keys=("reason", "finishReason", "finish_reason"))
+    state.last_finish_reason = reason.lower() if reason else None
 
 
 def _as_int(value: object) -> int:
@@ -637,16 +718,15 @@ def _process_opencode_event(event: dict, state: _OpenCodeParseState) -> None:
     """
     # sessionID rides on EVERY line, so capture it unconditionally rather than
     # from one blessed event type that a provider might not emit.
-    for key in ("sessionID", "sessionId", "session_id"):
-        value = event.get(key)
-        if isinstance(value, str) and value:
-            state.session_id = value
-            break
+    session = _first_str(event, _part(event), keys=("sessionID", "sessionId", "session_id"))
+    if session:
+        state.session_id = session
 
     event_type = event.get("type") or event.get("event")
 
     if event_type == "step_start":
         state.step_texts.append([])
+        state.last_finish_reason = None
     elif event_type == "step_finish":
         _accumulate_usage(state, event)
     elif event_type == "tool_use":
@@ -660,10 +740,64 @@ def _process_opencode_event(event: dict, state: _OpenCodeParseState) -> None:
         if text:
             state.reasoning_parts.append(text)
     elif event_type == "error":
+        state.error_seen = True
         state.metadata.error_type = "error"
-        message = event.get("message") or event.get("error") or "OpenCode error"
-        state.metadata.error_message = (
-            message if isinstance(message, str) else json.dumps(message, default=str)
+        state.metadata.error_message = _error_message(event)
+
+
+def _error_message(event: dict) -> str:
+    """The human-readable reason carried by an ``error`` event.
+
+    Measured shape: ``{"type": "error", "error": {"name": ..., "data":
+    {"message": ...}}}``; the flat ``message`` / ``error: "<str>"`` spellings
+    and a ``part.error`` nest are accepted as fallbacks. An unreadable payload
+    is serialized rather than replaced, so the operator sees what arrived.
+    """
+    candidates = [event.get("error"), _part(event).get("error"), event.get("data"), event]
+    for blob in candidates:
+        if isinstance(blob, str) and blob:
+            return blob
+        if not isinstance(blob, dict):
+            continue
+        data = blob.get("data") if isinstance(blob.get("data"), dict) else {}
+        for source in (data, blob):
+            message = source.get("message")
+            if isinstance(message, str) and message:
+                return message
+    raw = event.get("error") or _part(event).get("error")
+    if raw:
+        return json.dumps(raw, default=str)[:500]
+    return "OpenCode error"
+
+
+def _parse_line(line: str, state: _OpenCodeParseState) -> Optional[dict]:
+    """One stdout line → one event dict, or ``None`` for a non-JSON line.
+
+    Shared by the subprocess reader and the unit entrypoint so both count the
+    same things: a line that is not a JSON object is dropped and COUNTED (the
+    turn logs the tally once at the end), never raised on.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        event = json.loads(stripped)
+    except json.JSONDecodeError:
+        event = None
+    if isinstance(event, dict):
+        return event
+    state.dropped_lines += 1
+    if state.first_dropped is None:
+        state.first_dropped = stripped[:200]
+    return None
+
+
+def _log_dropped_lines(state: _OpenCodeParseState) -> None:
+    if state.dropped_lines:
+        logger.warning(
+            "[OpenCode] dropped %s non-JSON stdout line(s) this turn "
+            "(execution_id=%s); first: %r",
+            state.dropped_lines, state.execution_id, state.first_dropped,
         )
 
 
@@ -673,8 +807,35 @@ FINAL_OK = "ok"
 FINAL_TOOLS_ONLY = "tools_only"
 FINAL_REASONING_ONLY = "reasoning_only"
 FINAL_EMPTY = "empty_response"
+FINAL_ERROR = "error"
+FINAL_TRUNCATED = "truncated"
+FINAL_INCOMPLETE = "incomplete"
+FINAL_TEXT_TOOL_CALL = "text_tool_call"
 
-_FAILED_FINALS = frozenset({FINAL_REASONING_ONLY, FINAL_EMPTY})
+_FAILED_FINALS = frozenset({
+    FINAL_REASONING_ONLY, FINAL_EMPTY, FINAL_ERROR, FINAL_TRUNCATED,
+    FINAL_INCOMPLETE, FINAL_TEXT_TOOL_CALL,
+})
+
+# The four text-shaped tool-call spellings open-weight models fall back to when
+# they fail to use the provider's native tool channel. Checked only when the
+# turn produced ZERO `tool_use` events: a model that ran a real tool and then
+# quoted JSON in its answer is answering, not calling.
+_TEXT_TOOL_CALL_SHAPES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
+    ("tool_call_tag", re.compile(r"<tool_call\b", re.IGNORECASE)),
+    ("function_call_tag", re.compile(r"<function_call\b", re.IGNORECASE)),
+    ("name_arguments_object", re.compile(
+        r"\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:", re.DOTALL)),
+    ("tool_calls_array", re.compile(r"\"tool_calls\"\s*:\s*\[")),
+)
+
+
+def text_tool_call_shape(text: str) -> Optional[str]:
+    """Name the tool-call shape ``text`` carries, or ``None`` for prose."""
+    for name, pattern in _TEXT_TOOL_CALL_SHAPES:
+        if pattern.search(text):
+            return name
+    return None
 
 
 def finalize_response(state: _OpenCodeParseState) -> Tuple[str, str]:
@@ -682,17 +843,82 @@ def finalize_response(state: _OpenCodeParseState) -> Tuple[str, str]:
 
     The final text is the LAST step's concatenated ``text`` parts — there is no
     separate result line to fall back on. See the module docstring for the
-    outcome table and why ``reasoning`` is never promoted into the response.
+    outcome table (row order here IS the precedence) and why ``reasoning`` is
+    never promoted into the response.
     """
+    if state.error_seen:
+        return "", FINAL_ERROR
+    if state.last_finish_reason == "length":
+        return "", FINAL_TRUNCATED
+    if state.last_finish_reason == "tool-calls":
+        return "", FINAL_INCOMPLETE
     last_step = state.step_texts[-1] if state.step_texts else []
     text = "".join(last_step).strip()
     if text:
+        ran_tools = any(entry.type == "tool_use" for entry in state.execution_log)
+        if not ran_tools and text_tool_call_shape(text):
+            return "", FINAL_TEXT_TOOL_CALL
         return text, FINAL_OK
     if state.reasoning_parts and "".join(state.reasoning_parts).strip():
         return "", FINAL_REASONING_ONLY
     if any(entry.type == "tool_use" for entry in state.execution_log):
         return "(Task completed)", FINAL_TOOLS_ONLY
     return "", FINAL_EMPTY
+
+
+_PROVIDER_ENV = "AGENT_RUNTIME_PROVIDER"
+
+
+def _custom_provider_block() -> Optional[dict]:
+    """The template's ``runtime.provider`` block, as serialized at create
+    (ruling T5). Malformed → ``None`` with a warning; the provider/MCP seam
+    (checkpoint C) owns validation, this reader only needs the cost shape."""
+    raw = os.environ.get(_PROVIDER_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        block = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("[OpenCode] %s is not JSON (%s); cost policy ignores it", _PROVIDER_ENV, exc)
+        return None
+    return block if isinstance(block, dict) else None
+
+
+def _apply_cost_policy(metadata: ExecutionMetadata, model: Optional[str]) -> None:
+    """Ruling T6: a custom provider's native cost is $0 unless the block
+    declares ``models.<id>.cost``, and $0 is "unknown", not "free". With no
+    declared cost ``cost_usd`` becomes ``None`` (loop budgets see unknown) and
+    ONE warning is logged per turn. A models.dev provider keeps the native sum.
+    """
+    block = _custom_provider_block()
+    if not block or not model or "/" not in model:
+        return
+    provider_id, _, model_id = model.partition("/")
+    if str(block.get("id") or "") != provider_id:
+        return
+    models = block.get("models") if isinstance(block.get("models"), dict) else {}
+    declared = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+    if isinstance(declared.get("cost"), dict) and declared["cost"]:
+        return
+    logger.warning(
+        "[OpenCode] custom provider %r declares no cost for model %r — recording "
+        "cost_usd=None (unknown), not the $%s OpenCode reported. Declare "
+        "runtime.provider.models.%s.cost in template.yaml to price it.",
+        provider_id, model_id, metadata.cost_usd or 0, model_id,
+    )
+    metadata.cost_usd = None
+
+
+def _finish_parse(state: _OpenCodeParseState) -> Tuple[str, str]:
+    """Close out a fully-read stream: ledger counts, the dropped-line tally,
+    the cost policy, then the outcome. One function so the subprocess reader
+    and the unit entrypoint cannot drift."""
+    metadata = state.metadata
+    metadata.tool_count = len([e for e in state.execution_log if e.type == "tool_use"])
+    metadata.session_id = state.session_id
+    _log_dropped_lines(state)
+    _apply_cost_policy(metadata, state.model)
+    return finalize_response(state)
 
 
 def parse_opencode_jsonl(
@@ -707,19 +933,11 @@ def parse_opencode_jsonl(
     state = _OpenCodeParseState(execution_log=[], metadata=metadata, model=model)
     raw_messages: List[Dict] = []
     for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
+        event = _parse_line(line, state)
+        if event is not None:
             raw_messages.append(event)
             _process_opencode_event(event, state)
-    metadata.tool_count = len([e for e in state.execution_log if e.type == "tool_use"])
-    metadata.session_id = state.session_id
-    response_text, outcome = finalize_response(state)
+    response_text, outcome = _finish_parse(state)
     return response_text, state.execution_log, metadata, raw_messages, outcome
 
 
@@ -753,10 +971,10 @@ def classify_opencode_failure(
     would open the breaker on a healthy credential.
     """
     haystack = " ".join(s for s in (stderr or "", metadata.error_message or "") if s)
-    lowered = haystack.lower()
-    if any(marker in lowered for marker in _RATE_MARKERS):
+    shaped = _classify_message(haystack)
+    if shaped == 429:
         return 429, f"OpenCode rate limit: {(stderr or metadata.error_message or '')[:300]}"
-    if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
+    if shaped == 503:
         return 503, (
             f"OpenCode authentication failure: "
             f"{(stderr or metadata.error_message or '')[:300]}. "
@@ -764,6 +982,18 @@ def classify_opencode_failure(
         )
     detail = (stderr or "").strip() or metadata.error_message or "see agent logs"
     return 500, f"OpenCode execution failed (exit code {return_code}): {detail[:300]}"
+
+
+def _classify_message(haystack: str) -> Optional[int]:
+    """429 for a rate-shaped message, 503 for an auth-shaped one, else None.
+    Shared by the exit-code path and the stream `error`-event path so one
+    registry decides what counts as AUTH."""
+    lowered = haystack.lower()
+    if any(marker in lowered for marker in _RATE_MARKERS):
+        return 429
+    if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
+        return 503
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -950,11 +1180,8 @@ class OpenCodeRuntime(AgentRuntime):
                         break
                     try:
                         sanitized = sanitize_subprocess_line(line)
-                        try:
-                            event = json.loads(sanitized.strip())
-                        except json.JSONDecodeError:
-                            continue
-                        if isinstance(event, dict):
+                        event = _parse_line(sanitized, state)
+                        if event is not None:
                             event = sanitize_dict(event)
                             if event.get("type") == "step_start":
                                 step_seen.set()
@@ -1098,20 +1325,20 @@ class OpenCodeRuntime(AgentRuntime):
                 logger.error("[OpenCode] %s", detail)
                 raise HTTPException(status_code=status_code, detail=detail)
 
-            metadata.tool_count = len(
-                [e for e in state.execution_log if e.type == "tool_use"]
-            )
-            metadata.session_id = state.session_id
-            response_text, outcome = finalize_response(state)
+            response_text, outcome = _finish_parse(state)
 
             if outcome in _FAILED_FINALS:
                 # Exit code 0 is NOT proof of a completed turn (#520). A
                 # provider that answers in `reasoning` with `content: ""` —
-                # measured live on qwen3.6:27b via Ollama — reports success.
-                raise HTTPException(
-                    status_code=500,
-                    detail=_empty_turn_detail(outcome, state, model),
-                )
+                # measured live on qwen3.6:27b via Ollama — reports success;
+                # so does a stream that carried an `error` event, a step cut
+                # at `length`, or a tool call emitted as prose.
+                status_code = 500
+                if outcome == FINAL_ERROR:
+                    status_code = _classify_message(metadata.error_message or "") or 500
+                detail = _failed_turn_detail(outcome, state, model)
+                logger.error("[OpenCode] %s", detail)
+                raise HTTPException(status_code=status_code, detail=detail)
 
             response_text = sanitize_text(response_text)
             metadata.status = "success"
@@ -1347,16 +1574,62 @@ class OpenCodeRuntime(AgentRuntime):
         return response, log, metadata, session_id
 
 
-def _empty_turn_detail(
+def _failed_turn_detail(
     outcome: str, state: _OpenCodeParseState, model: Optional[str]
 ) -> str:
     """The operator-facing reason an exit-0 turn is being failed.
 
-    Names the model, because the whole point of the `reasoning_only` case is
-    that it is a PROVIDER property (a model that answers in the wrong field),
-    not a Trinity fault — and the fix is to change the model or the provider
-    block, which nobody can do from "the turn failed".
+    Names the outcome and the model, because every case here is a PROVIDER
+    property (a model that answers in the wrong field, calls tools in prose,
+    or a backend that 5xx'd mid-turn), not a Trinity fault — and the fix is to
+    change the model or the provider block, which nobody can do from "the
+    turn failed".
     """
+    model_label = model or "<default>"
+    last_text = "".join(state.step_texts[-1] if state.step_texts else []).strip()
+    if outcome == FINAL_ERROR:
+        message = state.metadata.error_message or "OpenCode error"
+        shaped = _classify_message(message)
+        if shaped == 503:
+            # Same wording as the exit-code path: 503 is the backend's AUTH
+            # signal, so the operator reads one message for one cause.
+            return (
+                f"OpenCode authentication failure (outcome={FINAL_ERROR}, "
+                f"model={model_label}): {message[:300]}. "
+                "Check the provider credentials injected into this agent."
+            )
+        if shaped == 429:
+            return (
+                f"OpenCode rate limit (outcome={FINAL_ERROR}, "
+                f"model={model_label}): {message[:300]}"
+            )
+        return (
+            f"OpenCode stream reported an error (outcome={FINAL_ERROR}, "
+            f"model={model_label}): {message[:300]}"
+        )
+    if outcome == FINAL_TRUNCATED:
+        return (
+            f"OpenCode turn was cut off by the model's output limit "
+            f"(outcome={FINAL_TRUNCATED}, step_finish.reason=length, "
+            f"model={model_label}). The partial text is not an answer. "
+            f"First 300 chars: {last_text[:300]!r}"
+        )
+    if outcome == FINAL_INCOMPLETE:
+        return (
+            f"OpenCode turn ended after a tool-calls step with no following "
+            f"step (outcome={FINAL_INCOMPLETE}, model={model_label}): the "
+            "tools ran but the model never produced the answer they were "
+            "fetched for."
+        )
+    if outcome == FINAL_TEXT_TOOL_CALL:
+        shape = text_tool_call_shape(last_text) or "tool-call"
+        return (
+            f"OpenCode returned a tool call as TEXT instead of calling the tool "
+            f"(outcome={FINAL_TEXT_TOOL_CALL}, shape={shape}, model={model_label}). "
+            "No tool ran, so this is a failed turn, not an answer: the model "
+            "did not use the provider's native tool channel. First 300 chars: "
+            f"{last_text[:300]!r}"
+        )
     if outcome == FINAL_REASONING_ONLY:
         preview = "".join(state.reasoning_parts).strip()[:300]
         return (
