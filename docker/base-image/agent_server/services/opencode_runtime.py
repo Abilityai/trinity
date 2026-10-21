@@ -123,7 +123,11 @@ from ..utils.credential_sanitizer import (
     sanitize_text,
 )
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
-from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
+from ._runtime_config import (
+    _DEFAULT_EXECUTION_TIMEOUT_SEC,
+    _load_guardrails,
+    merged_disallowed_tools,
+)
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
 from . import opencode_mcp, opencode_provider
@@ -380,6 +384,7 @@ def _prepare_turn_config(
     system_prompt: Optional[str],
     model: Optional[str] = None,
     env_out: Optional[Dict[str, str]] = None,
+    permission: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
@@ -395,7 +400,12 @@ def _prepare_turn_config(
     env: the pinned OpenCode substitutes ``{env:VAR}`` with no default form,
     so a ``${VAR:-default}`` placeholder's default is honoured by the spawn.
     A malformed provider block raises :class:`OpenCodeProviderConfigError`
-    BEFORE anything is written, naming the field.
+    BEFORE anything is written, naming the field. ``permission`` is the
+    turn's control block from :func:`build_permission_block` (read-only,
+    guardrails, platform denials, headless ``allowed_tools``); it is merged
+    over the operator's own ``permission:`` with deny sticky
+    (:func:`merge_permission_block`) and rendered into the same per-turn
+    ``opencode.json`` — checkpoint D of #2981.
 
     Why per-turn and not one shared file: ``opencode run`` has no
     system-prompt flag (verified against the real ``--help``), so the platform
@@ -444,6 +454,10 @@ def _prepare_turn_config(
     env_defaults = opencode_mcp.apply_mcp_config(config)
     if env_out is not None:
         env_out.update(env_defaults)
+    if permission:
+        config["permission"] = merge_permission_block(
+            config.get("permission"), permission
+        )
 
     config_path = os.path.join(config_dir, "opencode.json")
     with open(config_path, "w", encoding="utf-8") as fh:
@@ -492,8 +506,11 @@ def _is_read_only() -> bool:
     Codex loader — diverging one runtime to fail-closed would make read-only
     enforcement inconsistent across runtimes.
 
-    This change only READS it, for the log line. Enforcement through the
-    ``permission:`` config block is a later #2981 change.
+    Enforced through the per-turn ``permission:`` config block
+    (:func:`build_permission_block` → ``_prepare_turn_config``): read-only
+    renders ``edit: deny`` and ``bash: deny``, which the pinned OpenCode
+    refuses BEFORE asking (``permission/index.ts:75-79``, v1.18.32) — so
+    ``--auto``'s auto-approval never sees them.
     """
     config = _READ_ONLY_CONFIG if _READ_ONLY_CONFIG.exists() else _LEGACY_READ_ONLY_CONFIG
     try:
@@ -512,6 +529,181 @@ def _is_read_only() -> bool:
             "[OpenCode] read-only config malformed (%s); treating as not read-only", exc
         )
         return False
+
+
+# ---------------------------------------------------------------------------
+# Controls → `permission:` (checkpoint D, #2981)
+# ---------------------------------------------------------------------------
+#
+# Verified against the pinned OpenCode v1.18.32 source, not assumed:
+#
+# * Schema — `packages/core/src/v1/config/permission.ts`: `Action` is the
+#   literal set `ask | allow | deny` (line 5); a `Rule` is an Action OR a
+#   `{pattern: Action}` map (line 11); the known keys are `read`, `edit`,
+#   `glob`, `grep`, `list`, `bash`, `task`, `external_directory`,
+#   `todowrite`, `question`, `webfetch`, `websearch`, `lsp`, `doom_loop`,
+#   `skill` plus any string key (lines 17-36). `bash`/`edit` take a Rule (so a
+#   pattern map is accepted); `webfetch`/`websearch` are Action-only scalars.
+#   `tools: {write: false}` is folded into the same block, with `write`,
+#   `edit` and `patch` all collapsing onto the ONE `edit` key
+#   (`packages/opencode/src/config/config.ts:567-578`) — which is why the four
+#   Claude edit tools below share a key and cannot be denied separately.
+# * What `opencode run` does with `ask` — `packages/opencode/src/cli/cmd/run.ts`:
+#   `--auto` is "auto-approve permissions that are not explicitly denied"
+#   (lines 242-245); on a `permission.asked` event it replies `once` under
+#   `--auto` and `reject` otherwise (lines 801-819). Either way the turn never
+#   blocks on a prompt — so under the `--auto` this runtime always passes,
+#   `ask` is an approval, and `deny` is the ONLY value that withholds a
+#   capability: `permission/index.ts:75-79` raises `PermissionDenied` before
+#   the ask is ever published.
+# * The binary default left in place for every key this map does not decide —
+#   `packages/opencode/src/agent/agent.ts:119-135`, the `build` agent:
+#   `"*": "allow"`, `doom_loop: ask`, `external_directory: {"*": ask}` (+ the
+#   tmp/skill dirs allowed), `read: {"*": allow, "*.env": ask, "*.env.*": ask,
+#   "*.env.example": allow}`; `question`/`plan_enter` are re-allowed for
+#   `build` (lines 146-150). Under `--auto` every one of those `ask`s is
+#   approved, i.e. the effective default is "everything allowed".
+#
+# The map is deliberately the plan's set plus `websearch` (which the pinned
+# schema has — the plan conditioned it on exactly that). Claude names with
+# no row here are NOT silently dropped: `build_permission_block` returns them
+# and `_execute_opencode` writes one execution-log entry per name.
+
+# Claude tool name → OpenCode permission key. The ONE vocabulary table.
+PERMISSION_KEY_FOR_TOOL: Dict[str, str] = {
+    "Write": "edit",
+    "Edit": "edit",
+    "MultiEdit": "edit",
+    "NotebookEdit": "edit",
+    "Bash": "bash",
+    "WebFetch": "webfetch",
+    "WebSearch": "websearch",
+}
+
+# Read-only mode: no writes, no shell; fetching stays allowed (the plan's
+# set). The `allow` is the lowest-precedence value in the block — a deny from
+# any other source over `webfetch` survives it (`merge`-sticky below).
+READ_ONLY_PERMISSION: Dict[str, str] = {
+    "edit": "deny",
+    "bash": "deny",
+    "webfetch": "allow",
+}
+
+# Origins a surfaced (unmapped) control name can carry, and the ledger text.
+CONTROL_GUARDRAIL = "guardrail"
+CONTROL_PLATFORM = "platform"
+CONTROL_ALLOWED_TOOLS = "allowed_tools"
+_UNMAPPED_TEXT = {
+    CONTROL_GUARDRAIL: "guardrail not mapped: {tool}",
+    CONTROL_PLATFORM: "platform denial not mapped: {tool}",
+    CONTROL_ALLOWED_TOOLS: "allowed_tools not mapped: {tool}",
+}
+
+
+def build_permission_block(
+    *,
+    read_only: bool,
+    guardrails: Optional[dict],
+    allowed_tools: Optional[List[str]],
+) -> Tuple[Dict[str, str], List[Tuple[str, str]]]:
+    """Fold every Trinity control onto OpenCode's ``permission:`` block.
+
+    Pure: ``(read_only, guardrails, allowed_tools) → (block, unmapped)``, so
+    the tests and the mutation check hit one place. ``block`` holds ONLY the
+    keys a control decides; everything else stays at the binary's default
+    (stated in the module comment above). ``unmapped`` is every control name
+    with no row in :data:`PERMISSION_KEY_FOR_TOOL`, as ``(origin, name)``
+    pairs, in first-seen order and never deduplicated across origins — the
+    caller surfaces each one in the execution log rather than dropping it.
+
+    Precedence, pinned by test: read-only deny > guardrail / platform deny >
+    ``allowed_tools`` > the binary default. Nothing turns a deny back into
+    allow — read-only's ``webfetch: allow`` yields to a guardrail that denies
+    ``WebFetch``. An empty or ``None`` ``allowed_tools`` restricts nothing,
+    exactly as the Claude runtime treats it; a non-empty one denies every
+    mapped key NONE of whose Claude names is listed (the four edit tools share
+    one key, so listing any of them keeps ``edit`` at its default).
+    """
+    block: Dict[str, str] = {}
+    unmapped: List[Tuple[str, str]] = []
+
+    # Lowest explicit layer: the headless allowlist (deny what it omits).
+    if allowed_tools:
+        listed = {name.strip() for name in allowed_tools if isinstance(name, str)}
+        allowed_keys = {
+            PERMISSION_KEY_FOR_TOOL[name] for name in listed if name in PERMISSION_KEY_FOR_TOOL
+        }
+        for key in set(PERMISSION_KEY_FOR_TOOL.values()) - allowed_keys:
+            block[key] = "deny"
+        for name in allowed_tools:
+            if isinstance(name, str) and name.strip() and name.strip() not in PERMISSION_KEY_FOR_TOOL:
+                unmapped.append((CONTROL_ALLOWED_TOOLS, name.strip()))
+
+    # Guardrails (operator `disallowed_tools`) ∪ platform denials, through the
+    # one builder every Claude spawn uses — never a second reader (#2454).
+    guardrails = guardrails if isinstance(guardrails, dict) else {}
+    operator_names = {
+        n.strip() for n in (guardrails.get("disallowed_tools") or ())
+        if isinstance(n, str) and n.strip()
+    }
+    for name in merged_disallowed_tools(guardrails):
+        key = PERMISSION_KEY_FOR_TOOL.get(name)
+        if key:
+            block[key] = "deny"
+        else:
+            origin = CONTROL_GUARDRAIL if name in operator_names else CONTROL_PLATFORM
+            unmapped.append((origin, name))
+
+    # Highest: read-only. Its denies win outright; its one allow only fills a
+    # key nothing above denied.
+    if read_only:
+        for key, action in READ_ONLY_PERMISSION.items():
+            if action == "deny" or block.get(key) != "deny":
+                block[key] = action
+    return block, unmapped
+
+
+def merge_permission_block(existing: object, computed: Dict[str, str]) -> Dict[str, object]:
+    """Overlay Trinity's block on the operator's own ``permission:``.
+
+    The schema accepts a bare Action for the whole block (normalised to
+    ``{"*": action}``, ``permission.ts:40-41``) or a key map whose values may
+    be pattern maps. Deny is sticky in BOTH directions: an operator ``deny``
+    is never replaced by Trinity's ``allow``, and Trinity's ``deny`` replaces
+    whatever the operator wrote for that key (a pattern map included — a
+    scalar ``deny`` is the stricter rule).
+    """
+    if isinstance(existing, str):
+        merged: Dict[str, object] = {"*": existing}
+    elif isinstance(existing, dict):
+        merged = dict(existing)
+    else:
+        merged = {}
+    for key, action in computed.items():
+        if action != "deny" and merged.get(key) == "deny":
+            continue
+        merged[key] = action
+    return merged
+
+
+def _control_log_entries(unmapped: List[Tuple[str, str]]) -> List[ExecutionLogEntry]:
+    """One ledger entry per surfaced control — the operator sees it in the
+    execution log, not only in the container logger (the Codex path, which
+    only logs, is the pattern being improved on)."""
+    entries: List[ExecutionLogEntry] = []
+    for origin, name in unmapped:
+        text = _UNMAPPED_TEXT[origin].format(tool=name)
+        entries.append(
+            ExecutionLogEntry(
+                id=f"control-{origin}-{_safe_token(name)}",
+                type="tool_result",
+                tool="trinity-control",
+                output=text,
+                success=None,
+                timestamp=datetime.now().isoformat(),
+            )
+        )
+    return entries
 
 
 # ---------------------------------------------------------------------------
@@ -1114,6 +1306,7 @@ class OpenCodeRuntime(AgentRuntime):
         timeout_seconds: int,
         execution_id: Optional[str],
         concurrent_reader: bool = False,
+        allowed_tools: Optional[List[str]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
         # Always an explicit `-m`: with no pin the CLI would choose a model
@@ -1139,9 +1332,35 @@ class OpenCodeRuntime(AgentRuntime):
             logger.error("[OpenCode] %s", detail)
             raise HTTPException(status_code=status_code, detail=detail)
 
+        # Controls → `permission:` (checkpoint D). Read-only, the operator's
+        # guardrails ∪ platform denials, and the headless allowlist all land
+        # in the same per-turn config; what has no OpenCode equivalent is
+        # surfaced below, never dropped.
+        read_only = _is_read_only()
+        permission, unmapped = build_permission_block(
+            read_only=read_only,
+            guardrails=_load_guardrails(),
+            allowed_tools=allowed_tools,
+        )
+        control_entries = _control_log_entries(
+            [(origin, name) for origin, name in unmapped if origin != CONTROL_PLATFORM]
+        )
+        if unmapped:
+            # Operator guardrails and the allowlist go to the ledger (entries
+            # above) AND the logger. Platform denials (#2454/#2468) are Claude
+            # harness built-ins OpenCode does not offer at all, so they are
+            # satisfied vacuously: logged once per turn, not written to the
+            # ledger eleven times per turn.
+            logger.warning(
+                "[OpenCode] controls not mapped onto permission (surfaced, not "
+                "enforced): %s",
+                ", ".join(_UNMAPPED_TEXT[o].format(tool=n) for o, n in unmapped),
+            )
+
         env_defaults: Dict[str, str] = {}
         turn_dir = _prepare_turn_config(
-            execution_id, system_prompt, model, env_out=env_defaults
+            execution_id, system_prompt, model, env_out=env_defaults,
+            permission=permission,
         )
         cmd = self._build_command(
             model=model, session_id=session_id, directory=_AGENT_HOME
@@ -1185,7 +1404,7 @@ class OpenCodeRuntime(AgentRuntime):
         # name it on every provider, so it is set here rather than parsed.
         metadata.model_name = model
         state = _OpenCodeParseState(
-            execution_log=[], metadata=metadata, model=model,
+            execution_log=list(control_entries), metadata=metadata, model=model,
             execution_id=execution_id,
         )
         raw_messages: List[Dict] = []
@@ -1193,8 +1412,10 @@ class OpenCodeRuntime(AgentRuntime):
 
         registry = get_process_registry()
         logger.info(
-            "[OpenCode] run model=%s session=%s read_only=%s execution_id=%s",
-            model or "(default)", bool(session_id), _is_read_only(), execution_id,
+            "[OpenCode] run model=%s session=%s read_only=%s permission=%s "
+            "execution_id=%s",
+            model or "(default)", bool(session_id), read_only,
+            json.dumps(permission, sort_keys=True), execution_id,
         )
 
         # stdin=DEVNULL: the prompt is a positional arg, so OpenCode must never
@@ -1579,12 +1800,6 @@ class OpenCodeRuntime(AgentRuntime):
             )
         if images:
             logger.warning("[OpenCode] images are not supported — ignoring")
-        if allowed_tools:
-            logger.info(
-                "[OpenCode] allowed_tools=%s requested; per-tool gating is a "
-                "later #2981 change — not enforced by this build.",
-                allowed_tools,
-            )
         if max_turns is not None:
             logger.info(
                 "[OpenCode] max_turns=%s requested; `opencode run` has no turn-cap "
@@ -1601,6 +1816,7 @@ class OpenCodeRuntime(AgentRuntime):
                 timeout_seconds=timeout_seconds,
                 execution_id=execution_id,
                 concurrent_reader=True,
+                allowed_tools=allowed_tools,
             )
         except (OpenCodeModelShapeError, OpenCodeProviderConfigError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
