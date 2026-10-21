@@ -438,6 +438,37 @@ def _exec_field(row: Any, name: str) -> Any:
     return getattr(row, name, None)
 
 
+def _bearer_started_by(row: Any, current_user: Optional[User]) -> bool:
+    """Did THIS bearer credential start this task through A2A? (#3751)
+
+    The bearer twin of AAuth's `execution_owned_by` and the payer binding: a
+    task handle answers only for the credential that sent it. All three must
+    match what `_mint_a2a_execution` / `_run_a2a_task` stamped:
+
+    * `triggered_by == "a2a"` — the same person's UI chat, `/task` or MCP
+      `chat_with_agent` rows on this agent are not A2A tasks, and `tasks/cancel`
+      must never reach them;
+    * `source_user_id` — set, and the caller's (AAuth and paid rows carry none);
+    * `source_mcp_key_id` — the caller's key, or None on both sides for a
+      signed-in person. The key, not the user, is the identity: every agent key
+      of one owner resolves to that owner's user id and role, so the user id
+      alone would let a sibling agent poll another agent's task. A re-minted key
+      therefore loses its in-flight tasks, as it loses its `messageId`
+      namespace (`_a2a_idem_scope`, which keys on the same credential).
+
+    No owner/admin override: an agent key carries its owner's role. Who may see
+    every run of an agent is the execution REST surface's question, not the
+    A2A task handle's."""
+    if current_user is None or _exec_field(row, "triggered_by") != "a2a":
+        return False
+    started_by = _exec_field(row, "source_user_id")
+    return (
+        started_by is not None
+        and started_by == getattr(current_user, "id", None)
+        and _exec_field(row, "source_mcp_key_id") == getattr(current_user, "mcp_key_id", None)
+    )
+
+
 def _text_from_message(message: Dict[str, Any]) -> str:
     """Concatenate the text parts of an A2A message (v0.3 part kind='text')."""
     parts = message.get("parts") if isinstance(message, dict) else None
@@ -1688,6 +1719,10 @@ async def _dispatch_jsonrpc(
         # read via _exec_field so both the model and a dict work.
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: a bearer caller reads only a task it started; anyone else gets
+        # the unknown-id answer, byte for byte (no existence oracle).
+        if aauth is None and not _bearer_started_by(row, current_user):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
     # ---- tasks/cancel -----------------------------------------------------
@@ -1699,6 +1734,9 @@ async def _dispatch_jsonrpc(
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: and cancels only its own, before anything is signalled.
+        if aauth is None and not _bearer_started_by(row, current_user):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
