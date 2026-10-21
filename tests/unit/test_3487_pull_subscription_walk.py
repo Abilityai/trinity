@@ -202,6 +202,10 @@ def sink(wired, monkeypatch):
 
     pull_db = FakePullDB()
     switch_db = _wire_db(wired, _switch_db(viable=[_sub("sub-b")]))
+    # The sink must walk with the SAME module object the fixture patched: a
+    # test elsewhere may evict and re-import `services.subscription_auto_switch`,
+    # leaving `pcs` holding the old, unpatched one (seen in a shuffled CI run).
+    monkeypatch.setattr(pcs, "subscription_auto_switch", wired.m)
     monkeypatch.setattr(pcs, "db", pull_db)
     monkeypatch.setattr(pcs, "event_dispatch_service", MagicMock())
     monkeypatch.setattr(pcs, "activity_service", MagicMock())

@@ -330,28 +330,17 @@ async def _deliver_result(
     backend_url: str,
     mcp_key: str,
     deadline_monotonic: float,
+    reply_sink: Optional[list] = None,
 ) -> bool:
     """POST the §3.3 terminal, retrying with capped decorrelated-jitter backoff
     until the lease deadline. Returns True on a 2xx (delivered) OR a permanent
     4xx (no point retrying); False only when the deadline passed — the backend
     lease reaper then re-queues (same ``execution_id``), so no work is lost.
-    Mirrors ``result_callback._deliver``."""
-    delivered, _ = await _deliver_result_reply(
-        client, execution_id, body, backend_url, mcp_key, deadline_monotonic
-    )
-    return delivered
+    Mirrors ``result_callback._deliver``.
 
-
-async def _deliver_result_reply(
-    client: httpx.AsyncClient,
-    execution_id: str,
-    body: Dict[str, Any],
-    backend_url: str,
-    mcp_key: str,
-    deadline_monotonic: float,
-):
-    """`_deliver_result`, plus the 2xx reply body (None otherwise) — the place
-    a #3487 ``retry`` instruction comes back."""
+    #3487: ``reply_sink`` receives the 2xx reply body — where a ``retry``
+    instruction comes back. One delivery function, so a caller (or a test) that
+    replaces it still replaces every delivery."""
     url = f"{backend_url}/api/internal/tasks/{execution_id}/result"
     headers = {"Authorization": f"Bearer {mcp_key}"}
     prev_sleep = _BACKOFF_BASE
@@ -361,17 +350,20 @@ async def _deliver_result_reply(
             resp = await client.post(url, json=body, headers=headers)
             if resp.status_code < 300:
                 logger.info("[#1081] result for %s delivered (%s)", execution_id, resp.status_code)
-                try:
-                    reply = resp.json()
-                except Exception:  # noqa: BLE001 — a 2xx with no JSON is still delivered
-                    reply = None
-                return True, reply if isinstance(reply, dict) else None
+                if reply_sink is not None:
+                    try:
+                        reply = resp.json()
+                    except Exception:  # noqa: BLE001 — a 2xx with no JSON is still delivered
+                        reply = None
+                    if isinstance(reply, dict):
+                        reply_sink.append(reply)
+                return True
             if resp.status_code in _PERMANENT_STATUSES:
                 logger.warning(
                     "[#1081] result for %s permanently rejected (%s) — giving up",
                     execution_id, resp.status_code,
                 )
-                return True, None
+                return True
             # Transient (incl. the #1085 governor 503). Honor Retry-After as a floor.
             retry_after_floor = _parse_retry_after(resp.headers.get("Retry-After"))
             logger.warning("[#1081] result for %s got %s — will retry", execution_id, resp.status_code)
@@ -384,7 +376,7 @@ async def _deliver_result_reply(
                 "[#1081] result for %s not delivered before lease deadline — "
                 "backend lease reaper is the backstop", execution_id,
             )
-            return False, None
+            return False
         backoff = max(_jittered_backoff(prev_sleep, _RESULT_BACKOFF_CAP), retry_after_floor)
         prev_sleep = min(_RESULT_BACKOFF_CAP, backoff)
         backoff = min(backoff, max(0.0, deadline_monotonic - now))  # never sleep past deadline
@@ -512,15 +504,16 @@ async def _run_and_report(
         if persisted:
             _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
 
-        delivered, reply = await _deliver_result_reply(
-            client, execution_id, body, backend_url, mcp_key, deadline
+        replies: list = []
+        delivered = await _deliver_result(
+            client, execution_id, body, backend_url, mcp_key, deadline, reply_sink=replies
         )
         if delivered and persisted:
             _delete_pull_result(execution_id)
 
         # #3487: the backend may answer a refused attempt with "run it again on
         # this credential". Only a capable, un-terminated worker follows it.
-        retry = (reply or {}).get("retry") if delivered else None
+        retry = (replies[-1] if replies else {}).get("retry") if delivered else None
         if not (capable and not terminated and isinstance(retry, dict) and retry.get("claim_token")):
             return
         claim_token = retry["claim_token"]

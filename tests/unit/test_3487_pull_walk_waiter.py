@@ -38,6 +38,8 @@ async def test_a_workspace_caller_on_a_pilot_gets_one_success_after_a_refusal(
     import services.platform_audit_service as audit_mod
 
     _wire_db(wired, _switch_db(viable=[_sub("sub-b")]))
+    # Same module object the fixture patched (another test may re-import it).
+    monkeypatch.setattr(pcs, "subscription_auto_switch", wired.m)
     monkeypatch.setattr(audit_mod.platform_audit_service, "log", AsyncMock())
     monkeypatch.setattr(pcs, "event_dispatch_service", MagicMock())
     monkeypatch.setattr(pcs, "channel_completion_report", MagicMock())
