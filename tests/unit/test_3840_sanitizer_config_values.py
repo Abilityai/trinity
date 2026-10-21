@@ -121,3 +121,31 @@ def test_credentials_inside_a_config_url_are_still_stripped(monkeypatch):
 
     out = sanitize_text("connecting to postgres://app:s3cretpass@db:5432/app")
     assert "s3cretpass" not in out
+
+
+def test_the_name_check_is_linear():
+    """#2398 class: a check reached with an unbounded input must stay linear.
+
+    Names come from `os.environ` and `~/.env`, so they are not attacker-sized
+    in practice, but nothing bounds them either. ~7ms at 64 KB measured; a
+    second is far above that and far below any quadratic regression.
+    """
+    import time
+
+    for name in ("A" * 65536, "FIBERY_" + "_HOS" * 16384 + "_HOST", "API_KE" * 10922):
+        started = time.perf_counter()
+        agent_sanitizer._is_credential_value_name(name)
+        assert time.perf_counter() - started < 1.0, name[:32]
+
+
+def test_sanitize_text_never_runs_the_name_check(monkeypatch):
+    """The name check belongs to the cached value LOADER, never to the per-text
+    hot path that #1661/#2398 had to make linear."""
+    monkeypatch.setenv("FIBERY_HOST", "acme.fibery.io")
+    refresh_credential_values()
+
+    def boom(_name):
+        raise AssertionError("name check reached from sanitize_text")
+
+    monkeypatch.setattr(agent_sanitizer, "_is_credential_value_name", boom)
+    sanitize_text("x " * 50000 + "FIBERY_HOST=acme.fibery.io https://acme.fibery.io/a")
