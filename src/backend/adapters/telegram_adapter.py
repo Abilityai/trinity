@@ -297,7 +297,10 @@ class TelegramAdapter(ChannelAdapter):
         # media context is in, so a tag in a caption is stripped too (ent#934).
         if is_group and bot_username and text:
             text = re.sub(rf'@{re.escape(bot_username)}\b', '', text).strip()
-            text = re.sub(r'(\[User sent [^\]]*?): \s*\]', r'\1]', text)
+            # A caption that was ONLY the tag leaves "[User sent a photo: ]".
+            # Linear on purpose: the caption is user text (CodeQL flagged an
+            # earlier backtracking pattern as polynomial).
+            text = re.sub(r': +\]', ']', text)
 
         # Allow messages with files even if no text
         if not text and not files:

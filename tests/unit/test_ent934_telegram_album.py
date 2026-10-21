@@ -370,6 +370,23 @@ class TestCaptionMention:
         assert "@bot" not in msg.text
         assert "what is this?" in msg.text
 
+    def test_caption_that_is_only_the_tag_leaves_a_clean_line(self, monkeypatch):
+        _adapter_db(monkeypatch)
+        msg = TelegramAdapter().parse_message(
+            _photo(1, group=None, caption="@bot ", entities=self._TAG))
+        assert msg.metadata["observe_only"] is False
+        assert msg.text == "[User sent a photo]"
+
+    def test_caption_cleanup_is_linear_on_hostile_input(self, monkeypatch):
+        """CodeQL flagged the first cleanup regex as polynomial on captions
+        repeating "[User sent " — the caption is user-controlled."""
+        import time
+        _adapter_db(monkeypatch)
+        hostile = "@bot " + "[User sent " * 20000
+        started = time.perf_counter()
+        TelegramAdapter().parse_message(_photo(1, group=None, caption=hostile, entities=self._TAG))
+        assert time.perf_counter() - started < 1.0
+
     def test_tagged_caption_on_a_later_item_triggers_the_whole_album(self, monkeypatch):
         _adapter_db(monkeypatch)
         merged = merge_album_updates([
