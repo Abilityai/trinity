@@ -111,14 +111,36 @@ const windowed = computed(() => paneWindow(messages.value || [], props.item.firs
 const runs = computed(() => paneRuns(windowed.value.shown))
 const labelFor = (name) => (name && props.labels && props.labels[name]) || name || 'Agent'
 
+// The room read pages from `since` (oldest first, a bounded batch), so a long
+// room is read to its END before the pane says `rendered`: the new messages
+// are the newest, and reading the room on a transcript that stopped short of
+// them would clear what the pane never showed (Codex review). It stops on the
+// first empty batch, bounded so a misbehaving server cannot spin it.
+const MAX_ROOM_PAGES = 10
+async function fetchToEnd(id) {
+  const out = []
+  let since = 0
+  for (let page = 0; page < MAX_ROOM_PAGES; page++) {
+    const data = await store.fetchRoom(id, since)
+    const batch = (Array.isArray(data?.messages) ? data.messages : [])
+      .filter((m) => m && !(Number(m.seq) <= since))
+    if (!batch.length) return out
+    out.push(...batch)
+    const last = Number(batch[batch.length - 1]?.seq)
+    if (!Number.isFinite(last) || last <= since) return out
+    since = last
+  }
+  return out
+}
+
 async function load() {
   const mine = ++gen
   busy.value = true
   failed.value = false
   try {
-    const data = await store.fetchRoom(props.item.id)
+    const all = await fetchToEnd(props.item.id)
     if (mine !== gen) return
-    messages.value = roomPaneMessages(data?.messages)
+    messages.value = roomPaneMessages(all)
     await nextTick()
     emit('rendered', props.item.key)
   } catch {

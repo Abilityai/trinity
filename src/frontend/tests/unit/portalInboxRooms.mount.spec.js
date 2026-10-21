@@ -124,7 +124,7 @@ describe('Unread: a room with new messages (AC 1)', () => {
 
     await w.find('[data-testid="inbox-row-room:r1"]').trigger('click')
     await flushPromises()
-    expect(store.fetchRoom).toHaveBeenCalledWith('r1')
+    expect(store.fetchRoom).toHaveBeenCalledWith('r1', 0)
     const shown = w.findAll('[data-testid^="inbox-pane-message-"]').map((x) => x.attributes('data-testid'))
     expect(shown).toEqual(['inbox-pane-message-m3', 'inbox-pane-message-m4'])
     expect(w.find('[data-testid="inbox-pane-body"]').text()).toContain('Ada')
@@ -135,6 +135,25 @@ describe('Unread: a room with new messages (AC 1)', () => {
     await w.setProps({ threads: [threads[0], { ...threads[1], unread: 0 }] })
     expect(has(w, 'inbox-row-read-room:r1')).toBe(true)
     expect(markRead).toHaveBeenCalledTimes(1)
+  })
+
+  it('a long room is read to its end before it is marked read (Codex review)', async () => {
+    // The room read returns at most 500 rows from `since` — oldest first — so a
+    // room past that ended the pane on m500 while the new messages sat beyond
+    // it, and the read then cleared what the pane never showed.
+    const all = Array.from({ length: 502 }, (_, i) => msg(`m${i + 1}`, i + 1))
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500)))
+    const previews = { 'room:r1': { latest: { kind: 'message', id: 'm502', at: iso(1), excerpt: 'x' }, first_unread_message_id: 'm501' } }
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [room('r1', { unread: 2 })], previews, markRead }, { tab: 'unread' })
+    await w.find('[data-testid="inbox-row-room:r1"]').trigger('click')
+    await flushPromises()
+    const shown = w.findAll('[data-testid^="inbox-pane-message-"]').map((x) => x.attributes('data-testid'))
+    expect(shown).toEqual(['inbox-pane-message-m501', 'inbox-pane-message-m502'])
+    // Paged from `since`, to the first empty batch (the desktop preview read it
+    // once already; the explicit open reloads it).
+    expect(store.fetchRoom.mock.calls.slice(-3).map((c) => c[1])).toEqual([0, 500, 502])
+    expect(markRead.mock.calls).toEqual([['room', 'r1']])
   })
 
   it('a room that fails to load is not read', async () => {
