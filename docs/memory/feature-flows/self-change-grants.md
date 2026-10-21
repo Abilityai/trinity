@@ -56,7 +56,8 @@ admin → Agent Settings → Permissions to change itself (ent#756)
   │  components/settings/SelfChangePermissionsPanel.vue  over  stores/capabilityGrants.js
   │  copy + the permission-request title match: utils/capabilityGrants.js (pure)
   │  also reads GET /{agent}/autonomy (shown, never granted) and
-  │  GET /api/operator-queue?agent_name=&status=pending (open permission requests)
+  │  GET /api/operator-queue?agent_name=&status=pending (open permission requests;
+  │      every pending ask, walked past the first 500-row page — #3302)
   │  GET  /api/agents/{agent_name}/capability-grants          OwnedAgentByName
   │  PUT  /api/agents/{agent_name}/capability-grants/{cap} {granted}
   │        require_admin + reject_non_interactive_principal   ← a key never grants
