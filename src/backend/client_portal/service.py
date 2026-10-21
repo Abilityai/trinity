@@ -2708,6 +2708,14 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
+    # The platform default is a Claude model id: a Codex or Gemini agent runs on
+    # its own model instead (`task_execution_service._default_model_for`).
+    try:
+        from services.docker_service import get_agent_runtime
+        if get_agent_runtime(agent_name) != "claude-code":
+            return None
+    except Exception as e:  # noqa: BLE001 — an unknown runtime keeps the default
+        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
     try:
         from services import settings_service
         return settings_service.get_platform_default_model() or None
