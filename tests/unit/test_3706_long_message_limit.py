@@ -1,8 +1,8 @@
 """#3706 — a person can paste a long reference document into a room or a
 Workspace chat.
 
-The inbound cap is 100,000 characters on both surfaces, the operator 1:1 chat
-limit. 13,661 is the reported document. `ROOM_TRANSCRIPT_BUDGET_CHARS` bounds the cold-wake
+The inbound cap is 100,000 characters on both surfaces, the agent reply bound
+(`MAX_AGENT_REPLY_CHARS`). 13,661 is the reported document. `ROOM_TRANSCRIPT_BUDGET_CHARS` bounds the cold-wake
 transcript whatever one message may hold.
 """
 from __future__ import annotations

@@ -116,9 +116,9 @@ ROOM_MAX_CHAIN_DEPTH = 8
 
 # The INBOUND cap: what a person, a workspace client or an agent calling the API
 # may post as one message (it mirrors `RoomMessageCreate.max_length`).
-# #3706: 100,000, the operator 1:1 chat limit (`models.py`) and the Workspace
-# chat limit (`PortalChatRequest.message`), so a person can paste a reference
-# document for the agents to work from. What an agent is SHOWN is bounded separately by
+# #3706: 100,000, the Workspace chat limit (`PortalChatRequest.message`) and
+# the agent reply bound below, so a person can paste a reference document for
+# the agents to work from. What an agent is SHOWN is bounded separately by
 # `ROOM_TRANSCRIPT_BUDGET_CHARS`, so this number does not set the size of a
 # wake. Kept at or below `MAX_AGENT_REPLY_CHARS`: `_fit_transcript` keeps two
 # messages whole (the newest and this agent's ask), and two at the larger of
