@@ -93,6 +93,10 @@ blank the chat list the caller asked for.
    the index refuses the insert until the old row's flag is cleared. A
    concurrent Reset that won first yields a named 409 `reset_raced`.
 6. one `role = 'system'` message in the **new** Main naming the archive.
+   It is a signpost, not a turn: it does not bump `message_count`, and the
+   renderer gates the new-chat state (briefing + suggestions) on
+   `portalUtils.isNewChatTranscript` — "no non-system messages" — so the fresh
+   Main shows the notice above the briefing rather than the notice alone (#3795).
 
 **There is no second reset primitive.** A fresh row carries no
 `cached_claude_session_id` and `session_turn_service` resumes only on a cached

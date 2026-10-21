@@ -18,7 +18,10 @@ from typing import Optional, List
 
 from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
-from dependencies import get_current_user, assert_admin, assert_agent_access, assert_agent_owner
+from dependencies import (
+    get_current_user, assert_admin, assert_agent_access, assert_agent_owner,
+    is_fleet_admin, principal_reach,
+)
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from db_models import (
     SubscriptionCredentialCreate,
@@ -229,10 +232,17 @@ async def list_subscriptions(
     of the accessor's contract, so scoping costs nothing and restores exactly
     the read the workflow needs: an agent key resolves to its owner and sees
     that owner's subscriptions, which are the only ones it can assign anyway.
+    Each row's `agents` is cut to the agent key's reach (trinity-enterprise#872),
+    so the owner's other agents are not named.
     """
-    if current_user.role == "admin" and not getattr(current_user, "agent_name", None):
+    if is_fleet_admin(current_user):
         return db.list_subscriptions_with_agents()
-    return db.list_subscriptions_with_agents(owner_id=current_user.id)
+    subs = db.list_subscriptions_with_agents(owner_id=current_user.id)
+    reach = principal_reach(current_user) if subs else None
+    if reach is not None:
+        subs = [s.model_copy(update={"agents": cut, "agent_count": len(cut)})
+                for s in subs for cut in ([a for a in s.agents if a in reach],)]
+    return subs
 
 
 @router.get("/{subscription_id}/usage", response_model=SubscriptionUsage)

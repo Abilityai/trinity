@@ -308,7 +308,7 @@ describe('All says what it holds (§3g D-4)', () => {
     store.asks = Array.from({ length: 200 }, (_, i) => ask(`a${i}`, { created_at: iso(i + 1) }))
     store.asksLoaded = true
     const w = await mountInbox({ threads: [] }, { query: { tab: 'all' } })
-    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain('Showing your 200 most recent asks.')
+    expect(w.find('[data-testid="inbox-list-footer"]').text()).toContain('Showing your first 200 asks: the ones waiting longest come first.')
   })
 
   it('an empty All offers a new chat', async () => {

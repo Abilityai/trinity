@@ -146,7 +146,11 @@ disk = psutil.disk_usage('/')
 #### GET /api/telemetry/containers
 `src/backend/routers/telemetry.py` — `get_container_stats`
 
-Returns aggregate statistics across all running agent containers.
+Returns aggregate statistics across the running agent containers the caller
+may see: an admin person every container; a non-admin person their owned and
+shared agents; an agent key its reach (trinity-enterprise#872). A scoped
+response recomputes `running_count` (running agents in scope, including one
+whose stats fetch failed) and the CPU/memory totals from the cached payload.
 
 **Requires authentication** (Bearer token, SEC-180).
 

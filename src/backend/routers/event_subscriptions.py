@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access, principal_reach
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -493,7 +493,12 @@ async def list_all_events(
     A ``source_agent`` outside the caller's access returns one uniform 403.
     """
     # No email -> empty roster, never a lookup keyed on "" (same as /ws).
-    if current_user.role == "admin":
+    # An agent key carries its owner's role and email, so it reads its reach in
+    # place of either branch (trinity-enterprise#872).
+    reach = principal_reach(current_user)
+    if reach is not None:
+        roster = sorted(reach)
+    elif current_user.role == "admin":
         roster = None
     elif current_user.email:
         roster = db.get_accessible_agent_names(current_user.email, is_admin=False)

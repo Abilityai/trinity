@@ -312,7 +312,10 @@ onMounted(() => {
             {{ info.description }}
           </p>
         </div>
+        <!-- trinity-enterprise#887: the Info tab is Settings › General now,
+             which is owner-only — so is this link. -->
         <button
+          v-if="agent.can_share"
           class="shrink-0 text-xs font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
           @click="emit('navigate-tab', 'info')"
         >Full details →</button>
@@ -346,9 +349,12 @@ onMounted(() => {
 
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      <div class="flex items-center justify-between px-5 pt-4">
+      <!-- #2197 class: title + live counts + window toggle are ~360px of
+           rigid min-content, so this row widened the page at 375px (found by
+           e2e/agent-header.spec.js, ent#950). It wraps instead. -->
+      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-5 pt-4">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Activity trends</h3>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <span v-if="live" class="text-xs text-gray-500 dark:text-gray-400">
             <span class="font-mono text-action-primary-600 dark:text-action-primary-400">{{ live.running_count }}</span> running ·
             <span class="font-mono text-status-warning-700 dark:text-status-warning-400">{{ live.queued_count }}</span> queued

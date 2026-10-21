@@ -19,14 +19,30 @@
       </button>
     </div>
 
+    <InlineError
+      v-if="view.stale"
+      :message="staleBannerMessage('public links', lastLoadedAt)"
+      :detail="loadError"
+      retryable
+      @retry="loadLinks"
+    />
+
     <!-- Loading state -->
-    <div v-if="loading" class="text-center py-8">
+    <div v-if="view.state === 'loading'" class="text-center py-8">
       <div class="animate-spin rounded-full h-8 w-8 border-b-2 border-action-primary-500 mx-auto"></div>
       <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">Loading links...</p>
     </div>
 
+    <LoadFailed
+      v-else-if="view.state === 'failed'"
+      title="Couldn't load public links"
+      message="The link list failed to load. Your links are unchanged. Try again."
+      :detail="loadError"
+      @retry="loadLinks"
+    />
+
     <!-- Empty state -->
-    <div v-else-if="links.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
+    <div v-else-if="view.state === 'empty'" class="text-center py-12 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
       <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
       </svg>
@@ -356,10 +372,13 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { publicLinkUrl } from '../utils/publicLinkUrl'
+import LoadFailed from './LoadFailed.vue'
+import InlineError from './InlineError.vue'
+import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const props = defineProps({
   agentName: {
@@ -372,6 +391,10 @@ const authStore = useAuthStore()
 
 // State
 const loading = ref(false)
+const loadError = ref('')
+const hasLoaded = ref(false)
+const lastLoadedAt = ref(null)
+const view = computed(() => viewState({ hasLoaded: hasLoaded.value, error: loadError.value, count: links.value.length }))
 const links = ref([])
 const showCreateModal = ref(false)
 const editingLink = ref(null)
@@ -396,15 +419,19 @@ const formError = ref(null)
 // Load links
 const loadLinks = async () => {
   loading.value = true
+  loadError.value = ''
   try {
     const response = await axios.get(`/api/agents/${props.agentName}/public-links`, {
       headers: authStore.authHeader
     })
     links.value = response.data
+    hasLoaded.value = true
+    lastLoadedAt.value = new Date()
     // Load Slack connections for all links
     await loadAllSlackConnections()
   } catch (err) {
     console.error('Failed to load public links:', err)
+    loadError.value = String(err.response?.data?.detail || err.message || 'Request failed')
   } finally {
     loading.value = false
   }
@@ -636,6 +663,8 @@ const isExpired = (dateStr) => {
 
 // Watch for agent name changes
 watch(() => props.agentName, () => {
+  links.value = []
+  hasLoaded.value = false
   loadLinks()
 }, { immediate: true })
 

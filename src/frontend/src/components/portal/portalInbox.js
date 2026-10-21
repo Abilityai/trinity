@@ -33,7 +33,8 @@ export const INBOX_TAB_SHELL = Object.freeze([
 
 // All (§3g D-4a): EVERY chat the sidebar lists, of any age, plus the asks list —
 // pending asks always, ended ones for the 7 days the server keeps them
-// (`asks/service.py`, which also stops the read at 200 rows, pending first).
+// (`asks/service.py`, which also stops the read at 200 rows, pending first and
+// the longest-waiting of those first, #3679).
 // Not bounded here: the list pages it (`pageWindow`).
 export const ENDED_ASK_WINDOW_DAYS = 7
 export const ASKS_READ_CAP = 200
@@ -352,7 +353,9 @@ export function pageWindow(items, limit = PAGE_SIZE, selectedKey = null) {
 // when it was hit (server pagination + a total is #3059).
 export function allFooterNotes({ hasRooms = false, askCount = 0 } = {}) {
   const notes = ['Answered, expired and cancelled asks drop off after 7 days.']
-  if (askCount >= ASKS_READ_CAP) notes.push(`Showing your ${ASKS_READ_CAP} most recent asks.`)
+  // #3679: the server returns pending asks oldest first, so a capped read
+  // keeps the longest-waiting ones and drops the newest.
+  if (askCount >= ASKS_READ_CAP) notes.push(`Showing your first ${ASKS_READ_CAP} asks: the ones waiting longest come first.`)
   if (hasRooms) notes.push("Rooms aren't in the Inbox yet. Open them from the sidebar.")
   return notes
 }

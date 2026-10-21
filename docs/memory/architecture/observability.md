@@ -178,8 +178,9 @@ canvas under the new name while the old one stayed visible.
   it unreachable would be dead code wearing a fix's name. Since #2559 that caller
   is the **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
   `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
-  retired overlay — so a call started through Agent Detail's Talk door still
-  draws on the same durable canvas the Canvas tab renders.
+  retired overlay — so a Workspace call draws on the same durable canvas the
+  Canvas tab renders. (`AgentHeader`'s Workspace and Talk doors were later removed
+  by trinity-enterprise#950.)
 - **Audience is how "never widens" is made structural.** `audience` ∈ `operator`
   (default) | `roster`, a validated COLUMN and never a key inside `blocks` (the
   ent#364 rule — `blocks` is agent-authored, so an audience buried there lets a

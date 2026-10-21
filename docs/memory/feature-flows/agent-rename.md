@@ -396,7 +396,7 @@ Both main WebSocket manager and filtered Trinity Connect manager receive the eve
 | `container_stop()` | Stops container if running |
 | `container_rename()` | Changes container name from `agent-{old}` to `agent-{new}` |
 
-Note: Container is NOT auto-restarted. Volume rename is deferred to next restart via `recreate_container_with_updated_config()`.
+Note: Container is NOT auto-restarted, and its env and labels are unchanged. Volumes are never renamed (#1664). The next start recreates the container (`check_agent_auth_token_env_matches` fires on the stale token), and `recreate_container_with_updated_config()` re-bakes `TRINITY_AGENT_AUTH_TOKEN`, `AGENT_NAME` and the `trinity.agent-name` label from the new name (#3813). The agent server reads `AGENT_NAME` for `/health`, heartbeat, pull worker ids (`<name>#wN`), the result callback and git auto-sync. `check_agent_name_env_matches` repairs an agent still carrying the old name on its next cold start.
 
 ---
 

@@ -99,6 +99,11 @@ ROOM_DEFAULT_TTL_HOURS_KEY = "room_default_ttl_hours"
 # never be a value a caller would have been refused.
 MAX_MESSAGES_CEILING = 500
 MAX_TTL_HOURS = 168
+# #3495: the cost cap had no upper bound, so `max_cost_usd` was the one budget
+# field a caller could set to any figure. Per room, in USD. The operator default
+# shares it (`RoomBudgetDefaultsUpdate`), and a stored default above it is
+# CLAMPED to it by `_coerce_cost` — never read as "uncapped".
+MAX_COST_USD_CEILING = 1000.0
 MAX_PARTICIPANTS = 12
 
 # How much transcript a COLD agent gets when it has no resumable session.
@@ -294,6 +299,15 @@ def _assert_can_reach_agent(current_user, agent_name: str) -> None:
                         f"You do not have access to agent {agent_name!r}")
 
 
+def _can_still_reach(current_user, agent_name: str) -> bool:
+    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check."""
+    try:
+        _assert_can_reach_agent(current_user, agent_name)
+    except RoomError:
+        return False
+    return True
+
+
 def _require_membership(room_id: str, current_user) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
@@ -384,7 +398,11 @@ def _coerce_cost(raw):
     # its first message" — the `RoomCreate` validator refuses <= 0 for the same
     # reason, and a stored 0 must not become a stricter cap than the operator can
     # express through the API.
-    return value if value > 0 else None
+    if value <= 0:
+        return None
+    # Above the ceiling (a row written before #3495, or by hand): tighten to the
+    # ceiling. Treating it as invalid would fall back to NO cap — the unsafe way.
+    return min(value, MAX_COST_USD_CEILING)
 
 
 def budget_defaults() -> dict:
@@ -448,11 +466,13 @@ def set_budget_defaults(*, max_messages=None, max_cost_usd=None, ttl_hours=None,
 def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
     """Decide the room's budget, and who was allowed to decide it (ent#387).
 
-    A **platform** principal (JWT user, MCP key, agent key) may bound a room
-    explicitly — that is the operator, and an unspecified field falls through to
-    the operator default. A **workspace client** may not: their values are
-    dropped, not refused, because the Workspace never offers the fields and a 4xx
-    would only advertise a control they cannot have.
+    A **platform** principal at `operator` or above (JWT user, MCP key, agent
+    key) may bound a room explicitly — that is the operator, and an unspecified
+    field falls through to the operator default. A **workspace client** may not,
+    and neither may a Workspace-only account (the `user` rung, an MCP key it
+    owns, or a role outside the ladder — #3495; `user` became a platform login in
+    #3488): their values are dropped, not refused, because the Workspace never
+    offers the fields and a 4xx would only advertise a control they cannot have.
 
     Ignoring rather than clamping is deliberate. A clamp still lets the bounded
     party choose anything up to the ceiling — including "the ceiling" — which is
@@ -477,10 +497,17 @@ def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
         getattr(current_user, "is_platform", not getattr(current_user, "is_portal", False))
     )
 
-    if not is_platform and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
+    # #3495: being a platform principal is not enough — the Workspace-only rung
+    # logs in on the platform side too. A principal with no role at all fails
+    # closed here, as one without `is_portal` does above.
+    from dependencies import is_workspace_only_role
+
+    may_bound = is_platform and not is_workspace_only_role(getattr(current_user, "role", None))
+
+    if not may_bound and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
         logger.info(
-            "[rooms] ignoring caller-supplied budget from a workspace client — "
-            "operator defaults apply"
+            "[rooms] ignoring caller-supplied budget from a %s — operator defaults apply",
+            "workspace client" if not is_platform else "workspace-only account",
         )
         max_messages = max_cost_usd = ttl_hours = None
 
@@ -1280,15 +1307,14 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
     # ent#362 AC#6: membership is the grant, but a REVOKED share must stop
     # future wakes — checked here, at wake time, not at join time. The
     # transcript stays (the record is shared and permanent); what goes away is
-    # the ability to keep spending the agent's time. Only workspace clients are
-    # re-checked: a platform member's access was already resolved by the
-    # platform ACL when the room was created.
-    if targets and getattr(current_user, "is_portal", False):
-        from client_portal.service import agent_on_roster
-        email = _workspace_identity(current_user)
-        include_owned = bool(getattr(current_user, "is_platform", False))
-        still_reachable = [t for t in targets
-                           if agent_on_roster(t, email, include_owned)]
+    # the ability to keep spending the agent's time. trinity-enterprise#860:
+    # EVERY principal is re-checked, with the rule room creation applies
+    # (`_assert_can_reach_agent`) — a platform member's access was resolved
+    # when the room was made, and no unshare path touches rooms. An agent's
+    # reply carries the person whose turn started the chain, so a cascade is
+    # held to that person's access too.
+    if targets:
+        still_reachable = [t for t in targets if _can_still_reach(current_user, t)]
         if len(still_reachable) != len(targets):
             revoked = [t for t in targets if t not in still_reachable]
             _post_system(room_id,

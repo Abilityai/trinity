@@ -31,11 +31,13 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 
 | Type | What you do |
 |------|-------------|
-| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. When none of them is right, choose **Something else** (or just start typing) and write what the agent should do instead — the agent carries out none of its options and re-plans from your instruction. The text is required then, and the button reads **Send instruction**. Any other free-text decision is refused. Approvals raised by the platform itself (skill gates) are decided by their options only and show no **Something else**. |
+| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. When none of them is right, choose **Something else** (or just start typing) and write what the agent should do instead — the agent carries out none of its options and re-plans from your instruction. The text is required then, and the button reads **Send instruction**. Any other free-text decision is refused. Approvals raised by the platform itself (skill gates) are decided by their options only and show no **Something else**; they draw the platform's own card — the agent, the skills, the exact input Approve runs, who asked, the deadline, who it is waiting on — and only a person the approval is addressed to gets the controls. Beside a picked **Reject** the note is the reason the requester is told. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals). |
 | Question | Type an answer and send. |
 | Heads up | Click **Got it** to acknowledge. |
 
 An ask an agent addressed to a role that several people fill goes to every one of them: the first answer ends it, and the others' Workspace shows who answered.
+
+The page reads one capped page of 200 items; pending items come by priority and, within a priority, the longest-waiting first, so a queue past the cap drops the newest asks rather than the ones that have waited longest.
 
 If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
 
@@ -78,6 +80,8 @@ Consolidated view of agent notifications (replaces the former standalone Events 
 Terminal operator-queue items. Responded items stay visible until the agent confirms delivery of the response. A platform alert has no agent to deliver to, so answering one — **Got it** included — ends it as acknowledged straight away.
 
 When an agent asks again after one of its asks expired, the two cards name each other: **Re-ask of …** on the new ask and **Re-asked as …** on the expired one, with the other ask's id in full on hover.
+
+An ask the agent ended itself reads **Replaced by the agent** (naming its successor) or **Withdrawn by the agent**, with the agent's one-line reason shown as text under a withdrawn one — the only agent ending whose reason is shown. See [Approvals](../automation/approvals.md#concepts).
 
 ### Clear All
 
@@ -123,6 +127,7 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 | `/api/operator-queue/{id}/respond` | POST | Submit response — body `{"response": "<decision>", "response_text": "<optional note>"}`. For an approval, `response` must be one of the item's own `options` (exact match) or the reserved `"(something else)"` with the instruction in `response_text`; anything else fails with 422 `response_not_an_offered_option` carrying `offered_options`, and the reserved value fails with 422 `instruction_required` (blank `response_text`), `reserved_value` (not an approval) or `not_off_menu` (a platform-minted gate approval). `response_text` is at most 4000 characters; 409 if the item is no longer pending; 403 `person_required` for agent-, system- and connector-scoped keys (only a person ends an ask), and 403 `not_addressee` for a skill-gate approval addressed to someone else |
 | `/api/operator-queue/{id}/cancel` | POST | Cancel item (person-only, like respond; a skill-gate approval only by its addressee or an admin) |
 | `/api/operator-queue/agents/{name}` | GET | Items for a specific agent |
+| `/api/agents/{name}/operator-queue/{request_id}/withdraw` | POST | The agent withdraws one of its OWN pending asks — `{reason}` (1–500 characters); agent key only. `409 ask_ended` once a person answered or ended it, `404 ask_not_found` for any ask that is not its own (a gate's or the platform's included) — see [Approvals](../automation/approvals.md#for-agents) |
 | `/api/notifications/dismiss-all` | POST | Dismiss all pending + acknowledged notifications (optional `agent_name`) |
 
 Full API reference: http://localhost:8000/docs
@@ -146,6 +151,7 @@ A walk's guarantee has one stated bound: a change that ends an item (an answer, 
 | `list_operator_queue` / `get_operator_queue_item` | Read queue items you can access |
 | `respond_to_operator_queue` | Answer an item — works only with a person's user-scoped key; agent- and system-scoped keys are refused (403 `person_required`) |
 | `get_my_ask` | From inside an agent: how one of its own asks ended |
+| `withdraw_ask` | From inside an agent: end one of its own pending asks that no longer needs an answer, with a one-line reason (see [Approvals](../automation/approvals.md)) |
 | `send_notification` | Send a notification to the Notifications tab from within an agent |
 
 ## See Also

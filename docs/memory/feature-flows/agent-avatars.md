@@ -7,7 +7,7 @@ AI-generated circular avatars for agents using Gemini image generation, with a r
 As an agent owner, I want to generate a custom avatar for my agent from a text description, and quickly regenerate variations without re-entering my prompt, so that my agents are visually distinguishable across the platform.
 
 ## Entry Points
-- **UI (Generate/Edit)**: `src/frontend/src/components/AgentHeader.vue:4-49` - Two-button hover overlay (regenerate + edit) or camera icon
+- **UI (Generate/Edit, in place)**: `src/frontend/src/components/AgentHeader.vue` - owner-only hover overlay on the header avatar: two buttons (next emotion + change prompt) when an avatar with an identity prompt exists, else a camera. Moved to Settings by trinity-enterprise#887, restored by trinity-enterprise#955; Settings › General › Identity › Avatar (`agent-settings/GeneralPane.vue`) keeps the same verbs as the full path
 - **UI (Display)**: `src/frontend/src/components/AgentAvatar.vue` - Reusable avatar component (5 sizes)
 - **UI (Modal)**: `src/frontend/src/components/AvatarGenerateModal.vue` - Generation modal with reference preview
 - **API (Generate)**: `POST /api/agents/{agent_name}/avatar/generate`
@@ -32,7 +32,7 @@ As an agent owner, I want to generate a custom avatar for my agent from a text d
 - Gradient uses `hsl(hash%360, 65%, 45%)` to `hsl((hash+40)%360, 65%, 55%)`
 
 #### AgentHeader.vue (avatar trigger - two-button hover UI with crossfade)
-- **File**: `src/frontend/src/components/AgentHeader.vue:4-49`
+- **File**: `src/frontend/src/components/AgentHeader.vue` (the overlay block under the `group` avatar wrapper; `data-testid="agent-header-avatar-{add,change,cycle}"`, owners only — `can_share && !is_system`; hover **or focus-within** reveals it, so the keyboard reaches the verbs)
 - Avatar sits on left edge of card at `absolute left-0 top-3 -translate-x-1/2` (50% in, 50% out)
 - Wrapped in indigo ring border (`border-[3px] border-indigo-400`) with `overflow-hidden`
 - **Crossfade transition** (AVATAR-002): Avatar wrapped in `<Transition name="avatar-crossfade">` inside a `relative w-24 h-24` container. Both leaving and entering elements are `absolute inset-0`, creating a true crossfade (1s ease) when `emotionAvatarUrl` changes.

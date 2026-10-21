@@ -152,6 +152,7 @@
 |------|----------|-------------|
 | Overview Tab | [agent-overview-dashboard.md](feature-flows/agent-overview-dashboard.md) | Default landing tab — multi-day trend charts + analytics endpoint (#1107) |
 | Tab Overflow (More ▾) | [agent-detail-tab-overflow.md](feature-flows/agent-detail-tab-overflow.md) | Reusable `OverflowTabs.vue` — tabs collapse into a "More" dropdown instead of horizontal scroll (#1114) |
+| Agent Settings home | [agent-settings-home.md](feature-flows/agent-settings-home.md) | One Settings tab with a pane rail (General, Guardrails, People, Storage, …), `?section=` deep links, one restart banner (trinity-enterprise#887/#888/#890/#891) |
 | Tasks Tab | [tasks-tab.md](feature-flows/tasks-tab.md) | Task execution UI with history |
 | Skills Tab | [skills-tab.md](feature-flows/skills-tab.md) | One tab for the agent's own and shared skills: Run, Requires approval, last-known list when stopped (trinity-enterprise#754) |
 | Playbooks Tab (superseded) | [playbooks-tab.md](feature-flows/playbooks-tab.md) | Superseded by [skills-tab.md](feature-flows/skills-tab.md) (trinity-enterprise#754) |

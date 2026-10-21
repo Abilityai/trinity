@@ -1,0 +1,32 @@
+{
+  "version": "diff",
+  "date": "2026-10-19",
+  "mode": "diff-daily",
+  "scope": "feature/3601-proxy-https-urls vs origin/dev",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "full-repo phases not run in diff mode (history secrets, dependency scan, CI/CD, image internals)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes in diff)"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "n/a (diff run)"
+}

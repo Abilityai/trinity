@@ -71,7 +71,6 @@ const COMPOSABLE = read('../../src/composables/useVoiceSession.js')
 const CANVAS_COLUMN = read('../../src/components/portal/PortalVoiceCanvas.vue')
 const TABS = read('../../src/components/portal/PortalChatTabs.vue')
 const STORE = read('../../src/stores/clientPortal.js')
-const HEADER = read('../../src/components/AgentHeader.vue')
 const CODE = stripComments(CONVERSATION)
 const SHELL_CODE = stripComments(SHELL)
 
@@ -590,15 +589,11 @@ describe('the auto-start intent is ARMED IN THE APP, never by the URL alone', ()
   })
 })
 
-describe('the door and the hand-off are wired (source, since there is no mount harness)', () => {
-  it('the Talk button arms the one-shot BEFORE it navigates', () => {
-    const header = stripComments(HEADER)
-    expect(header).toContain("import { armVoiceAutoStart } from './portal/portalVoiceMode'")
-    const fn = header.slice(header.indexOf('function goToTalk()'), header.indexOf('function goToBrain()'))
-    expect(fn).toContain('armVoiceAutoStart()')
-    expect(fn).toMatch(/router\.push\(\{ path: '\/workspace', query: \{ agent: props\.agent\.name, voice: '1' \} \}\)/)
-    expect(fn.indexOf('armVoiceAutoStart()')).toBeLessThan(fn.indexOf('router.push'))
-  })
+describe('the hand-off is wired (source, since there is no mount harness)', () => {
+  // The Agent Detail Talk door that armed the one-shot was removed by
+  // trinity-enterprise#950 (absence pinned in agentDetailTalkDoor.spec.js).
+  // `armVoiceAutoStart` keeps its rule tests above; the shell's strip-and-
+  // disarm wiring below is what keeps a pasted `?voice=1` inert.
 
   it('the shell records the intent, and strips NOTHING, inside resolveAgentQuery', () => {
     const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('function resolveAgentQuery()'), SHELL_CODE.indexOf('const ASKS_POLL_MS'))
@@ -648,7 +643,7 @@ describe('the door and the hand-off are wired (source, since there is no mount h
   })
 
   it('does NOT use `navigator.userActivation` — it is a heuristic, not a provenance check', () => {
-    for (const src of [SHELL, HEADER, read('../../src/components/portal/portalVoiceMode.js')]) {
+    for (const src of [SHELL, read('../../src/components/portal/portalVoiceMode.js')]) {
       // The rationale lives in comments; no CODE path may consult it.
       expect(stripComments(src)).not.toContain('userActivation')
     }
