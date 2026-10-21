@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
+from ..runtime_names import is_claude_runtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -209,7 +210,12 @@ async def get_agent_info():
     return AgentInfo(
         name=agent_state.agent_name,
         status="running",
-        claude_version=runtime_version if agent_state.agent_runtime == "claude-code" else None,
+        # #2981: the field is Claude-named for wire compatibility,
+        # but the QUESTION is "is this agent's runtime CLI present". The old
+        # literal `== "claude-code"` also excluded the equally-valid `claude`
+        # alias, so an agent created with `runtime: claude` reported null here
+        # while being a perfectly healthy Claude agent.
+        claude_version=runtime_version if is_claude_runtime(agent_state.agent_runtime) else None,
         mcp_servers=mcp_servers,
         uptime=None  # TODO: Calculate uptime
     )

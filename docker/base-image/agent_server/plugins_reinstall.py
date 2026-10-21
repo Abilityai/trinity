@@ -68,6 +68,11 @@ try:  # package import (normal) …
 except ImportError:  # pragma: no cover — … or standalone, for a script run
     from safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml  # type: ignore
 
+try:  # same dual-import idiom for the runtime predicate
+    from .runtime_names import is_claude_runtime
+except ImportError:  # pragma: no cover — … or standalone, for a script run
+    from runtime_names import is_claude_runtime  # type: ignore
+
 AGENT_HOME = Path("/home/developer")
 MANIFEST_FILE = AGENT_HOME / ".trinity" / "plugins.yaml"
 # Fallback for a source-mode / tokenless agent (Cornelius) whose committed
@@ -450,6 +455,20 @@ def reinstall(manifest: Optional[Dict[str, object]] = None) -> Dict[str, object]
         "withheld": {},
         "status": "ok",
     }
+    # Claude-runtime only (#2981). Every subprocess this
+    # module runs is `claude plugin ...` — a CLI that only exists in the Claude
+    # image path. On a gemini-cli / codex / opencode agent the hook therefore
+    # ran unconditionally, spent two failing `claude` execs per boot, and wrote
+    # a `withheld:` state file describing a capability that runtime does not
+    # have. Skipping is not a degradation: there is nothing to reinstall.
+    if not is_claude_runtime():
+        result["status"] = "skipped_runtime"
+        _log(
+            f"skipped: AGENT_RUNTIME={os.getenv('AGENT_RUNTIME', '')!r} is not "
+            "the Claude runtime; Claude Code plugins do not apply"
+        )
+        write_state(result)
+        return result
     if manifest is None:
         manifest = load_manifest()
     declared = bool(manifest)

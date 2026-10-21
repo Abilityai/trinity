@@ -13,6 +13,15 @@ from datetime import datetime
 
 from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..model_context import resolve_context_window
+from ..runtime_names import (  # noqa: F401 — re-exported for existing importers
+    CLAUDE_RUNTIMES,
+    CODEX_RUNTIMES,
+    GEMINI_RUNTIMES,
+    KNOWN_RUNTIMES,
+    OPENCODE_RUNTIMES,
+    is_claude_runtime,
+    normalize_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,11 +200,14 @@ class AgentRuntime(ABC):
 
 
 # Accepted AGENT_RUNTIME values (lowercased). Unknown values fail loudly
-# rather than silently selecting Claude (#1187 Phase D).
-_CLAUDE_RUNTIMES = frozenset({"claude-code", "claude"})
-_GEMINI_RUNTIMES = frozenset({"gemini-cli", "gemini"})
-_CODEX_RUNTIMES = frozenset({"codex"})
-KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES
+# rather than silently selecting Claude (#1187 Phase D). The name sets and the
+# `is_claude_runtime` / `normalize_runtime` predicates live in the
+# zero-dependency `runtime_names` leaf so the boot hooks can import them too;
+# re-exported here because this is the historical import path.
+_CLAUDE_RUNTIMES = CLAUDE_RUNTIMES
+_GEMINI_RUNTIMES = GEMINI_RUNTIMES
+_CODEX_RUNTIMES = CODEX_RUNTIMES
+_OPENCODE_RUNTIMES = OPENCODE_RUNTIMES
 
 
 def get_runtime() -> AgentRuntime:
@@ -209,12 +221,13 @@ def get_runtime() -> AgentRuntime:
     (#1187 Phase D).
 
     Returns:
-        AgentRuntime instance (ClaudeCodeRuntime, GeminiRuntime, or CodexRuntime)
+        AgentRuntime instance (ClaudeCodeRuntime, GeminiRuntime, CodexRuntime,
+        or OpenCodeRuntime)
 
     Raises:
         ValueError: if AGENT_RUNTIME is set to an unrecognized value.
     """
-    runtime_type = os.getenv("AGENT_RUNTIME", "claude-code").lower()
+    runtime_type = normalize_runtime()
 
     if runtime_type in _GEMINI_RUNTIMES:
         from .gemini_runtime import get_gemini_runtime
@@ -224,6 +237,10 @@ def get_runtime() -> AgentRuntime:
         from .codex_runtime import get_codex_runtime
         logger.info("Using OpenAI Codex runtime")
         return get_codex_runtime()
+    if runtime_type in _OPENCODE_RUNTIMES:
+        from .opencode_runtime import get_opencode_runtime
+        logger.info("Using OpenCode runtime")
+        return get_opencode_runtime()
     if runtime_type in _CLAUDE_RUNTIMES:
         from .claude_code import get_claude_runtime
         logger.info("Using Claude Code runtime")

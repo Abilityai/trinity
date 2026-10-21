@@ -6204,6 +6204,36 @@
         "unit"
       ],
       "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
+      "file": "unit/test_opencode_runtime.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "OpenCode harness core, subprocess stubbed: parser (last-step text, native cost, reasoning/cache subset traps), empty/reasoning-only turns fail even on exit 0, error→HTTP mapping (auth 503 anchored, 429, 500, 502, 504), provider/model shape 400, per-turn XDG config carries the system prompt as instructions, metadata.model_name is the resolved -m (runtime default passed explicitly), tool activity tracked under the execution id, is_available probed once per process, read-only config /opt/trinity first then the home copy. Mutation: dropping model_name, the execution_id kwarg, the availability cache or the /opt precedence each turns its test red."
+    },
+    {
+      "file": "unit/test_runtime_factory_opencode.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "get_runtime() resolves AGENT_RUNTIME=opencode in any casing to the OpenCodeRuntime singleton; a near-miss value still raises; opencode is in KNOWN_RUNTIMES."
+    },
+    {
+      "file": "unit/test_2981_runtime_seam_hygiene.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "runtime_names leaf: is_claude_runtime is case-insensitive, env-reading, import-free; runtime_adapter re-exports it; plugins_reinstall skips non-Claude runtimes with a named skipped_runtime status and still runs on Claude; AgentState probes each runtime's own CLI (unknown → unavailable, never claude); result_callback's async-dispatch gate shares the casing-safe predicate. Mutation: removing the reinstall gate turns 5 tests red."
     }
   ]
 }

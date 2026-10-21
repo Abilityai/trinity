@@ -173,6 +173,15 @@ class ExecutionMetadata(BaseModel):
     # the backend read error_code directly and retire status-inference.
     status: Optional[str] = None  # "success" | "error"
     error_code: Optional[str] = None  # "AUTH" | "RATE_LIMIT" | "TIMEOUT" | "AGENT_ERROR" | "RUNTIME_UNAVAILABLE"
+    # #2981: how many times this turn was relaunched because
+    # OpenCode produced ZERO bytes and never reached its first `step_start`.
+    # 0 on every healthy turn and on every other runtime. It exists because
+    # the stall is HOST-DEPENDENT (unreproduced on one container, ~13% per
+    # attempt on another) — without it, an affected host looks merely "slow
+    # but fine" in the ledger, since a retried turn that eventually succeeds
+    # is recorded as a plain success. Additive: the backend reads metadata as
+    # a plain dict, so an older backend simply ignores the key.
+    stall_retries: int = 0
 
 
 # ============================================================================
