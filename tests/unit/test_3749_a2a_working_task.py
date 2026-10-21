@@ -92,9 +92,15 @@ def h(monkeypatch):
 
     def _mint(**kw):
         state["minted"].append(kw)
+        fields = kw.get("fields")
         state["executions"][MINTED] = {
             "agent_name": kw["agent_name"], "status": "running",
             "response": None, "error": None,
+            # #3751: the attribution the real mint stamps, which the bearer
+            # `tasks/get` / `tasks/cancel` gate reads.
+            "triggered_by": kw.get("triggered_by"),
+            "source_user_id": getattr(fields, "source_user_id", None),
+            "source_mcp_key_id": getattr(fields, "source_mcp_key_id", None),
         }
         return types.SimpleNamespace(id=MINTED)
 
@@ -381,12 +387,17 @@ def test_aauth_caller_can_poll_a_long_turn(h, monkeypatch):
     asyncio.run(run())
 
 
+# #3751: the fixture user's starter fields, for rows these tests poll directly.
+_STARTED_BY_ALICE = {"triggered_by": "a2a", "source_user_id": 1, "source_mcp_key_id": "k1"}
+
+
 # --------------------------------------------------------------------------- #
 # `tasks/get` state map: a gate-refused row is `rejected`, not `working`
 # --------------------------------------------------------------------------- #
 def test_tasks_get_maps_skipped_to_rejected(h):
     h.state["executions"]["e"] = {"agent_name": AGENT, "status": "skipped",
-                                  "response": None, "error": "Not run: skill refused"}
+                                  "response": None, "error": "Not run: skill refused",
+                                  **_STARTED_BY_ALICE}
     body = asyncio.run(h.get("e"))
     task = body["result"]
     assert task["status"]["state"] == "rejected"
@@ -403,7 +414,8 @@ def test_tasks_cancel_treats_skipped_as_terminal(h, monkeypatch):
         return True
     monkeypatch.setattr(a2a, "terminate_execution_on_agent", _terminate)
     h.state["executions"]["e"] = {"agent_name": AGENT, "status": "skipped",
-                                  "response": None, "error": "Not run: skill refused"}
+                                  "response": None, "error": "Not run: skill refused",
+                                  **_STARTED_BY_ALICE}
 
     resp = asyncio.run(a2a._dispatch_jsonrpc(
         AGENT, h.request, ("tasks/cancel", {"id": "e"}, "c"), current_user=h.user))

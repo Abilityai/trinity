@@ -32,7 +32,9 @@ from services.docker_utils import (
 from services.agent_runtime_state import clear_agent_breakers
 from services.agent_auth import derive_agent_token
 from services.settings_service import get_anthropic_api_key
-from services.agent_service.helpers import check_base_image_state
+from services.agent_service.helpers import check_base_image_state, check_pull_mode_env_matches
+from services.agent_service.pull_mode import apply_pull_mode_env
+from services.pull_pilot import is_pull_pilot_agent
 from services.agent_service.lifecycle import (
     FULL_CAPABILITIES,
     AGENT_TMPFS_MOUNT,
@@ -159,6 +161,7 @@ class SystemAgentService:
 
             # Ensure database record has is_system=True (fixes regression if record exists without flag)
             db.register_agent_owner(SYSTEM_AGENT_NAME, admin_username(), is_system=True)
+            self._report_pull_mode(container)
 
             # #1816 — RUNNING: report, never act.
             #
@@ -298,6 +301,7 @@ class SystemAgentService:
                 return result
 
         # System agent doesn't exist - create it
+        self._report_pull_mode(None)
         try:
             creation_result = await self._create_system_agent()
             result["action"] = "created"
@@ -406,13 +410,12 @@ class SystemAgentService:
             'TRINITY_AGENT_AUTH_TOKEN': derive_agent_token(SYSTEM_AGENT_NAME),
         }
 
-        # NB: deliberately NO `TRINITY_BACKEND_URL` here. That env var is the
-        # agent-side heartbeat loop's gate, and heartbeat_service.
-        # authorize_heartbeat accepts ONLY `scope == "agent"` keys — the system
-        # agent's key is `scope == "system"`, so arming it would produce a
-        # permanent 5-second 403 loop (swallowed agent-side, ~17k backend log
-        # lines/day). Whether the orchestrator SHOULD be visible to fleet health
-        # is a real design question, and a separate one (#1816 §10).
+        # NB: no `TRINITY_BACKEND_URL` here. That env var is the agent-side
+        # heartbeat loop's gate, and whether the orchestrator SHOULD be visible
+        # to fleet health is a separate design question (#1816 §10). The one
+        # exception is a pull pilot, whose worker needs it: apply_pull_mode_env
+        # below adds it then, and the system agent's own system-scoped key is
+        # accepted by the pull seams and the heartbeat for its own name (#3814).
 
         # OpenTelemetry Configuration (enabled by default)
         if os.getenv('OTEL_ENABLED', '1') == '1':
@@ -431,6 +434,9 @@ class SystemAgentService:
         if agent_mcp_key:
             env_vars['TRINITY_MCP_URL'] = trinity_mcp_url
             env_vars['TRINITY_MCP_API_KEY'] = agent_mcp_key.api_key
+
+        # #3814: a piloted system agent claims queued work like any pilot.
+        apply_pull_mode_env(SYSTEM_AGENT_NAME, env_vars)
 
         # Set up volumes
         # Note: Volume name contains "workspace" but it mounts to /home/developer (consistent with all agents)
@@ -657,6 +663,48 @@ class SystemAgentService:
             platform_alerts.clear(SYSTEM_AGENT_NAME, "base_image_stale", SYSTEM_AGENT_NAME)
         elif kind == "system_agent_start_failed":
             platform_alerts.clear(SYSTEM_AGENT_NAME, "system_agent_start_failed", SYSTEM_AGENT_NAME)
+        elif kind == "system_agent_pull_drift":
+            platform_alerts.clear(SYSTEM_AGENT_NAME, "system_agent_pull_drift", SYSTEM_AGENT_NAME)
+
+    def _report_pull_mode(self, container) -> None:
+        """#3814: report the system agent's pull state at boot. Never raises.
+
+        While `PULL_MODE_PILOT_AGENTS` names it, every turn for it (operator
+        chat included) goes to the durable queue. A RUNNING container is never
+        recreated (#1816 AC2), so one started before the allowlist changed has
+        no worker and its turns wait until an operator restarts it. That state
+        files a platform alert; any other state clears it.
+        """
+        try:
+            if not is_pull_pilot_agent(SYSTEM_AGENT_NAME):
+                self._clear_alert("system_agent_pull_drift")
+                return
+            logger.warning(
+                "[#3814] %s is in PULL_MODE_PILOT_AGENTS: it claims queued work "
+                "with its own system-scoped key, and operator chat waits on the "
+                "queue like any pull pilot", SYSTEM_AGENT_NAME,
+            )
+            if container is None or getattr(container, "status", None) != "running":
+                return  # the create / cold-start path bakes the env itself
+            if check_pull_mode_env_matches(container, SYSTEM_AGENT_NAME):
+                self._clear_alert("system_agent_pull_drift")
+                return
+            from services import platform_alerts
+            outcome = platform_alerts.observe(
+                SYSTEM_AGENT_NAME, "system_agent_pull_drift", SYSTEM_AGENT_NAME,
+                priority="high",
+                title="System agent is piloted but runs no pull worker",
+                question=(
+                    f"{SYSTEM_AGENT_NAME} is in PULL_MODE_PILOT_AGENTS, but its "
+                    f"running container predates that and has no pull worker. "
+                    f"Its turns wait on the queue until it is restarted "
+                    f"(POST /api/system-agent/restart)."
+                ),
+                context={"agent_name": SYSTEM_AGENT_NAME, "detected_at": utc_now_iso()},
+            )
+            logger.warning("system-agent pull drift alarm (%s): restart it to start the worker", outcome)
+        except Exception:  # noqa: BLE001 — boot diagnostics must never block boot
+            logger.debug("system-agent pull-mode report failed", exc_info=True)
 
     def _emit_start_failed_alert(self, reason: str) -> None:
         """#1816 R1: the platform may now have NO system agent, and nobody is

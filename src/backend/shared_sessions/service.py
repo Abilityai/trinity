@@ -294,6 +294,15 @@ def _assert_can_reach_agent(current_user, agent_name: str) -> None:
                         f"You do not have access to agent {agent_name!r}")
 
 
+def _can_still_reach(current_user, agent_name: str) -> bool:
+    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check."""
+    try:
+        _assert_can_reach_agent(current_user, agent_name)
+    except RoomError:
+        return False
+    return True
+
+
 def _require_membership(room_id: str, current_user) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
@@ -1280,15 +1289,14 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
     # ent#362 AC#6: membership is the grant, but a REVOKED share must stop
     # future wakes — checked here, at wake time, not at join time. The
     # transcript stays (the record is shared and permanent); what goes away is
-    # the ability to keep spending the agent's time. Only workspace clients are
-    # re-checked: a platform member's access was already resolved by the
-    # platform ACL when the room was created.
-    if targets and getattr(current_user, "is_portal", False):
-        from client_portal.service import agent_on_roster
-        email = _workspace_identity(current_user)
-        include_owned = bool(getattr(current_user, "is_platform", False))
-        still_reachable = [t for t in targets
-                           if agent_on_roster(t, email, include_owned)]
+    # the ability to keep spending the agent's time. trinity-enterprise#860:
+    # EVERY principal is re-checked, with the rule room creation applies
+    # (`_assert_can_reach_agent`) — a platform member's access was resolved
+    # when the room was made, and no unshare path touches rooms. An agent's
+    # reply carries the person whose turn started the chain, so a cascade is
+    # held to that person's access too.
+    if targets:
+        still_reachable = [t for t in targets if _can_still_reach(current_user, t)]
         if len(still_reachable) != len(targets):
             revoked = [t for t in targets if t not in still_reachable]
             _post_system(room_id,

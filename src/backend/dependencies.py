@@ -1858,6 +1858,14 @@ def owner_is_workspace_only(owner_row: Optional[dict]) -> bool:
     return is_workspace_only_role((owner_row or {}).get("role"))
 
 
+def owner_is_suspended(owner_row: Optional[dict]) -> bool:
+    """A door that resolves a key's owner ROW itself (`/ws/events`) applies the
+    #995 deactivation check `get_current_user` and `/ws` apply: a suspended
+    owner's still-active key is refused. An unresolvable owner is refused by
+    `owner_is_workspace_only`, so None reads as "not suspended" here."""
+    return bool((owner_row or {}).get("suspended_at"))
+
+
 def require_role(min_role: str):
     """
     Dependency factory that requires the current user to have at least `min_role`.
@@ -2058,8 +2066,9 @@ def get_self_agent(current_user: User = Depends(get_current_user)) -> str:
     agent-scoped key is its own agent, the system key is `trinity-system`.
     Nothing in the request can name another one — and nothing has to, which
     matters because a renamed agent's container keeps its old `AGENT_NAME`
-    while its key follows the rename. Every other principal gets
-    `get_self_acting_agent`'s uniform 403, then the access check its 404.
+    until its next recreate (#3813), while its key follows the rename. Every
+    other principal gets `get_self_acting_agent`'s uniform 403, then the access
+    check its 404.
     """
     return get_self_acting_agent(acting_agent_name(current_user) or "", current_user)
 
