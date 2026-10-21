@@ -449,7 +449,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project', 'read'])
 
 const store = useClientPortalStore()
 
@@ -919,6 +919,11 @@ async function load({ full = false } = {}) {
     // counts toward the jump-to-latest control.
     if (full) await pinToBottom()
     else if (incoming.length) await onMessagesArrived(incoming.length)
+    // trinity-enterprise#959: the room on screen is read — on open (every door:
+    // the sidebar, the Inbox, a link) and whenever an agent's message lands in
+    // it, the rule a chat follows for a reply that arrives while you watch.
+    // Without it the room would badge in the sidebar while the person reads it.
+    if (full || incoming.some((m) => m && m.sender_kind === 'agent')) emit('read', props.roomId)
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {

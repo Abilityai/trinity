@@ -302,6 +302,7 @@
           @open-menu="mobileNav = true"
           @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
+          @read="(id) => markRead('room', id)"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"

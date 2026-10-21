@@ -87,13 +87,40 @@ export function itemKey(type, id) {
   return `${type}:${id}`
 }
 
+// trinity-enterprise#959: and `room:<id>` — a chat with more than one agent.
 export function parseItemKey(key) {
   if (typeof key !== 'string') return null
   const i = key.indexOf(':')
   if (i <= 0 || i === key.length - 1) return null
   const type = key.slice(0, i)
-  if (type !== 'ask' && type !== 'thread' && type !== 'mention') return null
+  if (type !== 'ask' && type !== 'thread' && type !== 'mention' && type !== 'room') return null
   return { type, id: key.slice(i + 1) }
+}
+
+// trinity-enterprise#959: a chat row of either kind — a 1:1 chat or a room. The
+// two are one thing to the person ("a chat"), so every rule that counts, reads
+// or draws chats takes both.
+export function isChatItem(it) {
+  return !!it && (it.type === 'thread' || it.type === 'room')
+}
+
+// A room the viewer is IN. The rooms list sets `member` from the participant
+// rows (an admin's list holds every room); anything short of an explicit true
+// is not the viewer's room and never becomes a row — fail closed, so a list
+// from a server that does not send the bit shows no rooms rather than all.
+export function isMemberRoom(t) {
+  return !!t && !!t.is_room && t.member === true && !!t.id
+}
+
+// A room's agents by label — the row's "who", as an agent's label is a chat's.
+// Bounded like the sidebar's avatars (three, then "+N").
+export const ROOM_LABEL_LIMIT = 3
+export function roomAgentsLabel(item, labels = {}) {
+  const names = Array.isArray(item?.agent_names) ? item.agent_names.filter(Boolean) : []
+  if (!names.length) return 'Agents'
+  const shown = names.slice(0, ROOM_LABEL_LIMIT).map((n) => (labels && labels[n]) || n)
+  const more = names.length - shown.length
+  return shown.join(', ') + (more > 0 ? ` +${more}` : '')
 }
 
 export function normalizeInboxTab(v) {
@@ -164,6 +191,36 @@ function threadItem(t, previews) {
     thread: t,
   }
 }
+
+// trinity-enterprise#959: a room, as a chat row. Its preview rides the same
+// `/chat-state` response under `room:<id>` (the server builds it only for a
+// member). No `agent_name`: a room is with several agents, and nothing that
+// follows ONE agent (the rail) may pick one of them for it.
+function roomItem(t, previews) {
+  const p = (previews && previews[`room:${t.id}`]) || null
+  const latest = p?.latest || null
+  const lastAt = t.last_message_at || null
+  const latestAt = latest?.at || null
+  return {
+    key: itemKey('room', t.id),
+    type: 'room',
+    id: t.id,
+    agent_name: null,
+    agent_names: Array.isArray(t.agent_names) ? t.agent_names : [],
+    title: t.title || t.name || null,
+    is_main: false,
+    archived: false,
+    n: Number(t.unread) || 0,
+    latest,
+    first_unread_message_id: p?.first_unread_message_id || null,
+    at: (ts(latestAt) >= ts(lastAt) ? (latestAt || lastAt) : lastAt) || t.created_at || null,
+    thread: t,
+  }
+}
+
+const chatItem = (t, previews) => (t.is_room ? roomItem(t, previews) : threadItem(t, previews))
+// What a chats tab draws: every thread, and the rooms the viewer is in.
+const listedChat = (t) => !!t && (t.is_room ? isMemberRoom(t) : !!threadId(t))
 
 const byAtDesc = (a, b) => ts(b.at) - ts(a.at) || String(b.id).localeCompare(String(a.id))
 
@@ -301,28 +358,30 @@ export function activeAgentFilter(from, rows, selected = null) {
 
 // Unread (D1): one row per CHAT with arrivals. Archived chats stay (an archived
 // chat is an ordinary tab and `totalUnread` counts it — dropping it would break
-// Σ "N new" == came). Rooms are excluded: their unread is 0 until PR C.
+// Σ "N new" == came). trinity-enterprise#959: a ROOM the viewer is in is a chat
+// here too — one row per room, its count from `/chat-state`, which counts a room
+// only for its members (so Σ still equals `totalUnread`).
 // Ordered by the latest arrival, falling back to the last message.
 // trinity-enterprise#631: plus the tags not yet opened, in the same recency order.
 export function unreadItems(threads, previews, mentions = []) {
   const chats = (Array.isArray(threads) ? threads : [])
-    .filter((t) => t && !t.is_room && threadId(t) && (Number(t.unread) || 0) > 0)
+    .filter((t) => listedChat(t) && (Number(t.unread) || 0) > 0)
     .map((t) => {
-      const it = threadItem(t, previews)
+      const it = chatItem(t, previews)
       return { ...it, at: it.latest?.at || t.last_message_at || null }
     })
   return [...chats, ...unreadMentions(mentions).map(mentionItem)].sort(byAtDesc)
 }
 
-// All: every chat (read or not, any age; rooms wait for PR C), merged with the
-// asks list — pending asks always, ended ones for 7 days. The server applies
-// that window too; the client guard stays for an ask that expired while it was
-// still listed as pending.
+// All: every chat (read or not, any age; since trinity-enterprise#959 the rooms
+// the viewer is in, too), merged with the asks list — pending asks always,
+// ended ones for 7 days. The server applies that window too; the client guard
+// stays for an ask that expired while it was still listed as pending.
 export function allItems(threads, asks, previews, now = Date.now(), mentions = []) {
   const askCutoff = now - ENDED_ASK_WINDOW_DAYS * DAY_MS
   const chats = (Array.isArray(threads) ? threads : [])
-    .filter((t) => t && !t.is_room && threadId(t))
-    .map((t) => threadItem(t, previews))
+    .filter(listedChat)
+    .map((t) => chatItem(t, previews))
   const askRows = (Array.isArray(asks) ? asks : [])
     .filter((a) => a && a.id)
     .map(askItem)
@@ -349,14 +408,14 @@ export function pageWindow(items, limit = PAGE_SIZE, selectedKey = null) {
 }
 
 // §3g D-4b / T16: what All's footer says, beyond the paging line. The ended-ask
-// window always; rooms only to a viewer who has some; the asks read's cap only
-// when it was hit (server pagination + a total is #3059).
-export function allFooterNotes({ hasRooms = false, askCount = 0 } = {}) {
+// window always; the asks read's cap only when it was hit (server pagination +
+// a total is #3059). trinity-enterprise#959: rooms are in the Inbox now, so the
+// "Rooms aren't in the Inbox yet" note is gone.
+export function allFooterNotes({ askCount = 0 } = {}) {
   const notes = ['Answered, expired and cancelled asks drop off after 7 days.']
   // #3679: the server returns pending asks oldest first, so a capped read
   // keeps the longest-waiting ones and drops the newest.
   if (askCount >= ASKS_READ_CAP) notes.push(`Showing your first ${ASKS_READ_CAP} asks: the ones waiting longest come first.`)
-  if (hasRooms) notes.push("Rooms aren't in the Inbox yet. Open them from the sidebar.")
   return notes
 }
 
@@ -390,7 +449,7 @@ export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = n
     return `Nothing waiting from ${droppedLabel} · ${items.length ? `${listHeadLabel(tab, items)} from all agents` : 'All caught up'}`
   }
   if (!items.length) return fromLabel && tab === 'action' ? `Nothing waiting from ${fromLabel}` : 'All caught up'
-  const chats = items.filter((it) => it && it.type === 'thread')
+  const chats = items.filter(isChatItem)
   const asks = items.filter((it) => it && it.type === 'ask')
   const tags = items.filter((it) => it && it.type === 'mention')
   if (tab === 'action') return plural(asks.length, 'ask', 'asks') + (fromLabel ? ` from ${fromLabel}` : '')
@@ -413,7 +472,7 @@ export function listHeadLabel(tab, liveItems, fromLabel = null, droppedLabel = n
 // capped (round 3).
 export function listHeadExact(tab, liveItems) {
   if (tab !== 'unread') return null
-  const chats = (Array.isArray(liveItems) ? liveItems : []).filter((it) => it && it.type === 'thread')
+  const chats = (Array.isArray(liveItems) ? liveItems : []).filter(isChatItem)
   const fresh = chats.reduce((sum, it) => sum + (Number(it.n) || 0), 0)
   if (!chats.length || String(capCount(fresh)) === String(fresh)) return null
   return `${plural(chats.length, 'chat', 'chats')} · ${fresh} new`
@@ -464,10 +523,11 @@ export function inboxBranchVisible({ isInboxRoute = false, stageState = 'loading
 // agent no longer on the roster → null → no rail.
 export function inboxSelectedAgent({ item, threads = [], asks = [], agents = [], mentions = [] } = {}) {
   const parsed = parseItemKey(item)
-  if (!parsed) return null
+  // trinity-enterprise#959: a room is with several agents — no one rail.
+  if (!parsed || parsed.type === 'room') return null
   let name = null
   if (parsed.type === 'thread') {
-    name = (Array.isArray(threads) ? threads : []).find((t) => threadId(t) === parsed.id)?.agent_name || null
+    name = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room && threadId(t) === parsed.id)?.agent_name || null
   } else if (parsed.type === 'mention') {
     name = (Array.isArray(mentions) ? mentions : []).find((m) => m && m.id === parsed.id)?.agent_name || null
   } else {
@@ -511,6 +571,13 @@ function ghostOf(snap, live) {
   if (snap.type === 'thread') {
     const t = live.thread ? live.thread(snap.id) : null
     if (!t) return null // deleted
+    return { ...snap, n: Number(t.unread) || 0, readInPlace: true, ghost: true }
+  }
+  if (snap.type === 'room') {
+    // trinity-enterprise#959: the chat's rule. `live.room` answers only a room
+    // the viewer is still in, so a room they left (or lost) drops, never ghosts.
+    const t = live.room ? live.room(snap.id) : null
+    if (!t) return null
     return { ...snap, n: Number(t.unread) || 0, readInPlace: true, ghost: true }
   }
   if (snap.type === 'mention') {
@@ -595,8 +662,14 @@ export function resolveItem(key, { threads = [], asks = [], previews = {}, menti
   const parsed = parseItemKey(key)
   if (!parsed) return null
   if (parsed.type === 'thread') {
-    const t = (Array.isArray(threads) ? threads : []).find((x) => threadId(x) === parsed.id)
+    const t = (Array.isArray(threads) ? threads : []).find((x) => x && !x.is_room && threadId(x) === parsed.id)
     return t ? threadItem(t, previews) : null
+  }
+  if (parsed.type === 'room') {
+    // trinity-enterprise#959: only a room the viewer is in — a deep link to
+    // another room id resolves to nothing, and nothing about it is drawn.
+    const t = (Array.isArray(threads) ? threads : []).find((x) => isMemberRoom(x) && x.id === parsed.id)
+    return t ? roomItem(t, previews) : null
   }
   if (parsed.type === 'mention') {
     const m = (Array.isArray(mentions) ? mentions : []).find((x) => x && x.id === parsed.id)
@@ -685,13 +758,35 @@ export function paneRuns(messages) {
     const last = runs[runs.length - 1]
     const prev = last && last.messages[last.messages.length - 1]
     const gap = prev ? ts(msg.created_at) - ts(prev.created_at) : 0
-    if (last && role !== 'system' && last.role === role && gap <= PANE_RUN_GAP_MS) {
+    // trinity-enterprise#959: in a room two agents speak as the same role, so a
+    // run is also ONE sender (a chat's messages carry none, and run by role).
+    const sender = msg.sender || null
+    if (last && role !== 'system' && last.role === role && last.sender === sender && gap <= PANE_RUN_GAP_MS) {
       last.messages.push(msg)
     } else {
-      runs.push({ key: `run:${msg.id || runs.length}`, role, at: msg.created_at || null, messages: [msg] })
+      runs.push({ key: `run:${msg.id || runs.length}`, role, sender, at: msg.created_at || null, messages: [msg] })
     }
   }
   return runs
+}
+
+// trinity-enterprise#959: a room's transcript (`GET /api/rooms/{id}` — the
+// membership-scoped read) in the pane's message shape. An agent's message is
+// the `assistant` role with its agent as `sender`; the room's own lines are
+// `system`; anything else is the reader (a room seats one person — `PortalRoom`
+// draws it the same way).
+export function roomPaneMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).filter(Boolean).map((m) => {
+    const system = m.kind === 'system' || m.sender_kind === 'system'
+    const agent = !system && m.sender_kind === 'agent'
+    return {
+      id: m.id,
+      role: system ? 'system' : agent ? 'assistant' : 'user',
+      sender: agent ? (m.sender_identity || null) : null,
+      content: m.content || '',
+      created_at: m.created_at || null,
+    }
+  })
 }
 
 // §3g C10: "Open canvas" appears only when there is a canvas to open — the
@@ -707,6 +802,8 @@ export function inboxCanvasCount({ tabs = [], canvases = {}, agent = null } = {}
 // "Open in chat": the chat, anchored at what the reader was looking at — the
 // first unread message, else the latest deliverable, else the bottom.
 export function openInChatTarget(item) {
+  // trinity-enterprise#959: a room opens itself (the room reads what it shows).
+  if (item && item.type === 'room' && item.id) return `/workspace/r/${encodeURIComponent(item.id)}`
   if (!item || item.type !== 'thread' || !item.id) return null
   const base = `/workspace/c/${encodeURIComponent(item.id)}`
   if (item.first_unread_message_id) return `${base}?anchor=${encodeURIComponent(`m:${item.first_unread_message_id}`)}`
