@@ -86,13 +86,18 @@ def harness(monkeypatch):
         principal["user"] = user
         if method == "POST":
             return client.post(f"/api/agents/{VICTIM}/decisions", json=RECORD)
+        if method == "AUTONOMY":
+            # trinity-enterprise#641: the seat-autonomy read is a third handler on
+            # this router and must hold the same gate, or it reopens #839.
+            return client.get(f"/api/agents/{VICTIM}/seat-autonomy",
+                              params={"execution_id": "exec-of-agent-a"})
         return client.get(f"/api/agents/{VICTIM}/decisions",
                           params={"execution_id": "exec-of-agent-a"})
 
     return call, seen
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
 def test_a_sibling_agent_key_is_refused_before_any_lookup(harness, method):
     call, seen = harness
     res = call(_agent_key("agent-b"), method)
@@ -101,7 +106,7 @@ def test_a_sibling_agent_key_is_refused_before_any_lookup(harness, method):
     assert seen == [], "the refusal must come before the access check and the execution read"
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
 def test_the_keys_own_agent_passes_the_gate(harness, method):
     call, seen = harness
     res = call(_agent_key(VICTIM), method)
@@ -109,7 +114,7 @@ def test_the_keys_own_agent_passes_the_gate(harness, method):
     assert seen == [("access", VICTIM), ("seat_for", VICTIM)]
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
 def test_a_person_passes_the_gate(harness, method):
     call, seen = harness
     res = call(_person(), method)
