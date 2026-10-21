@@ -6160,6 +6160,18 @@
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     },
     {
+      "file": "unit/test_3751_a2a_bearer_task_scope.py",
+      "feature": "#3751",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "a2a",
+        "auth",
+        "unit"
+      ],
+      "description": "Bearer A2A tasks/get and tasks/cancel answer only for the credential that started the task through A2A, through the real _dispatch_jsonrpc: the starter (key, JWT, agent key, shared user) reads and cancels its own (running and queued); a sibling agent key of the same owner, the owner's key, the owner signed in, a shared user, an admin and the system key get Task not found on get and cancel, with no terminate/queued-cancel/audit; the refusal is byte-identical to an unknown id; same-principal rows not triggered by a2a, rows with no starting user and a re-minted key are refused; the row _mint_a2a_execution writes is pollable by its caller only; AAuth still goes through execution_owned_by. Mutations: removing the gate turns 21 red, removing the triggered_by check turns 5 red."
+    },
+    {
       "file": "unit/test_3813_rename_agent_name_env.py",
       "feature": "#3813",
       "added": "2026-10-20",
@@ -6179,6 +6191,29 @@
         "devex"
       ],
       "description": "The pytest-randomly guard (tests/testing_utils/randomly_guard.py, via the tests/testkit symlink): opted_in reads the invocation (--randomly-seed, -p randomly, -prandomly, TRINITY_RANDOM_ORDER=1, PYTEST_ADDOPTS); enforce raises a UsageError naming both ways out when the plugin is active and the run did not opt in, is a no-op without the plugin, and passes an explicit seed or the env opt-in; the banner names the seed and how to reproduce/disable; both conftests (tests/ and the sealed unit/ island) wire it with tryfirst, and the four run-*.sh scripts pin -p no:randomly."
+    },
+    {
+      "file": "unit/test_ent858_event_stream_owner_state.py",
+      "feature": "trinity-enterprise#858",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
+    },
+    {
+      "file": "unit/test_ent860_room_wake_access.py",
+      "feature": "trinity-enterprise#860",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "unit"
+      ],
+      "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
     }
   ]
 }
