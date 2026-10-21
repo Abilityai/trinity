@@ -535,3 +535,36 @@ class TestWatermarkWrite:
         assert current() == 102
         ops.update_last_update_id("analytics", 103)
         assert current() == 103
+
+
+class TestTransportLifecycle:
+    @pytest.mark.asyncio
+    async def test_start_delivers_an_album_a_restart_left_in_redis(self, monkeypatch):
+        server = _server()
+        now = [1_000_000]
+        dead = _coalescer(server, _Sink(), window_s=60, clock_ms=lambda: now[0])
+        await dead.add("1", "-100:g1", _photo(1, caption="before the restart"))
+        await dead.add("1", "-100:g1", _photo(2))
+        await dead.stop()
+        now[0] += 15_000
+
+        _, t = _transport(monkeypatch)
+        t._albums = InboundCoalescer(prefix="test:album", window_s=WINDOW, max_items=10,
+                                     on_flush=t._flush_album, redis=_redis(server),
+                                     clock_ms=lambda: now[0])
+        await t.start()
+        await asyncio.sleep(0.05)
+        t.on_event.assert_awaited_once()
+        merged = t.on_event.await_args.args[0]
+        assert len(merged["message"]["_album"]) == 2
+        assert merged["message"]["caption"] == "before the restart"
+
+    @pytest.mark.asyncio
+    async def test_stop_leaves_a_pending_album_for_the_next_start(self, monkeypatch):
+        server = _server()
+        _, t = _transport(monkeypatch, server)
+        t._albums._window_s = 60
+        await t._process_update(_photo(1), {"id": 1, "agent_name": "analytics"})
+        await t.stop()
+        t.on_event.assert_not_awaited()
+        assert await _redis(server).llen("test:album:1:-100:g1:items") == 1

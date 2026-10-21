@@ -21,7 +21,10 @@ How exactly-once works without a leader lease:
   drain aborts the drain (WatchError) — its own timer takes over;
 - a drain also writes a short tombstone, so an item that arrives after its
   group was flushed is handed back to the caller (one extra turn, logged)
-  instead of starting a second, silent buffer.
+  instead of starting a second, silent buffer. (The tombstone check and the
+  push are two steps, so an item landing in the instant of a drain can still
+  start a fresh one-item buffer — it then flushes as its own turn a window
+  later, the same outcome as a late item.)
 
 Orphans: a restart (or a dead worker) leaves items in Redis with no timer.
 `sweep_orphans()` runs at transport start and, throttled, after any `add`; an
