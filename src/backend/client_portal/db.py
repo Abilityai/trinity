@@ -1353,6 +1353,88 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
     return out
 
 
+# trinity-enterprise#959 — a ROOM's unread arrivals, for one viewer.
+#
+# The same per-viewer timestamp cursor a chat uses (`chat_kind = 'room'`, already
+# written by `mark_chat_read` when the person opens a room) and the same ent#557
+# baseline for a room never opened, so `_UNREAD_CURSOR` is reused unchanged.
+# Rooms keep their own `last_read_seq` too, but that one is the AGENTS' delta
+# cursor and is never advanced for a person.
+#
+# An arrival is an AGENT's message: the chat rule (`role = 'assistant'`) in a
+# room's terms. The person's own messages and the room's system lines never
+# count. (A room seats exactly one person — its creator; only agents are ever
+# added — so "not an agent" is the reader or the room itself.)
+#
+# Membership is the grant, and it is a JOIN, not a filter applied afterwards:
+# a message is only ever read through the viewer's OWN active participant row,
+# in the identity space their credential acts in (`:pkind`/`:pid`). The cursor
+# write deliberately accepts any room id (invariant #8), so a non-member can
+# hold a cursor row for a room — this read then has no participant row to join
+# through and returns nothing for it, not even a zero.
+_UNREAD_ROOM_ARRIVALS = (
+    "SELECT msg.room_id AS room_id, msg.id AS id, msg.seq AS seq, "
+    "       msg.created_at AS at "
+    "FROM enterprise_room_messages msg "
+    "JOIN enterprise_room_participants p "
+    "  ON p.room_id = msg.room_id AND p.kind = :pkind AND p.identity = :pid "
+    " AND p.left_at IS NULL "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'room' "
+    " AND st.chat_id = msg.room_id "
+    "WHERE msg.sender_kind = 'agent' "
+    + _UNREAD_CURSOR.format(at="msg.created_at")
+)
+
+
+def unread_room_arrivals(client_email: str, participant_kind: str,
+                         participant_identity: str) -> dict[str, dict]:
+    """Per-room unread count, the newest arrival and the first unread message
+    id, for the rooms this viewer is an ACTIVE participant of — one statement,
+    so a row's "3 new" and its excerpt are one snapshot (the
+    `unread_arrivals_with_latest` rule).
+
+    Returns ``{room_id: {"n", "first_unread_message_id", "latest": {"id",
+    "at", "content"}}}``. Ordered by ``seq`` — the room's own ordering
+    primitive — so "first" and "latest" never depend on a timestamp tie.
+    An empty identity reads nothing: the caller could not say whose rooms these
+    are, and a guess would be someone else's.
+    """
+    if not participant_kind or not participant_identity:
+        return {}
+    stmt = text(
+        "SELECT w.room_id AS room_id, w.n AS n, w.id AS id, w.at AS at, "
+        "       w.first_id AS first_id, m2.content AS content "
+        "FROM ("
+        "  SELECT a.room_id, a.id, a.at, "
+        "         COUNT(*) OVER (PARTITION BY a.room_id) AS n, "
+        "         ROW_NUMBER() OVER (PARTITION BY a.room_id "
+        "                            ORDER BY a.seq DESC) AS rn, "
+        "         FIRST_VALUE(a.id) OVER (PARTITION BY a.room_id "
+        "                                 ORDER BY a.seq ASC "
+        "           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        "         ) AS first_id "
+        "  FROM (" + _UNREAD_ROOM_ARRIVALS + ") AS a"
+        ") AS w "
+        "JOIN enterprise_room_messages m2 ON m2.id = w.id "
+        "WHERE w.rn = 1"
+    )
+    params = {**_unread_params(client_email),
+              "pkind": participant_kind, "pid": participant_identity}
+    out: dict[str, dict] = {}
+    with get_engine().connect() as conn:
+        for r in conn.execute(stmt, params).mappings():
+            rid = r["room_id"]
+            if not rid:
+                continue
+            out[rid] = {
+                "n": int(r["n"]),
+                "first_unread_message_id": r["first_id"],
+                "latest": {"id": r["id"], "at": r["at"], "content": r["content"]},
+            }
+    return out
+
+
 # --- Agent page: first-try rate (ent#360) ------------------------------------
 
 def first_try_stats(agent_name: str, hours: int, *, scope_to_viewer: bool = False,

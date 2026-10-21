@@ -716,10 +716,13 @@ def portal_chat_state(previews: bool = Query(False),
     arrival and first unread message id, read in the SAME statement as the
     counts (`chat_previews`). Without it the payload is the ent#359 shape,
     unchanged — None fields are dropped, and no entry carries them."""
+    # trinity-enterprise#959: the room participant this credential reads as —
+    # membership in THAT identity space is what a room's count is scoped to.
+    room_reader = service.room_reader_of(principal)
     if previews:
         return chat_previews.get_chat_state_with_previews(
-            principal.email, principal.is_platform)
-    return service.get_chat_state(principal.email)
+            principal.email, principal.is_platform, room_reader=room_reader)
+    return service.get_chat_state(principal.email, room_reader=room_reader)
 
 
 @router.put("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)

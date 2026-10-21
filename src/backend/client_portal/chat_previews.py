@@ -112,11 +112,20 @@ def _project(latest: dict) -> dict:
     }
 
 
-def get_chat_state_with_previews(email: str, is_platform: bool) -> dict:
-    """`service.get_chat_state` with previews attached (see module docstring)."""
+def get_chat_state_with_previews(email: str, is_platform: bool,
+                                 room_reader: tuple[str, str] | None = None) -> dict:
+    """`service.get_chat_state` with previews attached (see module docstring).
+
+    trinity-enterprise#959: rooms too. A room's preview comes from
+    `db.unread_room_arrivals`, which reads only through the viewer's own
+    participant row — membership is the grant, so no roster check is added on
+    top (a room's agents are what its members already read in the room)."""
     arrivals = db.unread_arrivals_with_latest(email)
+    room_arrivals = db.unread_room_arrivals(email, *room_reader) if room_reader else {}
     state = service.get_chat_state(
-        email, unread={sid: a["n"] for sid, a in arrivals.items()})
+        email, unread={sid: a["n"] for sid, a in arrivals.items()},
+        room_reader=room_reader,
+        room_unread={rid: a["n"] for rid, a in room_arrivals.items()})
 
     roster = service.roster_agent_names(email, include_owned=is_platform)
     eligible = sorted(
@@ -133,5 +142,26 @@ def get_chat_state_with_previews(email: str, is_platform: bool) -> dict:
             continue
         a = arrivals[cid]
         chat["latest"] = _project(a["latest"])
+        chat["first_unread_message_id"] = a["first_unread_message_id"]
+
+    # Rooms share the 100-preview bound with chats: the most recent first.
+    room_eligible = sorted(
+        (rid for rid, a in room_arrivals.items() if a["n"] > 0),
+        key=lambda rid: (room_arrivals[rid]["latest"]["at"] or "", rid),
+        reverse=True,
+    )[:MAX_PREVIEWS]
+    room_chosen = set(room_eligible)
+    for chat in state["chats"]:
+        rid = chat.get("id")
+        if chat.get("kind") != "room" or rid not in room_chosen or not chat.get("unread"):
+            continue
+        a = room_arrivals[rid]
+        chat["latest"] = {
+            "kind": "message",
+            "id": a["latest"]["id"],
+            "at": a["latest"]["at"],
+            "excerpt": _arrival_excerpt(a["latest"].get("content")),
+            "outcome": None,
+        }
         chat["first_unread_message_id"] = a["first_unread_message_id"]
     return state

@@ -5775,29 +5775,43 @@ def _chat_state_room_left(email: str) -> bool:
         return True
 
 
-def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
+def get_chat_state(email: str, unread: dict[str, int] | None = None,
+                   room_reader: tuple[str, str] | None = None,
+                   room_unread: dict[str, int] | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
-    Unread is computed for threads only; a room carries its own seq cursor and
-    is reported as starred-or-not with `unread = 0`. `unread` lets a caller pass
-    counts it already read in the same statement as something else
-    (ent#610 `chat_previews`), so the two cannot come from different instants.
+    `unread` lets a caller pass counts it already read in the same statement as
+    something else (ent#610 `chat_previews`), so the two cannot come from
+    different instants; `room_unread` is the same for rooms.
+
+    trinity-enterprise#959: a room's unread is counted only when the caller
+    names the room participant it reads as (`room_reader`, from
+    `room_reader_of(principal)`), and only for rooms that participant is in
+    (`db.unread_room_arrivals` joins through the membership row). With no
+    reader every room reports `unread = 0`, exactly as before — the count never
+    guesses an identity.
     """
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
+    if room_unread is None:
+        room_unread = ({rid: a["n"] for rid, a in db.unread_room_arrivals(email, *room_reader).items()}
+                       if room_reader else {})
     chats = []
     seen_threads: set[str] = set()
+    seen_rooms: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
         if kind == "thread":
             seen_threads.add(cid)
+        elif kind == "room":
+            seen_rooms.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
-            "unread": unread.get(cid, 0) if kind == "thread" else 0,
+            "unread": unread.get(cid, 0) if kind == "thread" else room_unread.get(cid, 0),
         })
     # A CURSORLESS thread has unread and no state row, so the loop above never
     # reaches it — and that is the whole ent#557 case: an agent replies into a
@@ -5813,8 +5827,15 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # that is not already theirs. `starred` is False by construction — a chat
     # with no row has never been starred.
     cursorless = [
-        (cid, n) for cid, n in unread.items()
+        ("thread", cid, n) for cid, n in unread.items()
         if cid and cid not in seen_threads and n > 0
+    ]
+    # ent#959: a room the viewer is in and has never opened enters the same way,
+    # under the same cap rule. Bounded by the membership join that produced
+    # `room_unread`, so this cannot append a room the viewer is not in.
+    cursorless += [
+        ("room", cid, n) for cid, n in room_unread.items()
+        if cid and cid not in seen_rooms and n > 0
     ]
     # ...but ONLY while the viewer can still clear it, and that is not a
     # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
@@ -5833,9 +5854,30 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # list is empty and the cap cannot be the reason.
     if cursorless and not _chat_state_room_left(email):
         cursorless = []
-    for cid, n in cursorless:
-        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
+    for kind, cid, n in cursorless:
+        chats.append({"kind": kind, "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
+
+
+def room_reader_of(principal) -> tuple[str, str] | None:
+    """The room participant this Workspace credential reads as (ent#959).
+
+    Rooms seat a person in one of two identity spaces (ent#362), and the rooms
+    API picks between them by credential (`shared_sessions.service._caller`): a
+    platform session is `user` + its USERNAME, a Workspace session is
+    `workspace_user` + its verified email. The chat-state routes see the
+    `PortalPrincipal`, whose email alone cannot say which — so the decision is
+    made here, from the same two facts, and fails CLOSED: a platform principal
+    with no username reads no room rather than an email-keyed guess that could
+    be another person's Workspace identity.
+    """
+    from shared_sessions.service import WORKSPACE_KIND
+
+    if getattr(principal, "is_platform", False):
+        username = (getattr(principal, "username", None) or "").strip()
+        return ("user", username) if username else None
+    email = (getattr(principal, "email", None) or "").strip().lower()
+    return (WORKSPACE_KIND, email) if email else None
 
 
 def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> None:

@@ -595,6 +595,14 @@ def list_rooms(current_user) -> dict:
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
+        # trinity-enterprise#959: is the CALLER in this room? Always true off the
+        # admin path (the list is membership); an admin lists every room, and
+        # the Workspace Inbox shows only the rooms its reader is in, so it needs
+        # the bit rather than inferring it from a count.
+        r["member"] = any(
+            p.get("kind") == kind and p.get("identity") == identity and not p.get("left_at")
+            for p in participants
+        )
         r["message_count"] = counts_by_room.get(r["id"], 0)
         # Absent for an empty room; the client already falls back to `created_at`,
         # which for a room nobody has spoken in is the honest answer.
