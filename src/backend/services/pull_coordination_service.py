@@ -193,6 +193,9 @@ class ResultApplyOutcome:
     """
     kind: str
     status: Optional[str] = None
+    # #3487: ``retry`` — the turn was refused and the worker should run it
+    # again under the same claim; this is the instruction it gets back.
+    retry: Optional[Dict[str, Any]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -679,6 +682,15 @@ def apply_task_result(
     context_used = _context_used(metadata, tokens)
     context_max = metadata.get("context_window") or 200000
 
+    # #3487: a turn that walked the pool owns its attempts' cost and its trail.
+    # The refused attempts already spent (a mid-turn 429), so their cost rolls
+    # into the terminal — the push path's `previous_attempt_cost` rule.
+    walk = _walked(execution)
+    if walk is not None:
+        prior_cost = _walk_state(execution).get("attempt_cost") or 0
+        if prior_cost:
+            cost = (cost or 0) + float(prior_cost)
+
     log_json = None
     if isinstance(execution_log, list) and execution_log:
         try:
@@ -718,6 +730,9 @@ def apply_task_result(
         if (error_code or "").strip().lower() == "timeout":
             # #2846: name the setting to change when the claim clamped the limit.
             err_text += _shortened_note(execution)
+        if walk is not None:
+            # #3487: "Tried: A (rate limit) -> B (auth) -> the platform API key …"
+            err_text = f"{err_text}{walk.trail_text()}"
         won = db.update_execution_status(
             execution_id=execution_id,
             status=row_status,
@@ -803,9 +818,13 @@ def apply_task_result(
         # #1085 governor's correlated-cause pause still gates it; this only puts
         # the agent somewhere the next attempt can succeed. Dark until a pull
         # pilot is enabled, wired now exactly as #1578 and #1804 were.
+        # #3487: once the turn has walked the pool, the walk already recorded
+        # every refusal against the credential it ran on — the one-shot switch
+        # would record the last one twice and move the agent again (the push
+        # path's `subscription_switch_attempted` rule).
         switch_kind = (
             None
-            if row_status == TaskExecutionStatus.SUCCESS
+            if row_status == TaskExecutionStatus.SUCCESS or walk is not None
             else _switch_failure_kind(error_code, err_text)
         )
         if switch_kind is not None:
@@ -831,3 +850,315 @@ def apply_task_result(
         # Duplicate/late over an already-terminal row — idempotent, never clobbers.
         return ResultApplyOutcome("replayed", current.status)
     return ResultApplyOutcome("conflict", current.status if current else None)
+
+
+# ---------------------------------------------------------------------------
+# #3487 — SUB-003 walk on a pulled turn, in place under the same claim
+# ---------------------------------------------------------------------------
+#
+# #3470 made a refused turn walk every subscription and then the platform API
+# key before it fails — on PUSH, where the walk is a loop inside one dispatch
+# call. A pulled turn's attempts are separate result POSTs instead, possibly to
+# different backend workers, so here the walk lives on the row
+# (`backlog_metadata["subscription_walk"]`, never the secret) and each refused
+# attempt is answered with an instruction rather than a terminal: run the turn
+# again, under the SAME claim and lease, on this credential. The worker re-spawns
+# it and POSTs again. Nothing is re-queued — re-delivery stays the lease
+# reaper's (TARGET_ARCHITECTURE: the only recovery primitive), and the sync
+# waiter, which ignores a `running` row, keeps waiting for the one terminal.
+#
+# One attempt, one winner: the refused POST must rotate the claim token
+# (`db.rotate_claim_token`) before it may record anything, so a duplicate or
+# late POST of the same attempt can neither double-record the refusal nor write
+# a FAILED terminal over the retry. A duplicate gets the stored answer again.
+#
+# Only for a worker that says it can take a per-spawn credential
+# (`auth_override_capable` — a Claude runtime on a #3487 image). Anything else
+# keeps the pre-#3487 behaviour: the one-shot switch and a FAILED terminal.
+# The #1085 governor is deliberately not consulted: push has no such gate, and
+# its pause is armed by several agents failing on shared credentials — exactly
+# when moving to another credential helps. The rung cap and the turn's
+# remaining time are the bounds.
+
+WALK_STATE_KEY = "subscription_walk"
+
+
+def _row_meta(execution: Any) -> Dict[str, Any]:
+    try:
+        meta = json.loads(getattr(execution, "backlog_metadata", None) or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return meta if isinstance(meta, dict) else {}
+
+
+def _walk_state(execution: Any) -> Dict[str, Any]:
+    state = _row_meta(execution).get(WALK_STATE_KEY)
+    return state if isinstance(state, dict) else {}
+
+
+def _walked(execution: Any):
+    """The turn's walk, when it has run at least one attempt; else None."""
+    state = _walk_state(execution).get("walk")
+    if not isinstance(state, dict):
+        return None
+    try:
+        walk = subscription_auto_switch.walk_from_state(state)
+    except Exception:  # noqa: BLE001 — an unreadable state is "no walk", never a crash
+        logger.warning("[#3487] unreadable walk state on %s", getattr(execution, "id", "?"))
+        return None
+    return walk if walk.attempts else None
+
+
+def _token_digest(token: Optional[str]) -> str:
+    import hashlib
+    return hashlib.sha256((token or "").encode()).hexdigest()[:24]
+
+
+def _save_walk_state(execution: Any, claim_token: str, state: Dict[str, Any]) -> bool:
+    meta = _row_meta(execution)
+    meta[WALK_STATE_KEY] = state
+    try:
+        return db.set_backlog_metadata_for_token(execution.id, claim_token, json.dumps(meta))
+    except Exception as e:  # noqa: BLE001
+        logger.error("[#3487] could not save the walk state for %s: %s", execution.id, type(e).__name__)
+        return False
+
+
+def _remaining_budget_s(execution: Any) -> Optional[float]:
+    """Seconds the turn may still spend: the agent timeout minus the time since
+    this claim started. `started_at` is fixed for the life of a claim, so it is
+    the same anchor the sync waiter counts from. None when unreadable."""
+    from datetime import datetime, timezone
+
+    from utils.helpers import parse_iso_timestamp
+
+    try:
+        timeout = float(db.get_execution_timeout(execution.agent_name))
+        started = parse_iso_timestamp(execution.started_at)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    except Exception:  # noqa: BLE001
+        return None
+    return timeout - elapsed
+
+
+def _reconcile_ran_on(walk: Any, metadata: Dict[str, Any]) -> None:
+    """Make `walk.active` say what the attempt that just came back ran on.
+
+    The worker reports which credential it applied (`auth_override`, the pull
+    analogue of `X-Trinity-Auth-Override`). A trial it did not apply — the
+    secret could not be resolved, or a restarted worker ran the turn afresh —
+    ran on the baseline, so the refusal belongs to the baseline. Unlike push,
+    that does not mean the image cannot take one: the worker said it can.
+    """
+    if walk.active is None:
+        return
+    if (metadata or {}).get("auth_override") == walk.active.override_kind:
+        walk.override_supported = True
+    else:
+        walk.active = None
+
+
+def _retry_outcome(walk_state: Dict[str, Any], pending: Dict[str, Any]) -> Optional[ResultApplyOutcome]:
+    """The `retry` instruction for a stored attempt. The credential is read
+    fresh, never stored."""
+    walk = subscription_auto_switch.walk_from_state(walk_state)
+    rung = walk.active
+    override = None
+    if rung is not None:
+        secret = subscription_auto_switch.rung_credential(rung)
+        if secret:
+            rung.credential = secret
+            override = rung.payload()
+    return ResultApplyOutcome(
+        "retry",
+        TaskExecutionStatus.RUNNING,
+        retry={
+            "claim_token": pending["claim_token"],
+            "auth_override": override,
+            "timeout_seconds": pending.get("timeout_seconds"),
+            "attempt": pending.get("attempt"),
+        },
+    )
+
+
+async def _walk_refused_attempt(
+    execution_id: str,
+    claim_token: str,
+    *,
+    status: str,
+    error_code: Optional[str],
+    content: Optional[str],
+    cost: Optional[float],
+    metadata: Optional[Dict[str, Any]],
+) -> Tuple[Optional[ResultApplyOutcome], str]:
+    """Walk one refused attempt. Returns ``(retry_outcome, token)``:
+    a retry instruction to send back, or None to apply the result as a
+    terminal under ``token`` (rotated when this call won the attempt)."""
+    if status == "success":
+        return None, claim_token
+    failure_kind = _switch_failure_kind(error_code, content or "")
+    if failure_kind is None:
+        return None, claim_token
+    md = metadata or {}
+    if not md.get("auth_override_capable") or md.get("terminated"):
+        return None, claim_token
+    execution = db.get_execution(execution_id)
+    if execution is None or execution.status != TaskExecutionStatus.RUNNING:
+        return None, claim_token
+
+    state = _walk_state(execution)
+    pending = state.get("pending_retry")
+    if pending and state.get("superseded_token") == _token_digest(claim_token) and state.get("walk"):
+        # A duplicate of the POST that already won this attempt (its 200 was
+        # lost, or the worker resent it): the same answer again.
+        return _retry_outcome(state["walk"], pending), claim_token
+    # The token itself is checked by the rotation below — atomically, with the
+    # row still `running` (the execution model does not carry `claim_token`).
+    import secrets as _secrets
+    new_token = _secrets.token_urlsafe(24)
+    if not db.rotate_claim_token(execution_id, claim_token, new_token):
+        return None, claim_token  # lost the attempt — the result applies (and conflicts) as before
+
+    from services.task_execution_service import _AGENT_HTTP_SLACK_S, _SWITCH_RETRY_MIN_REMAINING_S
+
+    if state.get("walk"):
+        walk = subscription_auto_switch.walk_from_state(state["walk"])
+    else:
+        walk = subscription_auto_switch.start_subscription_walk(
+            execution.agent_name, getattr(execution, "triggered_by", None)
+        )
+    _reconcile_ran_on(walk, md)
+    attempt_cost = float(state.get("attempt_cost") or 0) + float(cost or md.get("cost_usd") or 0)
+
+    remaining = _remaining_budget_s(execution)
+    budget_ok = remaining is None or remaining > _SWITCH_RETRY_MIN_REMAINING_S
+    rung = await subscription_auto_switch.advance_subscription_walk(
+        walk, failure_kind=failure_kind, error_message=content or "", budget_ok=budget_ok,
+    )
+    new_state: Dict[str, Any] = {"walk": subscription_auto_switch.walk_to_state(walk),
+                                 "attempt_cost": attempt_cost}
+
+    if rung is None:
+        logger.warning(
+            "[#3487] %s: SUB-003 walk on pulled turn %s stopped after %d attempt(s) (%s)",
+            execution.agent_name, execution_id, len(walk.attempts), walk.stop_reason,
+        )
+        if walk.stop_reason != "budget":
+            try:
+                subscription_auto_switch.notify_pool_exhausted(
+                    walk, subscription_auto_switch.earliest_known_reset(
+                        subscription_auto_switch.walk_reset_candidates(walk)
+                    ),
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("[#3487] exhausted notice failed: %s", e)
+        new_state["summary"] = walk.summary()
+        _save_walk_state(execution, new_token, new_state)
+        return None, new_token
+
+    timeout_s = None
+    if remaining is not None:
+        timeout_s = max(1, int(remaining - _AGENT_HTTP_SLACK_S))
+    new_state["pending_retry"] = {
+        "claim_token": new_token,
+        "timeout_seconds": timeout_s,
+        "attempt": len(walk.attempts),
+    }
+    new_state["superseded_token"] = _token_digest(claim_token)
+    new_state["summary"] = walk.summary()
+    _save_walk_state(execution, new_token, new_state)
+    logger.warning(
+        "[#3487] %s: SUB-003 walk on pulled turn %s (%s) — retry %d under the same claim",
+        execution.agent_name, execution_id, failure_kind, len(walk.attempts),
+    )
+    try:
+        from services.platform_audit_service import AuditEventType, platform_audit_service
+
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="auto_retry",
+            source="pull_coordination_service",
+            actor_agent_name=execution.agent_name,
+            target_type="execution",
+            target_id=execution_id,
+            details={
+                "reason": "subscription_auto_switch",
+                "attempt": len(walk.attempts) + 1,
+                "phase": "initiated",
+                "failure_kind": failure_kind,
+                "rung": rung.kind,
+                "attempts": [dict(a) for a in walk.attempts],
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[#3487] audit failed (non-fatal): %s", e)
+    return _retry_outcome(new_state["walk"], new_state["pending_retry"]), new_token
+
+
+async def _commit_after_success(execution_id: str, claim_token: str, metadata: Optional[Dict[str, Any]]) -> None:
+    """A pulled turn SERVED. Make the credential it ran on durable where that is
+    right — `commit_subscription_walk`, exactly as push does after a served
+    trial — and point the row's SUB-004 attribution at it. A turn that never
+    walked costs one Redis GET (the "returned to its subscription" transition).
+    Never raises: the success is already committed."""
+    try:
+        execution = db.get_execution(execution_id)
+        if execution is None:
+            return
+        state = _walk_state(execution)
+        if state.get("walk"):
+            walk = subscription_auto_switch.walk_from_state(state["walk"])
+            _reconcile_ran_on(walk, metadata or {})
+        else:
+            marker = subscription_auto_switch.API_KEY_ROUTE_NOTICE_KEY.format(name=execution.agent_name)
+            if not subscription_auto_switch._notice_marker_present(marker):
+                return
+            walk = subscription_auto_switch.start_subscription_walk(
+                execution.agent_name, getattr(execution, "triggered_by", None)
+            )
+        last_kind = (walk.attempts[-1].get("failure") if walk.attempts else None) or "rate_limit"
+        await subscription_auto_switch.commit_subscription_walk(walk, failure_kind=last_kind)
+        served_kind, served_id, _ = walk.ran_on()
+        if served_kind == "api_key" or (served_id and walk.committed and walk.committed.get("switched")):
+            db.set_execution_subscription(execution_id, served_id)
+        if walk.started:
+            state["walk"] = subscription_auto_switch.walk_to_state(walk)
+            state["summary"] = walk.summary()
+            state.pop("pending_retry", None)
+            _save_walk_state(execution, claim_token, state)
+    except Exception as e:  # noqa: BLE001
+        logger.error("[#3487] commit after a served pulled turn failed for %s: %s", execution_id, e)
+
+
+async def handle_task_result(
+    execution_id: str,
+    claim_token: str,
+    *,
+    status: str,
+    content: Optional[str] = None,
+    error_code: Optional[str] = None,
+    cost: Optional[float] = None,
+    tokens: Optional[int] = None,
+    session_id: Optional[str] = None,
+    execution_log: Optional[list] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> ResultApplyOutcome:
+    """The pull result seam (§3.3): walk a refused attempt in place (#3487),
+    otherwise CAS-apply the terminal (`apply_task_result`), then commit a
+    served walk."""
+    retry, token = await _walk_refused_attempt(
+        execution_id, claim_token, status=status, error_code=error_code,
+        content=content, cost=cost, metadata=metadata,
+    )
+    if retry is not None:
+        return retry
+    outcome = apply_task_result(
+        execution_id, token, status=status, content=content, error_code=error_code,
+        cost=cost, tokens=tokens, session_id=session_id,
+        execution_log=execution_log, metadata=metadata,
+    )
+    if outcome.kind == "applied" and outcome.status == TaskExecutionStatus.SUCCESS:
+        await _commit_after_success(execution_id, token, metadata)
+    return outcome

@@ -332,6 +332,49 @@ class ScheduleQueueMixin:
                 for row in conn.execute(stmt).mappings()
             ]
 
+    def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
+        """Win one SUB-003 walk attempt on a pulled turn (#3487).
+
+        Swaps the claim token of a ``running`` row that still holds
+        ``old_token``. Exactly one result POST per attempt can win this, so
+        only the winner records the refusal and advances the walk; a duplicate
+        or late POST still carrying ``old_token`` can never match the row
+        again, so it cannot write a terminal over the retry that follows.
+        The row stays ``running`` under the same claim and lease — this is an
+        in-place retry, not a re-delivery.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.claim_token == old_token,
+                    )
+                )
+                .values(claim_token=new_token)
+            )
+            return result.rowcount > 0
+
+    def set_backlog_metadata_for_token(
+        self, execution_id: str, claim_token: str, backlog_metadata: str
+    ) -> bool:
+        """Write a pulled row's metadata only while ``claim_token`` still owns it
+        (#3487) — the walk state is written by the attempt that won it."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.claim_token == claim_token,
+                    )
+                )
+                .values(backlog_metadata=backlog_metadata)
+            )
+            return result.rowcount > 0
+
     def requeue_expired_lease(
         self, execution_id: str, now_iso: Optional[str] = None
     ) -> bool:

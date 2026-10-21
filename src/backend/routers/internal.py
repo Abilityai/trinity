@@ -209,7 +209,7 @@ async def internal_task_result(
 
     from services import pull_coordination_service
 
-    outcome = pull_coordination_service.apply_task_result(
+    outcome = await pull_coordination_service.handle_task_result(
         execution_id,
         payload.claim_token,
         status=payload.status,
@@ -222,6 +222,10 @@ async def internal_task_result(
         metadata=payload.metadata,
     )
 
+    if outcome.kind == "retry":
+        # #3487: the turn was refused on a credential and the pool has another
+        # one — run it again under the same claim (the new token is in here).
+        return {"applied": False, "retry": outcome.retry}
     if outcome.kind == "applied":
         return {"applied": True, "status": outcome.status}
     if outcome.kind == "replayed":

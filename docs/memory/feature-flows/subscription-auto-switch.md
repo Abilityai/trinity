@@ -593,10 +593,8 @@ persisted: a `docker restart` reverts to the DB baseline by construction.
 
 ### Not covered
 
-Pull pilots: `public` ∈ `PULL_REACHABLE_NON_AUTONOMOUS`, so a Workspace turn on
-a piloted agent is claimed from the durable queue and the pull sink only runs
-the one-shot `spawn_subscription_failure` with **no re-delivery**. Follow-up
-filed with the PR. Multi-worker (`--workers 2`): the process-local #799 lock
+Pull pilots: covered by #3487 — see **Pull pilots walk in place** below.
+Multi-worker (`--workers 2`): the process-local #799 lock
 serialises commits within a worker; two workers committing different serving
 subscriptions is last-write-wins with two hot-reloads and two notifications,
 never a restart or a wedge (the module comment's standing limitation).
@@ -614,3 +612,43 @@ real `execute_task` + real walk, the `/chat` re-issue, the portal ladder, and th
 agent's env layers / header / redaction. `test_792` / `test_2789` are re-seamed
 on `advance_subscription_walk`; `test_2638`'s one-remediation test became "the
 pre-dispatch switch feeds the walk and the origin is never retried".
+### Pull pilots walk in place (#3487)
+
+A pulled turn's attempts are separate result POSTs, so the walk cannot be a loop
+in one call. Instead:
+
+1. The worker (`agent_server/services/pull_worker.py`) says on every result
+   whether it can run a spawn on a per-spawn credential
+   (`metadata.auth_override_capable` — a Claude runtime on a #3487 image), which
+   credential it applied (`metadata.auth_override`, the pull analogue of
+   `X-Trinity-Auth-Override`), and whether the user terminated the turn.
+2. `routers/internal.py` → `pull_coordination_service.handle_task_result`. For a
+   refused attempt (`billing`/`auth`) from a capable, un-terminated worker on a
+   `running` row, `_walk_refused_attempt` wins the attempt with
+   `db.rotate_claim_token` (old → new token, atomic, `running` only), rebuilds the
+   walk from `backlog_metadata["subscription_walk"]` (or starts one), attributes
+   the refusal to the credential the attempt actually ran on, and calls
+   `advance_subscription_walk` with the remaining budget (agent timeout minus the
+   time since the claim's `started_at`).
+3. A rung → the reply is `{"applied": false, "retry": {claim_token, auth_override,
+   timeout_seconds, attempt}}`. No terminal is written, so the sync waiter keeps
+   waiting. The worker re-runs the SAME turn under the same claim and lease with
+   that credential staged for redaction, and POSTs again with the new token.
+4. No rung → the result is applied as before, but with the walk's
+   "Tried: …" trail on the FAILED row, the refused attempts' cost rolled in, the
+   once-per-hour exhausted notice, and no one-shot `spawn_subscription_failure`.
+5. Served → `_commit_after_success`: `commit_subscription_walk` + the SUB-004
+   attribution, and the summary is saved for `result_from_execution_row`
+   (`subscription_switch`, push parity).
+
+A duplicate POST of an attempt that already won (lost 200, resend) carries the
+superseded token: it gets the stored retry again and records nothing. A worker
+that cannot follow (older image, non-Claude runtime, a restarted worker
+resending from disk) keeps the pre-#3487 path. The #1085 governor is not
+consulted — push has no such gate, and its pause is armed by several agents
+failing on shared credentials, the case the walk is for.
+
+**Tests:** `tests/unit/test_3487_pull_subscription_walk.py` (state round-trip,
+the token CAS on real SQLite, the sink attempt by attempt, the worker) and
+`tests/unit/test_3487_pull_walk_waiter.py` (a refused `public` turn through the
+real claim, sink and sync waiter yields one success).

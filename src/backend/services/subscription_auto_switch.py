@@ -28,7 +28,7 @@ tests pinning that contract.
 import asyncio
 import importlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -945,6 +945,62 @@ class SubscriptionWalk:
         base["tried_subscription_ids"] = sorted(self.tried_subscription_ids)
         base["routed_api_key"] = bool(self.active is not None and self.active.kind == "api_key")
         return base
+
+
+# #3487: a PULLED turn's attempts are separate result POSTs, possibly handled by
+# different backend workers, so the walk has to live on the row between them.
+# Every field round-trips EXCEPT `Rung.credential` — the secret is never written
+# anywhere; `rung_credential` resolves it again when an attempt needs it.
+_RUNG_STATE_FIELDS = ("kind", "subscription_id", "subscription_name", "why")
+
+
+def walk_to_state(walk: SubscriptionWalk) -> dict:
+    """A JSON-safe snapshot of `walk`, without any credential."""
+    state = {}
+    for f in fields(SubscriptionWalk):
+        value = getattr(walk, f.name)
+        if f.name == "active":
+            value = None if value is None else {k: getattr(value, k) for k in _RUNG_STATE_FIELDS}
+        elif isinstance(value, set):
+            value = sorted(value)
+        state[f.name] = value
+    return state
+
+
+def walk_from_state(state: dict) -> SubscriptionWalk:
+    """The inverse of `walk_to_state`. The active rung comes back without its
+    credential; `rung_credential` fetches it when an attempt needs it."""
+    kwargs = {}
+    for f in fields(SubscriptionWalk):
+        if f.name not in state:
+            continue
+        value = state[f.name]
+        if f.name == "active" and value is not None:
+            value = Rung(**{k: value.get(k) for k in _RUNG_STATE_FIELDS})
+        elif f.name == "tried_subscription_ids":
+            value = set(value or ())
+        elif f.name == "attempts":
+            value = [dict(a) for a in (value or ())]
+        kwargs[f.name] = value
+    return SubscriptionWalk(**kwargs)
+
+
+def rung_credential(rung: Optional[Rung]) -> Optional[str]:
+    """The secret a rung stands for, read fresh (#3487). None when it cannot be
+    resolved — the attempt then runs on the baseline and is attributed so."""
+    if rung is None:
+        return None
+    if rung.credential:
+        return rung.credential
+    try:
+        if rung.kind == "subscription" and rung.subscription_id:
+            return db.get_subscription_token(rung.subscription_id)
+        if rung.kind == "api_key":
+            from services.settings_service import get_anthropic_api_key
+            return get_anthropic_api_key() or None
+    except Exception as e:  # noqa: BLE001 — a missing credential is a baseline attempt
+        logger.error("[#3487] credential for a %s rung unreadable: %s", rung.kind, type(e).__name__)
+    return None
 
 
 def _subscription_count_cap() -> int:
