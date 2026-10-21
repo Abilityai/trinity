@@ -126,6 +126,8 @@ from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .execution_env import build_execution_env
+from . import opencode_mcp, opencode_provider
+from .opencode_provider import OpenCodeProviderConfigError
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .subprocess_lifecycle import (
@@ -374,13 +376,26 @@ _LINK_FROM_SHARED = ("node_modules", "package.json", "package-lock.json", "auth.
 
 
 def _prepare_turn_config(
-    execution_id: str, system_prompt: Optional[str], model: Optional[str] = None
+    execution_id: str,
+    system_prompt: Optional[str],
+    model: Optional[str] = None,
+    env_out: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
     The returned directory IS the ``XDG_CONFIG_HOME`` (OpenCode reads
     ``$XDG_CONFIG_HOME/opencode/opencode.json``) and is also what the caller
     removes in its ``finally``.
+
+    The template's provider block (``opencode_provider``) and the
+    ``.mcp.json`` → ``mcp:`` translation (``opencode_mcp``) are rendered
+    here, per turn, carrying env-var NAMES only (``{env:VAR}`` references,
+    decision 6) — never a literal secret. ``env_out``, when given, collects
+    the ``{VAR: default}`` pairs the caller must export into the subprocess
+    env: the pinned OpenCode substitutes ``{env:VAR}`` with no default form,
+    so a ``${VAR:-default}`` placeholder's default is honoured by the spawn.
+    A malformed provider block raises :class:`OpenCodeProviderConfigError`
+    BEFORE anything is written, naming the field.
 
     Why per-turn and not one shared file: ``opencode run`` has no
     system-prompt flag (verified against the real ``--help``), so the platform
@@ -394,6 +409,9 @@ def _prepare_turn_config(
     ``$XDG_CONFIG_HOME/opencode/node_modules``, so a turn that could not see
     the seeded tree would reach the live npm registry on every cold container.
     """
+    # Validated first so a named failure leaves no half-built turn dir behind.
+    provider_block = opencode_provider.provider_block()
+
     turn_dir = os.path.join(_opencode_root(), "turns", _safe_token(execution_id))
     config_dir = os.path.join(turn_dir, "opencode")
     os.makedirs(config_dir, exist_ok=True)
@@ -419,10 +437,13 @@ def _prepare_turn_config(
         existing = list(existing) if isinstance(existing, list) else []
         config["instructions"] = [prompt_file, *existing]
 
-    # The template-declared provider block and the `.mcp.json` → `mcp:`
-    # translation are rendered on THIS seam, per turn, by the provider/MCP
-    # change of #2981 — never as literal secrets (`{env:NAME}` references).
-    # `model` is accepted here so that change needs no signature churn.
+    # Provider first (the `-m` target must exist before `mcp:` is read), then
+    # the `.mcp.json` translation. Both render `{env:NAME}` references; the
+    # serialized file never carries a value from the environment.
+    opencode_provider.render_provider_config(config, provider_block)
+    env_defaults = opencode_mcp.apply_mcp_config(config)
+    if env_out is not None:
+        env_out.update(env_defaults)
 
     config_path = os.path.join(config_dir, "opencode.json")
     with open(config_path, "w", encoding="utf-8") as fh:
@@ -866,22 +887,20 @@ def finalize_response(state: _OpenCodeParseState) -> Tuple[str, str]:
     return "", FINAL_EMPTY
 
 
-_PROVIDER_ENV = "AGENT_RUNTIME_PROVIDER"
+_PROVIDER_ENV = opencode_provider.ENV_PROVIDER
 
 
 def _custom_provider_block() -> Optional[dict]:
     """The template's ``runtime.provider`` block, as serialized at create
-    (ruling T5). Malformed → ``None`` with a warning; the provider/MCP seam
-    (checkpoint C) owns validation, this reader only needs the cost shape."""
-    raw = os.environ.get(_PROVIDER_ENV, "").strip()
-    if not raw:
-        return None
+    (ruling T5), through the ONE reader in ``opencode_provider``. Malformed →
+    ``None`` with a warning: the turn boundary fails such a block named, and
+    the cost policy — which can run on a parsed stream alone — only needs
+    the ``models.<id>.cost`` shape."""
     try:
-        block = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("[OpenCode] %s is not JSON (%s); cost policy ignores it", _PROVIDER_ENV, exc)
+        return opencode_provider.load_provider_block()
+    except OpenCodeProviderConfigError as exc:
+        logger.warning("[OpenCode] %s; cost policy ignores it", exc)
         return None
-    return block if isinstance(block, dict) else None
 
 
 def _apply_cost_policy(metadata: ExecutionMetadata, model: Optional[str]) -> None:
@@ -1101,7 +1120,29 @@ class OpenCodeRuntime(AgentRuntime):
         # Trinity cannot name, and the ledger's `model_name` would be a guess.
         model = validate_provider_model(model or self.get_default_model())
 
-        turn_dir = _prepare_turn_config(execution_id, system_prompt, model)
+        # Ruling T4: the key for the provider this turn runs on must be
+        # PRESENT before the subprocess starts — a missing one fails 503
+        # naming the variable, never a silent fallback. The wording goes
+        # through the same auth registry as the exit-code path, so one
+        # message means one cause ("missing api key" is an `_AUTH_PATTERNS`
+        # row); a malformed provider block raises named, mapped to 400.
+        provider_block = opencode_provider.provider_block()
+        missing_var = opencode_provider.missing_key_env(model, provider_block)
+        if missing_var:
+            provider_id = model.partition("/")[0]
+            status_code, detail = classify_opencode_failure(
+                0,
+                f"missing API key: environment variable {missing_var} is unset "
+                f"or empty, and provider {provider_id!r} (model {model}) needs it",
+                ExecutionMetadata(),
+            )
+            logger.error("[OpenCode] %s", detail)
+            raise HTTPException(status_code=status_code, detail=detail)
+
+        env_defaults: Dict[str, str] = {}
+        turn_dir = _prepare_turn_config(
+            execution_id, system_prompt, model, env_out=env_defaults
+        )
         cmd = self._build_command(
             model=model, session_id=session_id, directory=_AGENT_HOME
         )
@@ -1128,6 +1169,14 @@ class OpenCodeRuntime(AgentRuntime):
             "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
             "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
         })
+        # `${VAR:-default}` placeholders from `.mcp.json` were rendered as
+        # `{env:VAR}` (OpenCode has no default form — variable.ts, v1.18.32),
+        # so the default is applied HERE, to the child env, only where the
+        # var is unset or empty. `TRINITY_EXECUTION_ID` is already the
+        # execution tag set above, so the Trinity header resolves without one.
+        for name, default in env_defaults.items():
+            if not env.get(name):
+                env[name] = default
 
         metadata = ExecutionMetadata()
         metadata.context_window = self.get_context_window(model)
@@ -1478,7 +1527,7 @@ class OpenCodeRuntime(AgentRuntime):
                 execution_id=execution_id,
                 concurrent_reader=False,
             )
-        except OpenCodeModelShapeError as exc:
+        except (OpenCodeModelShapeError, OpenCodeProviderConfigError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except HTTPException:
             raise
@@ -1553,7 +1602,7 @@ class OpenCodeRuntime(AgentRuntime):
                 execution_id=execution_id,
                 concurrent_reader=True,
             )
-        except OpenCodeModelShapeError as exc:
+        except (OpenCodeModelShapeError, OpenCodeProviderConfigError) as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         except HTTPException:
             raise

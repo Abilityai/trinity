@@ -6213,7 +6213,7 @@
         "agent-runtime",
         "unit"
       ],
-      "description": "OpenCode harness core, subprocess stubbed: parser (last-step text, native cost, reasoning/cache subset traps), empty/reasoning-only turns fail even on exit 0, error→HTTP mapping (auth 503 anchored, 429, 500, 502, 504), provider/model shape 400, per-turn XDG config carries the system prompt as instructions, metadata.model_name is the resolved -m (runtime default passed explicitly), tool activity tracked under the execution id, is_available probed once per process, read-only config /opt/trinity first then the home copy. Mutation: dropping model_name, the execution_id kwarg, the availability cache or the /opt precedence each turns its test red."
+      "description": "OpenCode harness core, subprocess stubbed: parser (last-step text, native cost, reasoning/cache subset traps), empty/reasoning-only turns fail even on exit 0, error→HTTP mapping (auth 503 anchored, 429, 500, 502, 504), provider/model shape 400, per-turn XDG config carries the system prompt as instructions, metadata.model_name is the resolved -m (runtime default passed explicitly), tool activity tracked under the execution id, is_available probed once per process, read-only config /opt/trinity first then the home copy. Mutation: dropping model_name, the execution_id kwarg, the availability cache or the /opt precedence each turns its test red. Checkpoint C seam test: one executed turn renders provider: and mcp: by env-var name only, with the execution tag and a placeholder default in the child env."
     },
     {
       "file": "unit/test_runtime_factory_opencode.py",
@@ -6234,6 +6234,28 @@
         "unit"
       ],
       "description": "runtime_names leaf: is_claude_runtime is case-insensitive, env-reading, import-free; runtime_adapter re-exports it; plugins_reinstall skips non-Claude runtimes with a named skipped_runtime status and still runs on Claude; AgentState probes each runtime's own CLI (unknown → unavailable, never claude); result_callback's async-dispatch gate shares the casing-safe predicate. Mutation: removing the reinstall gate turns 5 tests red."
+    },
+    {
+      "file": "unit/test_opencode_provider.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "The template's runtime.provider block (AGENT_RUNTIME_PROVIDER, ruling T5) rendered per OpenCode turn as provider.<id>.{npm, options:{baseURL, apiKey:'{env:NAME}'}, models}: apiKey is the env reference and the key's value (set in the test env) appears nowhere in the serialized config; every validation rule fails NAMED (id shape, npm allowlist = @ai-sdk/openai-compatible only, absolute http/https base_url, api_key_env name shape, models mapping); a missing or empty key fails the turn 503 naming the variable BEFORE the subprocess starts for the custom block, OpenRouter, Anthropic and OpenAI (ruling T4), other models.dev providers are not pre-checked, OpenRouter renders no provider block, a malformed block is a 400 naming the field on both execute paths, B's cost policy reads through the one reader; static: no gateway/`/proc/net/route`/OPENCODE_OLLAMA code anywhere in the agent server (decision 5). Subprocess stubbed. Mutation: each validation rule, the allowlist, the scheme check, each key-presence row, the apiKey reference, the pre-check wiring and the render wiring each turn a test red."
+    },
+    {
+      "file": "unit/test_opencode_mcp_prompt.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "The AGENT half of `.mcp.json` → OpenCode `mcp:` (checkpoint C; the platform-prompt trinity_<tool> rewrite is checkpoint G): remote {url, headers} → {type:remote}, local {command, args, env} → {type:local, command:[…], environment}, disabled and unmappable entries, missing/malformed file degrades to no servers; the secret rule — ${VAR}/${VAR:-d} → {env:VAR} with the default returned for the subprocess env (the pinned v1.18.32 variable.ts has no default form), a header/env value equal to ANY secret-named env var's current value is rewritten to that var by name (reverse lookup, not one hard-coded name), a secret-shaped literal matching no env var is dropped with one warning naming server and field, plain headers pass through; operator-declared entries win; the seam: a `.mcp.json` fixture carrying the Trinity bearer literally renders a serialized opencode.json with the sentinel nowhere and `{env:TRINITY_MCP_API_KEY}` present. Mutation: the placeholder rewrite, the reverse-lookup scrub, the drop rule, the default collection, the precedence rule, the secret-name filter and the min-length floor each turn a test red."
     }
   ]
 }

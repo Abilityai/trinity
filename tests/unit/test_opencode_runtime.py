@@ -501,6 +501,17 @@ def test_execution_id_cannot_escape_the_turn_root(monkeypatch, tmp_path):
 # test helper: a fake subprocess
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _provider_keys_present(monkeypatch):
+    """Checkpoint C's turn-boundary pre-check (ruling T4) refuses a turn whose
+    provider key is unset BEFORE the subprocess starts. The execute-path tests
+    in this file are about what happens AFTER the spawn, so every provider
+    they name has a dummy key here; the refusal itself is pinned in
+    `test_opencode_provider.py`, which deletes these on purpose."""
+    for var in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "LOCAL_API_KEY"):
+        monkeypatch.setenv(var, "test-key-present")
+
+
 def _install_fake_subprocess(monkeypatch, *, stdout_lines, return_code=0, stderr=""):
     """Replace ``subprocess.Popen`` in the runtime module with a stub that
     replays ``stdout_lines``. The real binary is never invoked in CI."""
@@ -976,6 +987,72 @@ def test_native_provider_cost_is_summed_even_when_a_custom_block_exists(monkeypa
         model="openrouter/qwen/qwen3-coder",
     )
     assert metadata.cost_usd == pytest.approx(0.03)
+
+
+# -- the provider/MCP seam (checkpoint C): names, never values ---------------
+
+@pytest.mark.asyncio
+async def test_turn_config_carries_provider_and_mcp_by_env_name_only(monkeypatch, tmp_path):
+    """One rendered turn: the template's provider block and the `.mcp.json`
+    translation are both in the serialized `opencode.json`, every secret is
+    an `{env:NAME}` reference, and no value from the environment appears
+    literally. The child env carries the execution tag the Trinity header
+    references and the placeholder default OpenCode cannot apply itself."""
+    from agent_server.services.opencode_mcp import ENV_MCP_CONFIG_PATH
+
+    key, trinity_key = "sk-SENTINEL-0123456789abcdef", "trinity_mcp_SENTINEL_fedcba9876543210"
+    monkeypatch.setenv("LOCAL_API_KEY", key)
+    monkeypatch.setenv("TRINITY_MCP_API_KEY", trinity_key)
+    monkeypatch.delenv("TRINITY_EXECUTION_ID", raising=False)
+    monkeypatch.delenv("OPTIONAL_FLAG", raising=False)
+    _provider_env(monkeypatch, {"qwen3:27b": {}})
+    mcp_file = tmp_path / ".mcp.json"
+    mcp_file.write_text(json.dumps({"mcpServers": {
+        "trinity": {"type": "http", "url": "http://mcp-server:8080/mcp", "headers": {
+            "Authorization": f"Bearer {trinity_key}",
+            "X-Trinity-Execution-Id": "${TRINITY_EXECUTION_ID:-manual}",
+            "X-Flag": "${OPTIONAL_FLAG:-off}",
+        }},
+    }}))
+    monkeypatch.setenv(ENV_MCP_CONFIG_PATH, str(mcp_file))
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    written: list = []
+    real_dump = opencode_runtime.json.dump
+
+    def _capture(obj, fh, **kw):
+        written.append(json.dumps(obj))
+        return real_dump(obj, fh, **kw)
+
+    monkeypatch.setattr(opencode_runtime.json, "dump", _capture)
+    child_env: list = []
+    real_popen = opencode_runtime.subprocess.Popen
+    _install_fake_subprocess(monkeypatch, stdout_lines=_lines(*_pstep("done", cost=0.0)))
+    fake_popen = opencode_runtime.subprocess.Popen
+
+    def _spy(cmd, *a, **k):
+        child_env.append(dict(k.get("env") or {}))
+        return fake_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(opencode_runtime.subprocess, "Popen", _spy)
+    assert real_popen is not fake_popen
+
+    _text, _log, metadata, _sid = await runtime.execute_headless(
+        "task", model="local/qwen3:27b", execution_id="exec-seam"
+    )
+    raw = written[-1]
+    config = json.loads(raw)
+    assert config["provider"]["local"]["options"]["apiKey"] == "{env:LOCAL_API_KEY}"
+    assert config["mcp"]["trinity"]["headers"]["Authorization"] == "Bearer {env:TRINITY_MCP_API_KEY}"
+    assert config["mcp"]["trinity"]["headers"]["X-Trinity-Execution-Id"] == "{env:TRINITY_EXECUTION_ID}"
+    for literal in (key, trinity_key, "manual", "off"):
+        assert literal not in raw, literal
+    env = child_env[0]
+    assert env["TRINITY_EXECUTION_ID"] == "exec-seam", "the execution tag IS the header's var"
+    assert env["OPTIONAL_FLAG"] == "off", "a placeholder default is applied in the child env"
+    assert metadata.model_name == "local/qwen3:27b"
 
 
 # -- the end-to-end half: exit 0 is not a success for any failed outcome ----
