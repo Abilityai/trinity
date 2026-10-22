@@ -16,7 +16,14 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from dependencies import get_owned_agent_by_name, require_admin, require_person
+from dependencies import (
+    agent_principal_name,
+    get_authorized_agent_by_name,
+    get_current_user,
+    get_owned_agent_by_name,
+    require_admin,
+    require_person,
+)
 from models import NeverminedOrganizationState, NeverminedOrganizationUpdate, User
 from services import nevermined_delegation_service as delegation_service
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -131,3 +138,25 @@ async def create_widget_session(
             headers={**NO_STORE, **(err.headers or {})},
         )
     return JSONResponse(content=result, headers=NO_STORE)
+
+
+# ---------------------------------------------------------------------------
+# Delegation binding
+# ---------------------------------------------------------------------------
+
+@router.get("/agents/{agent_name}/delegation")
+async def get_agent_delegation(
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """What this agent can spend through its Nevermined card mandate — live
+    from Nevermined, never cached, never computed here. An agent key reads its
+    own budget only; any other agent is the same 404 as a missing one."""
+    principal_agent = agent_principal_name(current_user)
+    if principal_agent is not None and principal_agent != agent_name:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    enforce_rate_limit(
+        f"nvm-read:{current_user.username}:{agent_name}", 30, 60,
+        detail="Too many Nevermined spending reads for this agent.",
+    )
+    return await delegation_service.read_delegation(agent_name)

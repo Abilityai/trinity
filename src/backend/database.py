@@ -3859,6 +3859,12 @@ class DatabaseManager:
     def count_active_agent_delegations(self):
         return self._nevermined_delegation_ops.count_active_delegations()
 
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================

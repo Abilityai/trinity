@@ -15,7 +15,7 @@ predicate as the partial unique index — and every count also joins the live
 ``agent_ownership`` row, so a deleted agent's kept row never blocks anything.
 """
 
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 
 from sqlalchemy import delete, func, insert, select, update
 
@@ -142,3 +142,64 @@ class NeverminedDelegationOperations:
                 ).scalar()
                 or 0
             )
+
+    #: The "active" predicate — the partial unique index's, verbatim.
+    @staticmethod
+    def _active_clause():
+        return (
+            agent_delegations.c.revoked_at.is_(None),
+            agent_delegations.c.agent_deleted_at.is_(None),
+        )
+
+    @staticmethod
+    def _row(mapping) -> Dict:
+        return {
+            "id": mapping["id"],
+            "agent_name": mapping["agent_name"],
+            "delegation_id": mapping["delegation_id"],
+            "payment_method_id": mapping["payment_method_id"],
+            "provider": mapping["provider"],
+            "environment": mapping["environment"],
+            "api_key_injected": bool(mapping["api_key_injected"]),
+            "created_by": mapping["created_by"],
+            "created_at": mapping["created_at"],
+            "revoked_at": mapping["revoked_at"],
+            "revoked_by": mapping["revoked_by"],
+            "agent_deleted_at": mapping["agent_deleted_at"],
+        }
+
+    def get_active_delegation(self, agent_name: str) -> Optional[Dict]:
+        """The agent's one active binding (same predicate as the index, joined
+        to the live ownership row), or None."""
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(agent_delegations)
+                .select_from(
+                    agent_delegations.join(
+                        agent_ownership,
+                        agent_ownership.c.agent_name == agent_delegations.c.agent_name,
+                    )
+                )
+                .where(agent_delegations.c.agent_name == agent_name, *self._active_clause())
+                .order_by(agent_delegations.c.created_at.desc())
+                .limit(1)
+            ).mappings().first()
+        return self._row(row) if row else None
+
+    def list_delegation_history(self, agent_name: str, limit: int = 10) -> List[Dict]:
+        """Most recent bindings first — the GET's `history` block."""
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                select(
+                    agent_delegations.c.delegation_id,
+                    agent_delegations.c.created_at,
+                    agent_delegations.c.revoked_at,
+                )
+                .where(agent_delegations.c.agent_name == agent_name)
+                .order_by(agent_delegations.c.created_at.desc(), agent_delegations.c.id.desc())
+                .limit(limit)
+            ).mappings().all()
+        return [
+            {"delegation_id": r["delegation_id"], "created_at": r["created_at"], "revoked_at": r["revoked_at"]}
+            for r in rows
+        ]

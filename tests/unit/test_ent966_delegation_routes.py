@@ -443,3 +443,248 @@ class TestWidgetSessionCensus:
         for name in ("get_nevermined_organization", "put_nevermined_organization",
                      "delete_nevermined_organization"):
             assert routes[prefix + name].code_class == "admin_tier"
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint C — delegation binding
+# ---------------------------------------------------------------------------
+
+DLG_ID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+DLG_URL = "/api/nevermined/agents/ent966-a/delegation"
+LIVE_BODY = {
+    "id": DLG_ID, "status": "ACTIVE", "spendingLimitCents": 5000, "amountSpentCents": 800,
+    "remainingBudgetCents": 4200, "transactionCount": 3, "maxTransactions": 50,
+    "currency": "usd", "expiresAt": "2026-11-14T20:00:00Z",
+    "transactions": [{"id": "t1", "amountCents": 800}],
+}
+EVE = dict(id=3, username="eve", email="eve@example.com", role="creator")
+
+
+@pytest.fixture
+def dlg_env(env, monkeypatch):
+    """`env` + two owned agents (`ent966-a`, `ent966-b` — both ada's), the
+    organization, a mock Nevermined and a mock agent container."""
+    import httpx
+    from database import db
+    from db.engine import get_engine
+    from routers import nevermined_delegation as router_mod
+    from services import nevermined_delegation_service as svc
+
+    owners = {"ent966-a": {"admin", "ada"}, "ent966-b": {"admin", "ada"}}
+    monkeypatch.setattr(db, "get_agent_owner", lambda name: {"owner_username": "ada"} if name in owners else None)
+    monkeypatch.setattr(db, "can_user_access_agent", lambda user, name: user in owners.get(name, set()))
+    monkeypatch.setattr(db, "can_user_share_agent", lambda user, name: user in owners.get(name, set()))
+    with get_engine().begin() as conn:
+        for a in owners:
+            conn.execute(text("INSERT INTO agent_ownership (agent_name, owner_id, created_at) VALUES (:a, 2, 'now')"), {"a": a})
+    limits = []
+    monkeypatch.setattr(router_mod, "enforce_rate_limit", lambda *a, **k: limits.append(a))
+
+    upstream = {"status": 200, "body": LIVE_BODY, "raise": None, "requests": [],
+                "delete_status": 200}
+
+    def handler(request):
+        upstream["requests"].append(request)
+        if upstream["raise"]:
+            raise upstream["raise"]
+        if request.method == "DELETE":
+            return httpx.Response(upstream["delete_status"], json={})
+        if isinstance(upstream["body"], (dict, list)):
+            return httpx.Response(upstream["status"], json=upstream["body"])
+        return httpx.Response(upstream["status"], text=upstream["body"])
+
+    monkeypatch.setattr(svc, "_http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    _put(env)
+    env.upstream = upstream
+    env.limits = limits
+    env.as_(**OPERATOR)
+    return env
+
+
+def _bind_row(env, agent="ent966-a", delegation_id=DLG_ID, **cols):
+    from db.engine import get_engine
+
+    row = dict(id="row-" + agent + "-" + delegation_id[:8], agent_name=agent, delegation_id=delegation_id,
+               payment_method_id="pm_0123456789", provider="stripe", environment="sandbox",
+               api_key_injected=1, created_by="ada@example.com", created_at="2026-10-22T20:00:00Z",
+               revoked_at=None, revoked_by=None)
+    row.update(cols)
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO agent_delegations (id, agent_name, delegation_id, payment_method_id, provider,"
+            " environment, api_key_injected, created_by, created_at, revoked_at, revoked_by)"
+            " VALUES (:id, :agent_name, :delegation_id, :payment_method_id, :provider, :environment,"
+            " :api_key_injected, :created_by, :created_at, :revoked_at, :revoked_by)"), row)
+    return row
+
+
+UNBOUND = {"agent_name": "ent966-a", "configured": True, "funded": False,
+           "delegation": None, "live": None, "history": []}
+
+
+class TestReadDelegation:
+    def test_not_configured_is_a_200_state(self, dlg_env):
+        dlg_env.as_()
+        dlg_env.client.delete("/api/nevermined/organization")
+        dlg_env.as_(**OPERATOR)
+        r = dlg_env.client.get(DLG_URL)
+        assert r.status_code == 200
+        assert r.json() == {**UNBOUND, "configured": False}
+        assert dlg_env.upstream["requests"] == []
+
+    def test_unbound(self, dlg_env):
+        r = dlg_env.client.get(DLG_URL)
+        assert r.status_code == 200 and r.json() == UNBOUND
+        assert dlg_env.upstream["requests"] == []
+        assert dlg_env.limits == [("nvm-read:ada:ent966-a", 30, 60)]
+
+    def test_bound_copies_every_number_from_nevermined(self, dlg_env):
+        _bind_row(dlg_env)
+        r = dlg_env.client.get(DLG_URL)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["configured"] and body["funded"]
+        assert body["delegation"] == {
+            "delegation_id": DLG_ID, "payment_method_id": "pm_0123456789", "provider": "stripe",
+            "environment": "sandbox", "created_by": "ada@example.com", "created_at": "2026-10-22T20:00:00Z"}
+        live = body["live"]
+        assert live.pop("fetched_at")
+        assert live == {"source": "nevermined", "status": "active", "remaining_cents": 4200,
+                        "spending_limit_cents": 5000, "spent_cents": 800, "transactions_used": 3,
+                        "max_transactions": 50, "currency": "usd", "expires_at": "2026-11-14T20:00:00Z",
+                        "error": None}
+        assert body["history"] == [{"delegation_id": DLG_ID, "created_at": "2026-10-22T20:00:00Z", "revoked_at": None}]
+        (req,) = dlg_env.upstream["requests"]
+        assert str(req.url) == f"https://api.sandbox.nevermined.app/api/v1/delegation/{DLG_ID}/transactions?offset=0"
+        assert req.headers["authorization"] == "Bearer " + AGENT_KEY
+        _no_secret(r)
+
+    def test_remaining_is_null_when_absent_never_limit_minus_spent(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.upstream["body"] = {"status": "active", "spendingLimitCents": 5000, "amountSpentCents": 800}
+        live = dlg_env.client.get(DLG_URL).json()["live"]
+        assert live["remaining_cents"] is None
+        assert live["spending_limit_cents"] == 5000 and live["spent_cents"] == 800
+        assert live["transactions_used"] is None and live["expires_at"] is None
+
+    def test_envelope_shapes_and_unknown_status(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.upstream["body"] = {"delegation": {"status": "Exhausted", "remainingBudgetCents": 0}}
+        live = dlg_env.client.get(DLG_URL).json()["live"]
+        assert live["status"] == "exhausted" and live["remaining_cents"] == 0 and live["source"] == "nevermined"
+        dlg_env.upstream["body"] = {"transactions": []}
+        live = dlg_env.client.get(DLG_URL).json()["live"]
+        assert live["status"] == "unknown" and live["error"] is None and live["source"] == "nevermined"
+        dlg_env.upstream["body"] = "<html>"
+        live = dlg_env.client.get(DLG_URL).json()["live"]
+        assert live["status"] == "unknown" and live["error"] is None
+
+    @pytest.mark.parametrize("failure,error", [
+        ("unreachable", "nevermined_unreachable"), ("busy", "nevermined_busy"),
+        ("401", "nevermined_rejected"), ("500", "nevermined_rejected"), ("404", "nevermined_rejected"),
+    ])
+    def test_upstream_failure_is_unavailable_with_every_number_null(self, dlg_env, monkeypatch, failure, error):
+        import contextlib
+        import httpx
+        from services import nevermined_delegation_service as svc
+
+        _bind_row(dlg_env)
+        if failure == "unreachable":
+            dlg_env.upstream["raise"] = httpx.ReadTimeout("slow " + AGENT_KEY)
+        elif failure == "busy":
+            @contextlib.asynccontextmanager
+            async def full():
+                raise svc.DelegationBusy("full")
+                yield  # pragma: no cover
+            monkeypatch.setattr(svc, "delegation_slot", full)
+        else:
+            dlg_env.upstream.update(status=int(failure), body={"error": "nope " + AGENT_KEY})
+        r = dlg_env.client.get(DLG_URL)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["funded"] is True and body["delegation"]["delegation_id"] == DLG_ID
+        live = body["live"]
+        assert live["source"] == "unavailable" and live["status"] == "unknown" and live["error"] == error
+        for k in ("remaining_cents", "spending_limit_cents", "spent_cents", "transactions_used",
+                  "max_transactions", "currency", "expires_at"):
+            assert live[k] is None
+        _no_secret(r)
+
+    def test_history_lists_revoked_rows_newest_first(self, dlg_env):
+        _bind_row(dlg_env, delegation_id="old-0123456789", created_at="2026-10-01T00:00:00Z",
+                  revoked_at="2026-10-02T00:00:00Z", revoked_by="ada")
+        _bind_row(dlg_env)
+        body = dlg_env.client.get(DLG_URL).json()
+        assert [h["delegation_id"] for h in body["history"]] == [DLG_ID, "old-0123456789"]
+        assert body["history"][1]["revoked_at"] == "2026-10-02T00:00:00Z"
+        assert "replaced_at" not in body["history"][0]
+
+    def test_not_accessible_is_uniform_404(self, dlg_env):
+        dlg_env.as_(**EVE)
+        a = dlg_env.client.get(DLG_URL)
+        b = dlg_env.client.get("/api/nevermined/agents/ent966-missing/delegation")
+        assert a.status_code == b.status_code == 404 and a.json() == b.json()
+
+    def test_agent_key_reads_itself_but_a_sibling_is_the_uniform_404(self, dlg_env):
+        _bind_row(dlg_env)
+        _bind_row(dlg_env, agent="ent966-b", delegation_id="b-0123456789")
+        dlg_env.as_(**{**OPERATOR, "agent_name": "ent966-a", "mcp_scope": "agent"})
+        own = dlg_env.client.get(DLG_URL)
+        assert own.status_code == 200 and own.json()["delegation"]["delegation_id"] == DLG_ID
+        sibling = dlg_env.client.get("/api/nevermined/agents/ent966-b/delegation")
+        missing = dlg_env.client.get("/api/nevermined/agents/ent966-missing/delegation")
+        assert sibling.status_code == missing.status_code == 404 and sibling.json() == missing.json()
+        assert len(dlg_env.upstream["requests"]) == 1  # only the self read dialled Nevermined
+
+    def test_single_flight_shares_one_upstream_call(self, dlg_env):
+        import asyncio
+        from database import db
+        from services import nevermined_delegation_service as svc
+
+        _bind_row(dlg_env)
+        org = {**db.get_nevermined_organization(), **db.get_nevermined_organization_secrets()}
+
+        async def go():
+            return await asyncio.gather(*[svc.fetch_live(org, DLG_ID, agent_name="ent966-a") for _ in range(5)])
+
+        results = asyncio.run(go())
+        assert len(dlg_env.upstream["requests"]) == 1
+        assert all(r["remaining_cents"] == 4200 for r in results)
+
+    def test_malformed_id_never_reaches_a_url(self, dlg_env):
+        from services import nevermined_delegation_service as svc
+
+        for bad in ("../x", "short", "a" * 129, "id?x=1", "id/transactions", "dlg 12345678"):
+            with pytest.raises(svc.InvalidDelegationId):
+                svc.validate_delegation_id(bad)
+        _bind_row(dlg_env, delegation_id="../../v1/organization")
+        live = dlg_env.client.get(DLG_URL).json()["live"]
+        assert live["source"] == "unavailable" and dlg_env.upstream["requests"] == []
+
+    def test_no_secret_or_token_reaches_a_log_line(self, dlg_env, caplog):
+        import httpx
+
+        caplog.set_level(logging.DEBUG)
+        _bind_row(dlg_env)
+        dlg_env.client.get(DLG_URL)
+        dlg_env.upstream.update(status=401, body={"error": "nope " + AGENT_KEY})
+        dlg_env.client.get(DLG_URL)
+        dlg_env.upstream["raise"] = httpx.ConnectError("conn " + AGENT_KEY)
+        dlg_env.client.get(DLG_URL)
+        assert "upstream_status=200" in caplog.text
+        for s in SECRETS + (SESSION_TOKEN,):
+            assert s not in caplog.text
+
+
+class TestDelegationCensus:
+    def test_get_is_listed_agent_callable_with_the_pinned_path(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _route_census as census
+
+        key = "routers/nevermined_delegation.py::get_agent_delegation"
+        assert census.AGENT_CALLABLE[key][0] == "GET /api/nevermined/agents/{agent_name}/delegation"
+        route = census.walk().routes[key]
+        assert route.code_class not in ("person", "admin_tier")

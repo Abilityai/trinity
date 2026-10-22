@@ -21,12 +21,14 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import weakref
 from typing import Any, Dict, List, Optional
 
 import httpx
 
 from database import db
+from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -322,3 +324,191 @@ async def mint_widget_session(email: Optional[str], *, agent_name: str, actor: s
     if not isinstance(session, dict):
         raise _rejected(status, "Nevermined answered the widget session request with an unexpected body.")
     return {"session": session, "environment": environment, "org_id": org["org_id"]}
+
+
+# ---------------------------------------------------------------------------
+# Delegation read-back (GET) — one upstream call per delegation id in flight
+# ---------------------------------------------------------------------------
+
+#: A Nevermined delegation / payment-method id is a UUID-like token. Pinned
+#: before ANY interpolation into an upstream path (plan §10): no `/`, `?`, `.`.
+DELEGATION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+
+#: Nevermined field → our field. Every number is COPIED from the named
+#: Nevermined field or left null; nothing is derived locally.
+LIVE_NUMBER_FIELDS = (
+    ("remainingBudgetCents", "remaining_cents"),
+    ("spendingLimitCents", "spending_limit_cents"),
+    ("amountSpentCents", "spent_cents"),
+    ("transactionCount", "transactions_used"),
+    ("maxTransactions", "max_transactions"),
+)
+LIVE_KNOWN_STATUSES = ("active", "exhausted", "expired", "revoked")
+
+_READ_INFLIGHT: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+class InvalidDelegationId(ValueError):
+    """An id that must not reach an upstream URL."""
+
+
+def validate_delegation_id(value: str, *, what: str = "delegation id") -> str:
+    if not isinstance(value, str) or not DELEGATION_ID_RE.match(value):
+        raise InvalidDelegationId(f"{what} must match [A-Za-z0-9_-]{{8,128}}")
+    return value
+
+
+def _delegation_url(environment: str, delegation_id: str, suffix: str = "") -> str:
+    validate_delegation_id(delegation_id)
+    return f"{NEVERMINED_API_BASES[environment]}/api/v1/delegation/{delegation_id}{suffix}"
+
+
+def _empty_live(source: str, status: str, error: Optional[str]) -> Dict[str, Any]:
+    live = {"source": source, "status": status}
+    live.update({ours: None for _, ours in LIVE_NUMBER_FIELDS})
+    live.update({"currency": None, "expires_at": None, "fetched_at": utc_now_iso(), "error": error})
+    return live
+
+
+def _live_candidates(payload: Any):
+    """The dict that carries the delegation's fields: the body itself, or one
+    of the envelopes a REST API tends to use. The shape is undocumented."""
+    if not isinstance(payload, dict):
+        return
+    yield payload
+    for key in ("delegation", "data", "result"):
+        inner = payload.get(key)
+        if isinstance(inner, dict):
+            yield inner
+
+
+def parse_live(payload: Any) -> Dict[str, Any]:
+    """Tolerant parse of Nevermined's delegation read: fields copied by name,
+    `status` lowercased when present (`status_present` says whether it was),
+    `unknown` otherwise. Never computes a number."""
+    live = _empty_live("nevermined", "unknown", None)
+    live["status_present"] = False
+    for candidate in _live_candidates(payload):
+        hit = False
+        status = candidate.get("status")
+        if isinstance(status, str) and status.strip():
+            live["status"] = status.strip().lower()
+            live["status_present"] = True
+            hit = True
+        for theirs, ours in LIVE_NUMBER_FIELDS:
+            value = candidate.get(theirs)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                live[ours] = value
+                hit = True
+        currency = candidate.get("currency")
+        if isinstance(currency, str):
+            live["currency"] = currency
+            hit = True
+        expires = candidate.get("expiresAt")
+        if isinstance(expires, str):
+            live["expires_at"] = expires
+            hit = True
+        if hit:
+            break
+    return live
+
+
+async def _upstream_delegation_get(org: Dict[str, Any], delegation_id: str) -> httpx.Response:
+    """ONE `GET /api/v1/delegation/{id}/transactions?offset=0`, inside the gate.
+
+    Raises `DelegationBusy` / `httpx.HTTPError`; the caller classifies.
+    """
+    url = _delegation_url(org["environment"], delegation_id, "/transactions")
+    headers = {"Authorization": f"Bearer {org['agent_api_key']}"}
+    async with delegation_slot():
+        async with _http_client() as client:
+            return await client.get(url, params={"offset": 0}, headers=headers)
+
+
+def _read_inflight() -> Dict[str, "asyncio.Future"]:
+    loop = asyncio.get_running_loop()
+    inflight = _READ_INFLIGHT.get(loop)
+    if inflight is None:
+        inflight = {}
+        _READ_INFLIGHT[loop] = inflight
+    return inflight
+
+
+async def _fetch_live_once(org: Dict[str, Any], delegation_id: str, *, agent_name: str) -> Dict[str, Any]:
+    try:
+        response = await _upstream_delegation_get(org, delegation_id)
+    except DelegationBusy:
+        logger.warning("Nevermined delegation read for %s: delegation gate busy", agent_name)
+        return _empty_live("unavailable", "unknown", "nevermined_busy")
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Nevermined delegation read for %s: unreachable (%s)", agent_name, type(exc).__name__,
+        )
+        return _empty_live("unavailable", "unknown", "nevermined_unreachable")
+    except InvalidDelegationId:
+        logger.error("Nevermined delegation read for %s: stored delegation id is malformed", agent_name)
+        return _empty_live("unavailable", "unknown", "nevermined_rejected")
+
+    status = response.status_code
+    logger.info("Nevermined delegation read for %s: upstream_status=%s", agent_name, status)
+    if not 200 <= status < 300:
+        return _empty_live("unavailable", "unknown", "nevermined_rejected")
+    try:
+        payload = response.json()
+    except ValueError:
+        return _empty_live("nevermined", "unknown", None)
+    live = parse_live(payload)
+    live.pop("status_present", None)
+    return live
+
+
+async def fetch_live(org: Dict[str, Any], delegation_id: str, *, agent_name: str) -> Dict[str, Any]:
+    """The GET's `live` block: no cache, but N concurrent reads of one
+    delegation id share one upstream call (T3 single-flight)."""
+    inflight = _read_inflight()
+    future = inflight.get(delegation_id)
+    if future is None:
+        future = asyncio.ensure_future(_fetch_live_once(org, delegation_id, agent_name=agent_name))
+        inflight[delegation_id] = future
+        try:
+            return dict(await future)
+        finally:
+            inflight.pop(delegation_id, None)
+    return dict(await future)
+
+
+def _delegation_block(row: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "delegation_id": row["delegation_id"],
+        "payment_method_id": row["payment_method_id"],
+        "provider": row["provider"],
+        "environment": row["environment"],
+        "created_by": row["created_by"],
+        "created_at": row["created_at"],
+    }
+
+
+def delegation_state(agent_name: str, *, configured: bool, row: Optional[Dict[str, Any]],
+                     live: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The one response shape the GET, the bind and the panel share."""
+    return {
+        "agent_name": agent_name,
+        "configured": configured,
+        "funded": row is not None,
+        "delegation": _delegation_block(row) if row else None,
+        "live": live if row else None,
+        "history": db.list_agent_delegation_history(agent_name) if configured else [],
+    }
+
+
+async def read_delegation(agent_name: str) -> Dict[str, Any]:
+    """GET: the agent's binding and what Nevermined says it can still spend."""
+    org = db.get_nevermined_organization()
+    secrets = db.get_nevermined_organization_secrets() if org else None
+    if not org or not secrets:
+        return delegation_state(agent_name, configured=False, row=None, live=None)
+    row = db.get_active_agent_delegation(agent_name)
+    live = None
+    if row:
+        live = await fetch_live({**org, **secrets}, row["delegation_id"], agent_name=agent_name)
+    return delegation_state(agent_name, configured=True, row=row, live=live)
