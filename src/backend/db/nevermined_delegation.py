@@ -15,6 +15,7 @@ predicate as the partial unique index — and every count also joins the live
 ``agent_ownership`` row, so a deleted agent's kept row never blocks anything.
 """
 
+import uuid
 from typing import Dict, List, Optional
 
 from sqlalchemy import delete, func, insert, select, update
@@ -203,3 +204,63 @@ class NeverminedDelegationOperations:
             {"delegation_id": r["delegation_id"], "created_at": r["created_at"], "revoked_at": r["revoked_at"]}
             for r in rows
         ]
+
+    def insert_delegation(
+        self,
+        agent_name: str,
+        delegation_id: str,
+        payment_method_id: Optional[str],
+        provider: Optional[str],
+        environment: str,
+        api_key_injected: bool,
+        created_by: str,
+    ) -> Dict:
+        """Insert the new active row. Raises `sqlalchemy.exc.IntegrityError`
+        when another active row already holds the agent's slot (the partial
+        unique index is the race fence)."""
+        row = dict(
+            id=str(uuid.uuid4()),
+            agent_name=agent_name,
+            delegation_id=delegation_id,
+            payment_method_id=payment_method_id,
+            provider=provider,
+            environment=environment,
+            api_key_injected=1 if api_key_injected else 0,
+            created_by=created_by,
+            created_at=utc_now_iso(),
+        )
+        with get_engine().begin() as conn:
+            conn.execute(insert(agent_delegations).values(**row))
+        row["api_key_injected"] = bool(api_key_injected)
+        return {**row, "revoked_at": None, "revoked_by": None, "agent_deleted_at": None}
+
+    def delete_delegation_row(self, row_id: str) -> bool:
+        """Compensation after a failed inject: remove ONLY the row just inserted."""
+        with get_engine().begin() as conn:
+            result = conn.execute(delete(agent_delegations).where(agent_delegations.c.id == row_id))
+        return result.rowcount > 0
+
+    def revoke_delegation(self, row_id: str, revoked_by: str) -> Optional[str]:
+        """Stamp `revoked_at/by` on an active row; returns the timestamp, or
+        None if the row was no longer active."""
+        now = utc_now_iso()
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_delegations)
+                .where(agent_delegations.c.id == row_id, agent_delegations.c.revoked_at.is_(None))
+                .values(revoked_at=now, revoked_by=revoked_by)
+            )
+        return now if result.rowcount > 0 else None
+
+    def latest_prior_api_key_injected(self, agent_name: str) -> bool:
+        """Whether the agent's most recent earlier binding introduced
+        `NVM_API_KEY` (H1: a revoke with the agent down leaves the key in
+        `.env`, and the next bind must not forget Trinity put it there)."""
+        with get_engine().connect() as conn:
+            value = conn.execute(
+                select(agent_delegations.c.api_key_injected)
+                .where(agent_delegations.c.agent_name == agent_name)
+                .order_by(agent_delegations.c.created_at.desc(), agent_delegations.c.id.desc())
+                .limit(1)
+            ).scalar()
+        return bool(value)

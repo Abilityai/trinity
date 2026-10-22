@@ -5829,3 +5829,26 @@ class NeverminedOrganizationState(BaseModel):
     updated_at: Optional[str] = None
     updated_by: Optional[str] = None
     active_delegations: int = 0
+
+
+NEVERMINED_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+class NeverminedDelegationBind(BaseModel):
+    """POST /api/nevermined/agents/{agent_name}/delegation — the ids the
+    Nevermined widget handed the browser. Both spellings are accepted."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    delegation_id: str = Field(..., alias="delegationId", pattern=NEVERMINED_ID_PATTERN)
+    payment_method_id: Optional[str] = Field(default=None, alias="paymentMethodId", pattern=NEVERMINED_ID_PATTERN)
+    provider: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if any(c in v for c in "\r\n"):
+            raise ValueError("provider must be a single line")
+        return v or None

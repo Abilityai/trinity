@@ -24,7 +24,13 @@ from dependencies import (
     require_admin,
     require_person,
 )
-from models import NeverminedOrganizationState, NeverminedOrganizationUpdate, User
+from models import (
+    NeverminedDelegationBind,
+    NeverminedOrganizationState,
+    NeverminedOrganizationUpdate,
+    User,
+)
+from services import credential_requirements_service
 from services import nevermined_delegation_service as delegation_service
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.rate_limiter import enforce as enforce_rate_limit
@@ -160,3 +166,90 @@ async def get_agent_delegation(
         detail="Too many Nevermined spending reads for this agent.",
     )
     return await delegation_service.read_delegation(agent_name)
+
+
+@router.post("/agents/{agent_name}/delegation", status_code=201)
+async def bind_agent_delegation(
+    body: NeverminedDelegationBind,
+    agent_name: str = Depends(get_owned_agent_by_name),
+    current_user: User = Depends(require_person),
+):
+    """Bind the Nevermined delegation the widget created to this agent. Nevermined
+    holds the card and the mandate; Trinity records the id and hands the agent
+    its `NVM_*` keys, effective at the agent's next execution."""
+    try:
+        delegation_service.require_organization()
+    except delegation_service.DelegationError as err:
+        _raise(err)
+    enforce_rate_limit(
+        f"nvm-bind:{current_user.username}:{agent_name}", 10, 60,
+        detail="Too many Nevermined bind attempts for this agent.",
+    )
+    try:
+        state = await delegation_service.bind_delegation(
+            agent_name,
+            delegation_id=body.delegation_id,
+            payment_method_id=body.payment_method_id,
+            provider=body.provider,
+            actor=current_user.username,
+            created_by=current_user.email or current_user.username,
+        )
+    except delegation_service.DelegationError as err:
+        _raise(err)
+
+    credential_requirements_service.invalidate_report_cache(agent_name)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CREDENTIALS,
+        event_action="nevermined_delegation_bind",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "delegation_id": body.delegation_id,
+            "payment_method_id": body.payment_method_id,
+            "provider": body.provider,
+            "environment": state["delegation"]["environment"],
+            "api_key_injected": state["api_key_injected"],
+        },
+    )
+    return state
+
+
+@router.delete("/agents/{agent_name}/delegation")
+async def revoke_agent_delegation(
+    agent_name: str = Depends(get_owned_agent_by_name),
+    current_user: User = Depends(require_person),
+):
+    """Revoke this agent's Nevermined mandate: Nevermined refuses the agent's
+    next paid call at once; the keys leave the agent's credential file when
+    it is running, otherwise at its next bind."""
+    try:
+        result = await delegation_service.revoke_delegation(
+            agent_name, actor=current_user.username,
+            revoked_by=current_user.email or current_user.username,
+        )
+    except delegation_service.DelegationError as err:
+        _raise(err)
+
+    credential_requirements_service.invalidate_report_cache(agent_name)
+    await platform_audit_service.log(
+        event_type=AuditEventType.CREDENTIALS,
+        event_action="nevermined_delegation_revoke",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "delegation_id": result["delegation_id"],
+            "environment": result["environment"],
+            "env_removed": result["env_removed"],
+            "api_key_removed": result["api_key_injected"] and result["env_removed"],
+        },
+    )
+    return {
+        "revoked": True,
+        "delegation_id": result["delegation_id"],
+        "env_removed": result["env_removed"],
+        "env_note": result["env_note"],
+    }

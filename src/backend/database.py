@@ -3865,6 +3865,22 @@ class DatabaseManager:
     def list_agent_delegation_history(self, agent_name, limit=10):
         return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
 
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
+
+    def latest_prior_agent_delegation_api_key_injected(self, agent_name):
+        return self._nevermined_delegation_ops.latest_prior_api_key_injected(agent_name)
+
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================

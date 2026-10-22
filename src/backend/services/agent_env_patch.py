@@ -29,7 +29,7 @@ from __future__ import annotations
 import re
 from typing import Dict, Iterable, Mapping
 
-__all__ = ["format_env_line", "set_keys", "remove_keys"]
+__all__ = ["format_env_line", "set_keys", "remove_keys", "has_key"]
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: What counts as "a line for KEY" — the same shape the PAT patcher matches
@@ -103,3 +103,9 @@ def remove_keys(env_text: str, keys: Iterable[str]) -> str:
         line for line in env_text.splitlines(keepends=True)
         if _line_key(line) not in targets
     )
+
+
+def has_key(env_text: str, key: str) -> bool:
+    """Whether any line sets ``key`` (value not inspected)."""
+    _check_key(key)
+    return any(_line_key(line) == key for line in env_text.splitlines())

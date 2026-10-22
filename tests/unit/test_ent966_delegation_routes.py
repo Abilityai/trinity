@@ -458,6 +458,7 @@ LIVE_BODY = {
     "transactions": [{"id": "t1", "amountCents": 800}],
 }
 EVE = dict(id=3, username="eve", email="eve@example.com", role="creator")
+AGENT_ENV_SECRET = "agent-env-" + "S" * 24
 
 
 @pytest.fixture
@@ -494,9 +495,34 @@ def dlg_env(env, monkeypatch):
         return httpx.Response(upstream["status"], text=upstream["body"])
 
     monkeypatch.setattr(svc, "_http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+
+    agent = {"env": "OTHER_KEY=keep-me\nSOME_SECRET=" + AGENT_ENV_SECRET + "\n", "running": True,
+             "reads": 0, "injects": [], "inject_status": 200, "raise": None, "read_status": 200}
+
+    def agent_handler(request):
+        if agent["raise"]:
+            raise agent["raise"]
+        if request.url.path == "/api/credentials/read":
+            agent["reads"] += 1
+            return httpx.Response(agent["read_status"], json={"files": {".env": agent["env"]}})
+        if request.url.path == "/api/credentials/inject":
+            import json as _json
+            files = _json.loads(request.content)["files"]
+            agent["injects"].append(files)
+            if agent["inject_status"] == 200:
+                agent["env"] = files[".env"]
+            return httpx.Response(agent["inject_status"], json={"status": "ok"})
+        return httpx.Response(404)  # pragma: no cover
+
+    monkeypatch.setattr(svc, "_agent_client", lambda name: httpx.AsyncClient(transport=httpx.MockTransport(agent_handler)))
+    monkeypatch.setattr(svc, "_agent_running", lambda name: agent["running"])
+    invalidated = []
+    monkeypatch.setattr(router_mod.credential_requirements_service, "invalidate_report_cache", invalidated.append)
     _put(env)
     env.upstream = upstream
     env.limits = limits
+    env.agent = agent
+    env.invalidated = invalidated
     env.as_(**OPERATOR)
     return env
 
@@ -688,3 +714,365 @@ class TestDelegationCensus:
         assert census.AGENT_CALLABLE[key][0] == "GET /api/nevermined/agents/{agent_name}/delegation"
         route = census.walk().routes[key]
         assert route.code_class not in ("person", "admin_tier")
+
+
+BIND_BODY = {"delegationId": DLG_ID, "paymentMethodId": "pm_0123456789", "provider": "stripe"}
+
+
+def _env_keys(text):
+    return {line.split("=", 1)[0]: line.split("=", 1)[1] for line in text.splitlines() if "=" in line}
+
+
+class TestBind:
+    def test_happy_path_one_upstream_call_then_env_write(self, dlg_env):
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["funded"] is True and body["configured"] is True
+        assert body["effective"] == "next_execution" and body["api_key_injected"] is True
+        assert body["delegation"]["delegation_id"] == DLG_ID
+        assert body["delegation"]["payment_method_id"] == "pm_0123456789"
+        assert body["delegation"]["created_by"] == "ada@example.com"
+        assert body["live"]["status"] == "active" and body["live"]["remaining_cents"] == 4200
+        assert [h["delegation_id"] for h in body["history"]] == [DLG_ID]
+        # exactly ONE upstream call, the verify, whose payload became `live`
+        (req,) = dlg_env.upstream["requests"]
+        assert req.method == "GET" and req.url.path == f"/api/v1/delegation/{DLG_ID}/transactions"
+        # the agent's .env carries the three keys, everything else intact
+        keys = _env_keys(dlg_env.agent["env"])
+        assert keys["NVM_DELEGATION_ID"] == f'"{DLG_ID}"'
+        assert keys["NVM_API_KEY"] == f'"{AGENT_KEY}"' and keys["NVM_ENVIRONMENT"] == '"sandbox"'
+        assert keys["OTHER_KEY"] == "keep-me" and keys["SOME_SECRET"] == AGENT_ENV_SECRET
+        assert len(dlg_env.agent["injects"]) == 1 and dlg_env.agent["reads"] == 2  # read, re-read, inject
+        assert dlg_env.limits == [("nvm-bind:ada:ent966-a", 10, 60)]
+        assert dlg_env.invalidated == ["ent966-a"]
+        call = dlg_env.audit.await_args.kwargs
+        assert call["event_action"] == "nevermined_delegation_bind"
+        assert call["details"] == {"delegation_id": DLG_ID, "payment_method_id": "pm_0123456789",
+                                   "provider": "stripe", "environment": "sandbox", "api_key_injected": True}
+        _no_secret(r)
+        assert AGENT_ENV_SECRET not in r.text
+
+    def test_snake_case_body_accepted(self, dlg_env):
+        r = dlg_env.client.post(DLG_URL, json={"delegation_id": DLG_ID})
+        assert r.status_code == 201 and r.json()["delegation"]["payment_method_id"] is None
+
+    @pytest.mark.parametrize("bad", ["../x", "short", "a" * 129, "id?x=1", f"{DLG_ID}/x", "dlg 12345678"])
+    def test_malformed_id_is_422_before_any_upstream_call(self, dlg_env, bad):
+        r = dlg_env.client.post(DLG_URL, json={"delegationId": bad})
+        assert r.status_code == 422
+        r = dlg_env.client.post(DLG_URL, json={"delegationId": DLG_ID, "paymentMethodId": bad})
+        assert r.status_code == 422
+        assert dlg_env.upstream["requests"] == [] and dlg_env.agent["reads"] == 0
+
+    def test_not_configured(self, dlg_env):
+        dlg_env.as_()
+        dlg_env.client.delete("/api/nevermined/organization")
+        dlg_env.as_(**OPERATOR)
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "nevermined_not_configured"
+        assert dlg_env.upstream["requests"] == [] and dlg_env.limits == []
+
+    def test_rate_limit_fires_before_upstream(self, dlg_env, monkeypatch):
+        from fastapi import HTTPException
+        from routers import nevermined_delegation as router_mod
+
+        def deny(*a, **k):
+            raise HTTPException(status_code=429, detail="slow down", headers={"Retry-After": "9"})
+
+        monkeypatch.setattr(router_mod, "enforce_rate_limit", deny)
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 429
+        assert dlg_env.upstream["requests"] == [] and dlg_env.agent["reads"] == 0
+        monkeypatch.setattr(router_mod, "enforce_rate_limit", lambda *a, **k: None)
+        assert dlg_env.client.get(DLG_URL).json()["funded"] is False
+
+    def test_second_bind_while_active_is_refused_without_upstream_or_env(self, dlg_env):
+        _bind_row(dlg_env)
+        r = dlg_env.client.post(DLG_URL, json={"delegationId": "new-0123456789"})
+        assert r.status_code == 409
+        detail = r.json()["detail"]
+        assert detail["code"] == "delegation_active" and detail["delegation_id"] == DLG_ID
+        assert "revoke" in detail["message"].lower() and "Nevermined" in detail["message"]
+        assert dlg_env.upstream["requests"] == []
+        assert dlg_env.agent["reads"] == 0 and dlg_env.agent["injects"] == []
+        assert dlg_env.client.get(DLG_URL).json()["delegation"]["delegation_id"] == DLG_ID
+
+    def test_agent_not_running(self, dlg_env):
+        dlg_env.agent["running"] = False
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "agent_not_running"
+        assert dlg_env.upstream["requests"] == [] and dlg_env.agent["reads"] == 0
+
+    def test_delegation_not_found(self, dlg_env):
+        dlg_env.upstream.update(status=404, body={"error": "no"})
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "delegation_not_found"
+        assert dlg_env.agent["reads"] == 0 and dlg_env.client.get(DLG_URL).json()["funded"] is False
+
+    @pytest.mark.parametrize("status", ["expired", "REVOKED", "Exhausted"])
+    def test_delegation_inactive(self, dlg_env, status):
+        dlg_env.upstream["body"] = {**LIVE_BODY, "status": status}
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 422
+        assert r.json()["detail"]["code"] == "delegation_inactive"
+        assert r.json()["detail"]["status"] == status.lower()
+        assert dlg_env.agent["reads"] == 0
+
+    @pytest.mark.parametrize("body", [{"spendingLimitCents": 5000}, {"transactions": []}, "<html>", {"status": ""}])
+    def test_absent_status_does_not_block_the_bind(self, dlg_env, body):
+        """F5: the shape is undocumented; only an explicit non-active status refuses."""
+        dlg_env.upstream["body"] = body
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 201, r.text
+        assert r.json()["live"]["status"] == "unknown" and r.json()["live"]["source"] == "nevermined"
+
+    def test_unreachable_writes_nothing(self, dlg_env):
+        import httpx
+
+        dlg_env.upstream["raise"] = httpx.ConnectTimeout("t " + AGENT_KEY)
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "nevermined_unreachable"
+        assert dlg_env.agent["reads"] == 0 and dlg_env.agent["injects"] == []
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []
+        assert dlg_env.audit.await_count == 1  # only the org PUT
+
+    @pytest.mark.parametrize("status,code,http", [(401, "nevermined_rejected", 502), (403, "nevermined_rejected", 502),
+                                                  (500, "nevermined_unreachable", 503), (418, "nevermined_rejected", 502)])
+    def test_upstream_refusals_write_nothing(self, dlg_env, status, code, http):
+        dlg_env.upstream.update(status=status, body={"error": "x " + AGENT_KEY})
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == http and r.json()["detail"]["code"] == code
+        assert dlg_env.agent["reads"] == 0 and dlg_env.client.get(DLG_URL).json()["history"] == []
+        _no_secret(r)
+
+    def test_busy(self, dlg_env, monkeypatch):
+        import contextlib
+        from services import nevermined_delegation_service as svc
+
+        @contextlib.asynccontextmanager
+        async def full():
+            raise svc.DelegationBusy("full")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(svc, "delegation_slot", full)
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "nevermined_busy"
+        assert r.headers["retry-after"] == "5" and dlg_env.agent["reads"] == 0
+
+    def test_env_read_failure_writes_no_row(self, dlg_env):
+        dlg_env.agent["read_status"] = 500
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "agent_unreachable"
+        assert dlg_env.agent["injects"] == []
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []
+
+    def test_inject_failure_compensates_by_deleting_the_inserted_row(self, dlg_env):
+        dlg_env.agent["inject_status"] = 500
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "agent_unreachable"
+        assert "Nevermined" in r.json()["detail"]["message"]
+        assert len(dlg_env.agent["injects"]) == 1  # the write was attempted
+        state = dlg_env.client.get(DLG_URL).json()
+        assert state["funded"] is False and state["history"] == []  # the row is gone, not revoked
+        assert dlg_env.audit.await_count == 1 and dlg_env.invalidated == []
+
+    def test_inject_transport_error_compensates_too(self, dlg_env):
+        import httpx
+
+        original = dlg_env.agent
+
+        # the reads succeed, the inject blows up at the transport
+        def handler(request):
+            if request.url.path == "/api/credentials/inject":
+                raise httpx.ConnectError("gone")
+            original["reads"] += 1
+            return httpx.Response(200, json={"files": {".env": original["env"]}})
+
+        from services import nevermined_delegation_service as svc
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(svc, "_agent_client", lambda name: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+            r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "agent_unreachable"
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []
+
+    def test_direct_db_race_is_bind_in_progress(self, dlg_env, monkeypatch):
+        """Two binds at once: the service's own check passes for both, the partial
+        unique index refuses the second insert."""
+        from database import db
+
+        _bind_row(dlg_env)  # the first bind's row is already active
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(db, "get_active_agent_delegation", lambda name: None)
+            r = dlg_env.client.post(DLG_URL, json={"delegationId": "second-0123456789"})
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "bind_in_progress"
+        assert dlg_env.agent["injects"] == []
+        state = dlg_env.client.get(DLG_URL).json()
+        assert state["delegation"]["delegation_id"] == DLG_ID and len(state["history"]) == 1
+
+    def test_pre_existing_api_key_is_not_claimed(self, dlg_env):
+        dlg_env.agent["env"] = "NVM_API_KEY=hand-pasted-personal-key\n"
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 201 and r.json()["api_key_injected"] is False
+        assert dlg_env.audit.await_args.kwargs["details"]["api_key_injected"] is False
+        # the org key still overwrites the value (Premise 6), but revoke will leave it
+        assert _env_keys(dlg_env.agent["env"])["NVM_API_KEY"] == f'"{AGENT_KEY}"'
+
+    def test_rebind_carries_api_key_injected_after_a_revoke_with_the_agent_down(self, dlg_env):
+        """H1: revoke while the agent is down leaves NVM_API_KEY in .env; the
+        next bind must still remember Trinity introduced it."""
+        assert dlg_env.client.post(DLG_URL, json=BIND_BODY).status_code == 201
+        dlg_env.agent["running"] = False
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["env_removed"] is False
+        assert "NVM_API_KEY" in _env_keys(dlg_env.agent["env"])
+        dlg_env.agent["running"] = True
+        r = dlg_env.client.post(DLG_URL, json={"delegationId": "second-0123456789"})
+        assert r.status_code == 201 and r.json()["api_key_injected"] is True
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["env_removed"] is True
+        assert "NVM_API_KEY" not in _env_keys(dlg_env.agent["env"])
+
+    def test_agent_key_is_refused(self, dlg_env):
+        dlg_env.as_(**{**OPERATOR, "agent_name": "ent966-a", "mcp_scope": "agent"})
+        assert dlg_env.client.post(DLG_URL, json=BIND_BODY).status_code == 403
+        assert dlg_env.client.delete(DLG_URL).status_code == 403
+        assert dlg_env.upstream["requests"] == []
+
+    def test_not_owner_is_uniform_404(self, dlg_env):
+        dlg_env.as_(**EVE)
+        for method in ("post", "delete"):
+            kw = {"json": BIND_BODY} if method == "post" else {}
+            a = getattr(dlg_env.client, method)(DLG_URL, **kw)
+            b = getattr(dlg_env.client, method)("/api/nevermined/agents/ent966-missing/delegation", **kw)
+            assert a.status_code == b.status_code == 404 and a.json() == b.json()
+        assert dlg_env.upstream["requests"] == []
+
+
+class TestRevoke:
+    def test_happy_path_upstream_first_then_row_then_env(self, dlg_env):
+        assert dlg_env.client.post(DLG_URL, json=BIND_BODY).status_code == 201
+        dlg_env.upstream["requests"].clear()
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"revoked": True, "delegation_id": DLG_ID, "env_removed": True, "env_note": None}
+        (req,) = dlg_env.upstream["requests"]
+        assert req.method == "DELETE" and str(req.url) == f"https://api.sandbox.nevermined.app/api/v1/delegation/{DLG_ID}"
+        assert req.headers["authorization"] == "Bearer " + AGENT_KEY
+        keys = _env_keys(dlg_env.agent["env"])
+        assert not {"NVM_DELEGATION_ID", "NVM_API_KEY", "NVM_ENVIRONMENT"} & set(keys)
+        assert keys["OTHER_KEY"] == "keep-me" and keys["SOME_SECRET"] == AGENT_ENV_SECRET
+        state = dlg_env.client.get(DLG_URL).json()
+        assert state["funded"] is False and state["history"][0]["revoked_at"]
+        call = dlg_env.audit.await_args.kwargs
+        assert call["event_action"] == "nevermined_delegation_revoke"
+        assert call["details"] == {"delegation_id": DLG_ID, "environment": "sandbox",
+                                   "env_removed": True, "api_key_removed": True}
+        assert dlg_env.invalidated[-1] == "ent966-a"
+        assert "Nevermined" in dlg_env.client.delete(DLG_URL).json()["detail"]["message"]
+
+    def test_hand_configured_key_survives_revoke(self, dlg_env):
+        _bind_row(dlg_env, api_key_injected=0)
+        dlg_env.agent["env"] = 'NVM_API_KEY=personal\nNVM_DELEGATION_ID="x"\nNVM_ENVIRONMENT=live\n'
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["env_removed"] is True
+        keys = _env_keys(dlg_env.agent["env"])
+        assert keys == {"NVM_API_KEY": "personal", "NVM_ENVIRONMENT": "live"}
+        assert dlg_env.audit.await_args.kwargs["details"]["api_key_removed"] is False
+
+    def test_upstream_404_is_revoked(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.upstream["delete_status"] = 404
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["revoked"] is True
+        assert dlg_env.client.get(DLG_URL).json()["funded"] is False
+
+    @pytest.mark.parametrize("failure,http,code", [
+        ("500", 503, "nevermined_unreachable"), ("401", 502, "nevermined_rejected"),
+        ("409", 502, "nevermined_rejected"), ("raise", 503, "nevermined_unreachable"), ("busy", 503, "nevermined_busy"),
+    ])
+    def test_upstream_failure_changes_nothing_locally(self, dlg_env, monkeypatch, failure, http, code):
+        import contextlib
+        import httpx
+        from services import nevermined_delegation_service as svc
+
+        _bind_row(dlg_env)
+        dlg_env.agent["env"] = 'NVM_DELEGATION_ID="x"\nNVM_API_KEY=k\n'
+        if failure == "raise":
+            dlg_env.upstream["raise"] = httpx.ReadTimeout("t")
+        mp = pytest.MonkeyPatch()
+        if failure == "busy":
+            @contextlib.asynccontextmanager
+            async def full():
+                raise svc.DelegationBusy("full")
+                yield  # pragma: no cover
+            mp.setattr(svc, "delegation_slot", full)
+        elif failure != "raise":
+            dlg_env.upstream["delete_status"] = int(failure)
+        try:
+            r = dlg_env.client.delete(DLG_URL)
+        finally:
+            mp.undo()
+        assert r.status_code == http and r.json()["detail"]["code"] == code
+        assert "Nevermined" in r.json()["detail"]["message"]
+        assert dlg_env.agent["injects"] == [] and dlg_env.agent["reads"] == 0
+        dlg_env.upstream["raise"] = None
+        state = dlg_env.client.get(DLG_URL).json()
+        assert state["funded"] is True and state["history"][0]["revoked_at"] is None
+        assert dlg_env.audit.await_count == 1
+
+    def test_agent_down_revokes_with_env_note(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.agent["running"] = False
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["revoked"] is True and body["env_removed"] is False
+        assert body["env_note"].startswith("agent_not_running") and "Nevermined" in body["env_note"]
+        assert dlg_env.agent["reads"] == 0
+        assert dlg_env.client.get(DLG_URL).json()["funded"] is False
+        assert dlg_env.audit.await_args.kwargs["details"]["env_removed"] is False
+
+    def test_env_removal_failure_still_revokes(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.agent["inject_status"] = 500
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["env_removed"] is False
+        assert r.json()["env_note"].startswith("agent_unreachable")
+        assert dlg_env.client.get(DLG_URL).json()["funded"] is False
+
+    def test_no_active_delegation(self, dlg_env):
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 404 and r.json()["detail"]["code"] == "no_active_delegation"
+        assert dlg_env.upstream["requests"] == []
+
+    def test_not_configured(self, dlg_env):
+        _bind_row(dlg_env)
+        dlg_env.as_()
+        # the org cannot be deleted while a mandate is active; drop it directly
+        from db.engine import get_engine
+        with get_engine().begin() as conn:
+            conn.execute(text("DELETE FROM nevermined_organization"))
+        dlg_env.as_(**OPERATOR)
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "nevermined_not_configured"
+
+
+class TestBindRevokeSecrets:
+    def test_no_secret_token_or_env_line_reaches_a_log_line(self, dlg_env, caplog):
+        import httpx
+
+        caplog.set_level(logging.DEBUG)
+        dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        dlg_env.client.delete(DLG_URL)
+        dlg_env.agent["inject_status"] = 500
+        dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        dlg_env.agent["inject_status"] = 200
+        dlg_env.upstream.update(status=401, body={"error": "nope " + AGENT_KEY})
+        dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        dlg_env.upstream["raise"] = httpx.ConnectError("conn " + AGENT_KEY)
+        dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert "Nevermined delegation bound to ent966-a" in caplog.text
+        assert "Nevermined delegation revoked for ent966-a" in caplog.text
+        for s in SECRETS + (SESSION_TOKEN, AGENT_ENV_SECRET, "keep-me", "OTHER_KEY="):
+            assert s not in caplog.text
