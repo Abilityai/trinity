@@ -17,6 +17,9 @@ The fix is a server-side gated write: the agent never supplies a user email. The
 - **MCP Tool**: `write_user_memory` in `src/mcp-server/src/tools/memory.ts:30`
 - **API**: `POST /api/agents/{agent_name}/user-memory`
 
+## Frontend Layer
+None in this flow: the agent writes through MCP. The person sees what an agent remembers about them, and the writes behind it, in the Workspace agent page (`PortalAgentMemory.vue`, ent#637 — see [schedule-workspace-delivery.md](schedule-workspace-delivery.md)). A refused write leaves nothing there to see.
+
 ## MCP Tool Layer
 
 ### Tool Definition
@@ -132,6 +135,19 @@ The agent never provides the user's email — it supplies only `execution_id`. T
 | A group (or unverified) channel turn | 422 | `{"code": "memory_not_one_to_one", ...}` |
 | No verified email on execution | 422 | No verified user email associated with this execution |
 | The text trips the screen | 422 | `{"code": "memory_<rule>", "message": "Line N …", "line": N}` |
+
+## Security Considerations
+- **Who writes**: an agent-scoped key writes only its own agent's memory (self-gate), for the person its execution serves — resolved server-side, never named by the caller (a seat run's addressee, a channel turn's one-to-one verified speaker, a public/Workspace turn's verified visitor). A group turn writes no one's memory.
+- **What is written**: the [anti-poisoning gates](#anti-poisoning-gates-trinity-enterprise419) — a named pattern screen at the boundary (a cheap screen, not prompt-injection detection: paraphrase, other languages and homoglyphs pass) and the trust envelope at the read point, which does not depend on spelling.
+- **Logs**: a refusal is logged with the rule, the line, the execution and the trigger — never the notes; the 422 body carries the rule and the line, never the text.
+- **Cost**: every guard pass is linear; the summarizer clamps each chat message before formatting it on the event loop.
+- **Residual limits**: the summarizer's writes are screened but not recorded in history, and there is no owner/admin memory view (trinity-enterprise#962).
+
+## Testing
+- `tests/unit/test_ent419_memory_poisoning_gates.py` — the screen through the real router (each rule, folded spellings, benign table, the hit-keyed exemption and its bypasses, copy-back normalisation, logging), AC 4 per channel, the envelope on the real `format_user_memory_block` (incl. a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer, seat decisions, the Telegram defang, AST pins, totality and time budgets. ✅
+- `tests/unit/test_ent637_schedule_seat_memory.py` — seat-run writes, history and undo. ✅
+- `tests/unit/test_ent79_portal_exposure.py::test_portal_memory_reaches_the_turn_inside_the_trust_envelope` — `portal_chat` → `execute_task(system_prompt=…)`. ✅
+- `src/mcp-server/src/tools/memory.test.ts` — a 422 refusal's code, message and line reach the agent; the published description names the refusal codes. ✅
 
 ## Key Files
 | File | Role |
