@@ -23,9 +23,10 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from db.evaluations import TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, tier0_gate_outcome
+from db.evaluations import (
+    TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, TIER1_EVALUATOR_PREFIX, tier0_gate_outcome,
+)
 
-TIER1_EVALUATOR_PREFIX = "platform:tier1:"
 TIER1_KIND = "platform:tier1"
 MAX_WINDOW_DAYS = 92
 FAILED_LIMIT = 50
@@ -112,6 +113,22 @@ def _failed_checks(row: dict, key: str = "checks") -> list[dict]:
         out.append({"id": cid,
                     "reason": reason if isinstance(reason, str) and _TOKEN_RE.match(reason) else None})
     return out
+
+
+# A playbook ref as Tier-0 parsed it: a bare skill name, `ns:name` at most.
+_PLAYBOOK_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}(?::[A-Za-z0-9][A-Za-z0-9_.-]{0,63})?$")
+
+
+def playbook_of(row: dict) -> Optional[str]:
+    """The playbook a run invoked (Tier-0's `intent_ref`), or None. Read
+    through the same token shape Tier-0 parsed it with, so a ref is a name,
+    never prose (ent#939)."""
+    checks = row.get("checks")
+    intent = checks.get("intent_ref") if isinstance(checks, dict) else None
+    if not isinstance(intent, dict) or intent.get("kind") != "playbook":
+        return None
+    ref = intent.get("ref")
+    return ref if isinstance(ref, str) and _PLAYBOOK_RE.match(ref) else None
 
 
 def _completed(row: dict) -> bool:
@@ -237,6 +254,7 @@ def fold(rows: list[dict], human_labels: dict[str, list[float]], *,
                     "agent_name": r.get("agent_name"),
                     "caller_agent": r.get("caller_agent"),
                     "schedule_id": r.get("schedule_id"),
+                    "playbook": playbook_of(r),
                     "completed_at": r.get("completed_at"),
                     "completion": done,
                     "failed_checks": fails,

@@ -26,10 +26,11 @@ from typing import Iterable, Optional
 from sqlalchemy import and_, exists, or_, select
 
 from db.engine import get_engine
-from db.evaluations import TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, TIER0_TARGET_KIND
+from db.evaluations import (
+    TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, TIER0_TARGET_KIND, TIER1_EVALUATOR_PREFIX,
+)
 from db.tables import agent_evaluations, schedule_executions
 
-TIER1_EVALUATOR_PREFIX = "platform:tier1:"
 # The person-label kinds (ent#366). Anything else is not a human label.
 HUMAN_EVALUATOR_PREFIXES = ("workspace:", "operator:")
 AGG_ROW_CAP = 5000
@@ -159,6 +160,7 @@ class EvaluationAggregateOperations:
                 se.triggered_by,
                 se.started_at,
                 se.completed_at,
+                se.cost,
                 t1.c.quality.label("judge_quality"),
                 t1.c.judge_json,
                 t1.c.evaluator.label("judge_evaluator"),
@@ -201,6 +203,24 @@ class EvaluationAggregateOperations:
         )
         with get_engine().connect() as conn:
             return [r[0] for r in conn.execute(stmt).all()]
+
+    def agent_costs(self, agent_name: str, *, since: str, until: str,
+                    cap: int = AGG_ROW_CAP) -> list[float]:
+        """The recorded cost of each of `agent_name`'s successful runs that
+        completed in `[since, until)` — the cost baseline for ent#939's
+        cost-vs-baseline indicator. Graded or not: the baseline is what the
+        agent spends, not what was evaluated."""
+        se = schedule_executions.c
+        stmt = (
+            select(se.cost)
+            .where(and_(se.agent_name == agent_name, se.status == "success",
+                        se.completed_at >= since, se.completed_at < until,
+                        se.cost.isnot(None)))
+            .order_by(se.completed_at.desc())
+            .limit(max(0, int(cap)))
+        )
+        with get_engine().connect() as conn:
+            return [float(r[0]) for r in conn.execute(stmt).all()]
 
     def human_labels(self, execution_ids: Iterable[str]) -> dict[str, list[float]]:
         """`{execution_id: [quality, ...]}` from person ratings (ent#366) that

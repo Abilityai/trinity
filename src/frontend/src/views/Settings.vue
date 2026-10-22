@@ -74,6 +74,8 @@
           <CredentialVaultPanel v-if="activeTab === 'credential-vault'" />
           <SkillRunnerPanel v-if="activeTab === 'skill-runner'" @navigate-tab="selectTab" />
 
+          <EvalJudgePanel v-if="activeTab === 'eval-judge'" />
+
           <!-- Retention Tab Content (#1039) -->
           <div v-if="activeTab === 'retention'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-5">
@@ -2342,6 +2344,7 @@ import SsoPanel from '../components/settings/SsoPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'
 import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vue'
 import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
+import EvalJudgePanel from '../components/settings/EvalJudgePanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
 import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
@@ -2431,6 +2434,9 @@ const ALL_TABS = [
   // (`requires_entitlement("skill_runner")` + `require_human_admin`), so
   // this is UX, not containment.
   { id: 'skill-runner', label: 'Skill Runner', adminOnly: true,  requires: 'skill_runner' },
+  // ent#936 — the sampled judge's platform policy. Hidden when unentitled;
+  // the API is admin + entitlement gated regardless.
+  { id: 'eval-judge',   label: 'Judge',        adminOnly: true,  requires: 'eval_judge' },
   { id: 'agents',       label: 'Agents',       adminOnly: true  },
   { id: 'retention',    label: 'Retention',    adminOnly: true  },
   // ent#184 — local product-event activation funnel. Capture is OSS-core;

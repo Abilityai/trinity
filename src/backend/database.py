@@ -3135,6 +3135,9 @@ class DatabaseManager:
     def evaluation_human_labels(self, execution_ids):
         return self._evaluation_aggregate_ops.human_labels(execution_ids)
 
+    def evaluation_agent_costs(self, agent_name, **kw):
+        return self._evaluation_aggregate_ops.agent_costs(agent_name, **kw)
+
     def execution_chain_node(self, execution_id):
         return self._evaluation_aggregate_ops.chain_node(execution_id)
 
@@ -3156,6 +3159,22 @@ class DatabaseManager:
 
     def unevaluated_execution_ids(self, **kw):
         return self._evaluation_ops.unevaluated_execution_ids(**kw)
+
+    # --- Tier-1 sampled judge seam (ent#936) --------------------------------
+    def claim_tier1_row(self, execution_id, **kw):
+        return self._evaluation_ops.claim_tier1_row(execution_id, **kw)
+
+    def finish_tier1_row(self, eval_id, **kw):
+        return self._evaluation_ops.finish_tier1_row(eval_id, **kw)
+
+    def latest_tier1_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_tier1_for_execution(execution_id)
+
+    def tier1_candidates(self, **kw):
+        return self._evaluation_ops.tier1_candidates(**kw)
+
+    def reclaim_stale_tier1(self, **kw):
+        return self._evaluation_ops.reclaim_stale_tier1(**kw)
 
     def unevaluated_pair_execution_ids(self, **kw):  # ent#940
         return self._evaluation_ops.unevaluated_pair_execution_ids(**kw)

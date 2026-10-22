@@ -243,6 +243,28 @@ the summary route; `agent_name` defaults to the calling agent, the access row is
 `enforce` on `agent_name`, and the projection is the backend's — the proxy never
 decides what an agent may see.
 
+## Tier-1 judge seam (ent#936, checkpoint A)
+
+The sampled, model-backed judge is an enterprise module; OSS carries the seam
+it writes through, in `db/evaluations.py` (contract: [requirements §46
+addendum B](../requirements/lifecycle-observability.md)):
+
+```
+ tier1_candidates(limit, lookback_hours)   Tier-0 rows whose run has no Tier-1 row
+        ▼
+ claim_tier1_row(execution_id, model)      INSERT platform:tier1:<model> in state
+   compare-and-set on the one-row index      `claimed`; loser → None (no call, no spend)
+        ▼  (the judge's provider call — enterprise, not here)
+ finish_tier1_row(eval_id, judge)          validate_judge_json → verdict or skip,
+   only onto a row still `claimed`           final per run; Tier-0 row untouched
+ reclaim_stale_tier1(stale_seconds)        releases a claim a dead worker left
+```
+
+A second row, never the Tier-0 row (a Tier-0 re-grade would clobber `quality`
+in place). Reached from the `database.py` facade only; the write fence holds
+(`tests/unit/test_935_write_fence.py`, ent#936 section). The agent-facing
+read of a judge row is ent#937's. Tests: `tests/unit/test_936_tier1_writer.py`.
+
 ## Operations › Evaluations tab (ent#938)
 
 **Component tree.** `views/Operations.vue` adds tab id `evaluations`. Gated tabs are
@@ -395,6 +417,34 @@ only its own: a callee's `failed` list never carries the caller's edge failure.
 `test_940_read_receipt.py`, `test_940_trigger_widening.py`,
 `test_940_facade.py`; the writer fence in `test_935_write_fence.py`.
 
+## Agent Overview › Behavior — per-agent indicators (ent#939)
+
+```
+OverviewPanel ─► indicators/AgentBehavior.vue ─► stores/agentIndicators.js
+   GET /api/agents/{name}/evaluations/indicators?days=14        (require_person + access gate)
+     routers/evaluations.py::agent_indicators_read
+       db.evaluation_window_rows(window) + (previous window) + human labels
+       db.evaluation_agent_costs(30 days before the window)     (successful runs, graded or not)
+       services/agent_indicators.compute ─► six indicators + fix_paths
+   click a tile ─► indicators/BehaviorDrilldown.vue
+   GET …/indicators/{indicator}/runs?days=&check=
+       services/agent_indicators.failing_runs ─► groups by playbook | schedule | chat
+```
+
+Six named indicators (completion, checks passed, scope fidelity, escalation
+correctness, quality, cost vs baseline), each with its sample; under the floor
+(5 runs, `agent_indicators_min_runs`) an indicator is `insufficient` and has no
+value. There is no blended score. The source of a run is the playbook Tier-0
+parsed (`checks.intent_ref`), else its schedule, else chat (`__manual__` is chat).
+
+**The agent's own view** is the ent#937 summary: each failed run now names its
+`playbook`, and `judge_failed` lists judge-failed dimensions by name
+(`agent_indicators.judge_failures`). **Workspace**: the role card read carries
+`behavior` (tones + run count, `role_card.behavior_for`), rendered by
+`portal/PortalAgentBehavior.vue` under the role card.
+
+**Tests.** `tests/unit/test_939_*.py`; `src/frontend/tests/unit/agentBehavior.mount.spec.js`.
+
 ## What this does NOT include
 
 - **The thing that populates `quality`.** Tier-0 grades what the run left
@@ -411,6 +461,7 @@ only its own: a callee's `failed` list never carries the caller's edge failure.
 | Tier-0 | `src/backend/services/tier0_evaluator.py`, `src/backend/services/tier0_sweep_service.py` |
 | Pair (ent#940) | `src/backend/services/tier0_pair_evaluator.py`; read receipt in `src/backend/services/activity_service.py` (`record_first_reads`), hooked in `routers/schedules.py` + `routers/fan_out.py`; `db/activities.py`, `db/schedules/executions.py` (`sibling_executions`, `pair_rework_series`) |
 | DB | `src/backend/db/evaluations.py` (`EvaluationOperations`), facade in `database.py` |
+| Tier-1 seam | `src/backend/db/evaluations.py` (`claim_tier1_row` / `finish_tier1_row` / `tier1_candidates` / `reclaim_stale_tier1` / `validate_judge_json`), ent#936 |
 | Read (ent#937) | `src/backend/db/evaluation_aggregates.py`, `src/backend/services/evaluation_read_service.py`, `src/backend/services/eval_scorecard_service.py` |
 | MCP | `src/mcp-server/src/tools/evaluations.ts` (`get_evaluation_summary`) |
 | Schema | `db/schema.py`, `db/tables.py`, `db/migrations.py`, `migrations/versions/0033_agent_evaluations.py` |

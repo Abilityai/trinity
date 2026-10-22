@@ -6229,6 +6229,18 @@
       "description": "Checks passed rate (ent#935 C3) on the real schema, across all three analytics payloads (per-schedule, schedules rollup row, agent Overview): rate = runs whose Tier-0 gate headline passed / runs evaluated; a skip-only row is evaluated, not passed; a run with no Tier-0 row is not evaluated (neither side); 0 evaluated -> rate None; workspace:/operator: rows never enter it; window, schedule and agent scoping; Completion (success_rate) unchanged; the Pydantic envelopes carry the fields. Mutation: counting a skip-only headline as passed turns 7 tests red."
     },
     {
+      "file": "unit/test_936_tier1_writer.py",
+      "feature": "abilityai/trinity-enterprise#936",
+      "added": "2026-10-18",
+      "categories": [
+        "backend",
+        "database",
+        "evaluations",
+        "unit"
+      ],
+      "description": "Tier-1 (judge) seam (ent#936 checkpoint A) on the real schema: claim_tier1_row is a compare-and-set on the ent#366 partial unique index (needs the Tier-0 row; a second claim under any model is None; two concurrent claims on one execution yield exactly one row and one claim); finish_tier1_row writes a verdict or a skip onto a row still `claimed` only (a finished row is final, a Tier-0 id writes nothing, an invalid document never reaches the table); validate_judge_json names each structural defect (schema, state, dimension/verdict enums, 160-char reason cap, no quotation marks, quality range, skip enum; an omitted dimension is n/a); tier1_candidates are Tier-0 rows without a Tier-1 row, bounded, oldest first; reclaim_stale_tier1 releases stale claims only; a Tier-0 re-grade keeps the judge row; a Tier-1 row never enters a rating read. Mutations: dropping the any-model pre-check reds the second-claim test; dropping the IntegrityError loser handler reds the race test."
+    },
+    {
       "file": "unit/test_938_tab_guard.py",
       "feature": "abilityai/trinity-enterprise#938",
       "added": "2026-10-18",

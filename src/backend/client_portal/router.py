@@ -875,9 +875,13 @@ async def portal_agent_role(
             and objectives_read_budget.admit(agent_name)
         )
 
-    return await role_card.build_role_card(
+    card = await role_card.build_role_card(
         agent_name, email, is_platform=principal.is_platform,
         admit_objectives=admit_objectives)
+    # ent#939: on every card, role or not — it is read from the platform's
+    # evaluations, not the agent's files.
+    card["behavior"] = role_card.behavior_for(agent_name)
+    return card
 
 
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)

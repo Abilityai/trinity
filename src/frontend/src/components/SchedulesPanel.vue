@@ -354,6 +354,8 @@
         :retrying="loading"
         @retry="loadSchedules"
       />
+      <!-- trinity-enterprise#74: anomaly detection — admin on an entitled install. -->
+      <AnomalyWatchCard v-if="anomalyActive" :agent-name="agentName" />
       <div
         v-for="schedule in schedules"
         :key="schedule.id"
@@ -374,6 +376,7 @@
               >
                 {{ schedule.enabled ? 'Active' : 'Disabled' }}
               </span>
+              <AnomalyBadge v-if="anomalyActive" :schedule-id="schedule.id" />
             </div>
             <p v-if="schedule.description" class="text-sm text-gray-500 dark:text-gray-400 mt-1">{{ schedule.description }}</p>
 
@@ -562,6 +565,13 @@
             </button>
           </div>
         </div>
+
+        <!-- trinity-enterprise#74: the schedule's open anomaly incident. -->
+        <AnomalyIncident
+          v-if="anomalyActive"
+          :schedule-id="schedule.id"
+          @open-execution="(id) => router.push({ name: 'ExecutionDetail', params: { name: agentName, executionId: id } })"
+        />
 
         <!-- Expand to show executions -->
         <button
@@ -926,6 +936,12 @@ import { parseUTC } from '@/utils/timestamps'
 import ConfirmDialog from './ConfirmDialog.vue'
 import ModelSelector from './ModelSelector.vue'
 import ScheduleAnalyticsCard from './ScheduleAnalyticsCard.vue'
+import AnomalyWatchCard from './anomaly/AnomalyWatchCard.vue'
+import AnomalyBadge from './anomaly/AnomalyBadge.vue'
+import AnomalyIncident from './anomaly/AnomalyIncident.vue'
+import { useRouter } from 'vue-router'
+import { useEnterpriseStore } from '../stores/enterprise'
+import { useAnomalyDetectionStore, FEATURE_ID as ANOMALY_FEATURE } from '../stores/anomalyDetection'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { apiErrorMessage } from '../utils/apiError'
@@ -964,6 +980,13 @@ const props = defineProps({
 defineEmits(['enable-autonomy'])
 
 const authStore = useAuthStore()
+const router = useRouter()
+// trinity-enterprise#74: the anomaly panel is an admin's, on an entitled
+// install — the API's own guard (entitlement + admin + person), mirrored.
+const enterpriseStore = useEnterpriseStore()
+const anomalyStore = useAnomalyDetectionStore()
+const anomalyActive = computed(() =>
+  authStore.role === 'admin' && enterpriseStore.isEntitled(ANOMALY_FEATURE))
 const executionsStore = useExecutionsStore()
 
 // #1115: inline per-schedule stats. Same single aggregate the Overview uses
@@ -1308,6 +1331,7 @@ async function loadSchedules() {
     if (seq !== loadSeq) return
     schedules.value = response.data
     loadError.value = ''
+    if (anomalyActive.value) anomalyStore.load(props.agentName)
   } catch (error) {
     if (seq !== loadSeq) return
     console.error('Failed to load schedules:', error)
@@ -1741,8 +1765,12 @@ watch(() => props.initialMessage, (newMessage) => {
   }
 }, { immediate: true })
 
+// The entitlement list lands asynchronously; load the anomaly view when it does.
+watch(anomalyActive, (on) => { if (on) anomalyStore.load(props.agentName) })
+
 onMounted(async () => {
   loadSchedules()
+  enterpriseStore.loadFeatureFlags()
   // Fetch platform default model for display and ModelSelector placeholder (#831)
   try {
     const r = await axios.get('/api/settings/feature-flags', { headers: authStore.authHeader })
