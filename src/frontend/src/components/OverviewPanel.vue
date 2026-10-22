@@ -23,6 +23,7 @@ import { useAgentsStore } from '../stores/agents'
 import StackedBarChart from './StackedBarChart.vue'
 import TrendLineChart from './TrendLineChart.vue'
 import CompatibilityPanel from './CompatibilityPanel.vue'
+import AgentBehavior from './indicators/AgentBehavior.vue'
 
 const props = defineProps({
   agent: { type: Object, required: true },
@@ -335,6 +336,14 @@ onMounted(() => {
 
     <!-- 2b. Deployment compatibility (#668) — count + expandable checklist, auto-fix -->
     <CompatibilityPanel :agent="agent" />
+
+    <!-- 2c. Behavior (trinity-enterprise#939) — per-agent indicators over the
+         ent#937 evaluations, each its own measure; click for the runs. -->
+    <AgentBehavior
+      :agent-name="agent.name"
+      @navigate-tab="(t) => emit('navigate-tab', t)"
+      @open-task="(id) => emit('open-task', id)"
+    />
 
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">

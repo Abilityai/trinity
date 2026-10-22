@@ -3135,6 +3135,9 @@ class DatabaseManager:
     def evaluation_human_labels(self, execution_ids):
         return self._evaluation_aggregate_ops.human_labels(execution_ids)
 
+    def evaluation_agent_costs(self, agent_name, **kw):
+        return self._evaluation_aggregate_ops.agent_costs(agent_name, **kw)
+
     def execution_chain_node(self, execution_id):
         return self._evaluation_aggregate_ops.chain_node(execution_id)
 

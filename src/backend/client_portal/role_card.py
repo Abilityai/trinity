@@ -494,6 +494,33 @@ async def build_role_card(agent_name: str, email: str, *, is_platform: bool,
     return card
 
 
+#: ent#939 — the window the Workspace's plain-words indicators cover.
+BEHAVIOR_DAYS = 14
+
+
+def behavior_for(agent_name: str) -> Optional[dict]:
+    """ent#939 — "how it's been working lately", for the people the agent
+    serves: a tone per indicator and the run count it rests on. No rate, score
+    or check id crosses (`agent_indicators.plain_lines`). Read from the
+    platform's own evaluations, never the container, so a stopped agent still
+    has one. Fail-soft: an unreadable window is None (nothing shown), never an
+    empty list that would read as "no problems"."""
+    from services import agent_indicators
+
+    try:
+        now = datetime.now(timezone.utc)
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+        rows, _ = db.evaluation_window_rows(
+            since=(now - timedelta(days=BEHAVIOR_DAYS)).strftime(fmt),
+            until=(now + timedelta(microseconds=1)).strftime(fmt), agents={agent_name})
+        computed = agent_indicators.compute(rows, [], {}, [])
+    except Exception as exc:  # noqa: BLE001 — the card renders without it
+        logger.warning("[role_card] behavior read failed for %s: %s", agent_name, type(exc).__name__)
+        return None
+    return {"days": BEHAVIOR_DAYS, "runs": computed["runs"],
+            "lines": agent_indicators.plain_lines(computed) if computed["runs"] else []}
+
+
 def _served_seat(agent_name: str, email: str) -> dict:
     """The seat this agent serves for this viewer — the seam's own never-raising
     answer, with a belt for an import-time failure."""

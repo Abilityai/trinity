@@ -1256,6 +1256,49 @@ See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 
 ---
 
+### Addendum D — Per-agent behavioral indicators (trinity-enterprise#939)
+
+Read-only over the ent#937 window rows; nothing here writes an evaluation.
+
+- **FR-18 — The indicator set**: completion, checks passed (the Tier-0 gate rate, "honesty
+  of claims"), scope fidelity and escalation correctness (the judge's dimension verdicts;
+  `n/a` is not a sample), quality (judged runs only, with the judge↔person agreement and
+  its `n`), cost vs baseline (this window's median run cost over the median of the agent's
+  successful runs in the 30 days before). Each is its own measure: no blended score, no
+  weighting, no rank. Declared defaults: window 14 days (7 / 14 / 30 accepted), sample floor
+  5 runs (`system_settings['agent_indicators_min_runs']`, clamped 1–100). Below the floor an
+  indicator reads `insufficient` with the counts it has; an empty window reads `no_runs`;
+  `value` is null in both, so nothing renders a zero. A delta in points against the
+  previous same-length window appears only when both windows meet the floor.
+- **FR-19 — Operator read**: `GET /api/agents/{name}/evaluations/indicators?days=` behind
+  the agent access gate and `require_person` — an agent key is refused (the agent reads its
+  failed checks through the summary, FR-21). Also returns the fix paths: failed checks and
+  judge-failed dimensions counted per source — the playbook the run invoked (Tier-0's
+  `intent_ref`), else its schedule (named), else chat. A chat/API run's
+  `schedule_id='__manual__'` is chat, never a schedule.
+- **FR-20 — Drill-down**: `GET …/indicators/{indicator}/runs?days=&check=` lists the runs
+  counting against one indicator, grouped by source with "failed of runs" per group, newest
+  50 per group, reason codes only (never evidence). `check=` narrows checks passed to one
+  Tier-0 check. Cost has no runs to list (422).
+- **FR-21 — The agent's own view**: the ent#937 summary (MCP `get_evaluation_summary`) adds
+  the playbook each failed run invoked and `judge_failed` — runs the judge failed on a
+  dimension, by dimension name only. Never a score, a rate it did not already read, or a
+  judge's reason.
+- **FR-22 — Workspace**: the role card read (`GET /api/enterprise/client-portal/agents/
+  {name}/role`) carries `behavior` on every card, role or not: a tone per indicator
+  (`good` ≥ 85 %, `watch` below, `unknown` under the floor) and the run count, never a
+  number. The sentences live in the frontend. Unreadable → `null` (nothing shown, never
+  "all good").
+- **FR-23 — UI**: Agent Overview › Behavior (`components/indicators/`), tiles that open the
+  drill-down in place, the fix-path table linking to the Skills / Schedules tab or
+  Operations › Evaluations; the Workspace agent details render the plain-words block
+  (`portal/PortalAgentBehavior.vue`). Out of scope until ruled: auto-adjusting skills from
+  indicators, any agent-visible scalar, cross-install comparison.
+
+**Tests.** `tests/unit/test_939_indicators_compute.py`, `test_939_indicators_routes.py`,
+`test_939_agent_self_view.py`, `test_939_workspace_behavior.py`;
+`src/frontend/tests/unit/agentBehavior.mount.spec.js`.
+
 ## 47. Declared Metric Registry (trinity-enterprise#477)
 
 **Epic**: ent#476 (agent-declared metrics). **Siblings**: ent#478 (`record_metrics` + `metric_points`), ent#479 (read + freshness), ent#482 (wizards), ent#483 (validator parity), ent#80 (cross-agent query).

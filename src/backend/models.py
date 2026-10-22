@@ -2071,11 +2071,23 @@ class EvaluationFailedRun(BaseModel):
     agent_name: str
     caller_agent: Optional[str] = None
     schedule_id: Optional[str] = None
+    # ent#939 — the playbook the run invoked (where its fix lives), if any.
+    playbook: Optional[str] = None
     completed_at: Optional[str] = None
     completion: bool
     failed_checks: List[Dict[str, Optional[str]]] = []
     # ent#940 — the failed edge checks of the run's pair row, same vocabulary.
     pair_failed_checks: List[Dict[str, Optional[str]]] = []
+
+
+class EvaluationJudgeFailedRun(BaseModel):
+    """ent#939 — a run a judge failed on a dimension, by dimension name only:
+    no reason prose, no score, no model."""
+    execution_id: str
+    completed_at: Optional[str] = None
+    schedule_id: Optional[str] = None
+    playbook: Optional[str] = None
+    dimensions: List[str]
 
 
 class EvaluationAgentSummaryResponse(BaseModel):
@@ -2089,6 +2101,79 @@ class EvaluationAgentSummaryResponse(BaseModel):
     # ent#940 (TD-6) — runs this agent delegated whose edge failed a pair
     # check: its own failures as the caller (`failed` holds them as callee).
     pair_failed: List[EvaluationFailedRun] = []
+    # ent#939 — runs a judge failed on a dimension (names only).
+    judge_failed: List[EvaluationJudgeFailedRun] = []
+
+
+class AgentIndicator(BaseModel):
+    """One behavioral indicator (ent#939). `value` is None unless `state` is
+    `ok` — a thin sample is never rendered as a zero."""
+    id: str
+    state: Literal["ok", "insufficient", "no_runs"]
+    value: Optional[float] = None
+    n: int = 0
+    num: Optional[int] = None
+    # points against the same-length window before; None when either is thin
+    delta: Optional[int] = None
+    # quality only — the judge's agreement with person ratings
+    agreement: Optional[float] = None
+    agreement_n: Optional[int] = None
+    # cost_vs_baseline only — medians per run, USD
+    median: Optional[float] = None
+    baseline: Optional[float] = None
+    baseline_n: Optional[int] = None
+
+
+class AgentIndicatorSource(BaseModel):
+    kind: Literal["playbook", "schedule", "chat"]
+    ref: Optional[str] = None
+    # a schedule's name, resolved for display
+    label: Optional[str] = None
+
+
+class AgentIndicatorFixPath(BaseModel):
+    check: str
+    judge: bool
+    source: AgentIndicatorSource
+    failed: int
+
+
+class AgentIndicatorsResponse(BaseModel):
+    agent_name: str
+    days: int
+    since: str
+    until: str
+    min_runs: int
+    runs: int
+    truncated: bool
+    latest_run_at: Optional[str] = None
+    indicators: List[AgentIndicator]
+    fix_paths: List[AgentIndicatorFixPath]
+
+
+class AgentIndicatorRun(BaseModel):
+    execution_id: str
+    completed_at: Optional[str] = None
+    reasons: List[str]
+    cost: Optional[float] = None
+
+
+class AgentIndicatorGroup(BaseModel):
+    source: AgentIndicatorSource
+    runs: int
+    failed: int
+    items: List[AgentIndicatorRun]
+
+
+class AgentIndicatorRunsResponse(BaseModel):
+    agent_name: str
+    indicator: str
+    check: Optional[str] = None
+    days: int
+    since: str
+    until: str
+    truncated: bool
+    groups: List[AgentIndicatorGroup]
 
 
 class EvaluationFailedResponse(BaseModel):

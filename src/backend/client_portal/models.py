@@ -709,6 +709,22 @@ class PortalRoleWalkthrough(BaseModel):
     unavailable: bool = False
 
 
+class PortalBehaviorLine(BaseModel):
+    """ent#939 — one behavioral indicator in plain words for the people the
+    agent serves: a tone, no number. The sentence is the frontend's."""
+    indicator: Literal["completion", "checks_passed", "scope_fidelity",
+                       "escalation_correctness"]
+    tone: Literal["good", "watch", "unknown"]
+
+
+class PortalBehavior(BaseModel):
+    """ent#939 — "how it's been working lately". `runs` is the sample the
+    lines rest on; 0 renders "no tasks in the last N days", never all-good."""
+    days: int
+    runs: int
+    lines: list[PortalBehaviorLine] = Field(default_factory=list)
+
+
 class PortalRoleCard(BaseModel):
     """ent#527 — the role card, a projection of the agent's own files.
     `role` is None when the agent carries no `x-role` (no card is rendered)."""
@@ -740,6 +756,9 @@ class PortalRoleCard(BaseModel):
     brief_held: bool = False
     # agent_stopped | agent_unreachable — the files live in the container.
     unavailable: Optional[str] = None
+    # ent#939 — the behavioral indicators in plain words; None when they could
+    # not be read (rendered as nothing, never as "all good").
+    behavior: Optional[PortalBehavior] = None
 
 
 class PortalRoleReadinessFlip(BaseModel):

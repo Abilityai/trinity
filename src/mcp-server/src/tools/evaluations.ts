@@ -35,8 +35,10 @@ export function createEvaluationTools(client: TrinityClient, requireApiKey: bool
         "Read how an agent's runs were graded over a window: runs evaluated and completed, " +
         "completion_rate, runs that passed the deterministic Tier-0 gate and checks_passed_rate, " +
         "per_check_fail (check id -> runs failing it), and up to 50 `failed` runs, each with " +
-        "its execution_id, caller_agent, schedule_id and failed check ids with reason codes. " +
-        "Evidence text is never returned. " +
+        "its execution_id, caller_agent, schedule_id, the playbook it invoked (where the fix " +
+        "lives) and failed check ids with reason codes. `judge_failed` lists runs the judge " +
+        "failed on a dimension (scope_fidelity, escalation_correctness, ...), by dimension name " +
+        "only. Evidence text and judge reasons are never returned. " +
         "Scope: an agent key reads ITS OWN runs only; naming another agent returns zeros, " +
         "even one you may reach. `caller` keeps the runs that agent delegated to you. " +
         "Omit `agent_name` to read yourself. An agent or machine key NEVER sees judge scores: " +

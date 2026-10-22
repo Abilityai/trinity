@@ -417,6 +417,34 @@ only its own: a callee's `failed` list never carries the caller's edge failure.
 `test_940_read_receipt.py`, `test_940_trigger_widening.py`,
 `test_940_facade.py`; the writer fence in `test_935_write_fence.py`.
 
+## Agent Overview › Behavior — per-agent indicators (ent#939)
+
+```
+OverviewPanel ─► indicators/AgentBehavior.vue ─► stores/agentIndicators.js
+   GET /api/agents/{name}/evaluations/indicators?days=14        (require_person + access gate)
+     routers/evaluations.py::agent_indicators_read
+       db.evaluation_window_rows(window) + (previous window) + human labels
+       db.evaluation_agent_costs(30 days before the window)     (successful runs, graded or not)
+       services/agent_indicators.compute ─► six indicators + fix_paths
+   click a tile ─► indicators/BehaviorDrilldown.vue
+   GET …/indicators/{indicator}/runs?days=&check=
+       services/agent_indicators.failing_runs ─► groups by playbook | schedule | chat
+```
+
+Six named indicators (completion, checks passed, scope fidelity, escalation
+correctness, quality, cost vs baseline), each with its sample; under the floor
+(5 runs, `agent_indicators_min_runs`) an indicator is `insufficient` and has no
+value. There is no blended score. The source of a run is the playbook Tier-0
+parsed (`checks.intent_ref`), else its schedule, else chat (`__manual__` is chat).
+
+**The agent's own view** is the ent#937 summary: each failed run now names its
+`playbook`, and `judge_failed` lists judge-failed dimensions by name
+(`agent_indicators.judge_failures`). **Workspace**: the role card read carries
+`behavior` (tones + run count, `role_card.behavior_for`), rendered by
+`portal/PortalAgentBehavior.vue` under the role card.
+
+**Tests.** `tests/unit/test_939_*.py`; `src/frontend/tests/unit/agentBehavior.mount.spec.js`.
+
 ## What this does NOT include
 
 - **The thing that populates `quality`.** Tier-0 grades what the run left
