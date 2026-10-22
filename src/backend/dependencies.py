@@ -29,10 +29,13 @@ _JWT_REVOKED_PREFIX = "jwt:revoked:"
 # Per-user platform-session cutoff (#3825): "sign this account out everywhere
 # else", written when its password is changed. Same shape as the portal cutoff
 # below (a per-`jti` blacklist cannot name every token a user holds): one key per
-# username holding `{"at": <epoch>, "keep": <jti>}`; a session token whose `iat`
-# is at or before `at` is refused, except the one `keep` names — the fresh token
-# the change handed back to the person who made it. Reads fail open like the
-# `jti` check; the TTL outlives the longest platform token.
+# username holding `{"at": <epoch>, "at_ms": <epoch ms>, "keep": <jti>}`; a
+# session token issued at or before the cutoff is refused, except the one `keep`
+# names — the fresh token the change handed back to the person who made it.
+# Tokens are dated to the millisecond (`iat_ms`) so a sign-in later in the same
+# second as the change is not refused; a token dated only by `iat` is refused for
+# the whole cutoff second. Event-loopback tokens are not sessions and are exempt.
+# Reads fail open like the `jti` check; the TTL outlives the longest token.
 _USER_SESSIONS_REVOKED_PREFIX = "trinity:user_sessions_revoked:"
 
 # Bulk portal-session revocation (trinity-enterprise#281): "log this client out
@@ -174,6 +177,12 @@ def is_token_revoked(jti: Optional[str]) -> bool:
         return False
 
 
+def _epoch_ms() -> int:
+    """Wall-clock epoch milliseconds — the one clock that dates platform tokens
+    and the #3825 cutoff, so the two can be compared below one second."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
     """Refuse every platform session token `username` was issued up to now,
     except `keep_jti` (#3825). True when the cutoff was durably written, so the
@@ -186,12 +195,12 @@ def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
         return False
     from config import ACCESS_TOKEN_EXPIRE_MINUTES
 
-    now = int(datetime.now(timezone.utc).timestamp())
+    now_ms = _epoch_ms()
     try:
         r.setex(
             f"{_USER_SESSIONS_REVOKED_PREFIX}{username}",
             ACCESS_TOKEN_EXPIRE_MINUTES * 60 + 60,  # + slack for clock skew
-            json.dumps({"at": now, "keep": keep_jti}),
+            json.dumps({"at": now_ms // 1000, "at_ms": now_ms, "keep": keep_jti}),
         )
         return True
     except Exception as exc:  # pragma: no cover — fail-open
@@ -204,7 +213,20 @@ def session_predates_user_revoke(payload: dict) -> bool:
 
     A token with no `iat` (minted before #3825) cannot be shown to post-date the
     cutoff, so it is refused — but only for a user who HAS a cutoff, i.e. who
-    changed their password, which is the kill switch it is meant to be."""
+    changed their password, which is the kill switch it is meant to be.
+
+    Dating: a token with `iat_ms` is refused when issued at or before the
+    cutoff's millisecond, so a sign-in later in the same second survives while a
+    token minted earlier in that second does not. A token with only `iat`
+    (whole seconds — e.g. a caller-supplied `iat`) cannot be placed inside the
+    cutoff second, so that whole second is refused: rounding toward revoking.
+
+    An event-loopback token (EVT-001) is not a session: the backend mints one per
+    dispatch with `sub` = the provisioned admin, no `iat` and a 5-minute life,
+    fenced to one route. Without the exemption an admin password change would
+    refuse every event dispatch for the cutoff's whole TTL."""
+    if payload.get("scope") == EVENT_LOOPBACK_SCOPE:
+        return False
     username = payload.get("sub")
     r = get_breaker_redis() if username else None
     if r is None:
@@ -215,15 +237,19 @@ def session_predates_user_revoke(payload: dict) -> bool:
             return False
         cutoff = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
         at = int(cutoff["at"])
+        at_ms = int(cutoff.get("at_ms", at * 1000 + 999))
         keep = cutoff.get("keep")
     except Exception as exc:  # pragma: no cover — fail-open
         logger.warning(f"[auth] session_predates_user_revoke failed (fail-open): {exc}")
         return False
     if keep and payload.get("jti") == keep:
         return False
+    iat_ms = payload.get("iat_ms")
     iat = payload.get("iat")
     try:
-        return iat is None or int(iat) <= at
+        if iat_ms is not None:
+            return int(iat_ms) <= at_ms
+        return iat is None or int(iat) <= at_ms // 1000
     except (TypeError, ValueError):
         return True
 
@@ -299,7 +325,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
     })
     # #3825: dates the token for the per-user session cutoff. A caller that
     # supplies its own `iat` (the portal session, ent#375) keeps it.
-    to_encode.setdefault("iat", int(datetime.now(timezone.utc).timestamp()))
+    # `iat_ms` dates it below the second, so a sign-in in the same second as a
+    # password change is not caught by that change's cutoff. Only when we set
+    # `iat` ourselves: a caller-supplied `iat` keeps second precision.
+    if "iat" not in to_encode:
+        now_ms = _epoch_ms()
+        to_encode["iat"] = now_ms // 1000
+        to_encode["iat_ms"] = now_ms
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 

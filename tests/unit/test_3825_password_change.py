@@ -259,7 +259,7 @@ def api(users_db, monkeypatch):
     # THAT copy — the one the change actually writes the cutoff with — each
     # globals dict once.
     dependencies = SimpleNamespace(**password_service.revoke_user_sessions.__globals__)
-    for scope in {id(g): g for g in (password_service._attempts_exhausted.__globals__,
+    for scope in {id(g): g for g in (password_service.change_own_password.__globals__,
                                      password_service.revoke_user_sessions.__globals__)}.values():
         monkeypatch.setitem(scope, "get_breaker_redis", lambda: redis)
     audit = AsyncMock()
@@ -340,6 +340,50 @@ class TestChangeRoute:
         assert PWD.verify(OLD, api.db.get_user_by_username(name)["password"])
         assert set(_actions(api.audit)) == {"password_change_failed"}
 
+    def test_the_cap_holds_under_concurrent_attempts(self, api, monkeypatch):
+        """The cap is reserved atomically BEFORE the password is checked: requests
+        racing across workers cannot all read "4 so far" and each get a guess."""
+        import threading
+        name = _admin(api.db)
+        racers = api.service.CHANGE_ATTEMPT_LIMIT + 3
+        barrier = threading.Barrier(racers, timeout=1.0)
+        checked = []
+        real_verify = api.service.verify_password
+
+        def slow_verify(plain, hashed):
+            checked.append(plain)
+            try:
+                barrier.wait()   # every racer past the gate before any records a failure
+            except threading.BrokenBarrierError:
+                pass
+            return real_verify(plain, hashed)
+
+        monkeypatch.setitem(api.service.change_own_password.__globals__, "verify_password", slow_verify)
+        outcomes = []
+
+        def attempt():
+            try:
+                api.service.change_own_password(name, "Wrong-Passw0rd-1!", NEW, "admin")
+            except api.service.PasswordChangeError as exc:
+                outcomes.append(exc.code)
+
+        threads = [threading.Thread(target=attempt) for _ in range(racers)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert len(checked) == api.service.CHANGE_ATTEMPT_LIMIT
+        assert outcomes.count("too_many_attempts") == racers - api.service.CHANGE_ATTEMPT_LIMIT
+
+    def test_a_right_password_does_not_spend_an_attempt(self, api):
+        name = _admin(api.db)
+        client, _ = api.as_(name)
+        for _ in range(api.service.CHANGE_ATTEMPT_LIMIT - 1):
+            _put(client, "Wrong-Passw0rd-1!", NEW)
+        # Right current password, refused for a weak new one: not a wrong guess.
+        assert _put(client, OLD, "weak").status_code == 422
+        assert _put(client, OLD, NEW).status_code == 200
+
     def test_the_cap_is_not_the_login_bucket(self, api):
         """A stolen session must not be able to lock the owner out of signing in."""
         name = _admin(api.db)
@@ -409,7 +453,7 @@ class TestChangeRoute:
         assert _put(client, OLD, NEW).json()["admin_env_stale"] is False
 
     def test_redis_down_still_changes_and_says_sessions_were_not_signed_out(self, api, monkeypatch):
-        for fn in (api.service._attempts_exhausted, api.service.revoke_user_sessions):
+        for fn in (api.service.change_own_password, api.service.revoke_user_sessions):
             monkeypatch.setitem(fn.__globals__, "get_breaker_redis", lambda: None)
         name = _admin(api.db)
         client, _ = api.as_(name)
@@ -496,6 +540,42 @@ class TestSessionCutoff:
     def test_the_cutoff_is_per_user(self, deps):
         assert deps.revoke_user_sessions("u3")
         assert deps.session_predates_user_revoke({"sub": "u4", "iat": 1}) is False
+
+    def test_the_event_loopback_token_is_not_a_session(self, deps):
+        """EVT-001 mints `sub` = the provisioned admin with no `iat`; an admin
+        password change must not refuse every event dispatch for 7 days."""
+        from jose import jwt
+        from services import event_dispatch_service
+        from utils.admin_identity import admin_username
+        assert deps.revoke_user_sessions(admin_username())
+        loopback = jwt.get_unverified_claims(event_dispatch_service._get_internal_token())
+        assert loopback["scope"] == deps.EVENT_LOOPBACK_SCOPE
+        assert deps.session_predates_user_revoke(loopback) is False
+        # ...while a real session of the same user is still cut off.
+        assert deps.session_predates_user_revoke({"sub": admin_username(), "iat": 1}) is True
+
+    def test_same_second_boundary(self, deps, monkeypatch):
+        """Within one second: a token minted before the change is refused, a
+        sign-in after it is not (sub-second `iat_ms`, not `iat`, decides)."""
+        from jose import jwt
+        clock = {"ms": 1_700_000_000_200}
+        monkeypatch.setitem(deps.create_access_token.__globals__, "_epoch_ms", lambda: clock["ms"])
+        before = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u6"}))
+        clock["ms"] = 1_700_000_000_500
+        assert deps.revoke_user_sessions("u6")
+        clock["ms"] = 1_700_000_000_800
+        after = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u6"}))
+        assert before["iat"] == after["iat"]  # same second
+        assert deps.session_predates_user_revoke(before) is True
+        assert deps.session_predates_user_revoke(after) is False
+
+    def test_a_token_dated_only_to_the_second_is_refused_in_the_cutoff_second(self, deps, monkeypatch):
+        """No `iat_ms` (a caller-supplied `iat`): the cutoff second cannot be
+        split, so it is refused — rounding toward revoking."""
+        monkeypatch.setitem(deps.create_access_token.__globals__, "_epoch_ms", lambda: 1_700_000_000_500)
+        assert deps.revoke_user_sessions("u7")
+        assert deps.session_predates_user_revoke({"sub": "u7", "iat": 1_700_000_000}) is True
+        assert deps.session_predates_user_revoke({"sub": "u7", "iat": 1_700_000_001}) is False
 
     def test_every_platform_token_now_carries_iat(self, deps):
         from jose import jwt

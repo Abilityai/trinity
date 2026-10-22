@@ -94,7 +94,7 @@
         class="text-sm text-status-warning-700 dark:text-status-warning-400"
         data-testid="sessions-not-signed-out"
       >
-        Your other sessions could not be signed out because the session store was unavailable. Restart the platform to sign them out.
+        Your other sessions are still signed in: the session store was unavailable, so the sign-out was not recorded. Once it is back, change the password again to sign them out.
       </p>
       <p
         v-if="done && done.admin_env_stale"

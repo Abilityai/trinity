@@ -68,28 +68,37 @@ class PasswordChangeResult:
     active_key_count: int = 0
 
 
-def _attempts_exhausted(username: str) -> bool:
+def _reserve_attempt(username: str) -> bool:
+    """Spend one attempt BEFORE the password is checked; False when the cap is
+    already spent. Redis INCR is atomic, so requests racing across workers
+    cannot all read "under the cap" and each get a guess. `SET NX EX` starts the
+    window on the first attempt; both run in one MULTI so the key cannot expire
+    between them and be re-created by INCR without a TTL (a lockout that never
+    resets)."""
     r = get_breaker_redis()
     if r is None:
-        return False  # fail-open, like the login limiter
+        return True  # fail-open, like the login limiter
+    key = f"{_ATTEMPT_PREFIX}{username}"
     try:
-        count = r.get(f"{_ATTEMPT_PREFIX}{username}")
-        return count is not None and int(count) >= CHANGE_ATTEMPT_LIMIT
+        pipe = r.pipeline(transaction=True)
+        pipe.set(key, 0, ex=CHANGE_ATTEMPT_WINDOW_SECONDS, nx=True)
+        pipe.incr(key)
+        _, count = pipe.execute()
+        return int(count) <= CHANGE_ATTEMPT_LIMIT
     except Exception as exc:  # pragma: no cover — fail-open
-        logger.warning(f"[auth] change-attempt limiter read failed (fail-open): {exc}")
-        return False
+        logger.warning(f"[auth] change-attempt limiter failed (fail-open): {exc}")
+        return True
 
 
-def _record_failed_attempt(username: str) -> None:
+def _release_attempt(username: str) -> None:
+    """Give back a reserved attempt: the current password was right."""
     r = get_breaker_redis()
     if r is None:
         return
-    key = f"{_ATTEMPT_PREFIX}{username}"
     try:
-        if r.incr(key) == 1:
-            r.expire(key, CHANGE_ATTEMPT_WINDOW_SECONDS)
-    except Exception as exc:  # pragma: no cover — fail-open
-        logger.warning(f"[auth] change-attempt limiter write failed: {exc}")
+        r.decr(f"{_ATTEMPT_PREFIX}{username}")
+    except Exception:  # pragma: no cover — best-effort
+        pass
 
 
 def _clear_attempts(username: str) -> None:
@@ -131,13 +140,13 @@ def change_own_password(username: str, current: str, new: str, token_mode: Optio
             "This account's password is stored in a legacy format. Restart the "
             "platform with ADMIN_PASSWORD set so it is migrated, then change it here.")
 
-    if _attempts_exhausted(username):
+    if not _reserve_attempt(username):
         raise PasswordChangeError(
             429, "too_many_attempts",
             "Too many wrong current passwords. Try again in 15 minutes.")
     if not verify_password(current, stored):
-        _record_failed_attempt(username)
         raise PasswordChangeError(400, "invalid_current_password", "The current password is wrong.")
+    _release_attempt(username)
 
     errors = validate_password_strength(new)
     if errors:
