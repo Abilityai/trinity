@@ -1,6 +1,42 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent966_facilitator_wording.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ],
+      "description": "ent#932 AC: every card-delegation refusal names Nevermined (raised for real + AST over DelegationError messages); no string says Trinity holds a card or settles money."
+    },
+    {
+      "file": "unit/test_ent966_delegation_routes.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "api",
+        "nevermined",
+        "security",
+        "unit"
+      ],
+      "description": "Nevermined organization admin routes through the real router + require_admin: configured:false 200, write-only secrets (encrypted, never in a body or log), secret_required, environment_mismatch, delegations_active on env change/key rotation/delete, deleted agent never blocks, user and agent keys refused."
+    },
+    {
+      "file": "unit/test_ent966_delegation_schema.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "database",
+        "nevermined",
+        "unit"
+      ],
+      "description": "Nevermined card delegation schema: SQLite migration idempotent, no replaced_at, partial unique active index (revoked/deleted rows inactive), KEEP AgentRef + agent_deleted_at stamp, Alembic 0102 after 0101, single head, shared DDL."
+    },
+    {
       "file": "unit/test_3725_public_template_tokenless_metadata.py",
       "feature": "abilityai/trinity#3725",
       "added": "2026-10-14",
