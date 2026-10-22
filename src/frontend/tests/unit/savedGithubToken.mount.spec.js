@@ -51,7 +51,7 @@ beforeEach(() => {
 describe('the token field', () => {
   it('names the saved token, is not required, and an override is explicit', async () => {
     const w = mount(SavedGithubTokenField, { props: { hasSaved: true, inputId: 't', modelValue: '' } })
-    expect(w.find('[data-testid="github-token-saved"]').exists()).toBe(true)
+    expect(w.find('[data-testid="github-token-saved"]').text()).toContain('Settings → MCP Keys → Personal GitHub Token')
     expect(w.find('[data-testid="github-token-input"]').exists()).toBe(false)
     expect(w.text()).not.toContain('*')
     await w.find('[data-testid="github-token-toggle"]').trigger('click')

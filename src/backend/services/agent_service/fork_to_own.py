@@ -217,8 +217,8 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
 
 
 # #3164 — which personal token a fork/bind may fall back to, and how a failure
-# of that token is named. The creator's SAVED personal token (Settings → GitHub
-# token, ent#162 `per_user`) is the user's own identity and may stand in for an
+# of that token is named. The creator's SAVED personal token (Settings → MCP Keys →
+# Personal GitHub Token, ent#162 `per_user`) is the user's own identity and may stand in for an
 # omitted form token. The PLATFORM token never may: the destination would be
 # created under the platform's account, and the fork path persists its token as
 # the agent's per-agent PAT (`github_pat_tier = "fork"`), which would bake the
