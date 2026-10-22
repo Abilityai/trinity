@@ -34,6 +34,7 @@ backend/docker/database imports.
 from __future__ import annotations
 
 import datetime as dt
+import os
 import re
 from pathlib import Path
 
@@ -59,18 +60,33 @@ _ALLOWLIST = {
     ".github/workflows/frontend-e2e.yml": "#3598 — frontend CI on Node 20, bump tracked there",
 }
 
-_FROM_NODE_RE = re.compile(r"^FROM\s+node:(\d+)", re.MULTILINE)
+# `FROM node:22-alpine`, `FROM --platform=$BUILDPLATFORM node:22 AS b`,
+# `FROM docker.io/library/node:22`. A floating tag (`node:lts`) has no major
+# to check and is not matched.
+_FROM_NODE_RE = re.compile(r"^FROM\s+(?:--\S+\s+)*(?:\S+/)?node:(\d+)", re.MULTILINE)
 _NODESOURCE_RE = re.compile(r"deb\.nodesource\.com/setup_(\d+)\.x")
-_NODE_VERSION_RE = re.compile(r"""^\s*node-version:\s*['"]?(\d+)""", re.MULTILINE)
+# `node-version: '22'` / `node-version: 22.x` / `node-version: [20, 22]`.
+_NODE_VERSION_RE = re.compile(r"""^\s*node-version:\s*(.+)$""", re.MULTILINE)
+_MAJOR_RE = re.compile(r"(?<![\w.])(\d+)(?:\.[\dx]+)*(?![\w])")
+
+# Never scanned: vendored deps, VCS metadata, and the private submodules
+# (their own repos, their own guards).
+_SKIP_DIRS = {"node_modules", ".git", ".claude", "enterprise"}
 
 
 def _dockerfiles() -> list[Path]:
-    return sorted(
-        p
-        for base in ("docker", "src")
-        for p in (_ROOT / base).rglob("Dockerfile*")
-        if "node_modules" not in p.parts
-    )
+    found: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(_ROOT):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        found.extend(Path(dirpath) / f for f in filenames if f.startswith("Dockerfile"))
+    return sorted(found)
+
+
+def _workflow_majors(value: str) -> list[int]:
+    """Majors in one `node-version:` value; `${{ ... }}` and `lts/*` yield none."""
+    if "${{" in value:
+        return []
+    return [int(m) for m in _MAJOR_RE.findall(value.split("#", 1)[0])]
 
 
 def _declarations() -> list[tuple[str, int]]:
@@ -83,8 +99,8 @@ def _declarations() -> list[tuple[str, int]]:
             found.append((rel, int(major)))
     for path in sorted(_WORKFLOWS.glob("*.yml")) + sorted(_WORKFLOWS.glob("*.yaml")):
         rel = path.relative_to(_ROOT).as_posix()
-        for major in _NODE_VERSION_RE.findall(path.read_text(encoding="utf-8")):
-            found.append((rel, int(major)))
+        for value in _NODE_VERSION_RE.findall(path.read_text(encoding="utf-8")):
+            found.extend((rel, major) for major in _workflow_majors(value))
     return found
 
 
@@ -150,6 +166,24 @@ def test_allowlist_entries_are_still_needed() -> None:
         if not any(r == rel and _problem(m, today) for r, m in declared)
     ]
     assert not stale, f"_ALLOWLIST entries no longer exempt anything — delete them: {stale}"
+
+
+def test_declaration_spellings_are_recognised() -> None:
+    """The regexes see the spellings a future Dockerfile or workflow will use."""
+    from_lines = (
+        "FROM node:20-alpine\n"
+        "FROM --platform=$BUILDPLATFORM node:20 AS build\n"
+        "FROM docker.io/library/node:20-bookworm\n"
+        "FROM node:lts-alpine\n"
+        "FROM python:3.13-slim\n"
+    )
+    assert _FROM_NODE_RE.findall(from_lines) == ["20", "20", "20"]
+    assert _workflow_majors("'20'") == [20]
+    assert _workflow_majors("20.x") == [20]
+    assert _workflow_majors("[20, 22]") == [20, 22]
+    assert _workflow_majors("${{ matrix.node }}") == []
+    assert _workflow_majors("lts/*") == []
+    assert _workflow_majors("'24'  # pinned (#3886)") == [24]
 
 
 def test_problem_rules() -> None:
