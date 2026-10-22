@@ -186,7 +186,7 @@ Open the repo in Claude Code and use the slash commands it ships with. The repo'
 | Disk | 20 GB | 50 GB |
 | OS | Ubuntu 22.04+ | Ubuntu 24.04 |
 
-These are the ops repo's figures for the smallest instance it can manage. Trinity's own floor for a working fleet is **8 GB RAM** (agent containers and platform services contend below that) — see [Single-Server Deployment](single-server.md#prerequisites). Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, Vultr, any Linux VM, localhost.
+These are the ops repo's figures for the smallest instance it can manage. They are not Trinity's: for the Trinity server itself, start at **4 vCPU / 8 GB RAM** — see [Sizing Your Server](capacity-planning.md). Supported providers: Hetzner Cloud, GCP, AWS, DigitalOcean, Vultr, any Linux VM, localhost.
 
 ## See Also
 

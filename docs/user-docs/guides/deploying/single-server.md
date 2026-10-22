@@ -9,7 +9,7 @@ Both use the production compose shape: no hot-reload, health checks and `unless-
 
 ## Prerequisites
 
-- Linux server (Ubuntu 22.04 LTS or later recommended), **8 GB RAM minimum** — below that the agent containers and the platform services contend and turns start failing under load
+- Linux server (Ubuntu 22.04 LTS or later recommended), **8 GB RAM recommended** (4 GB runs the platform with one or two agents) — size it from how many agents run at once; see [Sizing Your Server](capacity-planning.md)
 - Docker Engine 24+ and the Docker Compose plugin (`docker compose` — no hyphen)
 - A domain or subdomain pointing to your server's IP (e.g., `trinity.your-domain.com`), or a plan for private access — see [TLS on a bare VM](#tls-on-a-bare-vm)
 - `openssl` on the server for secret generation
@@ -332,9 +332,11 @@ Prefer to choose the admin password before the Droplet exists? `trinity-do-creat
 
 | Use case | RAM | vCPU | Boot disk |
 |---|---|---|---|
-| Minimum — platform plus 1–2 agents | 4 GB | 2 | 50 GB |
-| **Recommended** — a working fleet | **8 GB** | **4** | **80 GB** |
-| Larger fleets | 16 GB+ | 8+ | 160 GB+ |
+| Evaluation — platform plus 1–2 agents | 4 GB | 2 | 50 GB |
+| **Start here** — up to about 8 agents, about 2 runs at a time | **8 GB** | **4** | **80 GB** |
+| Busy fleet — several agents running at once | 16 GB | 4–8 | 150 GB |
+
+For heavier workloads and larger fleets, and how to estimate your own, see [Sizing Your Server](capacity-planning.md).
 
 The baked images occupy a significant share of the disk before any agent exists; agent workspaces grow from there. Disk can be increased on a running Droplet, never decreased.
 
