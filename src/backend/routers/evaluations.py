@@ -38,8 +38,11 @@ from dependencies import (
     get_authorized_agent_by_name,
     reject_agent_principal,
     require_admin,
+    require_person,
 )
 from models import (
+    AgentIndicatorRunsResponse,
+    AgentIndicatorsResponse,
     EvaluationAgentSummaryResponse,
     EvaluationAggregateResponse,
     EvaluationChainResponse,
@@ -55,7 +58,7 @@ from models import (
 # together by `test_ent366_workspace_ratings.py` instead.
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 OPERATOR_EVALUATOR_PREFIX = "operator:"
-from services import evaluation_read_service
+from services import agent_indicators, evaluation_read_service
 
 logger = logging.getLogger(__name__)
 
@@ -442,7 +445,103 @@ async def agent_evaluation_summary(
     return {"agent_name": agent_name, "since": lo, "until": hi, "truncated": truncated,
             "summary": evaluation_read_service.project_summary(folded, machine=scope.machine),
             "failed": failed, "failed_truncated": failed_truncated,
-            "pair_failed": evaluation_read_service.pair_failures(caller_rows)}
+            "pair_failed": evaluation_read_service.pair_failures(caller_rows),
+            "judge_failed": agent_indicators.judge_failures(rows)}
+
+
+# --- per-agent behavioral indicators (ent#939) --------------------------------
+
+MIN_RUNS_SETTING = "agent_indicators_min_runs"
+
+
+def _indicator_min_runs() -> int:
+    """The declared sample floor, overridable per install; anything unreadable
+    falls back to the default rather than to a floor of zero."""
+    try:
+        raw = db.get_setting_value(MIN_RUNS_SETTING, None)
+        value = int(raw) if raw is not None else agent_indicators.DEFAULT_MIN_RUNS
+    except (TypeError, ValueError):
+        value = agent_indicators.DEFAULT_MIN_RUNS
+    return max(1, min(value, 100))
+
+
+def _indicator_window(days: int) -> tuple[str, str, str]:
+    """`(prior_since, since, until)` for a window of `days` ending now."""
+    now = datetime.now(timezone.utc)
+    fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+    since = now - timedelta(days=days)
+    return ((since - timedelta(days=days)).strftime(fmt), since.strftime(fmt),
+            (now + timedelta(microseconds=1)).strftime(fmt))
+
+
+def _label_sources(agent_name: str, sources: list[dict]) -> None:
+    """Name each schedule source, in place. A schedule that is gone, or is not
+    this agent's, keeps its id and no label."""
+    names: dict[str, Optional[str]] = {}
+    for src in sources:
+        if src.get("kind") != "schedule" or not src.get("ref"):
+            continue
+        ref = src["ref"]
+        if ref not in names:
+            sched = db.get_schedule(ref)
+            names[ref] = sched.name if sched and sched.agent_name == agent_name else None
+        src["label"] = names[ref]
+
+
+@router.get("/agents/{agent_name}/evaluations/indicators",
+            response_model=AgentIndicatorsResponse)
+async def agent_indicators_read(
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    days: int = Query(agent_indicators.DEFAULT_WINDOW_DAYS),
+    current_user: User = Depends(require_person),
+):
+    """The agent's behavioral indicators over the last `days` (7, 14 or 30):
+    completion, checks passed, scope fidelity, escalation correctness, quality
+    and cost vs baseline — each its own measure with its sample, never one
+    score. Read-only over the ent#937 window rows. A person's read: an agent
+    reads its failed checks through the summary (no agent-visible scalar)."""
+    if days not in agent_indicators.WINDOW_DAYS:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_window", "message": "days must be 7, 14 or 30"})
+    prior_lo, lo, hi = _indicator_window(days)
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name})
+    prior, _ = db.evaluation_window_rows(since=prior_lo, until=lo, agents={agent_name})
+    labels = db.evaluation_human_labels([r["execution_id"] for r in rows]) if rows else {}
+    base_lo = (datetime.fromisoformat(lo.replace("Z", "+00:00"))
+               - timedelta(days=agent_indicators.BASELINE_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    costs = db.evaluation_agent_costs(agent_name, since=base_lo, until=lo)
+    min_runs = _indicator_min_runs()
+    out = agent_indicators.compute(rows, prior, labels, costs, min_runs=min_runs)
+    _label_sources(agent_name, [p["source"] for p in out["fix_paths"]])
+    return {"agent_name": agent_name, "days": days, "since": lo, "until": hi,
+            "min_runs": min_runs, "truncated": truncated,
+            "latest_run_at": rows[0].get("completed_at") if rows else None, **out}
+
+
+@router.get("/agents/{agent_name}/evaluations/indicators/{indicator}/runs",
+            response_model=AgentIndicatorRunsResponse)
+async def agent_indicator_runs(
+    indicator: str,
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    days: int = Query(agent_indicators.DEFAULT_WINDOW_DAYS),
+    check: Optional[str] = Query(None, max_length=64, pattern="^[a-z][a-z0-9_]{0,63}$"),
+    current_user: User = Depends(require_person),
+):
+    """The runs behind one indicator, grouped by the playbook, schedule or
+    chat they came from — where the fix happens. `check=` narrows
+    `checks_passed` to one Tier-0 check. Reason codes only, never evidence."""
+    if days not in agent_indicators.WINDOW_DAYS:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_window", "message": "days must be 7, 14 or 30"})
+    _, lo, hi = _indicator_window(days)
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name})
+    try:
+        groups = agent_indicators.failing_runs(rows, indicator, check=check)
+    except agent_indicators.IndicatorError as exc:
+        raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)})
+    _label_sources(agent_name, [g["source"] for g in groups])
+    return {"agent_name": agent_name, "indicator": indicator, "check": check, "days": days,
+            "since": lo, "until": hi, "truncated": truncated, "groups": groups}
 
 
 @router.get("/evaluations/{eval_id}", response_model=EvaluationResponse)
