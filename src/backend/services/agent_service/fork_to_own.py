@@ -243,7 +243,7 @@ def fork_pat_required():
     return _http_error(
         400, "FORK_PAT_REQUIRED",
         "A GitHub token is needed to create the repository in your account. "
-        "Save your personal token in Settings → GitHub token, or enter one here. "
+        "Save your personal token in Settings → MCP Keys → Personal GitHub Token, or enter one here. "
         "The platform's token is never used to create a repository for you.",
     )
 
@@ -280,7 +280,7 @@ def saved_token_message(code: str, message: str) -> Optional[str]:
     None when `code` is not about the token."""
     if code not in _TOKEN_FAILURE_CODES:
         return None
-    return (f"Your saved GitHub token (Settings → GitHub token) was used and failed: "
+    return (f"Your saved GitHub token (Settings → MCP Keys → Personal GitHub Token) was used and failed: "
             f"{message} Update it in Settings, or enter a different token here.")
 
 

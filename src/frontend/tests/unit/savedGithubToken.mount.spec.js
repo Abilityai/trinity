@@ -97,7 +97,7 @@ describe('fork-to-own at create', () => {
     saved.value = false
     const w = await forkForm()
     expect(await submit(w)).toBeUndefined()
-    expect(dom().text()).toContain('Settings → GitHub token')
+    expect(dom().text()).toContain('Settings → MCP Keys → Personal GitHub Token')
   })
 
   it('a typed override rides the payload', async () => {
@@ -138,7 +138,7 @@ describe('binding an agent to a repo you own', () => {
     await w.find('form').trigger('submit')
     await flushPromises()
     expect(bindAgentToOwnRepo).not.toHaveBeenCalled()
-    expect(w.text()).toContain('Settings → GitHub token')
+    expect(w.text()).toContain('Settings → MCP Keys → Personal GitHub Token')
   })
 
   it('an override left EMPTY sends nothing — never the broad saved token', async () => {
