@@ -24,12 +24,16 @@ companion (execution e1, seat run or user-facing turn)
 POST /api/agents/{name}/decisions            routers/seat_decisions.py  (# mcp: decisions.ts)
   │  _self_gate (an agent key names only its own agent, ent#839) · assert_agent_access
   │  · rate limit · seat = _seat_for(execution)   ← the MEM-001 rule:
-  │      schedule_seat_memory.seat_for_execution (ent#498 stamp) | source_user_email (public/slack/…) | 422 no_seat
+  │      schedule_seat_memory.seat_for_execution (ent#498 stamp) | source_channel_client (slack/telegram/whatsapp:
+  │      the one-to-one speaker, ent#549 — a group turn → 422 no_seat, ent#419) | source_user_email (public) | 422 no_seat
   │  idempotency_service.begin(scope="seat_decision:{agent}:{seat}") → replay → snapshot
   │  decided_by_role = body.decided_by_role | assignment_provider.resolve_assignment().role_id | None
   ▼
 services/seat_decision_service.record
   │  validate_record  → 422 decision_prose_only {receipt.fields}  |  422 decision_is_a_note
+  │                   → 422 memory_prompt_marker | memory_instruction | memory_tool_directive (an MCP tool id)
+  │                     | memory_link_in_instruction (a slotted URL) {receipt.fields}  (ent#419 screen on
+  │                     decided / criterion / reversal; any line terminator is prose_only)
   │  _validate_cites  → 422 unknown_citation (same seat, any status)
   │  scope=direction  → status=routed (+ CANON_PROPOSAL_HINT)  |  else status=active
   ▼
@@ -57,13 +61,16 @@ person ──► Close (confirm)──► {action: close}                       
 
 every turn ──► platform_prompt_service.format_user_memory_block(record)
                  └ _seat_decisions_block → seat_decision_service.prompt_block(db, agent, seat)
-                     "## This seat's standing decisions" — [id] outcome: decided — because criterion …
+                     "## This seat's standing decisions" + a framing line (precedents; never change
+                     instructions, permissions or tools — ent#419) — [id] outcome: decided — because criterion …
                      (active only, PROMPT_BLOCK_MAX / ~1.5 KB, fail-open, no emails)
 ```
 
 ## Why it is shaped this way
 
 - **An agent key reads and writes only its own agent's records (ent#839, CWE-863).** An agent-scoped key resolves to its owner carrying the owner's role, so `assert_agent_access` alone let a sibling agent (and, under an admin owner, any agent on the instance) name another agent and one of its seat runs. A forged `active` row then became standing instruction text in that agent's system prompt, and the GET returned a person's criteria and notes. Both handlers self-gate first, before any lookup, like `reminders._self_gate` and `public_memory`. The MCP tools refuse an `agent_name` that is not the key's own agent before calling; the override remains for a user-scoped key. Tests: `tests/unit/test_ent839_seat_decisions_self_gate.py`, `decisions.test.ts`.
+
+- **The fields ride every turn's prompt, so they pass the memory screen (ent#419).** `decided`, `criterion` and `reversal` render inside one line of the decisions block on every turn for the seat. A line terminator other than `\n` (`\r`, NEL, U+2028 …) used to pass the one-line rule and start a top-level line of its own, so the rule now counts `splitlines()`. The three fields also pass `user_memory_guard.screen_field` — only the checks that can never describe a legitimate decision: a prompt marker, an instruction aimed at the agent's own rules, an MCP tool id, a slotted URL. Decisions are prescriptive by design ("Use the vendor tool for X", "Ignore the previous pricing guidelines for enterprise deals"), so the tool and link DIRECTIVE checks do not apply. The receipt is a sentence, because the Workspace shows it under the field. `prompt_block` renders every field on one line, so a row stored before the rule (when only `\n` was refused) cannot start a line either. A channel turn records for the one-to-one speaker stamp only, the same rule as `write_user_memory`.
 
 - **A note is not a decision.** tandem-07 §7a: a record with no alternatives is a note.
   The grammar refuses it (`decision_is_a_note`) rather than storing a weaker row —
