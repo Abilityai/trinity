@@ -180,6 +180,12 @@
         <EvaluationsPanel />
       </div>
 
+      <!-- Outcomes Tab (trinity-enterprise#941) — admin on an entitled install;
+           the API guards it (admin + person + entitlement), this mirrors it. -->
+      <div v-if="activeTab === 'outcomes' && tabAllowed('outcomes')">
+        <OutcomesPanel />
+      </div>
+
       <!-- Reports Tab (#918) -->
       <div v-if="activeTab === 'reports'">
         <ReportsPanelFleet />
@@ -241,12 +247,14 @@ import MonitoringPanel from '../components/MonitoringPanel.vue'
 import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
 import EvaluationsPanel from '../components/EvaluationsPanel.vue'
+import OutcomesPanel from '../components/OutcomesPanel.vue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
+import { useEnterpriseStore } from '../stores/enterprise'
 import { isWorkspaceOnlyRole } from '../utils/workspaceOnly'
 
 const route = useRoute()
@@ -255,6 +263,7 @@ const operatorQueueStore = useOperatorQueueStore()
 const notificationsStore = useNotificationsStore()
 const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
+const enterpriseStore = useEnterpriseStore()
 
 const isAdmin = computed(() => authStore.role === 'admin')
 // ent#837's floor: operator, creator, admin. `authStore.role` defaults to
@@ -281,7 +290,7 @@ const queueRefreshFailed = computed(
 
 // Health is admin-only; Evaluations (ent#938) is operator-floor. A principal
 // below a tab's gate must not reach it even via deep link.
-const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'evaluations', 'reports', 'resolved']
+const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'evaluations', 'outcomes', 'reports', 'resolved']
 const OPERATOR_TABS = ['needs-response', 'notifications', 'resolved']
 // Gated tabs, as data: tab id → the predicate that admits the current role.
 // The strip, the render slot, `resolveTab` and the role watch all read this
@@ -289,6 +298,9 @@ const OPERATOR_TABS = ['needs-response', 'notifications', 'resolved']
 const TAB_GATES = {
   health: () => isAdmin.value,
   evaluations: () => atOperatorFloor.value,
+  // ent#941: the fleet record spans every project, so admin-only, and only
+  // where the eval_outcomes module is entitled.
+  outcomes: () => isAdmin.value && enterpriseStore.isEntitled('eval_outcomes'),
 }
 const tabAllowed = (id) => !(id in TAB_GATES) || TAB_GATES[id]()
 
@@ -313,6 +325,9 @@ const subtitle = computed(() => {
   }
   if (activeTab.value === 'evaluations') {
     return 'How your agents\' runs are graded — completion and gate checks, per agent'
+  }
+  if (activeTab.value === 'outcomes') {
+    return 'How projects executed each week, and the improvements proposed from it'
   }
 
   const queueCount = operatorQueueStore.pendingCount
@@ -340,6 +355,7 @@ const visibleTabs = computed(() => [
   ...(tabAllowed('health') ? [{ id: 'health', label: 'Health' }] : []),
   { id: 'executions', label: 'Executions' },
   ...(tabAllowed('evaluations') ? [{ id: 'evaluations', label: 'Evaluations' }] : []),
+  ...(tabAllowed('outcomes') ? [{ id: 'outcomes', label: 'Outcomes' }] : []),
   { id: 'reports', label: 'Reports' },
   { id: 'resolved', label: 'Resolved' },
 ])
@@ -445,7 +461,8 @@ async function confirmClearAll() {
 // link asked for that tab, re-select it (the role defaults to 'user' until
 // the profile lands, so a deep-linked admin or operator first resolves to the
 // default tab).
-watch(() => authStore.role, () => {
+// The entitlement list lands asynchronously too (ent#941's Outcomes gate).
+watch([() => authStore.role, () => enterpriseStore.enterpriseFeatures], () => {
   const wanted = route.query.tab
   if (!tabAllowed(activeTab.value)) {
     switchTab('needs-response')
@@ -455,6 +472,8 @@ watch(() => authStore.role, () => {
 })
 
 onMounted(() => {
+  // ent#941: the Outcomes tab is listed only on an entitled install.
+  enterpriseStore.loadFeatureFlags()
   // Operator-queue polling runs at the container level (drives both the
   // Needs Response / Resolved feeds and the NavBar Operations badge).
   operatorQueueStore.startPolling(10000)
