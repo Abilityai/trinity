@@ -96,9 +96,14 @@ def test_block_values_are_in_the_pinned_vocabulary():
 # ---------------------------------------------------------------------------
 
 def test_read_only_renders_the_exact_set():
+    """Read-only decides `edit` and `bash` only — `webfetch` is ABSENT from
+    the block (R18: an explicit allow decided nothing under `--auto` and
+    could only widen an operator deny)."""
     block, unmapped = _block(read_only=True)
-    assert block == {"edit": "deny", "bash": "deny", "webfetch": "allow"}
+    assert block == {"edit": "deny", "bash": "deny"}
+    assert "webfetch" not in block
     assert block == READ_ONLY_PERMISSION
+    assert "allow" not in block.values()
     assert _no_platform(unmapped) == []
 
 
@@ -194,15 +199,20 @@ def test_guardrail_deny_survives_an_allowlist():
 
 
 def test_read_only_allow_never_overrides_a_guardrail_deny():
-    """Nothing turns a deny back into allow: read-only's `webfetch: allow`
-    yields to a guardrail denying WebFetch."""
+    """Nothing turns a deny back into allow. There is no read-only allow any
+    more (R18); this pins that a guardrail deny on WebFetch coexists with
+    read-only — the `webfetch` key carries the guardrail's deny, untouched."""
     block, _ = _block(read_only=True, guardrails={"disallowed_tools": ["WebFetch"]})
     assert block["webfetch"] == "deny"
+    assert block["edit"] == "deny" and block["bash"] == "deny"
 
 
 def test_read_only_allow_never_overrides_an_allowlist_deny():
+    """Same for the allowlist: its deny on `webfetch` coexists with read-only
+    (no read-only allow exists to override it, R18)."""
     block, _ = _block(read_only=True, allowed_tools=["Read"])
     assert block["webfetch"] == "deny"
+    assert block["edit"] == "deny" and block["bash"] == "deny"
 
 
 def test_merge_keeps_an_operator_deny_and_replaces_a_pattern_map():
@@ -217,6 +227,33 @@ def test_merge_keeps_an_operator_deny_and_replaces_a_pattern_map():
 def test_merge_normalises_a_scalar_operator_block():
     assert merge_permission_block("allow", {"edit": "deny"}) == {"*": "allow", "edit": "deny"}
     assert merge_permission_block(None, {"edit": "deny"}) == {"edit": "deny"}
+
+
+@pytest.mark.parametrize("existing", [
+    pytest.param("deny", id="bare-deny-block"),
+    pytest.param({"*": "deny"}, id="wildcard-deny"),
+    pytest.param({"webfetch": {"*": "deny"}}, id="pattern-map-deny"),
+])
+def test_merge_keeps_a_wildcard_and_pattern_deny(existing):
+    """The validator's finding (PR #3888 review, R18): deny was sticky only
+    for a scalar `"deny"` on the key, so a computed `webfetch: allow` flattened
+    an operator's bare `"deny"` block, `{"*": "deny"}` and
+    `{"webfetch": {"*": "deny"}}` into `webfetch: allow`. Every deny shape the
+    schema accepts must survive a computed non-deny; a computed deny still
+    lands."""
+    merged = merge_permission_block(existing, {"webfetch": "allow", "edit": "deny"})
+    assert merged["edit"] == "deny"
+    assert merged.get("webfetch") != "allow"
+    if isinstance(existing, dict) and "webfetch" in existing:
+        # (c) the operator's finer pattern map is kept, not flattened
+        assert merged["webfetch"] == {"*": "deny"}
+        assert merged == {"webfetch": {"*": "deny"}, "edit": "deny"}
+    else:
+        # (a) a bare string normalises to the wildcard; (b) the wildcard deny
+        # covers an absent key, so no `webfetch` entry is written at all
+        assert merged["*"] == "deny"
+        assert "webfetch" not in merged
+        assert merged == {"*": "deny", "edit": "deny"}
 
 
 # ---------------------------------------------------------------------------
@@ -260,9 +297,9 @@ def test_rendered_config_carries_the_block(monkeypatch, tmp_path):
     turn_dir = opencode_runtime._prepare_turn_config(
         "exec-ro", "PROMPT", permission=READ_ONLY_PERMISSION
     )
-    assert _config_of(turn_dir)["permission"] == {
-        "edit": "deny", "bash": "deny", "webfetch": "allow",
-    }
+    rendered = _config_of(turn_dir)["permission"]
+    assert rendered == {"edit": "deny", "bash": "deny"}
+    assert "webfetch" not in rendered
 
 
 def test_rendered_config_has_no_block_when_nothing_was_decided(monkeypatch, tmp_path):
@@ -283,6 +320,40 @@ def test_rendered_config_merges_over_the_operator_block(monkeypatch, tmp_path):
     assert _config_of(turn_dir)["permission"] == {
         "webfetch": "deny", "edit": "deny", "bash": "deny",
     }
+
+
+@pytest.mark.parametrize("operator_block,expected", [
+    pytest.param(
+        "deny",
+        {"*": "deny", "edit": "deny", "bash": "deny"},
+        id="bare-deny-block",
+    ),
+    pytest.param(
+        {"webfetch": {"*": "deny"}},
+        {"webfetch": {"*": "deny"}, "edit": "deny", "bash": "deny"},
+        id="pattern-map-deny",
+    ),
+])
+def test_read_only_never_widens_an_operator_deny(monkeypatch, tmp_path, operator_block, expected):
+    """End to end on the rendered config (R18): a read-only turn over an
+    operator's `permission: "deny"` renders `{"*": "deny", edit, bash}` with no
+    `webfetch` key at all, and over `{"webfetch": {"*": "deny"}}` the pattern
+    map survives. Read-only withholds; it never widens."""
+    shared = tmp_path / "shared" / "opencode"
+    shared.mkdir(parents=True)
+    (shared / "opencode.json").write_text(json.dumps({"permission": operator_block}))
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    monkeypatch.setattr(opencode_runtime, "_shared_config_dir", lambda: str(shared))
+    turn_dir = opencode_runtime._prepare_turn_config(
+        "exec-ro-deny", None, permission=READ_ONLY_PERMISSION
+    )
+    rendered = _config_of(turn_dir)["permission"]
+    assert rendered == expected
+    assert rendered.get("webfetch") != "allow"
+    if operator_block == "deny":
+        assert "webfetch" not in rendered
+    else:
+        assert rendered["webfetch"] == {"*": "deny"}
 
 
 def _read_only(monkeypatch, tmp_path, enabled: bool):
@@ -319,7 +390,8 @@ async def test_read_only_turn_renders_the_block_through_execute(monkeypatch, tmp
     _install_fake_subprocess(monkeypatch, stdout_lines=_step("done"))
 
     _text, log, _meta, _sid = await runtime.execute_headless("task", model="openrouter/x/y")
-    assert rendered["permission"] == {"edit": "deny", "bash": "deny", "webfetch": "allow"}
+    assert rendered["permission"] == {"edit": "deny", "bash": "deny"}
+    assert "webfetch" not in rendered["permission"]
     assert [e for e in log if e.tool == "trinity-control"] == []
 
 

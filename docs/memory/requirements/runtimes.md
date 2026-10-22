@@ -496,7 +496,10 @@ adopted to the current harness seam; flow:
 
 - **FR-13 — Permission block:** `build_permission_block(read_only, guardrails,
   allowed_tools)` folds every Trinity control onto OpenCode's `permission:` key.
-  Read-only → `edit: deny`, `bash: deny`, `webfetch: allow` (read from
+  Read-only → `edit: deny`, `bash: deny` and nothing else — every other key
+  stays at the operator's value or the binary default (R18: the former
+  `webfetch: allow` decided nothing under `--auto` and could only widen an
+  operator deny) (read from
   `/opt/trinity/read-only-config.json`, legacy fallback as on Codex); operator
   `disallowed_tools` ∪ platform denials (`merged_disallowed_tools`) → `deny` on the
   mapped key; a non-empty headless `allowed_tools` denies every mapped key it does

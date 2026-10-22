@@ -595,13 +595,18 @@ PERMISSION_KEY_FOR_TOOL: Dict[str, str] = {
     "WebSearch": "websearch",
 }
 
-# Read-only mode: no writes, no shell; fetching stays allowed (the plan's
-# set). The `allow` is the lowest-precedence value in the block — a deny from
-# any other source over `webfetch` survives it (`merge`-sticky below).
+# Read-only mode: no writes, no shell — and nothing else. Read-only decides
+# `edit` and `bash` ONLY; every other key stays at the operator's value or the
+# binary default. It used to carry `webfetch: allow` (the plan's set), and
+# that allow was removed (R18, PR #3888 review): under `--auto` the binary's
+# default for `webfetch` is already allow, so the explicit allow decided
+# nothing and could only widen — it turned an operator's `permission: "deny"`,
+# `{"*": "deny"}` or `{"webfetch": {"*": "deny"}}` into `webfetch: allow`.
+# Nothing in Trinity's block is ever `allow`: read-only must never widen a
+# permission, only withhold one.
 READ_ONLY_PERMISSION: Dict[str, str] = {
     "edit": "deny",
     "bash": "deny",
-    "webfetch": "allow",
 }
 
 # Origins a surfaced (unmapped) control name can carry, and the ledger text.
@@ -633,8 +638,10 @@ def build_permission_block(
 
     Precedence, pinned by test: read-only deny > guardrail / platform deny >
     ``allowed_tools`` > the binary default. Nothing turns a deny back into
-    allow — read-only's ``webfetch: allow`` yields to a guardrail that denies
-    ``WebFetch``. An empty or ``None`` ``allowed_tools`` restricts nothing,
+    allow — read-only emits deny only (``edit`` and ``bash``), and nothing in
+    Trinity's block is ever ``allow``, so a guardrail or allowlist deny on
+    ``webfetch`` coexists with read-only untouched (R18). An empty or ``None``
+    ``allowed_tools`` restricts nothing,
     exactly as the Claude runtime treats it; a non-empty one denies every
     mapped key NONE of whose Claude names is listed (the four edit tools share
     one key, so listing any of them keeps ``edit`` at its default).
@@ -669,8 +676,9 @@ def build_permission_block(
             origin = CONTROL_GUARDRAIL if name in operator_names else CONTROL_PLATFORM
             unmapped.append((origin, name))
 
-    # Highest: read-only. Its denies win outright; its one allow only fills a
-    # key nothing above denied.
+    # Highest: read-only. Its denies win outright. The guard stays as the
+    # invariant's belt-and-braces: should a non-deny value ever return to the
+    # map, it can only fill a key nothing above denied, never flip a deny.
     if read_only:
         for key, action in READ_ONLY_PERMISSION.items():
             if action == "deny" or block.get(key) != "deny":
@@ -683,10 +691,17 @@ def merge_permission_block(existing: object, computed: Dict[str, str]) -> Dict[s
 
     The schema accepts a bare Action for the whole block (normalised to
     ``{"*": action}``, ``permission.ts:40-41``) or a key map whose values may
-    be pattern maps. Deny is sticky in BOTH directions: an operator ``deny``
-    is never replaced by Trinity's ``allow``, and Trinity's ``deny`` replaces
-    whatever the operator wrote for that key (a pattern map included — a
-    scalar ``deny`` is the stricter rule).
+    be pattern maps. Deny is sticky in BOTH directions, for every deny shape
+    the schema accepts (R18, PR #3888 review), not only a scalar ``deny`` on
+    the key. A computed value that is not ``deny`` never replaces the
+    operator's entry when (1) the existing value for that key is ``"deny"``;
+    (2) the existing value for that key is a pattern map — any dict: the
+    operator wrote finer rules and Trinity's coarser value must not flatten
+    them; or (3) the key is absent and the block carries ``"*": "deny"`` (a
+    bare ``"deny"`` block is already normalised to that, so it is this
+    shape). Trinity's ``deny`` still replaces whatever the operator wrote for
+    that key (a pattern map included — a scalar ``deny`` is the stricter
+    rule). Pure: ``(existing, computed) → merged``.
     """
     if isinstance(existing, str):
         merged: Dict[str, object] = {"*": existing}
@@ -694,9 +709,14 @@ def merge_permission_block(existing: object, computed: Dict[str, str]) -> Dict[s
         merged = dict(existing)
     else:
         merged = {}
+    wildcard_deny = merged.get("*") == "deny"
     for key, action in computed.items():
-        if action != "deny" and merged.get(key) == "deny":
-            continue
+        if action != "deny":
+            current = merged.get(key)
+            if current == "deny" or isinstance(current, dict):
+                continue
+            if current is None and wildcard_deny:
+                continue
         merged[key] = action
     return merged
 

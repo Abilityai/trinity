@@ -52,10 +52,13 @@ and adopted to the current seam. Requirements: [runtimes.md §42](../requirement
    first in `instructions:`; the backend has already rewritten Trinity tool names
    to `trinity_<tool>` and prepended the OpenCode orientation block
    (`platform_prompt_service._adapt_instructions_for_runtime`).
-6. **Controls.** `build_permission_block` maps read-only (`edit`/`bash` deny,
-   `webfetch` allow), operator `disallowed_tools` ∪ platform denials, and a
-   headless `allowed_tools` onto `permission:`; `merge_permission_block` keeps deny
-   sticky over the operator's own block. Each unmapped control becomes a
+6. **Controls.** `build_permission_block` maps read-only (`edit`/`bash` deny
+   only — every other key stays at the operator's value or the binary default;
+   nothing in Trinity's block is ever `allow`, R18), operator `disallowed_tools`
+   ∪ platform denials, and a headless `allowed_tools` onto `permission:`;
+   `merge_permission_block` keeps deny sticky over the operator's own block for
+   every deny shape the schema accepts (a scalar `deny`, a pattern map, and a
+   `"*": "deny"` wildcard covering an absent key). Each unmapped control becomes a
    `trinity-control` execution-log entry.
 7. **Parse + result.** Part-nested JSONL with top-level fallback → tool activity,
    tokens, cost, session id. `finalize_response` takes the last step's text and
