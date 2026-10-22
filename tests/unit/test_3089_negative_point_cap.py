@@ -46,3 +46,9 @@ def test_negative_retention_window_still_reads_as_disabled(monkeypatch):
 def test_definitions_policy_agrees_with_enforcement(monkeypatch, raw):
     monkeypatch.setattr(_SS.settings_service, "resolve_ops_setting", lambda key: (raw, "db-row"))
     assert _AF._metric_policy()["daily_point_cap"] == _MP._ops_int(CAP, 100000)
+
+
+@pytest.mark.parametrize("raw", ["-3", "0", "30", "garbage"])
+def test_definitions_policy_window_agrees_with_enforcement(monkeypatch, raw):
+    monkeypatch.setattr(_SS.settings_service, "resolve_ops_setting", lambda key: (raw, "db-row"))
+    assert _AF._metric_policy()["retention_days"] == _MP._ops_int("metrics_retention_days", 0)

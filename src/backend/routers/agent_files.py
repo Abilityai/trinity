@@ -755,22 +755,15 @@ def _metric_policy() -> dict:
     from services.settings_service import settings_service
     from routers import metric_points as _metric_points
 
-    retention, retention_source = settings_service.resolve_ops_setting(
-        "metrics_retention_days")
-    _cap, cap_source = settings_service.resolve_ops_setting(
-        "metrics_daily_point_cap")
+    _, retention_source = settings_service.resolve_ops_setting("metrics_retention_days")
+    _, cap_source = settings_service.resolve_ops_setting("metrics_daily_point_cap")
 
-    def _int(raw, fallback):
-        try:
-            return max(int(raw), 0)
-        except (TypeError, ValueError):
-            return fallback
-
+    # #3089: values come from the enforcing reader, so an unusable row reports
+    # what the record route applies: the default cap, never "unlimited", and a
+    # disabled window (0) for garbage, matching the sweep.
     return {
-        "retention_days": _int(retention, 365),
+        "retention_days": _metric_points._ops_int("metrics_retention_days", 0),
         "retention_days_source": retention_source,
-        # #3089: the enforcing reader, so a negative row reports the cap the
-        # record route applies rather than "unlimited".
         "daily_point_cap": _metric_points._ops_int("metrics_daily_point_cap", 100000),
         "daily_point_cap_source": cap_source,
         "enforced": True,
