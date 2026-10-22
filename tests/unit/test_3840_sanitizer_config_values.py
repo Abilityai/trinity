@@ -115,7 +115,7 @@ def test_key_value_redaction_still_uses_vendor_prefixes(monkeypatch):
 
 
 def test_credentials_inside_a_config_url_are_still_stripped(monkeypatch):
-    """A `*_URL` leaves the value set, but userinfo is redacted by shape."""
+    """A `*_URL` with userinfo stays in the value set, and is redacted by shape too."""
     monkeypatch.setenv("DATABASE_URL", "postgres://app:s3cretpass@db:5432/app")
     refresh_credential_values()
 
@@ -132,9 +132,17 @@ def test_the_name_check_is_linear():
     """
     import time
 
-    for name in ("A" * 65536, "FIBERY_" + "_HOS" * 16384 + "_HOST", "API_KE" * 10922):
+    long_url = "https://acme.fibery.io" + "/a" * 32768
+    for name, value in (
+        ("A" * 65536, "x"),
+        ("FIBERY_" + "_HOS" * 16384 + "_HOST", "x"),
+        ("API_KE" * 10922, "x"),
+        ("FIBERY_API_URL", long_url),
+        ("FIBERY_API_URL", "https://" + "a" * 65536),
+        ("FIBERY_API_URL", "https://h/" + "a1" * 32768),
+    ):
         started = time.perf_counter()
-        agent_sanitizer._is_credential_value_name(name)
+        agent_sanitizer._is_credential_value(name, value)
         assert time.perf_counter() - started < 1.0, name[:32]
 
 
@@ -144,8 +152,64 @@ def test_sanitize_text_never_runs_the_name_check(monkeypatch):
     monkeypatch.setenv("FIBERY_HOST", "acme.fibery.io")
     refresh_credential_values()
 
-    def boom(_name):
+    def boom(_name, _value):
         raise AssertionError("name check reached from sanitize_text")
 
-    monkeypatch.setattr(agent_sanitizer, "_is_credential_value_name", boom)
+    monkeypatch.setattr(agent_sanitizer, "_is_credential_value", boom)
     sanitize_text("x " * 50000 + "FIBERY_HOST=acme.fibery.io https://acme.fibery.io/a")
+
+
+# --- Review follow-up: a `_URL/_URI/_ENDPOINT` name alone is not enough ------
+# The suffix exemption took every secret-bearing URL without a listed secret
+# word out of the value set. All of these were redacted on `dev`, and neither
+# `redact_url_userinfo` nor the `KEY=value` pass catches them in free text, so
+# the URL suffixes are exempted only when the VALUE is a plain URL too.
+@pytest.mark.parametrize("name, value", [
+    # Capability URL: the path IS the credential.
+    ("SLACK_RESPONSE_URL",
+     "https://hooks.slack.com/actions/T00000000/0000000000/PLACEHOLDERplaceholder0000"),
+    # Query-string signature.
+    ("AZURE_STORAGE_SAS_URL",
+     "https://acct.blob.core.windows.net/c?sv=2020-01-01&sp=r&sig=PLACEHOLDERsignature"),
+    # Private iCal feed: the account and the private token are path segments.
+    ("GOOGLE_CALENDAR_ICAL_URL",
+     "https://calendar.google.com/calendar/ical/user%40example.com/private-0000placeholder0000/basic.ics"),
+    # `;`-style connection string.
+    ("DB_URL", "Server=db;Database=app;UID=app;PWD=placeholder-pwd;"),
+    ("DB_URL", "jdbc:sqlserver://db:1433;databaseName=app;password=placeholder-pwd"),
+    # Userinfo the #3770 regex stops short of (it ends at `"`).
+    ("POSTGRES_URI", 'postgresql://app:ab"cd@db/app'),
+    ("POSTGRES_URI", "postgresql://app:placeholder-pass@db/app"),
+    # Fragment-borne token.
+    ("GITHUB_CALLBACK_ENDPOINT", "https://example.com/cb#access_token=placeholder00"),
+    # Not a URL at all.
+    ("SLACK_RESPONSE_URL", "not-a-url-placeholder-value"),
+])
+def test_secret_bearing_url_values_stay_redacted(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    refresh_credential_values()
+
+    assert value in get_credential_values()
+    assert value not in sanitize_text(f"posting to {value} now")
+
+
+@pytest.mark.parametrize("name, value", [
+    ("TRINITY_MCP_URL", "http://mcp-server:8080/mcp"),
+    ("FIBERY_API_URL", "https://acme.fibery.io/api/graphql"),
+    ("GITHUB_API_ENDPOINT", "https://api.github.com"),
+    ("FIBERY_BASE_URI", "https://acme.fibery.io/"),
+])
+def test_plain_url_values_are_delivered(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    refresh_credential_values()
+
+    assert value not in get_credential_values()
+    assert sanitize_text(f"see {value}") == f"see {value}"
+
+
+def test_pat_is_a_secret_word(monkeypatch):
+    """Matches `secret_settings._CREDENTIAL_SUFFIXES` (`_pat`)."""
+    monkeypatch.setenv("GITHUB_PAT_HOST", "placeholder-pat-value")
+    refresh_credential_values()
+
+    assert "placeholder-pat-value" in get_credential_values()
