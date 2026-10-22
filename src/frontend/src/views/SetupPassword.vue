@@ -247,20 +247,16 @@ const passwordStrength = computed(() => passwordRequirements.value.filter(r => r
 // #3884: below all five requirements the meter tops out at "Good" (amber), so it
 // never reads as acceptable while submit is disabled. One requirement short, the
 // label names it.
-const strengthLevel = computed(() =>
-  passwordStrength.value === passwordRequirements.value.length ? 5 : Math.min(passwordStrength.value, 3)
-)
-
 const passwordStrengthText = computed(() => {
   const unmet = passwordRequirements.value.filter(r => !r.met)
   if (unmet.length === 1) return `Needs ${unmet[0].label}`
   const texts = ['Very Weak', 'Weak', 'Fair', 'Good', 'Good', 'Excellent']
-  return texts[strengthLevel.value] || 'Very Weak'
+  return texts[passwordStrength.value] || 'Very Weak'
 })
 
 const strengthColor = computed(() => {
   const colors = ['#f87171', '#f87171', '#fb923c', '#fbbf24', '#fbbf24', '#4ade80']
-  return colors[strengthLevel.value] || colors[0]
+  return colors[passwordStrength.value] || colors[0]
 })
 
 const isValid = computed(() =>

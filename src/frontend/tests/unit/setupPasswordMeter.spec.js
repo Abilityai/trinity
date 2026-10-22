@@ -41,6 +41,7 @@ describe('setup password meter', () => {
   it('a 12-character password missing only a symbol names the symbol', async () => {
     const m = await meter('Abcdefgh1234')
     expect(m.label).toContain('Symbol')
+    expect(m.labelColor).not.toBe(GREEN)
     expect(m.barColor).not.toContain(GREEN)
   })
 
