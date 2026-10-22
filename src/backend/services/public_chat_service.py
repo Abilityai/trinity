@@ -61,6 +61,21 @@ class PublicChatError(Exception):
         self.headers = headers
 
 
+def _mark_gate_hold(message_ids, exc) -> None:
+    """trinity#3402: the visitor's gated message and the notice answering it are
+    never replayed — not in a later turn's `Previous conversation`, not in the
+    MEM-001 summary. Never changes the answer (the approval is already raised,
+    or the refusal already given); a failure is an ERROR, since until fixed the
+    rows would be replayed."""
+    from services.skill_gate_errors import hold_marker
+
+    ids = [i for i in message_ids if i]
+    try:
+        db.mark_public_chat_messages_held(ids, hold_marker(exc))
+    except Exception:  # noqa: BLE001
+        logger.error("[PublicChat] could not mark the gated turn's messages %s", ids, exc_info=True)
+
+
 def agent_requires_email(agent_name: str) -> bool:
     """Agent-level email requirement (unified cross-channel policy, #311).
 
@@ -88,6 +103,7 @@ async def _execute_public_chat_background(
     memory_system_prompt: str = None,
     images: list = None,
     request_text: str = None,
+    user_message_id: str = None,
 ):
     """
     Background task for async public chat execution.
@@ -122,9 +138,10 @@ async def _execute_public_chat_background(
             )
         except SkillGateError as e:
             # trinity-enterprise#751: nothing ran — tell the visitor in the thread.
-            db.add_public_chat_message(session_id=chat_session_id, role="assistant",
-                                       content=e.message if hasattr(e, "message") else str(e),
-                                       sender_email=verified_email)
+            notice = db.add_public_chat_message(session_id=chat_session_id, role="assistant",
+                                                content=e.message if hasattr(e, "message") else str(e),
+                                                sender_email=verified_email)
+            _mark_gate_hold((user_message_id, getattr(notice, "id", None)), e)
             return
 
         if result.status == "success" and result.response:
@@ -302,11 +319,16 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     # sender-filtered MEM-001 summarizer (which keys on the user's own turns)
     # works on the web path identically to channels. None for anonymous
     # sessions, which never summarize.
-    db.add_public_chat_message(
+    # trinity#3402: marked as it is stored when it invokes a gated skill — a
+    # public visitor never self-approves, so it will not run as itself, and no
+    # later turn may replay it (one built while the gate still checks this one).
+    from services.skill_gate_service import gate_hold_on_write
+    user_row = db.add_public_chat_message(
         session_id=chat_session.id,
         role="user",
         content=chat_request.message,
         sender_email=verified_email,
+        **gate_hold_on_write(agent_name, chat_request.message),
     )
 
     # Record usage
@@ -356,6 +378,7 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
             memory_system_prompt=memory_system_prompt,
             images=_pub_image_data,
             request_text=chat_request.message,
+            user_message_id=getattr(user_row, "id", None),
         ))
 
         return {
@@ -391,7 +414,10 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     except SkillGateError as e:
         # trinity-enterprise#751: nothing ran. The visitor gets the notice as
         # the reply (stored like any turn), never a 502 or an empty answer.
+        gate_stop = e
         result = SimpleNamespace(status="gated", cost=None, response=getattr(e, "message", None) or str(e))
+    else:
+        gate_stop = None
 
     if result.status in ("failed", "cancelled"):
         # #679: a CANCELLED turn is non-delivery, not a success-like empty
@@ -424,13 +450,15 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     # this user's summary (they were included pre-#903) while the shared
     # multi-participant Slack thread — where the assistant turn stays null —
     # is the only place the filter drops assistant context.
-    db.add_public_chat_message(
+    reply_row = db.add_public_chat_message(
         session_id=chat_session.id,
         role="assistant",
         content=assistant_response,
         cost=result.cost,
         sender_email=verified_email,
     )
+    if gate_stop is not None:
+        _mark_gate_hold((getattr(user_row, "id", None), getattr(reply_row, "id", None)), gate_stop)
 
     # MEM-001: Increment message count and trigger background summarization every 5 messages
     if identifier_type == "email" and verified_email:

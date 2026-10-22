@@ -184,6 +184,7 @@ def _budget_defaults_response() -> RoomBudgetDefaults:
         sources=state["sources"],
         max_messages_ceiling=service.MAX_MESSAGES_CEILING,
         max_ttl_hours=service.MAX_TTL_HOURS,
+        max_cost_usd_ceiling=service.MAX_COST_USD_CEILING,
     )
 
 

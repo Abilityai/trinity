@@ -198,6 +198,10 @@ cursor would erase a call from every later delta after one failed typed turn)
 — rendered by `_format_voice_delta` under `VOICE_DELTA_HEADER`. The cold
 replay (`_format_history_context`, rewritten) renders the same rows in the same
 form and the delta is *not* added on top, so a cold retry never double-sends.
+A held gated turn's notice is not that cursor either — the platform wrote it,
+the live session never saw the turn — and neither the delta, the cold replay
+nor the voice model's opening summary (`build_portal_context_summary`) ever
+reads a turn the skill gate held or refused (trinity#3402, `_not_held`).
 One renderer (`_context_lines`) for both: `Client (voice):` / `You (voice):`,
 the platform's own row as a bracketed marker `[Voice call · 4 min]` (ent#523
 skipped these; a marker keeps "never the agent's words" and stops hiding that a

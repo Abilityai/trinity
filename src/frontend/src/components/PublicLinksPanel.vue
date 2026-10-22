@@ -376,6 +376,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import axios from 'axios'
 import { useAuthStore } from '../stores/auth'
 import { publicLinkUrl } from '../utils/publicLinkUrl'
+import { toDatetimeLocalInput } from '../utils/timestamps'
 import LoadFailed from './LoadFailed.vue'
 import InlineError from './InlineError.vue'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
@@ -398,6 +399,8 @@ const view = computed(() => viewState({ hasLoaded: hasLoaded.value, error: loadE
 const links = ref([])
 const showCreateModal = ref(false)
 const editingLink = ref(null)
+// #3584: the expiry field's value when the Edit dialog opened.
+const loadedExpiryInput = ref('')
 const deletingLink = ref(null)
 const actionLoading = ref(null)
 const copyNotification = ref(false)
@@ -447,8 +450,14 @@ const saveLink = async () => {
       name: formData.value.name || null,
     }
 
-    if (formData.value.expires_at) {
-      payload.expires_at = new Date(formData.value.expires_at).toISOString()
+    // #3584: the expiry is sent only when the person changed it. An untouched
+    // field is omitted, so Save cannot move the stored instant (the input keeps
+    // minutes only); a cleared one is sent as null, which removes the expiry.
+    const expiry = formData.value.expires_at
+    if (!editingLink.value) {
+      if (expiry) payload.expires_at = new Date(expiry).toISOString()
+    } else if (expiry !== loadedExpiryInput.value) {
+      payload.expires_at = expiry ? new Date(expiry).toISOString() : null
     }
 
     if (editingLink.value) {
@@ -497,9 +506,12 @@ const toggleLink = async (link) => {
 // Edit link
 const editLink = (link) => {
   editingLink.value = link
+  loadedExpiryInput.value = toDatetimeLocalInput(link.expires_at)
   formData.value = {
     name: link.name || '',
-    expires_at: link.expires_at ? link.expires_at.slice(0, 16) : '',
+    // #3584: the stored UTC instant, shown in the browser's local time — the
+    // datetime-local input has no zone and is read back as local.
+    expires_at: toDatetimeLocalInput(link.expires_at),
     enabled: link.enabled
   }
 }

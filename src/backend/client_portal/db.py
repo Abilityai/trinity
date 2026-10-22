@@ -170,27 +170,44 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        source: Optional[str] = None,
                        voice_call_id: Optional[str] = None,
                        attachments: Optional[str] = None,
-                       execution_id: Optional[str] = None) -> None:
+                       execution_id: Optional[str] = None,
+                       gate_hold: Optional[str] = None) -> None:
     # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
     # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     # #3265: `attachments` is the user turn's JSON list, already resolved
     # server-side (`service.resolve_turn_attachments`) — never client text.
     # #3166: `execution_id` names the turn that wrote the row, so a client can
     # take its OWN reply off a thread another turn is writing to.
+    # trinity#3402: `gate_hold` marks a row the skill gate stopped (the request
+    # id or `refused:<code>`) — never replayed to the agent.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
         "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
-        " source, voice_call_id, attachments, execution_id) "
+        " source, voice_call_id, attachments, execution_id, gate_hold) "
         "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call, "
-        " :attachments, :execution)"
+        " :attachments, :execution, :gate_hold)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
             "source": source, "call": voice_call_id, "attachments": attachments,
-            "execution": execution_id,
+            "execution": execution_id, "gate_hold": gate_hold,
         })
+
+
+def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> None:
+    """trinity#3402: mark the rows of a turn the skill gate stopped — the request
+    id or `refused:<code>` — or, with None, clear a reused row's old verdict (a
+    retry that reuses a refused turn's row stands for the NEW turn)."""
+    ids = [i for i in (message_ids or []) if i]
+    if not ids:
+        return
+    stmt = text(
+        "UPDATE enterprise_portal_messages SET gate_hold = :gate_hold WHERE id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"gate_hold": gate_hold, "ids": ids})
 
 
 def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
@@ -206,7 +223,8 @@ def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
                         session_id: Optional[str] = None,
-                        before: Optional[str] = None) -> list[dict]:
+                        before: Optional[str] = None,
+                        include_held: bool = False) -> list[dict]:
     """The most-recent ``limit`` messages for a conversation, oldest-first for
     display. Scoped to one ``session_id`` when given (the multi-session read);
     with no session it falls back to the whole (agent, client) history — the
@@ -215,7 +233,11 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     ``before`` (trinity-enterprise#610 §3g L7): only messages strictly older than
     this ISO-Z instant — the ask context's "what led up to it". A bound
     parameter compared with another `utc_now_iso()` column, so the two strings
-    share one format (Invariant #16's trap is `datetime('now')`, not this)."""
+    share one format (Invariant #16's trap is `datetime('now')`, not this).
+
+    ``include_held`` (trinity#3402): a turn the skill gate stopped, and its
+    notice, are left out unless asked for — see `_not_held`. A prompt builder
+    takes the default; a reader a PERSON sees passes True."""
     where = "agent_name = :agent AND client_email = :email"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "lim": limit}
     if session_id is not None:
@@ -224,6 +246,8 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     if before is not None:
         where += " AND created_at < :before"
         params["before"] = before
+    if not include_held:
+        where += " AND " + _not_held("enterprise_portal_messages")
     stmt = text(
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
@@ -259,6 +283,16 @@ _MESSAGE_COLUMNS = ("id, role, content, cost, created_at, source, voice_call_id,
 # carry NULL `source` too — they are part of the typed timeline, not of a call.
 _TYPED = "source IS NULL"
 
+
+def _not_held(table: str) -> str:
+    """trinity#3402: the rows a prompt may be built from — never a turn the skill
+    gate held or refused, nor its notice, whatever was decided since. The ONE
+    definition every read here uses. The turn marks its rows (`gate_hold`) when
+    the gate stops it; rows held before the column existed were marked once by
+    the `held_gate_turns` migration, from the gate record naming their turn."""
+    return f"{table}.gate_hold IS NULL"
+
+
 # Sized against a real 30-minute transcript (~180 rows): ~3 long calls plus
 # their typed turns. Read at call time (tests pin it), never captured as a
 # default argument.
@@ -273,7 +307,8 @@ class ThreadWindow:
 
 def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
                              typed_limit: int = 100,
-                             ceiling: Optional[int] = None) -> ThreadWindow:
+                             ceiling: Optional[int] = None,
+                             include_held: bool = False) -> ThreadWindow:
     """The newest ``typed_limit`` typed rows of one thread, plus every spoken
     row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
     survive, and ``truncated`` reports the cut).
@@ -283,10 +318,15 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
     DESC`` so the threshold and the range agree at a tie. Fewer typed rows than
     the limit → the whole thread (≤ ceiling). A call-only thread has no typed
     row at all and is returned whole for the same reason.
+
+    ``include_held`` (trinity#3402): as in `get_portal_messages` — left out of
+    both the window's count and its rows unless asked for.
     """
     ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
     typed_limit = max(1, int(typed_limit or 1))
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    if not include_held:
+        base += " AND " + _not_held("enterprise_portal_messages")
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
     threshold_stmt = text(
         f"SELECT created_at, id FROM enterprise_portal_messages "
@@ -327,6 +367,9 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     the background — typed in form, but it landed mid-call, so it is NOT the
     cursor. Taking it as one would erase the call's earlier spoken rows from
     the next delta, which is the very loss #2694 exists to prevent.
+
+    trinity#3402: nor is a held turn's notice — the platform wrote it, the live
+    session never saw that turn — for the same reason.
     """
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
@@ -337,9 +380,9 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     stmt = text(
         f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
         f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
-        f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
+        f"AND created_at > COALESCE((SELECT MAX(r.created_at) FROM enterprise_portal_messages r "
         f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
-        f"                              AND voice_call_id IS NULL), '') "
+        f"                              AND voice_call_id IS NULL AND {_not_held('r')}), '') "
         f"ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
