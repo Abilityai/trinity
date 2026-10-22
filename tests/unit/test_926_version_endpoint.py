@@ -179,10 +179,22 @@ def test_version_payload_passes_edition_and_features_through():
 
 def test_version_payload_runtimes_lists_all_shipped_runtimes():
     """#1187/#1443 drive-by: the hardcoded runtimes list had gone stale
-    (missing codex). Keep it matching the shipped runtime set."""
+    (missing codex). Keep it matching the shipped runtime set.
+
+    #2981 review I4: the list is now resolved by the handler from
+    `helpers.KNOWN_RUNTIME_NAMES` (`version_runtime_names`, whose output is
+    pinned to this same literal in test_2981_backend_registration, where the
+    real helpers module is importable) and passed in; the builder carries it
+    unchanged and in order."""
+    shipped = ["claude-code", "gemini-cli", "codex", "opencode"]
     build = _load_builder()
-    payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
-    assert payload["runtimes"] == ["claude-code", "gemini-cli", "codex"]
+    payload = build(voice_enabled=False, edition="oss", enterprise_features=[],
+                    runtimes=list(shipped))
+    assert payload["runtimes"] == ["claude-code", "gemini-cli", "codex", "opencode"]
+    src = (_BACKEND / "main.py").read_text(encoding="utf-8")
+    handler = src[src.index("async def get_version"):]
+    handler = handler[: handler.index("\n\n\n")]
+    assert "runtimes=version_runtime_names()" in handler
 
 
 def test_version_handler_imports_entitlement_service_function_locally():

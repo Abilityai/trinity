@@ -100,6 +100,10 @@ class ClaudeCodeRuntime(AgentRuntime):
             session_tab_resume=True,
             mcp_support=True,
             cost_reporting="native",
+            hooks=True,              # the ent#945 guardrail hooks are Claude Code hooks
+            images=True,             # execute_headless forwards `images` (#562)
+            plugins=True,            # plugins_reinstall runs only for Claude
+            subscription_auth=True,  # supports_auth_override = True
         )
 
     def is_available(self) -> bool:

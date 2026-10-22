@@ -18,6 +18,35 @@ from services.docker_utils import container_reload, api_exec_create, api_exec_st
 logger = logging.getLogger(__name__)
 
 
+def _cli_command(mode: str, model: str = None) -> list[str]:
+    """The exec argv for a terminal mode.
+
+    Modes: claude (Claude Code), gemini (Gemini CLI), codex (OpenAI Codex CLI,
+    #1187), opencode (OpenCode TUI, #2981 — v1.18.32's default `$0 [project]`
+    command declares `--model`/`-m` as `provider/model`,
+    packages/opencode/src/cli/cmd/tui.ts:81-85); anything else is bash.
+    """
+    if mode == "claude":
+        cmd = ["claude", "--dangerously-skip-permissions"]
+        if model:
+            cmd.extend(["--model", model])
+    elif mode == "gemini":
+        cmd = ["gemini"]
+        if model:
+            cmd.extend(["--model", model])
+    elif mode == "codex":
+        cmd = ["codex"]
+        if model:
+            cmd.extend(["-m", model])
+    elif mode == "opencode":
+        cmd = ["opencode"]
+        if model:
+            cmd.extend(["--model", model])
+    else:
+        cmd = ["/bin/bash"]
+    return cmd
+
+
 class TerminalSessionManager:
     """
     Manages terminal sessions for agents.
@@ -69,7 +98,7 @@ class TerminalSessionManager:
         Args:
             websocket: The WebSocket connection
             agent_name: Name of the agent to connect to
-            mode: Terminal mode ('claude', 'gemini', or 'bash')
+            mode: Terminal mode ('claude', 'gemini', 'codex', 'opencode' or 'bash')
             decode_token_fn: Function to decode JWT tokens
             model: Optional model to use (e.g., 'gemini-2.5-flash', 'sonnet')
         """
@@ -203,22 +232,7 @@ class TerminalSessionManager:
             session_start = datetime.utcnow()
 
             # Step 5: Create exec with TTY
-            # Support multiple terminal modes: claude (Claude Code), gemini
-            # (Gemini CLI), codex (OpenAI Codex CLI, #1187), bash
-            if mode == "claude":
-                cmd = ["claude", "--dangerously-skip-permissions"]
-                if model:
-                    cmd.extend(["--model", model])
-            elif mode == "gemini":
-                cmd = ["gemini"]
-                if model:
-                    cmd.extend(["--model", model])
-            elif mode == "codex":
-                cmd = ["codex"]
-                if model:
-                    cmd.extend(["-m", model])
-            else:
-                cmd = ["/bin/bash"]
+            cmd = _cli_command(mode, model)
 
             logger.info(f"Starting terminal with command: {cmd}")
 

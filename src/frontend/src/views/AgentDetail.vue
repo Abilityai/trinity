@@ -419,6 +419,7 @@ import { useSessionsStore } from '../stores/sessions'  // SESSION_TAB_2026-04 Ph
 import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../utils/avatarEmotion'
 import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import { settingsSections, LEGACY_TAB_SECTIONS } from '../utils/agentSettings'
+import { defaultModelForRuntime } from '../utils/agentRuntime'
 import { useAgentRestartStore } from '../stores/agentRestart'
 import NavBar from '../components/NavBar.vue'
 
@@ -883,16 +884,7 @@ async function renameAgent(newName) {
 }
 
 // Default model based on runtime
-const defaultModel = computed(() => {
-  const runtime = agent.value?.runtime || 'claude-code'
-  if (runtime === 'gemini-cli' || runtime === 'gemini') {
-    return 'gemini-2.5-flash'
-  }
-  if (runtime === 'codex') {
-    return 'gpt-5.1-codex' // OpenAI Codex default (#1187)
-  }
-  return 'sonnet' // Claude default
-})
+const defaultModel = computed(() => defaultModelForRuntime(agent.value?.runtime))
 
 // Agent settings composable
 const {

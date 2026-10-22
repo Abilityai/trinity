@@ -400,3 +400,154 @@ Composition paths and whether the model is known:
   #1521's context-window "safe floor").
 
 ---
+
+## 42. Multi-Runtime Harnesses — OpenCode (#2981)
+
+Trinity agents may run on **OpenCode** as a fourth execution runtime, beside
+Claude Code, Gemini CLI and Codex. A template selects it with
+`runtime: { type: opencode, model: <provider>/<model> }`; the container is
+created with `AGENT_RUNTIME=opencode` and `opencode_runtime.py` implements the
+`AgentRuntime` ABC. OpenCode is model-agnostic, so this is the runtime that runs
+an agent on an open-weight model (OpenRouter by default) or on a self-hosted
+OpenAI-compatible endpoint. Ported from the lab proof of concept (2026-09) and
+adopted to the current harness seam; flow:
+[opencode-runtime.md](../feature-flows/opencode-runtime.md).
+
+### 42.1 Execution engine + stream parser
+
+- **FR-1 — Execution:** `/api/chat` and `/api/task` run
+  `opencode run --format json --auto [-m <provider/model>] [--session <id>] [--dir <home>] [--command <name>]`
+  (`OpenCodeRuntime._build_command`). Chat continues its own session with
+  `--session`; headless turns are stateless.
+- **FR-2 — Parser:** JSONL events are read part-nested (`event.part.*`) with a
+  top-level fallback (`_part`, `_event_text`, `_tool_name`, `_record_tool`,
+  `_accumulate_usage`). There is **no separate result line**: the response is
+  the LAST step's concatenated text parts (`finalize_response`). Lines that do
+  not parse are counted and logged, never silently dropped (`_log_dropped_lines`).
+- **FR-3 — Exit 0 is not success:** a turn that exits 0 is still FAILED when it
+  carried an `error` event (status from the auth/rate registry, else 500), was cut
+  at `step_finish.reason=length` (500), ended on a `tool-calls` step with no
+  following step (500), returned only `reasoning` (500), returned nothing (500),
+  or returned a tool call written as text — `<tool_call>`, `<function_call>`,
+  `{"name":…,"arguments":…}`, `"tool_calls":[…]` — with zero real tool calls
+  (500, `text_tool_call_shape`). Each detail names the outcome and the model
+  (`_failed_turn_detail`); reasoning is never promoted into the response.
+- **FR-4 — Error → HTTP:** auth → **503**, rate limit → **429**, anything else
+  → **500**, never 503 (`classify_opencode_failure`, `_classify_message`, anchored
+  auth patterns); overrun → 504; pipe drop → 502; malformed model or provider
+  block → 400; CLI absent → 503.
+- **FR-5 — Stall watchdog:** a launch with no `step_start` inside the watchdog
+  window (`OPENCODE_STALL_TIMEOUT_SEC`, default 300 s, bounded by the turn timeout)
+  raises `OpenCodeStallError`; `_execute_with_stall_retry` relaunches on a fresh
+  session up to `OPENCODE_STALL_RETRIES` times (default 2, ceiling 5), inside the
+  turn's own deadline and never with under 90 s left, then fails 504 with the
+  `[OpenCode][STALL-RETRY]` marker. `ExecutionMetadata.stall_retries` records a
+  recovery. Mitigation, not a fix: the stall's cause is unknown.
+
+### 42.2 Provider block + key presence
+
+- **FR-6 — Model shape:** the model is `provider/model`. The backend rejects a
+  bare or malformed id at create with a named 400 (`helpers.validate_runtime_model`);
+  the harness re-checks the same regex per turn (`validate_provider_model`). An
+  unset model runs on `DEFAULT_OPENCODE_MODEL` = `anthropic/claude-sonnet-5`.
+- **FR-7 — Custom provider block:** `runtime.provider: {id, npm, base_url,
+  api_key_env, models: {<id>: {cost?}}}` is validated at create
+  (`helpers.validate_runtime_provider`: `id` `^[a-z0-9_-]+$`; `npm` allowlist
+  `@ai-sdk/openai-compatible` only, pre-seeded in the image; `base_url` absolute
+  http/https; `api_key_env` an env var NAME; `models` a mapping). A block under
+  any other runtime is a 400. `crud._build_base_env` and the recreate path
+  serialize it into `AGENT_RUNTIME_PROVIDER` through one serializer
+  (`render_runtime_provider_env`); recreate does not re-validate.
+- **FR-8 — Per-turn render:** `opencode_provider.provider_block` re-validates the
+  block every turn and `render_provider_config` writes
+  `provider.<id> = {npm, options: {baseURL, apiKey: "{env:<api_key_env>}"}, models}`
+  — the key's NAME, never its value. A models.dev provider (OpenRouter, Anthropic,
+  OpenAI, …) gets no `provider:` entry at all.
+- **FR-9 — Key presence (503 at the boundary):** before the subprocess starts,
+  `missing_key_env` resolves the variable the turn's provider needs — the custom
+  block's `api_key_env`, or `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` (`NATIVE_KEY_ENV`) — and an unset or empty one fails 503 naming
+  it. No silent fallback to another provider. Other models.dev providers are not
+  pre-checked; their auth failure is classified from the stream.
+
+### 42.3 MCP + platform prompt
+
+- **FR-10 — MCP translation:** `~/.mcp.json` stays the one store
+  (`configure_mcp` writes there). Each turn, `opencode_mcp.apply_mcp_config`
+  translates it onto OpenCode's `mcp:` key (remote `{type, url, headers}`, local
+  `{type, command[], environment}`, `enabled: false` kept), rewriting
+  `${VAR}` / `${VAR:-default}` to `{env:VAR}` (defaults exported into the
+  subprocess env), reverse-mapping any literal that equals a
+  `KEY|TOKEN|SECRET|PASSWORD` env value to its name, and dropping — with a
+  warning — a secret-shaped literal that matches no variable.
+- **FR-11 — Per-turn config:** `_prepare_turn_config` builds a private
+  `XDG_CONFIG_HOME` per execution under the 0700 OpenCode root, writes
+  `opencode.json` at 0600, symlinks the pre-seeded provider `node_modules` (and
+  `auth.json`) from the shared config, and removes the dir in `finally`.
+- **FR-12 — Platform prompt:** `opencode run` has no system-prompt flag, so the
+  composed prompt is written to the turn dir and listed first in `instructions:`.
+  `platform_prompt_service._adapt_instructions_for_runtime` rewrites the Claude
+  tool prefix to OpenCode's server-scoped `trinity_<tool>` names and prepends an
+  OpenCode orientation block (not a `PLATFORM_INSTRUCTIONS` section). OpenCode is
+  not a guardrail-hook runtime, so it gets the unhooked protected-paths sentence.
+  `CLAUDE.md` is read natively; no `AGENTS.md` mirror (that is Codex only).
+
+### 42.4 Controls parity + ledger
+
+- **FR-13 — Permission block:** `build_permission_block(read_only, guardrails,
+  allowed_tools)` folds every Trinity control onto OpenCode's `permission:` key.
+  Read-only → `edit: deny`, `bash: deny` and nothing else — every other key
+  stays at the operator's value or the binary default (R18: the former
+  `webfetch: allow` decided nothing under `--auto` and could only widen an
+  operator deny) (read from
+  `/opt/trinity/read-only-config.json`, legacy fallback as on Codex); operator
+  `disallowed_tools` ∪ platform denials (`merged_disallowed_tools`) → `deny` on the
+  mapped key; a non-empty headless `allowed_tools` denies every mapped key it does
+  not name. Precedence: read-only deny > guardrail/platform deny >
+  `allowed_tools` > binary default. `merge_permission_block` keeps deny sticky
+  over the operator's own `permission:`.
+- **FR-14 — Unmapped controls are surfaced:** every control name with no
+  OpenCode equivalent becomes an execution-log entry (`trinity-control`:
+  "guardrail not mapped", "platform denial not mapped", "allowed_tools not
+  mapped"), not only a container log line.
+- **FR-15 — Ledger:** tokens, cost, `model_name` and `tool_count` reach
+  `ExecutionMetadata` and the result callback unchanged. Cost is OpenCode's native
+  sum for models.dev providers; on a custom provider with no declared
+  `models.<id>.cost` it is `cost_usd=None` (unknown) with one warning — never $0
+  recorded as free (`_apply_cost_policy`).
+
+### 42.5 Playbook commands
+
+- **FR-16 — `/name args` runs the playbook:** each turn,
+  `opencode_commands.discover_playbook_commands` renders one `command:` entry per
+  skill the Playbooks tab lists (same reader as `GET /api/skills`), template
+  `Follow the skill at <SKILL.md path> with arguments: $ARGUMENTS`; nothing is
+  written to the workspace. `split_playbook_prefix` turns a first non-blank line
+  `/<name> [args]` naming a known skill into `--command <name>` with the rest as
+  arguments, in chat and headless turns. An unknown `/name` is prose.
+- **FR-17 — Shell-shape guard:** arguments carrying OpenCode's `` !`cmd` `` shape
+  (which OpenCode expands through the shell outside the permission layer) are not
+  dispatched as a command; the prompt is sent as prose and the fallback logged.
+
+### 42.6 Seam hygiene + UI
+
+- **FR-18 — One identity leaf:** `agent_server/runtime_names.py` owns the
+  runtime name sets (`OPENCODE_RUNTIMES`, `KNOWN_RUNTIMES`, `normalize_runtime`,
+  `is_claude_runtime`); the backend's `helpers.KNOWN_RUNTIME_NAMES` includes
+  `opencode`, and `/api/version` lists it. The model regex is a parity pair
+  backend ↔ harness (`test_2981_backend_registration`).
+- **FR-19 — Capabilities:** `RuntimeCapabilities` = chat continuity yes, Session-tab
+  resume no, MCP yes, cost `native`, hooks / images / plugins / subscription auth
+  no. `RUNTIMES_WITHOUT_SESSION_TAB_RESUME` includes `opencode`, so a Session-tab
+  turn runs stateless; `is_claude_runtime` is false, so no Claude subscription is
+  assigned.
+- **FR-20 — UI:** `RuntimeBadge.vue` shows "OpenCode" on its own `brand-opencode`
+  token family; `utils/agentRuntime.defaultModelForRuntime('opencode')` returns the
+  harness default; the agent terminal has an `opencode` mode that launches the
+  OpenCode TUI with `--model` when one is given.
+
+**Out of scope:** a `runtime.env` block; a Replicate shim (no OpenAI-compatible
+chat/tools endpoint was measured for it); subscription/OAuth auth for OpenCode;
+image input; Session-tab resume; a post-creation runtime switch.
+
+---

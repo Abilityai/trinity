@@ -153,6 +153,7 @@ PATTERN_INSTANCES = {
     ".claude/.credentials.json": ".claude/.credentials.json",
     ".gemini/settings.json": ".gemini/settings.json",
     ".tmp/codex/*": ".tmp/codex/auth.json",
+    ".tmp/opencode/*": ".tmp/opencode/data/opencode/auth.json",
     "/proc/*": "/proc/self/cwd/notes.md",
     "/dev/*": "/dev/fd/7",
     ".trinity/git-credential": ".trinity/git-credential",

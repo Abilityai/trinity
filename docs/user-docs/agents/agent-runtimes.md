@@ -1,6 +1,6 @@
 # Agent Runtimes
 
-Trinity is model-agnostic: each agent runs on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports three runtimes: Claude Code (the default), Gemini CLI, and OpenAI Codex.
+Trinity is model-agnostic: each agent runs on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports four runtimes: Claude Code (the default), Gemini CLI, OpenAI Codex, and OpenCode.
 
 ## Concepts
 
@@ -14,35 +14,37 @@ A template selects the runtime in `template.yaml`:
 
 ```yaml
 runtime:
-  type: codex          # claude-code (default) | gemini-cli | codex
+  type: codex          # claude-code (default) | gemini-cli | codex | opencode
   model: gpt-5.6-sol   # optional model override
 ```
 
 The runtime is fixed when the agent is created. To change it, recreate the agent from a template that declares a different runtime — there is no post-creation switch.
 
-On the Agent Detail page, a runtime badge shows which runtime the agent is using. Chat works on all three runtimes, and each continues its **own** chat session from turn to turn. Only Claude Code resumes a session in the [Workspace](../sharing-and-access/workspace.md): a Codex agent's Workspace turns replay the visible history as text instead, and Gemini's headless turns never resume (see Limitations).
+On the Agent Detail page, a runtime badge shows which runtime the agent is using. Chat works on all four runtimes, and each continues its **own** chat session from turn to turn. Only Claude Code resumes a session in the [Workspace](../sharing-and-access/workspace.md): a Codex or OpenCode agent's Workspace turns replay the visible history as text instead, and Gemini's headless turns never resume (see Limitations).
 
 ### Runtime Comparison
 
-| | Claude Code (default) | Gemini CLI | OpenAI Codex |
-|---|---|---|---|
-| Auth model | Claude subscription / OAuth, or platform API key | The platform Gemini key (Settings, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` on the backend) | `OPENAI_API_KEY` in `.env` (or a ChatGPT-plan login; Codex skips Claude-subscription auto-assign) |
-| System-prompt file | `CLAUDE.md` | `CLAUDE.md` | `AGENTS.md` |
-| Chat continuity (own session) | Yes | Yes | Yes |
-| Workspace session resume | Yes | No (headless turns never resume) | No (history replayed as text) |
-| MCP support | Yes | Yes | Yes |
-| Cost reporting | Reported by the CLI | Estimated from tokens | Estimated from tokens |
-| CLI version | Pinned in the base image | Pinned in the base image | Pinned in the base image |
+| | Claude Code (default) | Gemini CLI | OpenAI Codex | OpenCode |
+|---|---|---|---|---|
+| Auth model | Claude subscription / OAuth, or platform API key | The platform Gemini key (Settings, or `GEMINI_API_KEY` / `GOOGLE_API_KEY` on the backend) | `OPENAI_API_KEY` in `.env` (or a ChatGPT-plan login; Codex skips Claude-subscription auto-assign) | `OPENROUTER_API_KEY` in `.env` for OpenRouter models, or the key your model's provider needs (see [OpenCode authentication](#opencode-authentication)) |
+| System-prompt file | `CLAUDE.md` | `CLAUDE.md` | `AGENTS.md` | `CLAUDE.md` |
+| Chat continuity (own session) | Yes | Yes | Yes | Yes |
+| Workspace session resume | Yes | No (headless turns never resume) | No (history replayed as text) | No (history replayed as text) |
+| MCP support | Yes | Yes | Yes | Yes |
+| Cost reporting | Reported by the CLI | Estimated from tokens | Estimated from tokens | Reported by OpenCode for known providers; unknown on a custom provider unless the template declares a price |
+| CLI version | Pinned in the base image | Pinned in the base image | Pinned in the base image | Pinned in the base image |
+| Model string | Model id | Model id | Model id | `provider/model` (e.g. `openrouter/qwen/qwen3-coder`) |
+| Playbook calls (`/name args`) | Run as a slash command | Passed to the model as text | Passed to the model as text | Run as an OpenCode command when the first line names a playbook |
 
-Safety controls are not the same on every runtime. Platform controls (which credentials the agent holds, which agents and platform calls its key may reach) apply to all three, and so does credential redaction of stored results: the backend scrubs execution output whichever CLI produced it. The in-container controls differ:
+Safety controls are not the same on every runtime. Platform controls (which credentials the agent holds, which agents and platform calls its key may reach) apply to all four, and so does credential redaction of stored results: the backend scrubs execution output whichever CLI produced it. The in-container controls differ:
 
-| In-container control | Claude Code | OpenAI Codex | Gemini CLI |
-|---|---|---|---|
-| [Guardrail](agent-guardrails.md) hooks (Bash deny-list, credential-file protection, leak scan) | Yes | No | No |
-| Read-only mode | Yes, through a hook | Yes, through Codex's own read-only sandbox (`--sandbox read-only`) | No |
-| Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored |
-| Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
-| Per-agent disallowed tools | Yes | No | No |
+| In-container control | Claude Code | OpenAI Codex | Gemini CLI | OpenCode |
+|---|---|---|---|---|
+| [Guardrail](agent-guardrails.md) hooks (Bash deny-list, credential-file protection, leak scan) | Yes | No | No | No |
+| Read-only mode | Yes, through a hook | Yes, through Codex's own read-only sandbox (`--sandbox read-only`) | No | Yes, through OpenCode's permission settings (edits and shell commands denied) |
+| Credential redaction of output | Yes, inside the container | Yes, inside the container | No; only the platform's pattern-based scrub when results are stored | Yes, inside the container |
+| Turn limit | Yes | No; the execution timeout bounds the run | No; the execution timeout bounds the run | No; the execution timeout bounds the run |
+| Per-agent disallowed tools | Yes | No | No | Yes for Write, Edit, Bash and WebFetch, through OpenCode's permission settings; any other tool name is listed in the execution log as not enforced |
 
 See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md#coverage-by-runtime) for where the boundary sits.
 
@@ -58,6 +60,16 @@ Codex keeps its login and MCP configuration in `~/.tmp/codex/`. The Files tab ca
 ### Gemini authentication
 
 A Gemini agent uses the platform's Gemini key. Trinity reads the key saved in **Settings** first, then `GEMINI_API_KEY` or `GOOGLE_API_KEY` on the backend, and passes it to the container as `GEMINI_API_KEY` when the container is created. Settings accepts Google AI Studio keys that start with `AIza` or `AQ.` — see [Platform Keys](../credentials/platform-keys.md). With no key configured, the agent is still created, but its turns fail with "GEMINI_API_KEY not configured".
+
+### OpenCode authentication
+
+An OpenCode agent uses the API key of the provider its model names. The model string is `provider/model`, and the provider decides which variable is read:
+
+- **OpenRouter** (`openrouter/...`, the usual choice for open-weight models) — inject `OPENROUTER_API_KEY` as a credential.
+- **Anthropic** (`anthropic/...`) — inject `ANTHROPIC_API_KEY`. An OpenCode agent with no `runtime.model` runs on `anthropic/claude-sonnet-5`, so it needs this key.
+- **A custom endpoint** you declare in the template — inject the variable named in its `api_key_env`.
+
+If that variable is missing or empty, the turn fails before it starts with a message that names the variable. Trinity never falls back to another provider. OpenCode agents are not assigned a Claude subscription. See [OpenCode Runtime](opencode-runtime.md) for the template setup.
 
 ### Gemini CLI turns
 
@@ -80,8 +92,9 @@ Set the runtime in the template's `template.yaml`:
 
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
-| `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
+| `runtime.type` | `claude-code`, `gemini-cli`, `codex`, `opencode` | `claude-code` | Selects the harness |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`; on OpenCode `provider/model`) | runtime default | Optional override — pin it, so recorded cost is attributable |
+| `runtime.provider` | OpenCode only: a custom OpenAI-compatible endpoint | none | See [OpenCode Runtime](opencode-runtime.md#custom-openai-compatible-endpoint) |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
@@ -98,11 +111,16 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 - **No runtime switch after creation.** Recreate the agent from a different template to change runtimes — a post-creation runtime-switch endpoint is planned.
 - **Codex cost is estimated**, not metered exactly.
 - **Each CLI is pinned in the base image.** A model newer than the pinned Claude Code version is refused, and the run fails with `model_unsupported` rather than an auth error (see [Model Selection](agent-configuration.md#model-selection)). Rebuild the base image after upgrading Trinity so agents pick up the newer CLIs.
+- **OpenCode cannot resume a session.** Like Codex, its Workspace turns replay the visible history as text.
+- **No subscription login for OpenCode.** It runs on a provider API key only.
+- **OpenCode cost on a custom provider is unknown** unless the template declares a price for the model. It is recorded as unknown, not as zero.
+- **The OpenCode terminal opens the OpenCode interface** rather than a shell, when the terminal is requested in `opencode` mode.
 - **Codex vision/image input and SSE streaming are out of scope** for the current release (planned).
 
 ## See Also
 
 - [Creating Agents](creating-agents.md) -- Selecting a runtime via the template
+- [OpenCode Runtime](opencode-runtime.md) -- Running an agent on OpenRouter or a self-hosted model
 - [Continuous Conversations](agent-session.md) -- What resuming preserves (Claude Code only)
 - [Platform Keys](../credentials/platform-keys.md) -- The Gemini key a Gemini agent uses
 - [Agent Guardrails](agent-guardrails.md) -- Your own `disallowed_tools`, merged with the platform's headless denials

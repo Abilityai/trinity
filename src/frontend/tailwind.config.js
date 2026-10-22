@@ -32,6 +32,7 @@ export default {
         'state-locked':      colors.rose,
         'brand-claude':      colors.orange,
         'brand-gemini':      colors.blue,
+        'brand-opencode':    colors.teal,
         'accent-purple':     colors.purple,
         'action-primary':    colors.indigo,
       },

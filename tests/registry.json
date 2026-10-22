@@ -5395,17 +5395,6 @@
       "description": "The opt-in keyset (cursor) walk on GET /api/operator-queue (trinity-enterprise#815): within one walk no id is returned twice and every row matching at the start and when reached is returned exactly once while the queue changes. Inserts ahead of and behind the cursor (incl. a file-seam row with an old created_at); all five pending→ended writers between pages (ordering as of a watermark W = start − 300 s); a status=pending walk with answers; a permission change mid-walk; platform-alert priority changes through the walk's Redis priority snapshot (fakeredis), an alert raised mid-walk pinned to rank 4; a hypothesis property test (derandomize) over random interleavings of every write. The commit-lag bound: a write stamped before the walk began is not repeated, and a commit past the margin is logged at error. Strict cursor decoding (422 naming cursor; cursor+offset 422; filter mismatch 422; expired walk 410; Redis unreachable or failing 503; the decoded-bytes cap isolated); a forged token never widens visibility; an over-cap sort key (incl. non-ASCII and quote-heavy legacy ids) ends the page with has_more true, next_cursor null and a warning, and every issued cursor decodes; offset mode's order is unchanged; the walk statement compiles on postgresql and sqlite with one set of shared expressions. Mutation-proven."
     },
     {
-      "file": "unit/test_3302_queue_list_order.py",
-      "feature": "#3302",
-      "added": "2026-10-19",
-      "categories": [
-        "backend",
-        "unit",
-        "database"
-      ],
-      "description": "Pins the offset-mode order of GET /api/operator-queue that the operator-queue UI reads past its first page (#3302, src/frontend/src/utils/operatorQueueRead.js): every pending row precedes every ended row whatever their priorities and timestamps; the rows after the pending section are the ended rows, newest ending first; offset pages concatenate to the whole order; total counts the page's own WHERE (filters, not the page); the undelivered and closed-by-filer flags are the same whatever status/limit/offset the read carries. Real router in a small FastAPI app over a fresh SQLite file. Mutation-proven (pending sorted last fails two tests)."
-    },
-    {
       "file": "mcp-server/src/operator_queue_list.test.ts",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
@@ -6047,39 +6036,6 @@
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
     },
     {
-      "file": "unit/test_3402_workspace_held_history.py",
-      "feature": "#3402",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "security",
-        "unit"
-      ],
-      "description": "A Workspace turn the skill gate held or refused never reaches a later prompt: the next cold turn has neither the held request nor its notice, whatever was decided, nor a refused request; a held turn with no pre-created row is kept out by its mark alone; the client's thread and the reply poll still show both; a retried refused message that then runs is conversation again; the voice summary leaves them out; the voice-delta cursor skips a held notice; the registered migration marks rows held before the column. Real schema and the real gate backstop. Mutation-proven at each call site."
-    },
-    {
-      "file": "unit/test_3402_public_group_held_rows.py",
-      "feature": "#3402",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "security",
-        "unit"
-      ],
-      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; a message or group chatter stored while the gate map cannot be read is left unmarked, and the verdict marks a turn the gate then refuses; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
-    },
-    {
-      "file": "unit/test_3402_room_gate_holds.py",
-      "feature": "#3402",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "security",
-        "unit"
-      ],
-      "description": "The room re-hold loop: a later wake does not raise a second approval for a held post; a warm wake still gets the ordinary post that shared the held one's delta; a new request is still held; another agent still reads the post; a rejected request does not come back after the skill is un-gated; a standing refusal is recorded and a transient one is not; a wake left with nothing to answer dispatches nothing; MCP read_room by the agent leaves its holds out; a failed holds read re-holds rather than shows; holds are per agent and written once; AGENT_REFS cascade. Real schema and the real gate. Mutation-proven."
-    },
-    {
       "file": "unit/test_3590_rebuild_pull_env.py",
       "feature": "#3590",
       "added": "2026-10-12",
@@ -6259,6 +6215,179 @@
         "unit"
       ],
       "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
+      "file": "unit/test_opencode_runtime.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "OpenCode harness core, subprocess stubbed: parser (last-step text, native cost, reasoning/cache subset traps), empty/reasoning-only turns fail even on exit 0, error→HTTP mapping (auth 503 anchored, 429, 500, 502, 504), provider/model shape 400, per-turn XDG config carries the system prompt as instructions, metadata.model_name is the resolved -m (runtime default passed explicitly), tool activity tracked under the execution id, is_available probed once per process, read-only config /opt/trinity first then the home copy. Mutation: dropping model_name, the execution_id kwarg, the availability cache or the /opt precedence each turns its test red. Checkpoint C seam test: one executed turn renders provider: and mcp: by env-var name only, with the execution tag and a placeholder default in the child env."
+    },
+    {
+      "file": "unit/test_runtime_factory_opencode.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "get_runtime() resolves AGENT_RUNTIME=opencode in any casing to the OpenCodeRuntime singleton; a near-miss value still raises; opencode is in KNOWN_RUNTIMES."
+    },
+    {
+      "file": "unit/test_2981_runtime_seam_hygiene.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "runtime_names leaf: is_claude_runtime is case-insensitive, env-reading, import-free; runtime_adapter re-exports it; plugins_reinstall skips non-Claude runtimes with a named skipped_runtime status and still runs on Claude; AgentState probes each runtime's own CLI (unknown → unavailable, never claude); result_callback's async-dispatch gate shares the casing-safe predicate. Mutation: removing the reinstall gate turns 5 tests red."
+    },
+    {
+      "file": "unit/test_opencode_provider.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "The template's runtime.provider block (AGENT_RUNTIME_PROVIDER, ruling T5) rendered per OpenCode turn as provider.<id>.{npm, options:{baseURL, apiKey:'{env:NAME}'}, models}: apiKey is the env reference and the key's value (set in the test env) appears nowhere in the serialized config; every validation rule fails NAMED (id shape, npm allowlist = @ai-sdk/openai-compatible only, absolute http/https base_url, api_key_env name shape, models mapping); a missing or empty key fails the turn 503 naming the variable BEFORE the subprocess starts for the custom block, OpenRouter, Anthropic and OpenAI (ruling T4), other models.dev providers are not pre-checked, OpenRouter renders no provider block, a malformed block is a 400 naming the field on both execute paths, B's cost policy reads through the one reader; static: no gateway/`/proc/net/route`/OPENCODE_OLLAMA code anywhere in the agent server (decision 5). Subprocess stubbed. Mutation: each validation rule, the allowlist, the scheme check, each key-presence row, the apiKey reference, the pre-check wiring and the render wiring each turn a test red."
+    },
+    {
+      "file": "unit/test_opencode_mcp_prompt.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "The AGENT half of `.mcp.json` → OpenCode `mcp:` (checkpoint C; the platform-prompt trinity_<tool> rewrite is checkpoint G): remote {url, headers} → {type:remote}, local {command, args, env} → {type:local, command:[…], environment}, disabled and unmappable entries, missing/malformed file degrades to no servers; the secret rule — ${VAR}/${VAR:-d} → {env:VAR} with the default returned for the subprocess env (the pinned v1.18.32 variable.ts has no default form), a header/env value equal to ANY secret-named env var's current value is rewritten to that var by name (reverse lookup, not one hard-coded name), a secret-shaped literal matching no env var is dropped with one warning naming server and field, plain headers pass through; operator-declared entries win; the seam: a `.mcp.json` fixture carrying the Trinity bearer literally renders a serialized opencode.json with the sentinel nowhere and `{env:TRINITY_MCP_API_KEY}` present. Mutation: the placeholder rewrite, the reverse-lookup scrub, the drop rule, the default collection, the precedence rule, the secret-name filter and the min-length floor each turn a test red."
+    },
+    {
+      "file": "unit/test_opencode_controls.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "Controls parity (checkpoint D): read-only renders the exact permission set {edit:deny,bash:deny} — webfetch absent, nothing in Trinity's block is ever allow (R18, PR #3888 review: the former webfetch:allow decided nothing under --auto and only widened an operator deny); each mapped Claude name (Write/Edit/MultiEdit/NotebookEdit→edit, Bash→bash, WebFetch→webfetch, WebSearch→websearch — the pinned v1.18.32 schema) from disallowed_tools and from PLATFORM_DENIED_TOOLS (through merged_disallowed_tools, never a second reader) lands on its key; headless allowed_tools denies mapped keys none of whose names is listed and None/[] restricts nothing; precedence read-only deny > guardrail/platform deny > allowed_tools > binary default with deny sticky (a WebFetch guardrail/allowlist deny coexists with read-only); the operator's own permission block is merged deny-sticky for every deny shape the schema accepts — test_merge_keeps_a_wildcard_and_pattern_deny (bare \"deny\" block, {\"*\":\"deny\"}, {\"webfetch\":{\"*\":\"deny\"}} each survive a computed allow; the pattern map is kept, not flattened) and test_read_only_never_widens_an_operator_deny (end to end on the rendered opencode.json over the operator's bare deny and pattern-map deny); every unmapped name comes back as a `trinity-control` execution-log entry (`guardrail not mapped: X` / `allowed_tools not mapped: X`) plus one WARNING line, platform denials logged only; the seam through _prepare_turn_config and through execute_headless on the stubbed subprocess; the result-callback envelope keeps cost_usd=None (T6) and model_name from the resolved -m. Mutation: each map row, the read-only set, each precedence rule, the allowlist denial, the merge stickiness (incl. the wildcard and pattern-map clauses — M6), the read-only set regaining webfetch:allow (M5), the surfacing and the None-cost parity each turn a test red."
+    },
+    {
+      "file": "unit/test_2981_playbook_dispatch.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "security",
+        "unit"
+      ],
+      "description": "Playbook dispatch (checkpoint E, ruling T2): every SKILL.md found through routers/skills.py (skill_search_paths + scan_skills_directory — one reader) renders one per-turn opencode.json `command:` entry {template: \"Follow the skill at <abs SKILL.md> with arguments: $ARGUMENTS\", description: one line, capped} — body never embedded, dirs without SKILL.md skipped, project beats personal, unsafe names skipped with one WARNING, per-turn entries beat the shared config's; split_playbook_prefix dispatches only a scanned name on the first non-blank line (args + riders newline-preserved, bare /name → empty message, unknown /name / mid-text / no slash pass through unchanged) and refuses arguments carrying OpenCode's !`cmd` shell shape (run outside the permission layer, prompt.ts v1.18.32); _build_command emits --command; chat and headless argv on the stubbed subprocess carry --command <name> -- <args> (no separator for a bare /name) and leave no turn dir. Mutation: dropping the --command hand-off turns the execute-path tests red."
+    },
+    {
+      "file": "unit/test_2981_base_image_arch.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "infrastructure",
+        "unit"
+      ],
+      "description": "Container files (checkpoint F). Executed: the runtime-setup section of the SHIPPED startup.sh runs under bash against a tmp home/AGENT_TMPDIR/pre-seed dir — the OpenCode block (case-insensitive match) writes opencode.json (share disabled, autoupdate off) only if absent into exactly the dir opencode_runtime._shared_config_dir() reads ($TMPDIR/opencode/config/opencode), links the pre-seeded node_modules and copies package.json/lock, chmods the root 0700, exports no XDG_/OPENCODE_ var (ruling T3: the harness sets them per turn) and is skipped for every other runtime; the AGENTS.md mirror is a relative symlink to CLAUDE.md for codex ONLY (ruling T8; opencode, claude-code and gemini-cli get none) — tracks later edits, adopts a byte-identical copy, leaves a differing authored file alone with a loud message, repairs a wrong link, idempotent; bash -n passes. Static over the Dockerfile (its consumer is the image build): ARG OPENCODE_VERSION equals every v-version opencode_runtime.py cites; uname -m maps x86_64/aarch64 with a FATAL exit-1 default; the platform package is named explicitly; the opencode --version check sits after the install in the same RUN (#2537 rule); the pre-seeded provider set equals NPM_ALLOWLIST plus the drivers of NATIVE_KEY_ENV's providers, each an exact x.y.z with a test -d; the Go tarball is resolved per arch and verified with go version in the same RUN (ruling T1). Reverting the Dockerfile and startup.sh turns 25 of 27 red."
+    },
+    {
+      "file": "unit/test_2981_backend_registration.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "Backend registration of the opencode runtime (checkpoint G): KNOWN_RUNTIME_NAMES accepts opencode in any casing and equals the agent-side KNOWN_RUNTIMES; is_claude_runtime('opencode') is False (subscription gate) and the harness agrees (no auth_override, subscription_auth False); the Session-tab gate refuses resume for opencode and matches the runtime's capability; validate_runtime_model rejects a bare id with a 400 naming the value and provider/model, only for opencode, and its regex is character-identical to the harness _PROVIDER_MODEL_RE with a behavioural parity loop; validate_runtime_provider accepts a valid block, 400s naming each malformed field, 400s a block under any other runtime (G1), and agrees with the harness validate_provider_block on a parity set; render_runtime_provider_env is compact sorted JSON that round-trips through the harness load_provider_block, '' when absent; the real crud._build_base_env bakes it; create and recovery both serialize through the one helper, recovery does not re-validate (G3); create validates after the lowercase normalization."
+    },
+    {
+      "file": "unit/test_opencode_backend_inertness.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "OpenCode-shaped failure details (pipe-drop string, dict without the recovery marker) are inert for the #678 reader-race auto-retry signature; the genuine Claude signature still fires."
+    },
+    {
+      "file": "unit/test_2981_terminal_opencode_mode.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-runtime",
+        "terminal",
+        "unit"
+      ],
+      "description": "OpenCode terminal mode (checkpoint H, H3): the pure _cli_command(mode, model) maps opencode to the bare `opencode` TUI, appending `--model <provider/model>` when a model is given (v1.18.32's default `$0 [project]` command declares --model/-m, packages/opencode/src/cli/cmd/tui.ts:81-85); claude/gemini/codex/bash argv unchanged, unknown modes fall to /bin/bash. Executed: the real handle_terminal_session with Docker edges stubbed hands ['opencode','--model',...] to api_exec_create (before H it was ['/bin/bash']) and leaves no registered session."
+    },
+    {
+      "file": "unit/test_2981_docs_and_template.py",
+      "feature": "abilityai/trinity#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "templates",
+        "docs",
+        "unit"
+      ],
+      "description": "OpenCode template + docs (checkpoint I, I1-I4): the hidden test-opencode fixture parses, pins an openrouter/ model that passes the backend's real validate_runtime_model and declares OPENROUTER_API_KEY in credentials + credential_setup; its COMMENTED runtime.provider example is extracted, un-commented and run through the real validate_runtime_provider (base_url http://host.docker.internal:11434/v1), with a drifted npm proven to 400. Doc pins: README fixtures line, runtimes.md §42 + six subsections, feature-flows index rows + the flow's Verification status, user-docs mention OpenCode, and a lab-identifier scrub over every file the checkpoint touched."
+    },
+    {
+      "file": "unit/test_3302_queue_list_order.py",
+      "feature": "#3302",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "Pins the offset-mode order of GET /api/operator-queue that the operator-queue UI reads past its first page (#3302, src/frontend/src/utils/operatorQueueRead.js): every pending row precedes every ended row whatever their priorities and timestamps; the rows after the pending section are the ended rows, newest ending first; offset pages concatenate to the whole order; total counts the page's own WHERE (filters, not the page); the undelivered and closed-by-filer flags are the same whatever status/limit/offset the read carries. Real router in a small FastAPI app over a fresh SQLite file. Mutation-proven (pending sorted last fails two tests)."
+    },
+    {
+      "file": "unit/test_3402_workspace_held_history.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A Workspace turn the skill gate held or refused never reaches a later prompt: the next cold turn has neither the held request nor its notice, whatever was decided, nor a refused request; a held turn with no pre-created row is kept out by its mark alone; the client's thread and the reply poll still show both; a retried refused message that then runs is conversation again; the voice summary leaves them out; the voice-delta cursor skips a held notice; the registered migration marks rows held before the column. Real schema and the real gate backstop. Mutation-proven at each call site."
+    },
+    {
+      "file": "unit/test_3402_public_group_held_rows.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; a message or group chatter stored while the gate map cannot be read is left unmarked, and the verdict marks a turn the gate then refuses; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
+    },
+    {
+      "file": "unit/test_3402_room_gate_holds.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "The room re-hold loop: a later wake does not raise a second approval for a held post; a warm wake still gets the ordinary post that shared the held one's delta; a new request is still held; another agent still reads the post; a rejected request does not come back after the skill is un-gated; a standing refusal is recorded and a transient one is not; a wake left with nothing to answer dispatches nothing; MCP read_room by the agent leaves its holds out; a failed holds read re-holds rather than shows; holds are per agent and written once; AGENT_REFS cascade. Real schema and the real gate. Mutation-proven."
     },
     {
       "file": "unit/test_3390_module_split_guard.py",

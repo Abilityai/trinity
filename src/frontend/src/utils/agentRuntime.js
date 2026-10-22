@@ -64,3 +64,31 @@ export function isDefaultRuntime(agent) {
 export function showsRuntimeBadgeInList(agent) {
   return !isDefaultRuntime(agent)
 }
+
+/**
+ * The OpenCode harness default model (#2981, ruling T4). Mirrors
+ * `DEFAULT_OPENCODE_MODEL` in
+ * `docker/base-image/agent_server/services/opencode_runtime.py:159`;
+ * `agentRuntimeDefaultModel.spec.js` derives it from that file's text.
+ */
+export const OPENCODE_DEFAULT_MODEL = 'anthropic/claude-sonnet-5'
+
+/**
+ * The model an agent runs when none is set, per runtime — what the agent
+ * detail view hands the chat and terminal as `defaultModel`.
+ *
+ * @param {string|null|undefined} runtime
+ * @returns {string}
+ */
+export function defaultModelForRuntime(runtime) {
+  if (runtime === 'gemini-cli' || runtime === 'gemini') {
+    return 'gemini-2.5-flash'
+  }
+  if (runtime === 'codex') {
+    return 'gpt-5.1-codex' // OpenAI Codex default (#1187)
+  }
+  if (runtime === 'opencode') {
+    return OPENCODE_DEFAULT_MODEL
+  }
+  return 'sonnet' // Claude default
+}

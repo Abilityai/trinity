@@ -5,9 +5,11 @@ Contains functions used across multiple agent operations.
 """
 import fnmatch
 import json
+import re
 import logging
 import asyncio
 from typing import Optional, List, Callable, Any, Literal
+from urllib.parse import urlparse
 
 import docker
 import httpx
@@ -52,7 +54,161 @@ def is_claude_runtime(runtime: Optional[str]) -> bool:
 # #1187: every runtime the platform can launch. Mirrors the agent-side
 # `runtime_adapter.KNOWN_RUNTIMES` (which lives in the base image and isn't
 # importable from the backend). Keep the two in sync when adding a runtime.
-KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset({"gemini-cli", "gemini", "codex"})
+KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset(
+    {"gemini-cli", "gemini", "codex", "opencode"}
+)
+
+# The short aliases `/api/version` has never listed; every other known name is
+# a shipped runtime.
+_RUNTIME_ALIASES = frozenset({"claude", "gemini"})
+_VERSION_RUNTIME_ORDER = ("claude-code", "gemini-cli", "codex", "opencode")
+
+
+def version_runtime_names() -> List[str]:
+    """The `/api/version` runtimes list, read off :data:`KNOWN_RUNTIME_NAMES`
+    so a new runtime cannot miss it. The order is the payload's historical
+    one; a runtime the order does not name yet sorts after it."""
+    shipped = KNOWN_RUNTIME_NAMES - _RUNTIME_ALIASES
+    order = {name: index for index, name in enumerate(_VERSION_RUNTIME_ORDER)}
+    return sorted(shipped, key=lambda name: (order.get(name, len(order)), name))
+
+# #2981: OpenCode's `-m` takes `provider/model`, not a bare model id. A bare id
+# is not simply rejected — it is AMBIGUOUS, and the CLI's own complaint arrives
+# one container spawn and one failed turn later, attributed to the agent rather
+# than to the create request that caused it. Validated at the boundary instead,
+# with a named 400. Character-for-character the agent side's
+# `opencode_runtime._PROVIDER_MODEL_RE`; the backend cannot import the base
+# image, so the two are a parity pair (test_2981_backend_registration).
+_OPENCODE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][\w./:@+-]*$")
+
+# #2981: the `runtime.provider` block rules — the create-time half of a parity
+# pair with the agent side's `opencode_provider.validate_provider_block`, which
+# re-checks the same block at every turn (G3: recovery does not re-validate, so
+# a bad block can never strand a recreate).
+_OPENCODE_PROVIDER_NPM_ALLOWLIST = frozenset({"@ai-sdk/openai-compatible"})
+_OPENCODE_PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]+$")
+_OPENCODE_PROVIDER_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_OPENCODE_PROVIDER_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][\w./:@+-]*$")
+
+
+def validate_runtime_model(runtime: Optional[str], model: Optional[str]) -> None:
+    """Reject a runtime-model pairing the runtime cannot accept (#2981).
+
+    Only OpenCode constrains the SHAPE today. Empty/unset is always valid — it
+    means "no pin", and the runtime's own default applies.
+
+    Raises:
+        HTTPException(400): with a reason naming the rejected value and what a
+            valid id looks like.
+    """
+    if not model or (runtime or "").lower() != "opencode":
+        return
+    candidate = model.strip()
+    if "/" not in candidate:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"OpenCode model {model!r} is missing a provider prefix. Use "
+                "'provider/model' (e.g. 'anthropic/claude-sonnet-5', "
+                "'openrouter/qwen/qwen3-coder')."
+            ),
+        )
+    if not _OPENCODE_MODEL_RE.match(candidate):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"OpenCode model {model!r} is not a valid 'provider/model' "
+                "identifier: both halves must be non-empty and the provider may "
+                "contain only letters, digits, '.', '_' and '-'."
+            ),
+        )
+
+
+def _provider_400(message: str) -> HTTPException:
+    return HTTPException(status_code=400, detail=message)
+
+
+def validate_runtime_provider(runtime: Optional[str], block: Any) -> None:
+    """Reject a template ``runtime.provider`` block at create time (#2981).
+
+    Absent (``None``) is always valid. A block under any runtime other than
+    ``opencode`` is a named 400, never silently dropped (G1). Otherwise every
+    rule names its field, mirroring the agent side's
+    ``opencode_provider.validate_provider_block``: ``id``, ``npm`` (allowlist),
+    ``base_url`` (absolute http/https), ``api_key_env`` (an env var NAME),
+    ``models`` (a mapping of model ids to objects; ``cost`` optional).
+
+    Raises:
+        HTTPException(400): naming the offending field.
+    """
+    if block is None:
+        return
+    if (runtime or "").lower() != "opencode":
+        raise _provider_400("runtime.provider is only valid with runtime: opencode")
+    if not isinstance(block, dict):
+        raise _provider_400("runtime.provider must be an object")
+
+    provider_id = block.get("id")
+    if not isinstance(provider_id, str) or not _OPENCODE_PROVIDER_ID_RE.match(provider_id):
+        raise _provider_400(
+            f"runtime.provider.id {provider_id!r} is invalid: it must match "
+            "^[a-z0-9_-]+$ (it is the provider half of `-m <id>/<model>`)"
+        )
+
+    npm = block.get("npm")
+    if not isinstance(npm, str) or npm not in _OPENCODE_PROVIDER_NPM_ALLOWLIST:
+        raise _provider_400(
+            f"runtime.provider.npm {npm!r} is not allowed: the driver package "
+            f"must be one of {sorted(_OPENCODE_PROVIDER_NPM_ALLOWLIST)} "
+            "(pre-seeded into the image)"
+        )
+
+    base_url = block.get("base_url")
+    parsed = urlparse(base_url) if isinstance(base_url, str) else None
+    if parsed is None or parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise _provider_400(
+            f"runtime.provider.base_url {base_url!r} is invalid: it must be an "
+            "absolute http:// or https:// URL"
+        )
+
+    api_key_env = block.get("api_key_env")
+    if not isinstance(api_key_env, str) or not _OPENCODE_PROVIDER_ENV_NAME_RE.match(api_key_env):
+        raise _provider_400(
+            f"runtime.provider.api_key_env {api_key_env!r} is invalid: it must "
+            "be an environment variable NAME matching ^[A-Z_][A-Z0-9_]*$ "
+            "(the key itself is read from that variable, never from the template)"
+        )
+
+    models = block.get("models")
+    if not isinstance(models, dict):
+        raise _provider_400(
+            "runtime.provider.models must be a mapping of model ids, got "
+            f"{type(models).__name__}"
+        )
+    for model_id, declared in models.items():
+        if not isinstance(model_id, str) or not _OPENCODE_PROVIDER_MODEL_ID_RE.match(model_id):
+            raise _provider_400(
+                f"runtime.provider.models has an invalid model id {model_id!r}"
+            )
+        if declared is not None and not isinstance(declared, dict):
+            raise _provider_400(
+                f"runtime.provider.models.{model_id} must be an object "
+                f"(e.g. {{}} or {{cost: {{input, output}}}}), got {type(declared).__name__}"
+            )
+
+
+def render_runtime_provider_env(block: Any) -> str:
+    """The ``AGENT_RUNTIME_PROVIDER`` value for a ``runtime.provider`` block (#2981).
+
+    THE one serializer: creation (crud ``_build_base_env``) and recovery
+    (lifecycle ``recreate_missing_container``) both call it, so the two baked
+    env sets cannot drift. Compact, key-sorted JSON; ``''`` when absent — the
+    agent side's ``opencode_provider.load_provider_block`` reads blank as "no
+    block".
+    """
+    if block is None:
+        return ""
+    return json.dumps(block, separators=(",", ":"), sort_keys=True)
 
 
 def validate_runtime(runtime: Optional[str]) -> None:

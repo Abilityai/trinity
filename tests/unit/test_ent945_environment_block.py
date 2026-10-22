@@ -51,7 +51,7 @@ MAX_BLOCK_CHARS = 2600
 
 TIERS = (PromptTier.VERBOSE, PromptTier.MINIMAL)
 HOOKED_RUNTIMES = ("claude-code", "claude", "")
-UNHOOKED_RUNTIMES = ("codex", "gemini", "some-future-runtime")
+UNHOOKED_RUNTIMES = ("codex", "opencode", "gemini", "some-future-runtime")
 
 
 @pytest.fixture(autouse=True)
@@ -271,6 +271,15 @@ def test_codex_orientation_names_refresh_metric_definitions():
     assert "`refresh_metric_definitions`" in orientation
     assert "mcp__trinity__" not in rendered
     assert "`refresh_metric_definitions`" in _section(rendered)
+
+
+# T10b — the OpenCode twin (#2981): `trinity_`-prefixed, no Claude prefix.
+def test_opencode_orientation_names_refresh_metric_definitions():
+    rendered = get_platform_system_prompt(runtime="opencode")
+    orientation = rendered.split("\n\n---\n\n", 1)[0]
+    assert "`trinity_refresh_metric_definitions`" in orientation
+    assert "mcp__trinity__" not in rendered
+    assert "trinity_refresh_metric_definitions" in _section(rendered)
 
 
 # T11 — a force-replace pull is the one path that deletes untracked files

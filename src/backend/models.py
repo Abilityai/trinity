@@ -232,6 +232,9 @@ class AgentConfig(BaseModel):
     # Multi-runtime support
     runtime: Optional[str] = "claude-code"  # "claude-code" or "gemini-cli"
     runtime_model: Optional[str] = None  # Model override (e.g., "sonnet-4.5", "gemini-2.5-pro")
+    # #2981: template `runtime.provider` block (OpenCode custom provider). Not a
+    # DB column — validated at create, baked into AGENT_RUNTIME_PROVIDER.
+    runtime_provider: Optional[dict] = None
     # Security options
     full_capabilities: Optional[bool] = False  # True = Docker default caps (apt-get works), False = restricted (secure default)
     # Fork-to-own creation (trinity-enterprise#93): copy the github: template

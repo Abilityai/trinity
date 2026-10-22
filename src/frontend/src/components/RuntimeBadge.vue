@@ -65,6 +65,21 @@
       <polyline points="16 9 19 12 16 15" />
     </svg>
 
+    <!-- OpenCode (terminal prompt) -->
+    <svg
+      v-else-if="isOpenCodeRuntime"
+      class="w-3.5 h-3.5"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="2.2"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    >
+      <polyline points="5 7 10 12 5 17" />
+      <line x1="12" y1="18" x2="19" y2="18" />
+    </svg>
+
     <!-- Label -->
     <span v-if="showLabel">{{ label }}</span>
   </span>
@@ -105,10 +120,15 @@ const isCodexRuntime = computed(() => {
   return props.runtime === 'codex'
 })
 
+const isOpenCodeRuntime = computed(() => {
+  return props.runtime === 'opencode'
+})
+
 const label = computed(() => {
   if (isClaudeRuntime.value) return 'Claude'
   if (isGeminiRuntime.value) return 'Gemini'
   if (isCodexRuntime.value) return 'Codex'
+  if (isOpenCodeRuntime.value) return 'OpenCode'
   return props.runtime
 })
 
@@ -116,6 +136,7 @@ const tooltipText = computed(() => {
   if (isClaudeRuntime.value) return 'Anthropic Claude Code Runtime'
   if (isGeminiRuntime.value) return 'Google Gemini CLI Runtime'
   if (isCodexRuntime.value) return 'OpenAI Codex CLI Runtime'
+  if (isOpenCodeRuntime.value) return 'OpenCode Runtime'
   return `Runtime: ${props.runtime}`
 })
 
@@ -128,6 +149,9 @@ const badgeClasses = computed(() => {
   }
   if (isCodexRuntime.value) {
     return 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
+  }
+  if (isOpenCodeRuntime.value) {
+    return 'bg-brand-opencode-50 dark:bg-brand-opencode-950/50 text-brand-opencode-700 dark:text-brand-opencode-300 border border-brand-opencode-200 dark:border-brand-opencode-800'
   }
   return 'bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-gray-600'
 })

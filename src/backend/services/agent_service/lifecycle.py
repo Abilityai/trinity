@@ -31,7 +31,7 @@ from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name, render_runtime_provider_env
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -1667,12 +1667,18 @@ async def recreate_missing_container(agent_name: str):
     if isinstance(runtime_cfg, dict):
         runtime = (runtime_cfg.get("type") or "claude-code").lower()
         runtime_model = runtime_cfg.get("model") or ""
+        # #2981 (G3): serialized exactly as creation does, NOT re-validated —
+        # the harness re-checks the block at every turn, so a bad block can
+        # never strand a recovery.
+        runtime_provider = runtime_cfg.get("provider")
     elif isinstance(runtime_cfg, str):
         runtime = runtime_cfg.lower()
         runtime_model = ""
+        runtime_provider = None
     else:
         runtime = "claude-code"
         runtime_model = ""
+        runtime_provider = None
     # #1811: the original template id (`local:scout`, `github:Org/repo@main`)
     # lived ONLY in the destroyed container's TEMPLATE_NAME env and
     # `trinity.template` label — the workspace `template.yaml` carries `name:`
@@ -1703,6 +1709,7 @@ async def recreate_missing_container(agent_name: str):
         "AGENT_SERVER_PORT": "8000",
         "AGENT_RUNTIME": runtime,
         "AGENT_RUNTIME_MODEL": runtime_model,
+        "AGENT_RUNTIME_PROVIDER": render_runtime_provider_env(runtime_provider),
         "TMPDIR": AGENT_DEFAULT_TMPDIR,
         # #1811: creation sets this (crud.py) and two consumers read it —
         # startup.sh gates local-template init on it, and the agent-server

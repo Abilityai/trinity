@@ -27,6 +27,7 @@ Every color in the product is a **semantic token**. Raw Tailwind palette classes
 | `state-locked` | rose | operating mode: locked / restricted | 500 `#f43f5e` · 600 `#e11d48` |
 | `brand-claude` | orange | third-party identity: Claude | 500 `#f97316` · 600 `#ea580c` |
 | `brand-gemini` | blue | third-party identity: Gemini | 500 `#3b82f6` · 600 `#2563eb` |
+| `brand-opencode` | teal | third-party identity: OpenCode | 500 `#14b8a6` · 600 `#0d9488` |
 | `accent-purple` | purple | decorative highlight, non-status | 500 `#a855f7` · 600 `#9333ea` |
 | `action-primary` | indigo | interactive: buttons · links · focus | 500 `#6366f1` · 600 `#4f46e5` |
 | `gray` | gray (+ custom 750) | everything else — chrome, text, borders | see §2 |

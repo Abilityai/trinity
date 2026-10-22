@@ -39,12 +39,14 @@ RUNS_CODE = "runs_code"
 HIDDEN = "hidden"
 
 # Each runtime's login and MCP config (trinity-enterprise#823). Codex keeps
-# them in CODEX_HOME = $TMPDIR/codex = ~/.tmp/codex.
+# them in CODEX_HOME = $TMPDIR/codex = ~/.tmp/codex; OpenCode under its XDG
+# root $TMPDIR/opencode = ~/.tmp/opencode (#2981).
 RUNTIME_CONFIG_PATTERNS = (
     ".claude.json",
     ".claude/.credentials.json",
     ".gemini/settings.json",
     ".tmp/codex/*",
+    ".tmp/opencode/*",
 )
 # Never writable through the file routes, owner tier to read (ent#819).
 CREDENTIAL_PATH_PATTERNS = (
@@ -151,6 +153,7 @@ AGENT_SERVER_RUNTIME_CONFIG_RELPATHS = (
     ".claude/.credentials.json",
     ".gemini/settings.json",
     ".tmp/codex",
+    ".tmp/opencode",
 )
 
 _CLASS_PATTERNS = (

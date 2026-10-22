@@ -54,7 +54,7 @@ const PALETTE_FAMILIES = [
 const SEMANTIC_TOKENS = [
   'status-success', 'status-warning', 'status-danger', 'status-info', 'status-urgent',
   'state-autonomous', 'state-locked',
-  'brand-claude', 'brand-gemini',
+  'brand-claude', 'brand-gemini', 'brand-opencode',
   'accent-purple', 'action-primary',
 ]
 

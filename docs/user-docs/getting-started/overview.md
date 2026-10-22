@@ -1,12 +1,12 @@
 # What is Trinity
 
-Trinity is **the operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI or OpenAI Codex.
+Trinity is **the operating system for the AI-native company** — open source, self-hosted, that you own. It deploys, orchestrates, and governs fleets of AI agents on your own hardware, and it is model-agnostic: each agent runs on Claude Code, Gemini CLI, OpenAI Codex or OpenCode.
 
 > 📺 **Watch:** [Trinity Platform Demo](https://youtu.be/ivljtZqsxeo) *(May 2026)* · [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) *(May 2026)* · [all videos](../videos.md)
 
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, OpenAI Codex, or OpenCode (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
@@ -87,7 +87,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents
 ### Platform Capabilities
 
 - Create agents from GitHub templates or local directories
-- Model-agnostic runtimes: Claude Code, Gemini CLI, OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md))
+- Model-agnostic runtimes: Claude Code, Gemini CLI, OpenAI Codex, OpenCode (see [Agent Runtimes](../agents/agent-runtimes.md))
 - Credential management with encryption and hot-reload
 - Agent-to-agent collaboration via MCP tool calls
 - Cron-based scheduling with execution history and per-schedule timeouts

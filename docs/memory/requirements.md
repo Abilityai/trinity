@@ -26,7 +26,7 @@ list.
 | [github.md](requirements/github.md) | GitHub integration (sync, PAT, recovery) |
 | [infrastructure.md](requirements/infrastructure.md) | Infrastructure, platform operations, CLI tool, canary invariant harness, enterprise edition architecture, build info surface |
 | [content-files.md](requirements/content-files.md) | Content & file management, image generation, avatars, agent runtime data |
-| [runtimes.md](requirements/runtimes.md) | Multi-runtime support, OpenAI Codex, voice chat, VoIP telephony |
+| [runtimes.md](requirements/runtimes.md) | Multi-runtime support, OpenAI Codex, OpenCode, voice chat, VoIP telephony |
 | [public-access.md](requirements/public-access.md) | Public access, Nevermined payments, mobile admin PWA |
 | [security.md](requirements/security.md) | Security & compliance, operator queue / Operating Room, agent guardrails |
 | [skills.md](requirements/skills.md) | Skills management (GitHub-based), the agent Skills tab (own + shared, approval) |
