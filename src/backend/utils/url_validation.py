@@ -122,12 +122,12 @@ def reject_embedded_credentials(url: str) -> None:
     try:
         parsed = urlparse(text if had_authority else _ASSUMED_SCHEME + text)
     except ValueError:
-        # Only the `//` shape is newly parsed with an authority; anything else
-        # raises exactly as before (#3322 owns that class). Fall back to the
-        # shared authority regex rather than turn `//[oops` into a new 500.
-        if not text.startswith("//"):
-            raise
-        if _AUTHORITY_USERINFO_RE.match(text):
+        # urlparse refuses a bracket it cannot pair (`https://[::1/x`, `x[/y`).
+        # Fall back to the shared authority regex, so a userinfo is still
+        # refused and anything else is left to the caller's URL validator, which
+        # names the malformed URL itself. A bare ValueError here was a 500 on the
+        # skills-source routes, which catch only EmbeddedCredentialError (#3322).
+        if _AUTHORITY_USERINFO_RE.match(text if had_authority else _ASSUMED_SCHEME + text):
             raise EmbeddedCredentialError(_EMBEDDED_CREDENTIAL_MESSAGE) from None
         return
     if parsed.username or parsed.password:
@@ -309,6 +309,12 @@ def validate_skills_library_url(url: str) -> str:
         if url.startswith("github.com/"):
             url = f"https://{url}"
         elif "/" in url and not url.startswith(".") and not url.startswith("localhost"):
+            # An unbalanced bracket (`x[/y`) is not a repository; refuse it here
+            # the way the full-URL branch below does (#3322).
+            try:
+                urlparse(_ASSUMED_SCHEME + url)
+            except ValueError:
+                raise ValueError("Invalid URL format") from None
             # Assume "owner/repo" format — this is fine, will be prefixed with github.com later
             return url
         else:
@@ -637,6 +643,11 @@ def _validate_public_https_url(
         resolved = resolve(hostname, port)
     except socket.gaierror:
         raise PublicUrlRefusal("dns_failure", f"{host_label} could not be resolved ({hostname})")
+    except UnicodeError:
+        # `canonical_host` passes an ASCII host the idna codec refuses (an empty
+        # or 64+ char label), and getaddrinfo's own idna encode raises before any
+        # lookup (#3322).
+        raise PublicUrlRefusal("invalid", f"{label} must have a valid hostname") from None
 
     addresses: List[str] = []
     for entry in resolved:
@@ -800,7 +811,7 @@ def _validate_trusted_a2a_url(
     resolve = resolver or socket.getaddrinfo
     try:
         resolved = resolve(hostname, port)
-    except socket.gaierror:
+    except (socket.gaierror, UnicodeError):
         return None
     cidrs = [e for e in entries if tn._parse_cidr(e) is not None]
     name_trusted = tn.host_is_trusted(hostname, entries)
