@@ -702,8 +702,9 @@ OPENCODE_JSON
             && echo "  Linked pre-seeded OpenCode provider packages" \
             || echo "  Warning: could not link pre-seeded provider packages"
         for _f in package.json package-lock.json; do
-            [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ] && \
+            if [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ]; then
                 cp "/opt/trinity/opencode/$_f" "${OPENCODE_CONFIG_DIR}/$_f" 2>/dev/null || true
+            fi
         done
     fi
 fi

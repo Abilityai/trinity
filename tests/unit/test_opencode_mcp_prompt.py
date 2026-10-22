@@ -328,7 +328,7 @@ def test_serialized_turn_config_has_no_literal_secret(tmp_path, monkeypatch, sec
     env_out: dict = {}
     turn_dir = opencode_runtime._prepare_turn_config("exec-mcp", "PROMPT", None, env_out=env_out)
     try:
-        raw = (tmp_path / "turns" / "exec-mcp" / "opencode" / "opencode.json").read_text()
+        raw = (__import__("pathlib").Path(turn_dir) / "opencode" / "opencode.json").read_text()
     finally:
         opencode_runtime._cleanup_turn_dir(turn_dir)
 

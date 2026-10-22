@@ -37,7 +37,15 @@ _PY_PATTERNS = (
 _SH_PATTERNS = (re.compile(r"\bln\s+-[A-Za-z]*s"), re.compile(r"\bcp\s+-[A-Za-z]*s\b"))
 
 # path relative to the repo -> why this link is safe under the read rule.
-_ALLOWED: dict[str, str] = {}
+_ALLOWED: dict[str, str] = {
+    "docker/base-image/agent_server/services/opencode_runtime.py": (
+        "#2981: the per-turn OpenCode config links the pre-seeded provider tree "
+        "from the shared config dir; every link lives under $TMPDIR/opencode, "
+        "the 0700 scratch root the Files policy write-denies, and points at the "
+        "shared provider tree, never at the home's served files. Download and "
+        "preview refuse links for every caller."
+    ),
+}
 
 
 def _strip_py_comments(source: str) -> str:

@@ -391,7 +391,8 @@ def _prepare_turn_config(
 
     The returned directory IS the ``XDG_CONFIG_HOME`` (OpenCode reads
     ``$XDG_CONFIG_HOME/opencode/opencode.json``) and is also what the caller
-    removes in its ``finally``.
+    removes in its ``finally``. Its name is a server-generated token, not the
+    execution id, so no path here derives from a request value.
 
     The template's provider block (``opencode_provider``) and the
     ``.mcp.json`` → ``mcp:`` translation (``opencode_mcp``) are rendered
@@ -425,7 +426,8 @@ def _prepare_turn_config(
     # Validated first so a named failure leaves no half-built turn dir behind.
     provider_block = opencode_provider.provider_block()
 
-    turn_dir = os.path.join(_opencode_root(), "turns", _safe_token(execution_id))
+    turn_token = uuid.uuid4().hex
+    turn_dir = os.path.join(_opencode_root(), "turns", turn_token)
     config_dir = os.path.join(turn_dir, "opencode")
     # 0700/0600: the turn config names the agent's secrets and carries its
     # platform prompt. makedirs' mode is umask-masked, so chmod after.
@@ -488,10 +490,8 @@ def _prepare_turn_config(
 
 
 def _safe_token(execution_id: str) -> str:
-    """Filesystem-safe token. ``execution_id`` is system-generated today, but a
-    path is never built from it unguarded (the Codex ``_safe_result_token``
-    precedent): reduce to a basename and a conservative charset so a '/' or
-    '..' cannot escape the turn root."""
+    """Log-id-safe token: reduce to a basename and a conservative charset (the
+    Codex ``_safe_result_token`` precedent)."""
     token = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(execution_id or ""))
     return token or "opencode"
 
@@ -1361,7 +1361,11 @@ class OpenCodeRuntime(AgentRuntime):
                 f"or empty, and provider {provider_id!r} (model {model}) needs it",
                 ExecutionMetadata(),
             )
-            logger.error("[OpenCode] %s", detail)
+            logger.error(
+                "[OpenCode] provider %r (model %s) has no usable credential; "
+                "turn refused %s",
+                provider_id, model, status_code,
+            )
             raise HTTPException(status_code=status_code, detail=detail)
 
         # Controls → `permission:` (checkpoint D). Read-only, the operator's
@@ -1461,9 +1465,10 @@ class OpenCodeRuntime(AgentRuntime):
         registry = get_process_registry()
         logger.info(
             "[OpenCode] run model=%s session=%s read_only=%s permission=%s "
-            "command=%s execution_id=%s",
+            "command=%s execution_id=%s turn_dir=%s",
             model or "(default)", bool(session_id), read_only,
             json.dumps(permission, sort_keys=True), command or "-", execution_id,
+            turn_dir,
         )
 
         # stdin=DEVNULL: the prompt is a positional arg, so OpenCode must never

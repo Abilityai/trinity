@@ -502,7 +502,7 @@ def test_turn_config_carries_the_system_prompt_as_instructions(monkeypatch, tmp_
     monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
     turn_dir = opencode_runtime._prepare_turn_config("exec-1", "PLATFORM PROMPT")
 
-    config = json.loads((tmp_path / "turns" / "exec-1" / "opencode" / "opencode.json").read_text())
+    config = json.loads((__import__("pathlib").Path(turn_dir) / "opencode" / "opencode.json").read_text())
     assert config["instructions"], "instructions key missing"
     prompt_file = config["instructions"][0]
     assert open(prompt_file).read() == "PLATFORM PROMPT"

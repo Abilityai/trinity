@@ -408,3 +408,21 @@ def test_envelope_builder_does_not_coerce_none_cost():
     envelope = result_callback._success_envelope("t", [], metadata, None)
     assert envelope["metadata"]["cost_usd"] is None
     assert envelope["metadata"]["model_name"] == "local/m"
+
+
+def test_turn_dir_name_is_generated_never_the_execution_id(monkeypatch, tmp_path):
+    """No path derives from a request value (ruling R9, CodeQL path-injection):
+    the same execution id twice yields two distinct turn dirs under
+    `<root>/turns/`, and neither path carries the id."""
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    execution_id = "exec-r9-request-value"
+    a = opencode_runtime._prepare_turn_config(execution_id, None)
+    b = opencode_runtime._prepare_turn_config(execution_id, None)
+    try:
+        assert a != b
+        for turn_dir in (a, b):
+            assert _Path(turn_dir).parent == tmp_path / "turns"
+            assert execution_id not in turn_dir
+    finally:
+        opencode_runtime._cleanup_turn_dir(a)
+        opencode_runtime._cleanup_turn_dir(b)

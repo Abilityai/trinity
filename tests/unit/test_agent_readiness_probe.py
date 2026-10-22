@@ -73,6 +73,7 @@ def wait_for_agent_ready(monkeypatch):
             check_base_image_matches=None,  # added to lifecycle.py import (#1809)
             is_claude_runtime=None,  # added to lifecycle.py import (#1187)
             is_system_agent_name=None,  # added to lifecycle.py import (#1816)
+            render_runtime_provider_env=None,  # added to lifecycle.py import (#2981)
         ),
         "services.settings_service": types.SimpleNamespace(
             get_anthropic_api_key=None, get_github_pat=None,

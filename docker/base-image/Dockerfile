@@ -44,7 +44,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # Was hardcoded `go1.23.4.linux-amd64.tar.gz`. On an arm64 builder that URL
 # exists, downloads, and untars WITHOUT ERROR — installing a toolchain that
 # cannot execute on the host. Nothing fails, so nothing reports it, which is
-# exactly the defect the "deliberately NOT changed here" note further down
+# exactly the defect the out-of-scope note on the Claude layer further down
 # predicted.
 #
 # `uname -m`, NOT `TARGETARCH`. Both `docker build` call sites
