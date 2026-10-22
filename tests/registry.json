@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent966_delegation_gate.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ]
+    },
+    {
       "file": "unit/test_ent966_facilitator_wording.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-22",

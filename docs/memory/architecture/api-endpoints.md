@@ -406,6 +406,9 @@ Coverage: agent lifecycle, auth, sharing, credentials, settings, rename; request
 | GET | `/api/nevermined/agents/{name}/payments` | JWT | Payment history |
 | GET | `/api/nevermined/settlement-failures` | Admin | Failed settlements |
 | POST | `/api/nevermined/retry-settlement/{log_id}` | Admin | Retry settlement |
+| GET/PUT/DELETE | `/api/nevermined/organization` | Admin | Instance Nevermined organization; secrets write-only (ent#966) |
+| POST | `/api/nevermined/agents/{agent_name}/widget-session` | Person + owner | Mint a Nevermined card-widget session, `no-store` (ent#966) |
+| POST/GET/DELETE | `/api/nevermined/agents/{agent_name}/delegation` | Person + owner (GET: shared+, agent key self only) | Bind / live read / revoke the agent's Nevermined card mandate (ent#966) |
 
 ### Outbound File Sharing (FILES-001)
 | Method | Path | Auth | Description |

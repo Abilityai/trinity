@@ -17,10 +17,19 @@ import pytest
 
 pytestmark = pytest.mark.unit
 
-BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+REPO = Path(__file__).resolve().parents[2]
+BACKEND = REPO / "src" / "backend"
 MODULES = (
     BACKEND / "routers" / "nevermined_delegation.py",
     BACKEND / "services" / "nevermined_delegation_service.py",
+)
+#: Text a person reads that is not Python: the MCP tool descriptions and
+#: refusals (their live consumer is the MCP client / the model) and the two
+#: docs pages that describe the card-delegation surface.
+TEXT_SURFACES = (
+    REPO / "src" / "mcp-server" / "src" / "tools" / "nevermined.ts",
+    REPO / "docs" / "memory" / "feature-flows" / "nevermined-payments.md",
+    REPO / "docs" / "user-docs" / "integrations" / "nevermined-payments.md",
 )
 FORBIDDEN = re.compile(
     r"trinity\s+(charges|holds|stores|keeps|saves)\s+(the|your|a)\s+card"
@@ -93,3 +102,24 @@ def test_raised_refusals_name_nevermined(monkeypatch):
     for err in errors:
         assert "Nevermined" in err.message, err.code
         assert not FORBIDDEN.search(err.message)
+
+
+@pytest.mark.parametrize("path", TEXT_SURFACES, ids=lambda p: p.name if p.suffix == ".ts" else "/".join(p.parts[-2:]))
+def test_mcp_tools_and_docs_never_say_trinity_holds_a_card_or_settles(path):
+    text = " ".join(path.read_text().split())  # a phrase wrapped across lines still matches
+    hit = FORBIDDEN.search(text)
+    assert hit is None, f"{path.name}: {hit.group(0)!r}"
+
+
+def test_text_surfaces_describe_the_card_mandate_as_nevermined_held():
+    """Not vacuous: each surface does describe the card mandate, by Nevermined's name."""
+    for path in TEXT_SURFACES:
+        text = " ".join(path.read_text().split())
+        assert re.search(r"Nevermined card mandate|Nevermined holds the card", text), path.name
+
+
+def test_the_text_scan_catches_the_forbidden_phrasing():
+    """The pattern the surfaces are scanned with does match the ent#932 phrasings."""
+    for bad in ("Trinity charges your card", "Trinity holds the card", "Trinity stores your card",
+                "Trinity settles every purchase"):
+        assert FORBIDDEN.search(" ".join(bad.split()))

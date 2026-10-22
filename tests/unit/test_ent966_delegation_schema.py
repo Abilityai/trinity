@@ -136,3 +136,47 @@ class TestAlembicRevision:
         mod.op = fake_op
         mod.upgrade()
         assert executed == list(migrations.NEVERMINED_DELEGATIONS_DDL)
+
+
+class TestCompensation:
+    """M3: the bind's compensation deletes ONLY the row it inserted, so a
+    concurrent bind that took the agent's slot in between is left active."""
+
+    AGENT = "ent966-comp"
+
+    @pytest.fixture
+    def clean(self):
+        from db.engine import get_engine
+
+        def wipe():
+            with get_engine().begin() as conn:
+                conn.execute(text("DELETE FROM agent_delegations WHERE agent_name = :a"), {"a": self.AGENT})
+                conn.execute(text("DELETE FROM agent_ownership WHERE agent_name = :a"), {"a": self.AGENT})
+
+        wipe()
+        with get_engine().begin() as conn:  # active reads join the live ownership row (H3)
+            conn.execute(text("INSERT INTO agent_ownership (agent_name, owner_id, created_at)"
+                              " VALUES (:a, 1, 'now')"), {"a": self.AGENT})
+        yield
+        wipe()
+
+    def test_compensation_tolerates_active_row(self, clean):
+        from database import db
+
+        mine = db.insert_agent_delegation(
+            self.AGENT, "dlg-mine-0001", None, None, "sandbox", True, "ada@example.com")
+        # Between this bind's insert and its failed inject: a revoke stamps its
+        # row, and a second bind takes the agent's active slot.
+        assert db.revoke_agent_delegation(mine["id"], "admin@example.com")
+        theirs = db.insert_agent_delegation(
+            self.AGENT, "dlg-theirs-001", None, None, "sandbox", False, "admin@example.com")
+
+        # The first bind's compensation runs now — no IntegrityError, and only
+        # its own row goes.
+        assert db.delete_agent_delegation_row(mine["id"]) is True
+        active = db.get_active_agent_delegation(self.AGENT)
+        assert active is not None and active["id"] == theirs["id"]
+        assert [h["delegation_id"] for h in db.list_agent_delegation_history(self.AGENT)] == ["dlg-theirs-001"]
+        # A repeated compensation is a no-op, never an error.
+        assert db.delete_agent_delegation_row(mine["id"]) is False
+        assert db.get_active_agent_delegation(self.AGENT)["id"] == theirs["id"]

@@ -642,6 +642,28 @@
   agent delete (stamped `agent_deleted_at`) as a financial record and never
   block the organization or a later agent of the same name. `NVM_API_KEY` is
   removed on revoke only when a bind introduced it.
+  - **POST** (`require_person` + owner tier, 201): order is org configured
+    (409 `nevermined_not_configured`) → rate limit → active row (409
+    `delegation_active`, nothing upstream, no env read/write) → agent running
+    (409 `agent_not_running`) → ONE Nevermined verify (404 → 422
+    `delegation_not_found`; a present non-active status → 422
+    `delegation_inactive`; an absent status binds) → `.env` read → row insert
+    (a concurrent bind tripping the partial unique index → 409
+    `bind_in_progress`) → inject `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`
+    (failure deletes only the inserted row → 503 `agent_unreachable`). Response
+    is the GET shape plus `effective: "next_execution"` and `api_key_injected`.
+  - **GET** (read tier, uniform 404; an agent key reads only itself — a
+    sibling is the same 404): always 200 with `agent_name`, `configured`,
+    `funded`, `delegation`, `live`, `history` — `agent_name` is present in
+    every shape, including not-configured and unbound. `live` numbers are
+    copied from Nevermined, `null` when absent (never derived); Nevermined
+    unreachable/busy → `source: "unavailable"`, `status: "unknown"`.
+  - **DELETE** (`require_person` + owner tier): 404 `no_active_delegation`;
+    revokes at Nevermined first (2xx/404 = revoked; else 503/502, nothing local
+    changes), then the row, then best-effort env removal — agent down → 200
+    with `env_removed: false` and an `env_note`.
+  - **MCP**: `get_agent_spending` (GET pass-through) and
+    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.
