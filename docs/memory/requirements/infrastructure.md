@@ -777,7 +777,7 @@
 - **Primary surface**: `GET /api/canary/status` (admin-only, `require_admin`) →
   `CanaryService.get_run_status()` (Invariant #1 — logic in the service, thin
   router). Response `CanaryStatusResponse` (`models.py`, Invariant #14):
-  `enabled` (`CANARY_ENABLED == "1"`), `status`
+  `enabled` (`CANARY_ENABLED` is `1`/`true`/`yes`/`on`, any case), `status`
   (`disabled|healthy|stale|unknown`), `last_cycle_at`,
   `seconds_since_last_cycle` (clamped `max(0, int(age))`), `interval_seconds`,
   `stale_after_seconds`, `alert_sink_configured`, `redis_available`.
