@@ -384,6 +384,22 @@ class TestChangeRoute:
         assert _put(client, OLD, "weak").status_code == 422
         assert _put(client, OLD, NEW).status_code == 200
 
+    def test_the_attempt_counter_always_carries_the_window_ttl(self, api):
+        """The first wrong guess starts the window, later ones do not extend it,
+        and a give-back that re-creates a lapsed key still sets one: the counter
+        can never end up without an expiry (a lockout that never resets)."""
+        name = _admin(api.db)
+        key = f"pwchange:fail:{name}"
+        window = api.service.CHANGE_ATTEMPT_WINDOW_SECONDS
+        assert api.service._reserve_attempt(name)
+        assert 0 < api.redis.ttl(key) <= window
+        api.redis.expire(key, 60)
+        assert api.service._reserve_attempt(name)
+        assert 0 < api.redis.ttl(key) <= 60   # the running window is left alone
+        api.redis.delete(key)
+        api.service._release_attempt(name)    # window lapsed between reserve and give-back
+        assert 0 < api.redis.ttl(key) <= window
+
     def test_the_cap_is_not_the_login_bucket(self, api):
         """A stolen session must not be able to lock the owner out of signing in."""
         name = _admin(api.db)

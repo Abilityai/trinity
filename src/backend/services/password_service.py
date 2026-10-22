@@ -71,19 +71,20 @@ class PasswordChangeResult:
 def _reserve_attempt(username: str) -> bool:
     """Spend one attempt BEFORE the password is checked; False when the cap is
     already spent. Redis INCR is atomic, so requests racing across workers
-    cannot all read "under the cap" and each get a guess. `SET NX EX` starts the
-    window on the first attempt; both run in one MULTI so the key cannot expire
-    between them and be re-created by INCR without a TTL (a lockout that never
-    resets)."""
+    cannot all read "under the cap" and each get a guess. `EXPIRE NX` starts the
+    window on the attempt that created the key and leaves a running window
+    alone; both run in one MULTI, so no key INCR creates is ever left without a
+    TTL (a lockout that never resets). A counter with a TTL, not a lock — hence
+    no `SET NX` (#1920)."""
     r = get_breaker_redis()
     if r is None:
         return True  # fail-open, like the login limiter
     key = f"{_ATTEMPT_PREFIX}{username}"
     try:
         pipe = r.pipeline(transaction=True)
-        pipe.set(key, 0, ex=CHANGE_ATTEMPT_WINDOW_SECONDS, nx=True)
         pipe.incr(key)
-        _, count = pipe.execute()
+        pipe.expire(key, CHANGE_ATTEMPT_WINDOW_SECONDS, nx=True)
+        count, _ = pipe.execute()
         return int(count) <= CHANGE_ATTEMPT_LIMIT
     except Exception as exc:  # pragma: no cover — fail-open
         logger.warning(f"[auth] change-attempt limiter failed (fail-open): {exc}")
@@ -95,8 +96,14 @@ def _release_attempt(username: str) -> None:
     r = get_breaker_redis()
     if r is None:
         return
+    key = f"{_ATTEMPT_PREFIX}{username}"
     try:
-        r.decr(f"{_ATTEMPT_PREFIX}{username}")
+        # Same MULTI shape as the reserve: if the window lapsed in between,
+        # DECR re-creates the key, and it must not outlive a window either.
+        pipe = r.pipeline(transaction=True)
+        pipe.decr(key)
+        pipe.expire(key, CHANGE_ATTEMPT_WINDOW_SECONDS, nx=True)
+        pipe.execute()
     except Exception:  # pragma: no cover — best-effort
         pass
 
