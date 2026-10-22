@@ -74,6 +74,8 @@
 
     <!-- ent#527: the role card — rendered only when the agent carries a role. -->
     <PortalAgentRole :agent-name="agentName" />
+    <!-- ent#939: how it has been working, in plain words (rides on the role read). -->
+    <PortalAgentBehavior :agent-name="agentName" />
 
     <!-- ---------------------------- CHATS ------------------------------ -->
     <!-- The FULL list, which is what this panel is for: the tab strip shows
@@ -225,6 +227,7 @@ import ReportSummary from '@/components/reports/ReportSummary.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
+import PortalAgentBehavior from './PortalAgentBehavior.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
