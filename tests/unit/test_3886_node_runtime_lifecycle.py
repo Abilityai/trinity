@@ -67,7 +67,7 @@ _FROM_NODE_RE = re.compile(r"^FROM\s+(?:--\S+\s+)*(?:\S+/)?node:(\d+)", re.MULTI
 _NODESOURCE_RE = re.compile(r"deb\.nodesource\.com/setup_(\d+)\.x")
 # `node-version: '22'` / `node-version: 22.x` / `node-version: [20, 22]`.
 _NODE_VERSION_RE = re.compile(r"""^\s*node-version:\s*(.+)$""", re.MULTILINE)
-_MAJOR_RE = re.compile(r"(?<![\w.])(\d+)(?:\.[\dx]+)*(?![\w])")
+_MAJOR_RE = re.compile(r"(?<![\w.])v?(\d+)(?:\.[\dx]+)*(?![\w])")
 
 # Never scanned: vendored deps, VCS metadata, and the private submodules
 # (their own repos, their own guards).
@@ -180,6 +180,8 @@ def test_declaration_spellings_are_recognised() -> None:
     assert _FROM_NODE_RE.findall(from_lines) == ["20", "20", "20"]
     assert _workflow_majors("'20'") == [20]
     assert _workflow_majors("20.x") == [20]
+    assert _workflow_majors("v20") == [20]
+    assert _workflow_majors("'v20.19.5'") == [20]
     assert _workflow_majors("[20, 22]") == [20, 22]
     assert _workflow_majors("${{ matrix.node }}") == []
     assert _workflow_majors("lts/*") == []
