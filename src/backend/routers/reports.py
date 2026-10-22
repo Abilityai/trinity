@@ -14,7 +14,8 @@ Create is **self-gated** (review/Codex #1): ``AuthorizedAgent`` checks the key
 owner can access the path agent, but does NOT stop an agent-scoped key from
 reporting as a *sibling* agent the owner also accesses. So we additionally
 require an agent-scoped caller's bound ``agent_name`` to equal the path agent
-(mirrors heartbeat_service.authorize_heartbeat). User-scoped callers fall back to
+(the agent-scope half of heartbeat_service.authorize_heartbeat; the system
+agent's system-scoped key is not admitted here). User-scoped callers fall back to
 the access check.
 """
 import json

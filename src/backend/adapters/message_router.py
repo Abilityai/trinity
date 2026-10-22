@@ -382,14 +382,34 @@ class ChannelMessageRouter:
                 agent_name, adapter.get_session_identifier(message), channel
             )
             session_id = session.id if hasattr(session, "id") else session["id"]
+            # trinity#3402: chatter is never dispatched, so the gate never sees
+            # it — one that invokes a gated skill is kept out of the history.
+            from services.skill_gate_service import gate_hold_on_write
             db.add_public_chat_message(
                 session_id, "user", message.text,
                 sender_label=_sender_label(message),
+                **gate_hold_on_write(agent_name, message.text),
             )
             self._prune_group_session_if_due(session_id, _session_count(session), added=1)
             logger.debug(f"[ROUTER:{channel}] observed group message recorded (session={session_id})")
         except Exception as e:  # noqa: BLE001 — observation must never surface as an error
             logger.warning(f"[ROUTER:{channel}] observed-message record failed (non-fatal): {e}")
+
+    @staticmethod
+    def _mark_gate_hold(message: NormalizedMessage, exc, channel: str) -> None:
+        """trinity#3402: a group turn's message is stored as context before it
+        runs (step 7); one the gate stopped is kept out of every later turn's
+        history block. A DM is stored only after a run, so there is nothing to
+        mark. A failure is an ERROR: until fixed, the row would be replayed."""
+        row_id = message.metadata.get("_user_turn_row_id")
+        if not row_id:
+            return
+        from services.skill_gate_errors import hold_marker
+        try:
+            db.mark_public_chat_messages_held([row_id], hold_marker(exc))
+        except Exception:  # noqa: BLE001
+            logger.error(f"[ROUTER:{channel}] could not mark the gated message {row_id}",
+                         exc_info=True)
 
     @staticmethod
     def _prune_group_session_if_due(session_id: str, count_before: int, *, added: int) -> None:
@@ -534,12 +554,18 @@ class ChannelMessageRouter:
                 # run must sort after it (stored order = what the group saw),
                 # and a failed run must not erase the message from the group's
                 # memory. Step 11 skips the user insert for this turn.
-                db.add_public_chat_message(
+                # trinity#3402: marked as stored if it invokes a gated skill (a
+                # channel sender never self-approves, so it will not run as
+                # itself) — and again, with the verdict, if the gate stops it.
+                from services.skill_gate_service import gate_hold_on_write
+                row = db.add_public_chat_message(
                     session_id, "user", message.text,
                     sender_email=verified_email,
                     sender_label=_sender_label(message),
+                    **gate_hold_on_write(agent_name, message.text),
                 )
                 message.metadata["_user_turn_persisted"] = True
+                message.metadata["_user_turn_row_id"] = getattr(row, "id", None)
                 self._prune_group_session_if_due(session_id, _session_count(session), added=2)
             else:
                 # Context OFF ⇒ nothing about this group is recorded: not the
@@ -874,6 +900,7 @@ class ChannelMessageRouter:
             # ran. Say so in the conversation (with the request id when an
             # approval was raised) instead of an error or an empty reply.
             logger.info(f"[ROUTER:{channel}] Step 9 - held by the skill gate: {e.code}")
+            self._mark_gate_hold(message, e, channel)
             await self._resolve_indicator(adapter, message, success=False)
             await adapter.send_response(
                 message.channel_id,

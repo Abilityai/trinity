@@ -1288,7 +1288,7 @@ onMounted(async () => {
 
 **Method**: `build_context_prompt()` (`db/public_chat.py:245-280`)
 
-Last 10 exchanges (20 messages) formatted with public mode header (PUB-006):
+Last 10 exchanges (20 messages) formatted with public mode header (PUB-006). A row with a `gate_hold` is never in it (trinity#3402, `get_recent_messages`' default): a visitor's message that invokes a skill gated on the agent is marked `named` as it is stored, the gate's verdict marks it and the notice answering it (the request id, or `refused:<code>`), and the MEM-001 summary skips them too. The visitor's own history (`GET /api/public/history/{token}`) passes `include_held=True` — see [skill-gate.md](skill-gate.md).
 
 ```
 ### Trinity: Public Link Access Mode

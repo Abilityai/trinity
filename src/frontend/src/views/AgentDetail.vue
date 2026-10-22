@@ -112,7 +112,7 @@
           />
 
           <!-- Tabs -->
-          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']">
+          <div :class="['bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg', isFullscreenTab ? 'flex-1 flex flex-col overflow-hidden' : '']" data-testid="agent-tabs">
             <!-- #1114: tabs overflow into a "More ▾" dropdown instead of horizontal scroll -->
             <!-- trinity-enterprise#887: Settings is pinned at the end of the
                  strip, outside the overflow — the one configuration home is
@@ -333,6 +333,11 @@
                     @navigate-tab="handleOverviewNavigate"
                     @info-item-click="handleInfoItemClick"
                   />
+                  <CredentialsPane
+                    v-else-if="section === 'credentials'"
+                    :agent-name="agent.name"
+                    :agent-status="agent.status"
+                  />
                   <GuardrailsPane
                     v-else-if="section === 'guardrails'"
                     :agent-name="agent.name"
@@ -439,6 +444,7 @@ import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
 // trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
 import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
 import GeneralPane from '../components/agent-settings/GeneralPane.vue'
+import CredentialsPane from '../components/agent-settings/CredentialsPane.vue'
 import GuardrailsPane from '../components/agent-settings/GuardrailsPane.vue'
 import PeoplePane from '../components/agent-settings/PeoplePane.vue'
 import ChannelsPane from '../components/agent-settings/ChannelsPane.vue'

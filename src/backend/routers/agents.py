@@ -502,6 +502,14 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
     # path, so a per-agent call is fine here.
     agent_dict["display_label"] = db.get_display_label(agent_name)
+    # #3872: whether a repository is bound, known at first paint. The header
+    # reserves its GitHub row on this so the live git status (an exec into the
+    # running container, seconds later) cannot push the tab strip down when it
+    # lands. The template string cannot be the signal — an agent deployed
+    # locally and bound afterwards carries a `local:` label (or none, #1811) —
+    # but the persisted git config is exactly what `_reconstruct_template_id`
+    # already treats as "GitHub-backed". One read, like the label above.
+    agent_dict["git_configured"] = db.get_git_config(agent_name) is not None
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
@@ -1601,8 +1609,9 @@ async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: R
 
     Authenticated with the agent's own ``TRINITY_MCP_API_KEY`` (Option B,
     least-privilege) — *not* the user JWT and not the master internal secret.
-    An agent may only heartbeat itself: the key must be agent-scoped and its
-    bound ``agent_name`` must equal the path. User/system/null keys → 403.
+    An agent may only heartbeat itself: the key must be agent-scoped (or the
+    system agent's own system-scoped key, #3814) and its bound ``agent_name``
+    must equal the path. User/null keys → 403.
 
     Validation runs with ``track_usage=False`` so a 5s beat doesn't amplify the
     key's ``usage_count`` or write to SQLite on every beat. The write is
@@ -1681,7 +1690,7 @@ async def agent_execution_result(
     async-marker gate**.
 
     Acceptance rules (fail-closed):
-      * Missing/non-Bearer auth, or a user/system/wrong-agent key → 403.
+      * Missing/non-Bearer auth, or a user or wrong-agent key → 403.
       * Execution missing or not owned by ``agent_name`` → 404.
       * Execution already terminal → idempotent replay → 200 ``{replayed: true}``
         (the row is final; no write happens — safe to ACK so the agent stops

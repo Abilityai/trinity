@@ -11,7 +11,8 @@ class RoomCreate(BaseModel):
     agents: list[str] = Field(min_length=1, max_length=12)
     topic: Optional[str] = Field(default=None, max_length=2000)
     max_messages: Optional[int] = Field(default=None, ge=1, le=500)
-    max_cost_usd: Optional[float] = Field(default=None, gt=0)
+    # #3495: `service.MAX_COST_USD_CEILING` (pinned by test_3495_room_budget_roles).
+    max_cost_usd: Optional[float] = Field(default=None, gt=0, le=1000.0)
     ttl_hours: Optional[int] = Field(default=None, ge=0, le=168)
     scribe: Optional[str] = None
 
@@ -59,6 +60,7 @@ class RoomBudgetDefaults(BaseModel):
     sources: Dict[str, str] = {}
     max_messages_ceiling: int
     max_ttl_hours: int
+    max_cost_usd_ceiling: float               # #3495
 
 
 class RoomBudgetDefaultsUpdate(BaseModel):
@@ -69,6 +71,6 @@ class RoomBudgetDefaultsUpdate(BaseModel):
     API's own bounds.
     """
     max_messages: Optional[int] = Field(default=None, ge=1, le=500)
-    max_cost_usd: Optional[float] = Field(default=None, gt=0)
+    max_cost_usd: Optional[float] = Field(default=None, gt=0, le=1000.0)
     ttl_hours: Optional[int] = Field(default=None, ge=0, le=168)
     clear: List[str] = []

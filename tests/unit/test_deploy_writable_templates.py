@@ -75,32 +75,26 @@ def test_unwritable_templates_dir_fails_fast(monkeypatch):
     # (pytest imports every test module before running any test). The conftest's
     # restore can't fully clean them — they're baseline keys, so its pop-loop
     # skips them — leaving a stub that lacks `is_trinity_compatible`. Evict the
-    # deploy import chain with monkeypatch.delitem (linter-safe; auto-restored on
-    # teardown) so `deploy` re-imports against the real modules from disk.
+    # deploy import chain (auto-restored on teardown) so `deploy` re-imports
+    # against the real modules from disk.
     import importlib
-    import sys
 
-    for _name in (
+    from module_split_guard import evict
+
+    # #3272: the re-import below rebinds the PARENT PACKAGE attributes
+    # (`services.docker_utils`, …) to the fresh module objects. `evict` restores
+    # them on teardown along with the `sys.modules` entries; `monkeypatch.delitem`
+    # alone restores only the entries, so a later file that patches one copy
+    # while the code under test reads the other sees no patch.
+    evict(
+        monkeypatch,
         "services.agent_service.deploy",
         "services.agent_service.helpers",
         "services.template_service",
         "services.docker_service",
         "services.docker_utils",
         "services.settings_service",
-    ):
-        # #3272: the re-import below rebinds the PARENT PACKAGE attribute
-        # (`services.docker_utils`, …) to the fresh module object, and
-        # `delitem`'s teardown restores only the `sys.modules` entry. Left
-        # alone, `from services import docker_utils` and
-        # `sys.modules["services.docker_utils"]` are two different objects for
-        # the rest of the session, so a later file that patches one while the
-        # code under test reads the other sees no patch. Registering the
-        # attribute's current value with monkeypatch restores it on teardown.
-        _pkg_name, _, _attr = _name.rpartition(".")
-        _pkg = sys.modules.get(_pkg_name)
-        if _pkg is not None and hasattr(_pkg, _attr):
-            monkeypatch.setattr(_pkg, _attr, getattr(_pkg, _attr))
-        monkeypatch.delitem(sys.modules, _name, raising=False)
+    )
 
     deploy = importlib.import_module("services.agent_service.deploy")
     from models import DeployLocalRequest, User
