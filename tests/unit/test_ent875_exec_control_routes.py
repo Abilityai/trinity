@@ -152,11 +152,16 @@ def test_the_log_follows_the_same_rule_as_the_detail(monkeypatch, who, visible):
         assert exc.value.status_code == 404
 
 
-@pytest.mark.parametrize("who,kw", [("share", {"source_user_id": ME}), ("owner", {}), ("agent_key", {})])
-def test_a_schedules_history_is_narrowed_for_a_share_holder_only(monkeypatch, who, kw):
+@pytest.mark.parametrize("who,creator,kw", [
+    ("share", 1, {"source_user_id": ME, "include_unattributed": False}),
+    # The share holder CREATED this schedule: its cron/webhook runs (no user) are theirs.
+    ("share", ME, {"source_user_id": ME, "include_unattributed": True}),
+    ("owner", 1, {}), ("agent_key", 1, {}),
+])
+def test_a_schedules_history_is_narrowed_for_a_share_holder_only(monkeypatch, who, creator, kw):
     seen = []
     monkeypatch.setattr(schedules.db, "get_schedule",
-                        lambda sid: SimpleNamespace(agent_name=AGENT, id=sid, owner_id=1))
+                        lambda sid: SimpleNamespace(agent_name=AGENT, id=sid, owner_id=creator))
     monkeypatch.setattr(schedules.db, "get_schedule_executions",
                         lambda sid, limit=50, **k: seen.append(k) or [])
     assert run(schedules.get_schedule_executions(AGENT, "s1", 50, PRINCIPALS[who]())) == []
@@ -654,6 +659,11 @@ def test_the_schedule_responses_say_whether_this_viewer_may_manage_the_webhook()
     assert not hasattr(mine, "owner_id"), "the creator's id is not exposed"
 
 
+def test_a_schedule_response_built_without_the_predicate_claims_no_webhook_rights():
+    from models import ScheduleResponse
+    assert ScheduleResponse(**_schedule_payload()).can_manage_webhook is False
+
+
 def _schedule_payload():
     from datetime import datetime
     now = datetime(2026, 10, 16)
@@ -797,16 +807,26 @@ ROUTE_TIERS = {
     ("routers/git.py", "get_pull_sync_config"): "accessor: a config flag, no text",
     ("routers/git.py", "set_pull_sync_config"): "owner + person (already ruled)",
     ("routers/fan_out.py", "fan_out"): "dispatch with the caller's own key; the rows it makes carry their id",
+    # whole-agent aggregates, ruled open to share holders (PR #3777 review): counts,
+    # rates, cost and durations, no prompt or response text
+    ("routers/schedules.py", "get_schedule_analytics"): "accessor: one schedule's run counts and durations, no text (ruled open)",
+    ("routers/schedules.py", "get_agent_schedules_summary"): "accessor: per-schedule counts, no text (ruled open)",
+    # the Workspace Work tab (PR #3777 review): roster-gated, then own rows on every
+    # agent the viewer does not own (`client_portal/work/service._own_rows`)
+    ("client_portal/work/router.py", "get_work"): "roster + own-rows on shared agents",
+    ("client_portal/work/router.py", "get_work_activity"): "roster + own-rows on shared agents",
     ("routers/chat.py", "arm_execution_report_back"): "accessor + dispatcher-only (#3295): the service 404s unless the caller dispatched the row, and it reads nothing back",
 }
 
 _CENSUS_FILES = ("routers/schedules.py", "routers/chat.py", "routers/agents.py", "routers/git.py",
-                 "routers/executions.py", "routers/fan_out.py", "routers/activities.py", "routers/agent_config.py")
+                 "routers/executions.py", "routers/fan_out.py", "routers/activities.py", "routers/agent_config.py",
+                 "client_portal/work/router.py")
 # Files that are wholly about executions or activity: every route in them counts
 # (the fleet list's own path is "", which no word would match).
-_ALL_ROUTES_FILES = ("routers/executions.py", "routers/activities.py")
+_ALL_ROUTES_FILES = ("routers/executions.py", "routers/activities.py", "client_portal/work/router.py")
 _EXECUTION_CONTROL_WORDS = ("execution", "webhook", "activity", "model", "queue", "logs", "capacity", "chat/history",
-                            "git/pull", "start", "stop", "circuit-breaker", "release", "fan-out", "timeline")
+                            "git/pull", "start", "stop", "circuit-breaker", "release", "fan-out", "timeline",
+                            "analytics")
 
 
 def _routes_matching():
@@ -839,3 +859,16 @@ def test_every_execution_or_control_route_has_a_ruled_tier():
     )
     missing = set(ROUTE_TIERS) - set(routes)
     assert not missing, f"ROUTE_TIERS lists a route that no longer exists: {sorted(missing)}"
+
+
+def test_the_workspace_work_read_narrows_every_ledger_call():
+    """The Work tab's three ledger reads and its window count all carry the
+    own-rows narrowing (behaviour: test_ent875_workspace_work_own_rows.py)."""
+    tree = ast.parse((_BACKEND / "client_portal/work/service.py").read_text())
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_work")
+    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+             and n.func.attr in ("get_fleet_executions", "get_fleet_execution_stats")]
+    assert len(calls) == 4, "the census expects three list reads and one count"
+    for c in calls:
+        assert any(k.arg is None and isinstance(k.value, ast.Name) and k.value.id == "own" for k in c.keywords), (
+            f"line {c.lineno}: a Work-tab ledger read without **own")

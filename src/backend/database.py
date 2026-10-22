@@ -1858,6 +1858,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1898,9 +1902,10 @@ class DatabaseManager:
         )
 
     def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
-                                source_user_id=None):
+                                source_user_id=None, include_unattributed=False):
         return self._schedule_ops.get_schedule_executions(
-            schedule_id, limit, source_user_id=source_user_id)
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1967,9 +1972,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
