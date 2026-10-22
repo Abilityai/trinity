@@ -584,7 +584,7 @@ def test_real_catalog_hides_all_known_fixtures(monkeypatch):
     # No fixture (by explicit name or naming convention) may appear.
     forbidden = {
         "test-echo", "test-counter", "test-delegator", "test-codex",
-        "test-gemini", "sleep-echo", "test-leak-hook",
+        "test-gemini", "test-opencode", "sleep-echo", "test-leak-hook",
         "demo-researcher", "demo-analyst", "trinity-system",
         # #1759: `default` matches NEITHER the test-/demo- prefix convention
         # checked below NOR any other guard, so an author dropping its

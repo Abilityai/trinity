@@ -1,0 +1,78 @@
+name: test-opencode
+# Excluded from the user-facing template catalog (GET /api/templates). See README "Not starting points". (#1513)
+hidden: true
+display_name: Test OpenCode Agent
+description: Test agent using the OpenCode runtime for validation (#2981)
+version: "1.0.0"
+author: Trinity Platform
+priority: 10  # Lower = higher in list (after system templates)
+
+
+# Use the OpenCode runtime instead of Claude Code
+runtime:
+  type: opencode
+  # Pinned, NOT omitted (the #2207 reasoning, adapted). An unpinned OpenCode
+  # turn runs on the harness default `anthropic/claude-sonnet-5`, which needs
+  # ANTHROPIC_API_KEY — so "no pin" would silently move this fixture off the
+  # OpenRouter path it exists to exercise, and fail its first turn 503 naming
+  # a key it never declared. OpenCode's `-m` takes `provider/model`.
+  #
+  # models.dev (https://models.dev/api.json, read 2026-10-22), provider
+  # `openrouter`, model `qwen/qwen3-coder`: "Qwen3 Coder 480B A35B",
+  # tool_call: true, open_weights: true. Tool calling matters: a model that
+  # answers with a tool call written as text fails the turn (text_tool_call).
+  model: openrouter/qwen/qwen3-coder
+
+# Custom OpenAI-compatible provider (optional) — uncomment to run on a local or self-hosted endpoint:
+#   provider:
+#     id: local
+#     npm: "@ai-sdk/openai-compatible"
+#     base_url: "http://host.docker.internal:11434/v1"
+#     api_key_env: LOCAL_LLM_API_KEY
+#     models:
+#       qwen3-coder:30b: {}
+
+# With that block, set `model: local/qwen3-coder:30b` above and add
+# LOCAL_LLM_API_KEY to `credentials.env_file`. Cost on a custom provider is
+# recorded as unknown (null), never $0, unless the model declares one:
+# `qwen3-coder:30b: {cost: {input: 0.1, output: 0.3}}`. `npm` accepts only
+# "@ai-sdk/openai-compatible" (pre-seeded into the image); `base_url` must be
+# an absolute http(s) URL.
+
+resources:
+  cpu: "2"
+  memory: "2g"
+
+capabilities:
+  - chat
+  - code-generation
+  - web-search
+
+mcp_servers: []
+
+# OpenCode on the openrouter provider reads its key from OPENROUTER_API_KEY in
+# the agent's .env (CRED-002). Declaring it here makes the Quick Inject UI
+# prompt for it. A missing key fails the turn 503 naming the variable.
+#
+# `credentials:` is names-only and always will be — see
+# docs/schemas/trinity-agent-credentials.schema.json.
+credentials:
+  env_file:
+    - OPENROUTER_API_KEY
+
+# ent#128 — per-variable setup guidance. DECORATES the names above; it cannot
+# declare a variable that `credentials:` does not.
+credential_setup:
+  - name: OPENROUTER_API_KEY
+    title: OpenRouter API key
+    description: >-
+      Authenticates the OpenCode runtime's openrouter provider. Without it the
+      agent starts but every turn fails before it runs, naming this variable.
+    required: true
+    secret: true
+    format: secret
+    setup_url: https://openrouter.ai/keys
+
+slash_commands:
+  - name: /test
+    description: Test command to verify the OpenCode runtime is working

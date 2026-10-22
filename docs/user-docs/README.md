@@ -44,7 +44,8 @@ Trinity is the operating system for the AI-native company — open source, self-
 ## Agents
 
 - [Creating Agents](agents/creating-agents.md) — Templates, GitHub repos, from scratch
-- [Agent Runtimes](agents/agent-runtimes.md) — Claude Code, OpenAI Codex, Gemini CLI: auth, cost reporting, session resume, which safety controls apply
+- [Agent Runtimes](agents/agent-runtimes.md) — Claude Code, OpenAI Codex, Gemini CLI, OpenCode: auth, cost reporting, session resume, which safety controls apply
+- [OpenCode Runtime](agents/opencode-runtime.md) — Run an agent on OpenRouter or a self-hosted OpenAI-compatible model: template block, keys, playbooks, limitations
 - [Managing Agents](agents/managing-agents.md) — Start/stop, rename, delete, health
 - [Agent Data & Portability](agents/agent-data.md) — Runtime data paths, export/import across instances
 - [Agent Chat](agents/agent-chat.md) — The stateless per-turn chat on the agent page, streaming, history

@@ -8,7 +8,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 ## Do I have to use Claude, or can my agents run on other models?
 
-You can mix runtimes. Each agent runs on one of three runtimes — Claude Code (the default), Gemini CLI, or OpenAI Codex — chosen by its template's `template.yaml` when the agent is created; the platform treats their responses the same way. First-run setup still asks you to **Connect Claude** (a Claude subscription token or an Anthropic API key), because that is the one step it will not let you skip and the default runtime needs it. Gemini CLI agents use a Gemini API key, and Codex agents use an OpenAI key in their `.env`. See [Agent Runtimes](../agents/agent-runtimes.md).
+You can mix runtimes. Each agent runs on one of four runtimes — Claude Code (the default), Gemini CLI, OpenAI Codex, or OpenCode — chosen by its template's `template.yaml` when the agent is created; the platform treats their responses the same way. First-run setup still asks you to **Connect Claude** (a Claude subscription token or an Anthropic API key), because that is the one step it will not let you skip and the default runtime needs it. Gemini CLI agents use a Gemini API key, and Codex agents use an OpenAI key in their `.env`. See [Agent Runtimes](../agents/agent-runtimes.md).
 
 ## What do I need to run Trinity on my own machine?
 
