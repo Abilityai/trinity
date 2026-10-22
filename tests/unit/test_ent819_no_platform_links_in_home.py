@@ -45,6 +45,13 @@ _ALLOWED: dict[str, str] = {
         "shared provider tree, never at the home's served files. Download and "
         "preview refuse links for every caller."
     ),
+    "docker/base-image/startup.sh": (
+        "#2981: one link, `node_modules` under `${OPENCODE_CONFIG_DIR}` inside "
+        "the 0700 `$TMPDIR/opencode` scratch root the Files policy write-denies; "
+        "targets the read-only pre-seeded provider tree; the file creates no link "
+        "in the agent home (the Codex `AGENTS.md` mirror is a copy — see "
+        "test_2981_base_image_arch's startup guard)."
+    ),
 }
 
 

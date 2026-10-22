@@ -606,30 +606,48 @@ fi
 _agent_runtime_lc="$(printf '%s' "${AGENT_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
 case "$_agent_runtime_lc" in
   codex)
-    # SYMLINK, not a copy (#2981). The copy was made once, on the first boot
-    # that found no AGENTS.md, and then never again — so every later edit to
-    # CLAUDE.md (a git sync, a skill install, an operator change) left the
-    # Codex agent running on a frozen snapshot of its own identity, silently
-    # and with no way to notice. A relative symlink re-resolves on every read,
-    # so the two files cannot diverge. Codex only: OpenCode reads CLAUDE.md
-    # natively and needs no mirror.
+    # A COPY, refreshed on every start (#2981). The copy used to be made once,
+    # on the first boot that found no AGENTS.md, and then never again — so
+    # every later edit to CLAUDE.md (a git sync, a skill install, an operator
+    # change) left the Codex agent running on a frozen snapshot of its own
+    # identity, silently and with no way to notice. It cannot be a symlink
+    # instead: the Files surface never follows a link in the agent home
+    # (ent#819/#820 — download and preview refuse links for every caller), so
+    # a linked AGENTS.md would be unreadable there. Codex only: OpenCode reads
+    # CLAUDE.md natively and needs no mirror.
     #
-    # Upgrade path off the copy-era image, in three cases, because a regular
-    # AGENTS.md is ambiguous — it is either the copy this block used to make or
-    # an AGENTS.md the template author deliberately wrote:
-    #   * absent, or a symlink pointing anywhere else  -> (re)link. Self-healing.
-    #   * regular file BYTE-IDENTICAL to CLAUDE.md     -> provably our own
-    #     mirror, so replacing it with the link loses nothing.
-    #   * regular file that DIFFERS                    -> left alone; it may be
+    # Refreshing must never overwrite an AGENTS.md the template author wrote,
+    # so the block only rewrites one that is provably its own:
+    #   * absent                                -> copy.
+    #   * a symlink (anywhere)                  -> never author-written (Files
+    #     refuses links); removed first and replaced by a regular file, never
+    #     written through.
+    #   * BYTE-IDENTICAL to CLAUDE.md           -> already the mirror; only the
+    #     stamp is (re)written.
+    #   * BYTE-IDENTICAL to the stamp           -> the copy this block made last
+    #     start, so CLAUDE.md moved since; refresh it.
+    #   * anything else                         -> left alone; it may be
     #     authored. But say so loudly: an unexplained divergence here is exactly
     #     the failure that was previously silent.
+    # The stamp holds the bytes of the last copy, under the disk-backed scratch
+    # dir (#1098) — `.tmp/` is in the canonical gitignore, so no .gitignore
+    # write (#953). `cmp -s` only: no hashing tool, no new dependency.
     if [ -f "/home/developer/CLAUDE.md" ]; then
-        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ] || \
+        mkdir -p "${AGENT_TMPDIR}" 2>/dev/null
+        _agents_md_stamp="${AGENT_TMPDIR}/.agents-md-mirror.last"
+        if [ ! -L "/home/developer/AGENTS.md" ] && \
            cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
-            if [ "$(readlink /home/developer/AGENTS.md 2>/dev/null)" != "CLAUDE.md" ]; then
-                ln -sfn CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
-                    echo "  Linked AGENTS.md -> CLAUDE.md for Codex" || \
-                    echo "  Warning: could not create AGENTS.md symlink"
+            cmp -s /home/developer/CLAUDE.md "$_agents_md_stamp" || \
+                cp /home/developer/CLAUDE.md "$_agents_md_stamp" 2>/dev/null || \
+                echo "  Warning: could not write the AGENTS.md mirror stamp"
+        elif [ ! -e "/home/developer/AGENTS.md" ] || [ -L "/home/developer/AGENTS.md" ] || \
+             { [ -f "$_agents_md_stamp" ] && cmp -s "$_agents_md_stamp" /home/developer/AGENTS.md; }; then
+            if rm -f /home/developer/AGENTS.md && \
+               cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
+               cp /home/developer/CLAUDE.md "$_agents_md_stamp" 2>/dev/null; then
+                echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex (copy, refreshed every start)"
+            else
+                echo "  Warning: could not mirror CLAUDE.md -> AGENTS.md"
             fi
         else
             echo "  Warning: AGENTS.md is a regular file whose content differs from" \

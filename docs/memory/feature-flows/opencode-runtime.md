@@ -116,7 +116,7 @@ Existing suites extended: `test_validate_runtime.py`, `test_session_tab_gate_cod
 - **T5** — The custom provider is `runtime.provider: {id, npm, base_url, api_key_env, models{cost?}}`, serialized to `AGENT_RUNTIME_PROVIDER` at create and rendered per turn.
 - **T6** — A custom provider with no declared cost records `cost_usd=None` plus one warning, never $0.
 - **T7** — The `crud.py` hotspot paydown (#3033) is deferred.
-- **T8** — The `AGENTS.md` symlink stays Codex-only; OpenCode reads `CLAUDE.md`.
+- **T8** — The `AGENTS.md` mirror (a copy, refreshed at every start) stays Codex-only; OpenCode reads `CLAUDE.md`.
 - **G1** — A `runtime.provider` block under any runtime other than `opencode` is a named 400 at create.
 - **G2** — The OpenCode orientation is prepended at render, like Codex's, and is not a `PLATFORM_INSTRUCTIONS` section.
 - **G3** — Recreate serializes the provider block without re-validating it; the harness re-validates every turn.

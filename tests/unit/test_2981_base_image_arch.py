@@ -7,8 +7,9 @@ Two halves:
   text and run under ``bash`` against a tmp ``$HOME`` / ``$AGENT_TMPDIR`` /
   pre-seed dir — so these tests exercise the shell that ships, not a re-typed
   copy. The OpenCode block must write exactly the directory the harness reads
-  (``opencode_runtime._shared_config_dir()``), and the mirror must be a symlink
-  for ``codex`` only (ruling T8).
+  (``opencode_runtime._shared_config_dir()``), and the mirror must be a regular
+  file, a copy refreshed on every start, for ``codex`` only (rulings T8, R15) —
+  never a link in the agent home, which the Files surface refuses (ent#819).
 * **Dockerfile, static.** There is no docker on the unit island and the image
   build is the merge gate, so the Dockerfile is pinned by text — its live
   consumer is the image build itself: the OpenCode pin equals the version the
@@ -190,30 +191,53 @@ def _mirror(box, runtime="codex"):
     return home, proc.stdout
 
 
-def test_mirror_creates_relative_symlink(box):
+def _stamp(box) -> Path:
+    return box[1] / ".agents-md-mirror.last"
+
+
+def test_mirror_creates_a_regular_file_and_stamps_it(box):
     home = box[0]
     (home / "CLAUDE.md").write_text("v1\n")
-    _mirror(box)
-    link = home / "AGENTS.md"
-    assert link.is_symlink()
-    assert os.readlink(link) == "CLAUDE.md"  # relative, so it survives a move
-    assert link.read_text() == "v1\n"
+    _, out = _mirror(box)
+    mirror = home / "AGENTS.md"
+    assert not mirror.is_symlink()  # Files never follows a link (ent#819)
+    assert mirror.is_file()
+    assert mirror.read_text() == "v1\n"
+    assert _stamp(box).read_text() == "v1\n"
+    assert "Mirrored CLAUDE.md -> AGENTS.md" in out
 
 
 def test_mirror_tracks_later_edits(box):
-    """The defect: a copy froze at first boot. A symlink re-resolves."""
+    """The defect: a copy froze at first boot. The copy is refreshed every
+    start while it still equals the stamp of the last copy written."""
     home = box[0]
     (home / "CLAUDE.md").write_text("v1\n")
     _mirror(box)
     (home / "CLAUDE.md").write_text("v2 — edited by a git sync\n")
+    _mirror(box)
+    assert not (home / "AGENTS.md").is_symlink()
     assert (home / "AGENTS.md").read_text() == "v2 — edited by a git sync\n"
+    assert _stamp(box).read_text() == "v2 — edited by a git sync\n"
 
 
 def test_mirror_matches_codex_case_insensitively(box):
     home = box[0]
     (home / "CLAUDE.md").write_text("v1\n")
     _mirror(box, runtime="Codex")
-    assert (home / "AGENTS.md").is_symlink()
+    assert (home / "AGENTS.md").is_file()
+    assert (home / "AGENTS.md").read_text() == "v1\n"
+
+
+@pytest.mark.parametrize("target", ["CLAUDE.md", "SOMEWHERE_ELSE.md"])
+def test_mirror_replaces_a_symlink_with_a_regular_file(box, target):
+    """Includes this branch's own earlier image, which linked to CLAUDE.md."""
+    home = box[0]
+    (home / "CLAUDE.md").write_text("v1\n")
+    (home / "AGENTS.md").symlink_to(target)
+    _mirror(box)
+    assert not (home / "AGENTS.md").is_symlink()
+    assert (home / "AGENTS.md").read_text() == "v1\n"
+    assert (home / "CLAUDE.md").read_text() == "v1\n"  # not written through
 
 
 def test_mirror_adopts_a_stale_identical_copy(box):
@@ -221,25 +245,24 @@ def test_mirror_adopts_a_stale_identical_copy(box):
     (home / "CLAUDE.md").write_text("v1\n")
     (home / "AGENTS.md").write_text("v1\n")
     _mirror(box)
-    assert (home / "AGENTS.md").is_symlink()
+    assert not (home / "AGENTS.md").is_symlink()
+    assert (home / "AGENTS.md").read_text() == "v1\n"
+    assert _stamp(box).read_text() == "v1\n"
+    # adopted: a later CLAUDE.md edit now reaches it
+    (home / "CLAUDE.md").write_text("v2\n")
+    _mirror(box)
+    assert (home / "AGENTS.md").read_text() == "v2\n"
 
 
 def test_mirror_leaves_an_authored_agents_md_alone_but_says_so(box):
     home = box[0]
     (home / "CLAUDE.md").write_text("claude instructions\n")
     (home / "AGENTS.md").write_text("hand-written codex instructions\n")
+    _stamp(box).write_text("an older mirrored copy\n")
     _, out = _mirror(box)
     assert not (home / "AGENTS.md").is_symlink()
     assert (home / "AGENTS.md").read_text() == "hand-written codex instructions\n"
     assert "differs" in out.lower()
-
-
-def test_mirror_repairs_a_wrong_symlink(box):
-    home = box[0]
-    (home / "CLAUDE.md").write_text("v1\n")
-    (home / "AGENTS.md").symlink_to("SOMEWHERE_ELSE.md")
-    _mirror(box)
-    assert os.readlink(home / "AGENTS.md") == "CLAUDE.md"
 
 
 def test_mirror_is_idempotent(box):
@@ -247,15 +270,40 @@ def test_mirror_is_idempotent(box):
     (home / "CLAUDE.md").write_text("v1\n")
     _, first = _mirror(box)
     _, second = _mirror(box)
-    assert "Linked AGENTS.md" in first
-    assert "Linked AGENTS.md" not in second
-    assert (home / "AGENTS.md").is_symlink()
+    assert "Mirrored CLAUDE.md" in first
+    assert "Mirrored CLAUDE.md" not in second
+    assert "Warning" not in second
+    assert (home / "AGENTS.md").read_text() == "v1\n"
 
 
 def test_mirror_noops_without_claude_md(box):
     home = box[0]
     _mirror(box)
     assert not (home / "AGENTS.md").exists()
+
+
+def test_startup_sh_creates_no_link_in_the_agent_home():
+    """R16: the ent819 allowance for startup.sh is per file, so pin what it
+    admits — exactly one ``ln``, the OpenCode ``node_modules`` link under the
+    ``${OPENCODE_CONFIG_DIR}`` scratch root, and no link named under
+    ``/home/developer/`` outside a ``${...}`` scratch variable."""
+    ln_lines = [
+        ln for ln in _STARTUP.read_text().splitlines() if re.match(r"^\s*ln\s", ln)
+    ]
+    for ln in ln_lines:
+        args = []
+        for tok in ln.split()[1:]:
+            if tok in ("&&", "||", ";", "|", "\\") or re.match(r"^\d*>", tok):
+                break  # end of the ln command itself
+            if not tok.startswith("-"):
+                args.append(tok.strip("'\""))
+        link_name = args[-1]
+        if not link_name.startswith("${"):  # a scratch variable, e.g. OPENCODE_CONFIG_DIR
+            assert not link_name.startswith(("/home/developer", "~", "$HOME")), ln
+            assert "/" in link_name, f"relative link name in the home cwd: {ln}"
+    assert len(ln_lines) == 1, ln_lines
+    assert "node_modules" in ln_lines[0]
+    assert "${OPENCODE_CONFIG_DIR}" in ln_lines[0]
 
 
 @pytest.mark.parametrize("runtime", ["opencode", "OpenCode", "claude-code", "gemini-cli"])
@@ -265,12 +313,6 @@ def test_mirror_is_codex_only(box, runtime):
     (home / "CLAUDE.md").write_text("v1\n")
     _mirror(box, runtime=runtime)
     assert not (home / "AGENTS.md").exists()
-
-
-def test_startup_no_longer_copies_claude_md():
-    src = _STARTUP.read_text()
-    assert "cp /home/developer/CLAUDE.md /home/developer/AGENTS.md" not in src
-    assert "ln -sfn CLAUDE.md /home/developer/AGENTS.md" in src
 
 
 def test_startup_sh_parses():
