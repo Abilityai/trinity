@@ -753,10 +753,11 @@ def _metric_policy() -> dict:
     and `GET /api/settings/retention` cannot disagree about what is in force.
     """
     from services.settings_service import settings_service
+    from routers import metric_points as _metric_points
 
     retention, retention_source = settings_service.resolve_ops_setting(
         "metrics_retention_days")
-    cap, cap_source = settings_service.resolve_ops_setting(
+    _cap, cap_source = settings_service.resolve_ops_setting(
         "metrics_daily_point_cap")
 
     def _int(raw, fallback):
@@ -768,7 +769,9 @@ def _metric_policy() -> dict:
     return {
         "retention_days": _int(retention, 365),
         "retention_days_source": retention_source,
-        "daily_point_cap": _int(cap, 100000),
+        # #3089: the enforcing reader, so a negative row reports the cap the
+        # record route applies rather than "unlimited".
+        "daily_point_cap": _metric_points._ops_int("metrics_daily_point_cap", 100000),
         "daily_point_cap_source": cap_source,
         "enforced": True,
         "enforced_by": "abilityai/trinity-enterprise#478",
