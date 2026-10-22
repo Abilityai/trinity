@@ -41,8 +41,8 @@ read, not computed.
 
 Empty final text is a FAILED turn (#520)
 ----------------------------------------
-This is live, not theoretical: ``qwen3.6:27b`` through Ollama's
-OpenAI-compatible endpoint returns its prose in a non-standard ``reasoning``
+This is live, not theoretical: an open-weight model on an OpenAI-compatible
+endpoint returns its prose in a non-standard ``reasoning``
 field with ``content: ""`` **while reporting success**. A runtime that reads
 only the text and shrugs at an empty one reports that as a good turn. The
 policy, decided here and pinned by tests:
@@ -65,8 +65,8 @@ text empty, nothing at all            **FAIL** ``empty_response`` (500)
 
 The ``error`` row outranks the tools-ran row on purpose: a provider 5xx after
 the tools ran is a failed turn, never laundered into ``(Task completed)``. The
-``text_tool_call`` row is live too: ``llama4:scout`` emitted its tool call as
-prose (``<tool_call>…``) on the lab fork and the ledger recorded success.
+``text_tool_call`` row is live too: an open-weight model emitted its tool call
+as prose (``<tool_call>…``) on a test fork and the ledger recorded success.
 
 Cost (ruling T6): the native ``cost`` is summed for models.dev providers. A
 custom provider (the template's ``runtime.provider`` block, carried as
@@ -188,8 +188,8 @@ class OpenCodeModelShapeError(ValueError):
 # time — and without a watchdog it burns the whole execution timeout before
 # failing, holding the chat lock for the duration.
 #
-# The default is generous on purpose. Measured on a self-hosted Ollama
-# (gemma4:12b, cold): the silent pre-`step_start` window ranged 7.2s → 59.3s
+# The default is generous on purpose. Measured with an open-weight model on a
+# self-hosted OpenAI-compatible endpoint (cold): the silent pre-`step_start` window ranged 7.2s → 59.3s
 # for byte-identical configs, the variance being the provider's own model
 # load. A watchdog tighter than that would kill healthy turns, which is the
 # worse failure — so 300s, ~5x the worst measured floor.
@@ -200,7 +200,7 @@ _STALL_TIMEOUT_ENV = "OPENCODE_STALL_TIMEOUT_SEC"
 #
 # The measurement that sets it: the stall is HOST-DEPENDENT. One host
 # completed 16/16; another completed 2/15 (~13% per attempt) on the
-# same pinned binary, flags, provider block and Ollama endpoint. One retry on a
+# same pinned binary, flags, provider block and endpoint. One retry on a
 # 13% host is ~24% — i.e. three turns in four end as a 504, which is not
 # shippable unattended. Three attempts is ~34% and costs, at worst, two extra
 # silent windows out of the SAME turn budget (never on top of it). An
@@ -295,7 +295,7 @@ def validate_provider_model(model: Optional[str]) -> Optional[str]:
         raise OpenCodeModelShapeError(
             f"OpenCode model {model!r} is missing a provider prefix. "
             "Use 'provider/model' (e.g. 'anthropic/claude-sonnet-5', "
-            "'ollama/qwen3.6:27b')."
+            "'local/example-model')."
         )
     if not _PROVIDER_MODEL_RE.match(candidate):
         raise OpenCodeModelShapeError(
@@ -352,7 +352,7 @@ def _load_shared_config() -> Dict[str, object]:
     """The image/startup-generated ``opencode.json``, or the baked defaults.
 
     Read rather than assumed so an operator's custom-provider block (the
-    Ollama path) survives into the per-turn config. Falls back to the defaults
+    OpenAI-compatible endpoint path) survives into the per-turn config. Falls back to the defaults
     on any read/parse failure — a corrupt config must not take the agent down,
     and the fallback is the SAFE direction (privacy defaults on).
     """
@@ -427,7 +427,11 @@ def _prepare_turn_config(
 
     turn_dir = os.path.join(_opencode_root(), "turns", _safe_token(execution_id))
     config_dir = os.path.join(turn_dir, "opencode")
-    os.makedirs(config_dir, exist_ok=True)
+    # 0700/0600: the turn config names the agent's secrets and carries its
+    # platform prompt. makedirs' mode is umask-masked, so chmod after.
+    os.makedirs(config_dir, mode=0o700, exist_ok=True)
+    os.chmod(turn_dir, 0o700)
+    os.chmod(config_dir, 0o700)
 
     shared = _shared_config_dir()
     for name in _LINK_FROM_SHARED:
@@ -443,8 +447,10 @@ def _prepare_turn_config(
     config = _load_shared_config()
     if system_prompt:
         prompt_file = os.path.join(config_dir, "trinity-instructions.md")
-        with open(prompt_file, "w", encoding="utf-8") as fh:
+        fd = os.open(prompt_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(system_prompt)
+        os.chmod(prompt_file, 0o600)
         # Additive: keep whatever the operator declared, put Trinity's first.
         existing = config.get("instructions")
         existing = list(existing) if isinstance(existing, list) else []
@@ -1047,7 +1053,8 @@ _TEXT_TOOL_CALL_SHAPES: Tuple[Tuple[str, "re.Pattern[str]"], ...] = (
     ("tool_call_tag", re.compile(r"<tool_call\b", re.IGNORECASE)),
     ("function_call_tag", re.compile(r"<function_call\b", re.IGNORECASE)),
     ("name_arguments_object", re.compile(
-        r"\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:", re.DOTALL)),
+        r"\{\s*\"name\"\s*:\s*\"[^\"]+\"\s*,\s*\"arguments\"\s*:"
+        r"|\{\s*\"arguments\"\s*:\s*\{.*?\}\s*,\s*\"name\"\s*:", re.DOTALL)),
     ("tool_calls_array", re.compile(r"\"tool_calls\"\s*:\s*\[")),
 )
 
@@ -1177,7 +1184,16 @@ _AUTH_PATTERNS = (
     re.compile(r"\bauthentication\s+(?:failed|error)\b", re.IGNORECASE),
     re.compile(r"\bno\s+credentials?\s+found\b", re.IGNORECASE),
 )
-_RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
+# Rate markers are anchored for the same reason: "quota" inside
+# `disk_quota_report` or "429" inside a port number in tool output is not a
+# provider rate limit.
+_RATE_MARKERS = (
+    re.compile(r"\b429\b"),
+    re.compile(r"\brate[ _]limit", re.IGNORECASE),
+    re.compile(r"\bquota\b", re.IGNORECASE),
+    re.compile(r"\binsufficient_quota\b", re.IGNORECASE),
+    re.compile(r"\btoo\s+many\s+requests\b", re.IGNORECASE),
+)
 
 
 def classify_opencode_failure(
@@ -1208,8 +1224,7 @@ def _classify_message(haystack: str) -> Optional[int]:
     """429 for a rate-shaped message, 503 for an auth-shaped one, else None.
     Shared by the exit-code path and the stream `error`-event path so one
     registry decides what counts as AUTH."""
-    lowered = haystack.lower()
-    if any(marker in lowered for marker in _RATE_MARKERS):
+    if any(marker.search(haystack) for marker in _RATE_MARKERS):
         return 429
     if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
         return 503
@@ -1633,7 +1648,8 @@ class OpenCodeRuntime(AgentRuntime):
             if outcome in _FAILED_FINALS:
                 # Exit code 0 is NOT proof of a completed turn (#520). A
                 # provider that answers in `reasoning` with `content: ""` —
-                # measured live on qwen3.6:27b via Ollama — reports success;
+                # measured live with an open-weight model on an OpenAI-compatible
+                # endpoint — reports success;
                 # so does a stream that carried an `error` event, a step cut
                 # at `length`, or a tool call emitted as prose.
                 status_code = 500
@@ -1669,7 +1685,7 @@ class OpenCodeRuntime(AgentRuntime):
 
         **Why more than one retry.** One host measured 16/16 completions,
         which suggested one retry was enough. A second host then measured the
-        opposite on the SAME binary, flags, provider block and Ollama
+        opposite on the SAME binary, flags, provider block and
         endpoint: 2 completions in 15 runs (~13% per attempt). Both stand —
         the variable is the host, and the cause is unknown. At 13%, one retry
         yields ~24%, i.e. an affected host 504s three turns in four, which is

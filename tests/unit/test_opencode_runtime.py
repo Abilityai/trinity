@@ -6,9 +6,10 @@ against a parsed line stream or a stubbed ``_execute_opencode``.
 
 The load-bearing cases, in the order they matter:
 
-  * **empty final text is a FAILED turn** (#520) — live on qwen3.6:27b via
-    Ollama, which answers in a non-standard ``reasoning`` field with
-    ``content: ""`` *while reporting success*. Exit code 0 is not proof.
+  * **empty final text is a FAILED turn** (#520) — live with an open-weight
+    model on an OpenAI-compatible endpoint, which answers in a non-standard
+    ``reasoning`` field with ``content: ""`` *while reporting success*. Exit
+    code 0 is not proof.
   * **no cost double-count** — ``tokens.reasoning`` ⊂ ``tokens.output`` and
     ``tokens.cache.read`` ⊂ ``tokens.input``. Cost is native, so the assertion
     is that nothing is added to it and no pricing table exists.
@@ -22,6 +23,7 @@ The load-bearing cases, in the order they matter:
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from fastapi import HTTPException
@@ -208,8 +210,8 @@ def test_no_pricing_table_exists():
 # ---------------------------------------------------------------------------
 
 def test_reasoning_only_response_is_a_failure_not_a_success():
-    """The live qwen3.6:27b-via-Ollama shape: prose in `reasoning`, empty text,
-    and the CLI reports success."""
+    """The live shape of an open-weight model on an OpenAI-compatible endpoint:
+    prose in `reasoning`, empty text, and the CLI reports success."""
     lines = _lines(
         {"type": "step_start", "sessionID": "s"},
         {"type": "reasoning", "text": "Let me think... the answer is 42."},
@@ -266,12 +268,12 @@ async def test_empty_turn_raises_500_even_on_exit_zero(monkeypatch, tmp_path):
     _install_fake_subprocess(monkeypatch, stdout_lines=stream, return_code=0)
 
     with pytest.raises(HTTPException) as exc:
-        await runtime.execute_headless("do a thing", model="ollama/qwen3.6:27b")
+        await runtime.execute_headless("do a thing", model="local/example-model")
     assert exc.value.status_code == 500
     assert "reasoning" in str(exc.value.detail).lower()
     # The operator needs to know WHICH model did this — the fix is a provider
     # change, which nobody can make from "the turn failed".
-    assert "qwen3.6:27b" in str(exc.value.detail)
+    assert "local/example-model" in str(exc.value.detail)
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +298,55 @@ def test_failure_classification(stderr, expected):
     status, detail = classify_opencode_failure(1, stderr, ExecutionMetadata())
     assert status == expected
     assert detail
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "tool 'disk_check' failed: disk_quota_report missing",
+        "quotation marks are unbalanced in line 3",
+        "subquotas are not supported",
+        "listening on 127.0.0.1:14290 failed: address in use",
+        "corporate limit reached in the expense tool",
+    ],
+)
+def test_incidental_rate_words_in_tool_output_are_not_a_rate_limit(stderr):
+    """Review I7: rate markers are anchored like the auth patterns."""
+    status, _ = classify_opencode_failure(1, stderr, ExecutionMetadata())
+    assert status == 500
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "HTTP 429",
+        "quota exceeded for this model",
+        "Error: insufficient_quota",
+        "rate_limit_error: slow down",
+        "Too Many Requests",
+    ],
+)
+def test_real_rate_limit_messages_still_classify_429(stderr):
+    status, _ = classify_opencode_failure(1, stderr, ExecutionMetadata())
+    assert status == 429
+
+
+def test_turn_config_dir_and_files_are_private(monkeypatch, tmp_path):
+    """Review I8: the turn dir is 0700, the config and the prompt file 0600,
+    whatever the umask."""
+    import stat
+
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    old = os.umask(0o022)
+    try:
+        turn_dir = opencode_runtime._prepare_turn_config("exec-mode", "You are Trinity.")
+    finally:
+        os.umask(old)
+    config_dir = os.path.join(turn_dir, "opencode")
+    assert stat.S_IMODE(os.stat(turn_dir).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(config_dir).st_mode) == 0o700
+    for name in ("opencode.json", "trinity-instructions.md"):
+        assert stat.S_IMODE(os.stat(os.path.join(config_dir, name)).st_mode) == 0o600, name
 
 
 def test_generic_failure_is_500_not_503():
@@ -387,7 +438,7 @@ def test_context_window_strips_the_provider_prefix():
     "model",
     [
         "anthropic/claude-sonnet-5",
-        "ollama/qwen3.6:27b",
+        "local/example-model",
         "openrouter/meta-llama/llama-4-70b",
         "replicate/meta/meta-llama-3-70b-instruct",
         "my-provider/model.v2",
@@ -398,7 +449,7 @@ def test_valid_provider_model_shapes(model):
 
 
 @pytest.mark.parametrize(
-    "model", ["claude-sonnet-5", "qwen3.6:27b", "/model", "provider/", "-m/x"]
+    "model", ["claude-sonnet-5", "example-model", "/model", "provider/", "-m/x"]
 )
 def test_invalid_provider_model_shapes(model):
     with pytest.raises(OpenCodeModelShapeError) as exc:
@@ -417,7 +468,7 @@ async def test_bad_model_shape_is_a_400_not_a_failed_turn(monkeypatch):
     runtime = OpenCodeRuntime()
     monkeypatch.setattr(runtime, "is_available", lambda: True)
     with pytest.raises(HTTPException) as exc:
-        await runtime.execute_headless("task", model="qwen3.6:27b")
+        await runtime.execute_headless("task", model="example-model")
     assert exc.value.status_code == 400
     assert "provider prefix" in str(exc.value.detail)
 
@@ -428,10 +479,10 @@ async def test_bad_model_shape_is_a_400_not_a_failed_turn(monkeypatch):
 
 def test_command_shape():
     cmd = OpenCodeRuntime()._build_command(
-        model="ollama/qwen3.6:27b", session_id="ses_1", directory="/home/developer"
+        model="local/example-model", session_id="ses_1", directory="/home/developer"
     )
     assert cmd[:5] == ["opencode", "run", "--format", "json", "--auto"]
-    assert cmd[cmd.index("-m") + 1] == "ollama/qwen3.6:27b"
+    assert cmd[cmd.index("-m") + 1] == "local/example-model"
     assert cmd[cmd.index("--session") + 1] == "ses_1"
     assert cmd[cmd.index("--dir") + 1] == "/home/developer"
 
@@ -834,8 +885,8 @@ def test_empty_outcome_on_part_shape():
     ],
 )
 def test_text_tool_call_is_a_failed_turn_for_each_shape(final_text, shape):
-    """llama4:scout emitted its tool call as prose on the fork and the ledger
-    recorded success. A text-only final carrying a tool-call shape with zero
+    """An open-weight model emitted its tool call as prose on the fork and the
+    ledger recorded success. A text-only final carrying a tool-call shape with zero
     `tool_use` events is a failed turn, named."""
     assert text_tool_call_shape(final_text) == shape
     text, _log, _m, _raw, outcome = parse_opencode_jsonl(_lines(*_pstep(final_text)))
@@ -850,6 +901,28 @@ def test_text_tool_call_detector_is_silent_once_real_tools_ran():
         _pev("step_start", {"type": "step-start"}), _ptool(),
         _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
         *_pstep('I ran it: {"name": "bash", "arguments": {"command": "ls"}}'),
+    )
+    _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
+    assert outcome == FINAL_OK
+
+
+ARGUMENTS_FIRST = 'Calling it: {"arguments": {"command": "ls"}, "name": "bash"}'
+
+
+def test_arguments_first_text_tool_call_is_a_failed_turn():
+    """Review I3: the key order a model emits is not fixed; `arguments` before
+    `name` is the same text-shaped call."""
+    assert text_tool_call_shape(ARGUMENTS_FIRST) == "name_arguments_object"
+    text, _log, _m, _raw, outcome = parse_opencode_jsonl(_lines(*_pstep(ARGUMENTS_FIRST)))
+    assert outcome == FINAL_TEXT_TOOL_CALL
+    assert text == ""
+
+
+def test_arguments_first_after_a_real_tool_use_is_not_flagged():
+    lines = _lines(
+        _pev("step_start", {"type": "step-start"}), _ptool(),
+        _pev("step_finish", {"type": "step-finish", "reason": "tool-calls"}),
+        *_pstep(ARGUMENTS_FIRST),
     )
     _t, _log, _m, _raw, outcome = parse_opencode_jsonl(lines)
     assert outcome == FINAL_OK

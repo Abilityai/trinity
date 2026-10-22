@@ -45,8 +45,8 @@ The rendered config carries env-var NAMES. ``trinity_mcp`` writes the Trinity
 server's ``Authorization`` into ``.mcp.json`` as the LITERAL ``Bearer <key>``
 (Claude Code has no reference syntax for headers) and the execution-id header
 as the shell placeholder ``${TRINITY_EXECUTION_ID:-manual}``. Both are
-rewritten here, in this order, for every header value and every local
-server's ``env`` value:
+rewritten here, in this order, for every header value, every local
+server's ``env`` value and every element of its ``command``/``args`` argv:
 
 (a) every ``${VAR}`` / ``${VAR:-default}`` placeholder → OpenCode's
     ``{env:VAR}`` reference. The substitution syntax is VERIFIED against the
@@ -70,6 +70,10 @@ server's ``env`` value:
     it is never written literally. A dropped header can only mean a key that
     is not in the agent's environment, which OpenCode could not have
     substituted anyway.
+
+The one deliberate exception is a remote server's ``url``: it is written as
+declared, so a credential carried in its query string reaches the turn config
+literally. Put the credential in a header instead, where the rule applies.
 
 The platform-prompt half (the ``mcp__trinity__<tool>`` → ``trinity_<tool>``
 rewrite OpenCode's ``<server>_<tool>`` naming needs) is NOT here; it belongs
@@ -196,7 +200,18 @@ def _has_literal_secret(field_name: str, value: str) -> bool:
     if _SECRET_FIELD_RE.search(field_name):
         words = [w for w in residue.split() if w.lower() not in _SCHEME_WORDS]
         return bool("".join(words).strip())
+    if _is_argv_field(field_name):
+        # An argv carries package and server names (`server-sequential-thinking`
+        # is 26 word characters); a generated key carries digits.
+        return any(
+            any(ch.isdigit() for ch in m.group(0))
+            for m in _OPAQUE_LITERAL_RE.finditer(residue)
+        )
     return bool(_OPAQUE_LITERAL_RE.search(residue))
+
+
+def _is_argv_field(field_name: str) -> bool:
+    return field_name == "command" or field_name.startswith("args[")
 
 
 def render_secret_value(
@@ -298,10 +313,30 @@ def _map_one(
 
     command = entry.get("command")
     if command:
-        argv = [str(command)]
+        # The argv goes through the same secret rule as `env`: a template's
+        # `args: ["--api-key", "<literal>"]` would otherwise land in the turn
+        # config verbatim. A dropped arg is omitted; a dropped command leaves
+        # nothing runnable, so the server is skipped.
+        rendered_command = render_secret_value(
+            str(command), server=name, field_name="command",
+            environ=environ, env_defaults=env_defaults,
+        )
+        if rendered_command is None:
+            dropped.append((name, "command"))
+            return None
+        argv = [rendered_command]
         args = entry.get("args")
         if isinstance(args, (list, tuple)):
-            argv.extend(str(a) for a in args)
+            for index, arg in enumerate(args):
+                field_name = "args[%d]" % index
+                rendered_arg = render_secret_value(
+                    str(arg), server=name, field_name=field_name,
+                    environ=environ, env_defaults=env_defaults,
+                )
+                if rendered_arg is None:
+                    dropped.append((name, field_name))
+                    continue
+                argv.append(rendered_arg)
         mapped = {"type": "local", "command": argv, "enabled": True}
         env = entry.get("env")
         if isinstance(env, Mapping) and env:

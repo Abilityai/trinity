@@ -131,6 +131,20 @@ def test_unsafe_names_are_skipped_with_one_warning(homes, caplog):
     assert "'-flag'" in warnings[0].getMessage() and "'has space'" in warnings[0].getMessage()
 
 
+def test_skill_named_like_a_builtin_warns_and_still_registers(homes, caplog):
+    """Review I5: OpenCode registers its built-ins (`init`, `review`) first and
+    config commands after, so a same-named skill replaces the built-in."""
+    project, _ = homes
+    _skill(project, "review", "name: review")
+    _skill(project, "backlog", "name: backlog")
+    with caplog.at_level(logging.WARNING):
+        commands = discover_playbook_commands(project)
+    assert {"review", "backlog"} <= set(commands)
+    warned = [r.getMessage() for r in caplog.records if "built-in" in r.getMessage()]
+    assert len(warned) == 1 and "'review'" in warned[0]
+    assert not any("backlog" in m for m in warned)
+
+
 def test_no_skills_no_commands(homes):
     project, _ = homes
     assert discover_playbook_commands(project) == {}

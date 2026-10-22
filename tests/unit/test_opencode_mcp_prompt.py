@@ -219,6 +219,56 @@ def test_a_pure_reference_in_a_credential_header_is_not_a_literal():
 
 
 # ---------------------------------------------------------------------------
+# the secret rule, over a local server's argv (review I2)
+# ---------------------------------------------------------------------------
+
+def test_argv_literal_equal_to_a_secret_env_value_is_rewritten_by_name():
+    out = map_mcp_servers(
+        {"v": {"command": "npx", "args": ["-y", "vendor-mcp", "--api-key", CONTEXT7_KEY]}},
+        environ={"VENDOR_API_KEY": CONTEXT7_KEY},
+    )
+    assert out["v"]["command"] == ["npx", "-y", "vendor-mcp", "--api-key", "{env:VENDOR_API_KEY}"]
+
+
+def test_argv_placeholder_becomes_env_reference():
+    rendered = render_mcp_servers(
+        {"v": {"command": "${VENDOR_BIN}", "args": ["--token", "${VENDOR_TOKEN:-none}"]}},
+        environ={},
+    )
+    assert rendered.servers["v"]["command"] == ["{env:VENDOR_BIN}", "--token", "{env:VENDOR_TOKEN}"]
+    assert rendered.env_defaults == {"VENDOR_TOKEN": "none"}
+
+
+def test_argv_credential_residue_is_dropped_with_a_warning(caplog):
+    literal = "sk-" + "a1B2c3D4" * 5
+    with caplog.at_level(logging.WARNING, logger=_LOGGER):
+        rendered = render_mcp_servers(
+            {"v": {"command": "npx", "args": ["-y", "vendor-mcp", "--api-key", literal]}},
+            environ={"OTHER_KEY": "x" * 40},
+        )
+    assert rendered.servers["v"]["command"] == ["npx", "-y", "vendor-mcp", "--api-key"]
+    assert rendered.dropped == (("v", "args[3]"),)
+    warned = [r.getMessage() for r in caplog.records if "dropped" in r.getMessage()]
+    assert len(warned) == 1 and "'v'" in warned[0] and "args[3]" in warned[0]
+    assert literal not in warned[0]
+
+
+def test_argv_dropped_command_skips_the_server():
+    rendered = render_mcp_servers({"v": {"command": "sk-" + "a1B2c3D4" * 5}}, environ={})
+    assert rendered.servers == {}
+    assert rendered.dropped == (("v", "command"),)
+
+
+@pytest.mark.parametrize("args", [
+    ["-y", "@modelcontextprotocol/server-filesystem", "/home/developer"],
+    ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+])
+def test_plain_argv_is_unchanged(args):
+    out = map_mcp_servers({"fs": {"command": "npx", "args": args}}, environ={"OTHER_KEY": "x" * 40})
+    assert out["fs"]["command"] == ["npx", *args]
+
+
+# ---------------------------------------------------------------------------
 # the secret rule, over a whole `.mcp.json`
 # ---------------------------------------------------------------------------
 

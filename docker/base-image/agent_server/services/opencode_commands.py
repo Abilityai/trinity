@@ -25,7 +25,12 @@ Verified against the pinned OpenCode source, v1.18.32 (github.com/sst/opencode):
   same ``Info`` a ``.opencode/command/<name>.md`` file decodes to, frontmatter
   plus the body as ``template`` (``opencode/src/config/command.ts:21-31``).
   Config entries are listed after the built-ins (``command/index.ts:90-103``),
-  so a skill named ``init`` or ``review`` shadows OpenCode's own.
+  so a skill named ``init`` or ``review`` shadows OpenCode's own
+  (``Default = {INIT, REVIEW}``, ``command/index.ts:51-71``). The skill still
+  registers — it is the operator's name — and discovery logs one warning per
+  collision (:data:`OPENCODE_BUILTIN_COMMANDS`). An MCP server's prompt can
+  shadow a command the same way (``command/index.ts:86``), but its names are
+  only known once the server is connected, so discovery cannot see it.
 * The handler (``opencode/src/session/prompt.ts:1372-1395``) replaces ``$1``…
   positionally and ``$ARGUMENTS`` with the raw argument string; with neither in
   the template it appends the arguments after a blank line.
@@ -61,6 +66,10 @@ COMMAND_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 OPENCODE_SHELL_SHAPE = re.compile(r"!`[^`]+`")
 
 DESCRIPTION_MAX = 200
+
+# OpenCode's built-in commands at v1.18.32 (`command/index.ts:51-71`,
+# `Default = {INIT, REVIEW}`). A skill of the same name replaces the built-in.
+OPENCODE_BUILTIN_COMMANDS = frozenset({"init", "review"})
 
 
 def _one_line(description: Optional[str]) -> Optional[str]:
@@ -98,6 +107,11 @@ def discover_playbook_commands(home_dir: Path) -> Dict[str, Dict[str, str]]:
             if not COMMAND_NAME.fullmatch(skill.name) or "`" in str(skill_md):
                 rejected.append(skill.name)
                 continue
+            if skill.name in OPENCODE_BUILTIN_COMMANDS:
+                logger.warning(
+                    "[OpenCode] skill %r replaces OpenCode's built-in /%s "
+                    "command for this agent", skill.name, skill.name,
+                )
             entry = {"template": TEMPLATE.format(path=skill_md)}
             description = _one_line(skill.description)
             if description:
