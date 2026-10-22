@@ -12,7 +12,7 @@
 
 ### Agent Containers
 
-**Base image** `trinity-agent-base:latest`: Python 3.13, Node.js 20, Go 1.21, Claude Code (latest), common Python packages.
+**Base image** `trinity-agent-base:latest`: Python 3.13, Node.js 24, Go 1.21, Claude Code (latest), common Python packages.
 
 **Internal server** `agent-server.py` (FastAPI, port 8000):
 - `/api/chat` - Claude Code execution (messages persisted to database)
