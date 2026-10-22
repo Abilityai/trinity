@@ -96,16 +96,14 @@
           <ModelSelector v-model="selectedModel" label="Model" compact />
         </div>
         <div>
-          <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timeout</label>
+          <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Timeout<span v-if="timeoutCapped" data-testid="task-timeout-cap" :title="`This agent's execution timeout caps every task at ${formatTimeout(agentTimeoutCap)}`"> · agent cap {{ formatTimeout(agentTimeoutCap) }}</span></label>
           <select
-            v-model="taskTimeout"
+            :value="effectiveTimeout"
+            @change="taskTimeout = Number($event.target.value)"
+            data-testid="task-timeout"
             class="px-2 py-1.5 border border-gray-300 dark:border-gray-600 rounded-md text-sm bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-300 focus:outline-none focus:ring-1 focus:ring-action-primary-500"
           >
-            <option :value="300">5 min</option>
-            <option :value="900">15 min</option>
-            <option :value="1800">30 min</option>
-            <option :value="3600">1 hour</option>
-            <option :value="7200">2 hours</option>
+            <option v-for="opt in timeoutOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
           </select>
         </div>
       </div>
@@ -619,6 +617,39 @@ watch(selectedModel, (val) => {
 // Timeout selection
 const taskTimeoutKey = computed(() => `trinity-task-timeout-${props.agentName}`)
 const taskTimeout = ref(parseInt(localStorage.getItem(`trinity-task-timeout-${props.agentName}`)) || 3600)  // #665: 60min default
+// #3626: the backend clamps a task's timeout to the agent's execution timeout,
+// so options above that cap are hidden and the cap itself is offered. The
+// remembered choice is kept as-is, so raising the cap brings it back.
+const TIMEOUT_CHOICES = [300, 900, 1800, 3600, 7200]
+const agentTimeoutCap = ref(null)
+function formatTimeout(s) {
+  if (s % 3600 === 0) return s === 3600 ? '1 hour' : `${s / 3600} hours`
+  if (s % 60 === 0) return `${s / 60} min`
+  return `${s} s`
+}
+const timeoutCapped = computed(() => agentTimeoutCap.value !== null && agentTimeoutCap.value < TIMEOUT_CHOICES[TIMEOUT_CHOICES.length - 1])
+const timeoutOptions = computed(() => {
+  const cap = timeoutCapped.value ? agentTimeoutCap.value : Infinity
+  const values = TIMEOUT_CHOICES.filter(v => v <= cap)
+  if (cap !== Infinity && !values.includes(cap)) values.push(cap)
+  return values.map(value => ({ value, label: formatTimeout(value) }))
+})
+const effectiveTimeout = computed(() => {
+  const values = timeoutOptions.value.map(o => o.value)
+  return values.includes(taskTimeout.value) ? taskTimeout.value : Math.min(taskTimeout.value, values[values.length - 1])
+})
+async function loadAgentTimeout() {
+  const name = props.agentName
+  try {
+    const response = await axios.get(`/api/agents/${name}/timeout`, { headers: authStore.authHeader })
+    if (name !== props.agentName) return
+    const cap = Number(response.data?.execution_timeout_seconds)
+    agentTimeoutCap.value = cap > 0 ? cap : null
+  } catch {
+    if (name === props.agentName) agentTimeoutCap.value = null
+  }
+}
+
 watch(taskTimeout, (val) => {
   localStorage.setItem(taskTimeoutKey.value, val)
 })
@@ -710,7 +741,8 @@ async function loadAllData() {
   loading.value = true
   await Promise.all([
     loadExecutions(),
-    loadQueueStatus()
+    loadQueueStatus(),
+    loadAgentTimeout()
   ])
   loading.value = false
 }
@@ -868,7 +900,7 @@ async function runNewTask() {
 
   try {
     // Use /task endpoint for parallel execution (doesn't block queue)
-    const payload = { message: taskMessage, timeout_seconds: taskTimeout.value }
+    const payload = { message: taskMessage, timeout_seconds: effectiveTimeout.value }
     if (selectedModel.value) {
       payload.model = selectedModel.value
     }
