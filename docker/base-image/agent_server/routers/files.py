@@ -682,6 +682,11 @@ async def update_file(
     # (ent#820). The final component is not followed: a link there is refused.
     requested_path, _named = _mutation_target(path, _policy.WRITE)
 
+    # The home itself is a directory, not a file to write: a named 400, as
+    # mkdir and DELETE answer, not the 500 its missing parent raised (ent#949).
+    if requested_path == _HOME.resolve():
+        raise HTTPException(status_code=400, detail="Not a file: /home/developer")
+
     # Check if it's a protected path (for editing)
     # Platform writes can bypass .trinity protection (but not .git, .env, etc.)
     if _is_edit_protected_path(requested_path):
