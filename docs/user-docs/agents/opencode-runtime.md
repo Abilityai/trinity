@@ -63,9 +63,11 @@ credentials:
 
 Trinity checks the block when the agent is created and again on every turn. A mistake is reported with the name of the field at fault. A `provider` block on any other runtime is rejected.
 
+If you also edit the agent's shared `opencode.json` by hand, a `provider.<id>.options.apiKey` written there is copied into each turn's config as written, so use the `{env:VAR}` reference form there too (for example `{env:LOCAL_LLM_API_KEY}`), never the key itself.
+
 ## Playbooks
 
-Start a message with `/<playbook> <arguments>` and an OpenCode agent runs that playbook, the same way Claude Code runs a slash command. This works in chat, schedules, loops and messages from other agents. Only the first line can name a playbook, and only one the agent actually has (as listed in its Skills tab); anything else is sent as an ordinary message.
+Start a message with `/<playbook> <arguments>` and an OpenCode agent runs that playbook, the same way Claude Code runs a slash command. A playbook prompt is dispatched the same way from chat, schedules, loops and agent messages. Only the first line can name a playbook, and only one the agent actually has (as listed in its Skills tab); anything else is sent as an ordinary message.
 
 ## What the Agent Sees
 

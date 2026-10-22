@@ -58,6 +58,20 @@ KNOWN_RUNTIME_NAMES = CLAUDE_RUNTIME_NAMES | frozenset(
     {"gemini-cli", "gemini", "codex", "opencode"}
 )
 
+# The short aliases `/api/version` has never listed; every other known name is
+# a shipped runtime.
+_RUNTIME_ALIASES = frozenset({"claude", "gemini"})
+_VERSION_RUNTIME_ORDER = ("claude-code", "gemini-cli", "codex", "opencode")
+
+
+def version_runtime_names() -> List[str]:
+    """The `/api/version` runtimes list, read off :data:`KNOWN_RUNTIME_NAMES`
+    so a new runtime cannot miss it. The order is the payload's historical
+    one; a runtime the order does not name yet sorts after it."""
+    shipped = KNOWN_RUNTIME_NAMES - _RUNTIME_ALIASES
+    order = {name: index for index, name in enumerate(_VERSION_RUNTIME_ORDER)}
+    return sorted(shipped, key=lambda name: (order.get(name, len(order)), name))
+
 # #2981: OpenCode's `-m` takes `provider/model`, not a bare model id. A bare id
 # is not simply rejected — it is AMBIGUOUS, and the CLI's own complaint arrives
 # one container spawn and one failed turn later, attributed to the agent rather

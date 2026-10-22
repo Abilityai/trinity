@@ -10,7 +10,14 @@ from datetime import datetime, timezone
 
 from .models import ChatMessage
 from .model_context import resolve_context_window
-from .runtime_names import is_claude_runtime, normalize_runtime
+from .runtime_names import (
+    CLAUDE_RUNTIMES,
+    CODEX_RUNTIMES,
+    GEMINI_RUNTIMES,
+    OPENCODE_RUNTIMES,
+    is_claude_runtime,
+    normalize_runtime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,13 +144,16 @@ class AgentState:
     # container if the Claude CLI were ever absent. That latent Codex bug is
     # fixed here along with adding opencode; the lookup is keyed on the
     # NORMALIZED name, so `AGENT_RUNTIME=Codex` probes codex (#1187 casing trap).
+    # Built from the leaf's sets, so a new alias cannot miss the table.
     _RUNTIME_PROBE_BINARY = {
-        "claude-code": "claude",
-        "claude": "claude",
-        "gemini-cli": "gemini",
-        "gemini": "gemini",
-        "codex": "codex",
-        "opencode": "opencode",
+        name: binary
+        for names, binary in (
+            (CLAUDE_RUNTIMES, "claude"),
+            (GEMINI_RUNTIMES, "gemini"),
+            (CODEX_RUNTIMES, "codex"),
+            (OPENCODE_RUNTIMES, "opencode"),
+        )
+        for name in names
     }
 
     def _check_runtime_available(self) -> bool:

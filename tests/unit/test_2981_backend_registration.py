@@ -227,6 +227,26 @@ def test_model_regex_is_character_identical_to_the_harness():
     assert helpers._OPENCODE_MODEL_RE.pattern == opencode_runtime._PROVIDER_MODEL_RE.pattern
 
 
+@pytest.mark.parametrize("model", ["claude-sonnet-5", "qwen3-coder:30b", "/leading-slash", "provider/"])
+def test_both_model_rejectors_refuse(model):
+    """Sweep m4: the backend's create-time check and the harness's own refuse
+    the same bad ids."""
+    with pytest.raises(opencode_runtime.OpenCodeModelShapeError):
+        opencode_runtime.validate_provider_model(model)
+    with pytest.raises(HTTPException) as exc:
+        validate_runtime_model("opencode", model)
+    assert exc.value.status_code == 400
+
+
+def test_version_runtimes_are_read_off_the_known_set():
+    """Review I4: `/api/version`'s runtimes list is derived from
+    KNOWN_RUNTIME_NAMES minus the short aliases, in the payload's historical
+    order (the literal test_926 used to pin on the builder)."""
+    names = helpers.version_runtime_names()
+    assert names == ["claude-code", "gemini-cli", "codex", "opencode"]
+    assert set(names) == KNOWN_RUNTIME_NAMES - {"claude", "gemini"}
+
+
 def test_backend_and_agent_shape_rules_agree():
     cases = [
         "anthropic/claude-sonnet-5", "openrouter/qwen/qwen3-coder", "a/b",

@@ -1791,6 +1791,7 @@ def _build_version_payload(
     edition: str,
     enterprise_features: list,
     install_source: str = "unknown",
+    runtimes: "Optional[list]" = None,
 ) -> dict:
     """Pure dict-builder for the `/api/version` payload (#926-testable).
 
@@ -1876,7 +1877,9 @@ def _build_version_payload(
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
+        # Resolved by the handler from helpers.KNOWN_RUNTIME_NAMES (this
+        # builder is exec-sliced by its tests and must stay stdlib-only).
+        "runtimes": list(runtimes or []),
         # #1814: the version baked into the running image. Equal to `version`
         # on a normally-built stack; DIFFERENT means the image is stale
         # relative to the code being executed (an in-place upgrade without
@@ -1929,6 +1932,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
     from services.entitlement_service import entitlement_service
 
     from services import settings_service as _settings_service
+    from services.agent_service.helpers import version_runtime_names
 
     features = entitlement_service.list_entitled_features()
     edition = "enterprise" if features else "oss"
@@ -1937,7 +1941,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
     install_source = _settings_service.get_install_source()
     return _build_version_payload(
         VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
-        edition, features, install_source,
+        edition, features, install_source, runtimes=version_runtime_names(),
     )
 
 

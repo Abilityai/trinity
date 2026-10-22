@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
-from ..runtime_names import normalize_runtime
+from ..runtime_names import CODEX_RUNTIMES, OPENCODE_RUNTIMES, normalize_runtime
 from ..services.claude_code import get_execution_lock
 from ..services.execution_env import AUTH_OVERRIDE_HEADER
 from ..services.runtime_adapter import get_runtime
@@ -392,7 +392,7 @@ def _model_surface(runtime: str) -> dict:
             "validate": lambda m: None if (m in _GEMINI_MODELS or m.startswith("gemini-"))
             else f"Invalid Gemini model: {m}. Use: {', '.join(_GEMINI_MODELS)}.",
         }
-    if runtime == "codex":
+    if runtime in CODEX_RUNTIMES:
         return {
             "available_models": ["gpt-5.6-sol"],
             "note": "OpenAI Codex model ids (e.g. gpt-5.6-sol). Any id the pinned "
@@ -403,7 +403,7 @@ def _model_surface(runtime: str) -> dict:
             "validate": lambda m: None if (m and not m.startswith("-"))
             else f"Invalid Codex model: {m!r}. Expected an OpenAI model id.",
         }
-    if runtime == "opencode":
+    if runtime in OPENCODE_RUNTIMES:
         return {
             "available_models": [],
             "note": "OpenCode takes a 'provider/model' id (e.g. "

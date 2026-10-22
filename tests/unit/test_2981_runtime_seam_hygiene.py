@@ -217,3 +217,80 @@ def test_result_callback_gate_is_case_insensitive(monkeypatch, runtime, expected
 
     monkeypatch.setattr(result_callback.agent_state, "agent_runtime", runtime)
     assert result_callback.is_claude_runtime() is expected
+
+
+# --------------------------------------------------------------------------
+# 5. review I4: runtime names are compared through the leaf's sets
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("rel", ["routers/chat.py", "state.py"])
+def test_no_second_literal_for_a_runtime_name(rel):
+    """Pin on top of the behaviour tests above (the probe table and the
+    /api/model surfaces below): a `== "codex"` beside `normalize_runtime` is a
+    second spelling a new alias can miss."""
+    src = (_AGENT_SERVER / rel).read_text(encoding="utf-8")
+    hits = re.findall(r"""[=!]=\s*["'](?:opencode|codex)["']""", src)
+    assert not hits, f"{rel} compares a runtime name by literal: {hits}"
+
+
+# --------------------------------------------------------------------------
+# 6. review I9: the /api/model Claude and Gemini surfaces are unchanged
+# --------------------------------------------------------------------------
+
+# PRE-BRANCH TRUTH: copied by hand from `git show
+# cd1548c1c2aa:docker/base-image/agent_server/routers/chat.py` (get_model /
+# set_model before #2981 refactored them into `_model_surface`). Hard-coded on
+# purpose — reading the live module would compare it with itself.
+_PRE_GEMINI_MODELS = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+_PRE_GEMINI_NOTE = "Gemini models. 3-pro is the most capable; 3-flash is the fast default."
+_PRE_GEMINI_REJECT = (
+    "Invalid Gemini model: {m}. Use: gemini-3-pro, gemini-3-flash, gemini-2.5-pro, gemini-2.5-flash."
+)
+_PRE_CLAUDE_MODELS = ["sonnet", "opus", "haiku", "fable"]
+_PRE_CLAUDE_NOTE = (
+    "Claude model aliases (Anthropic API): each resolves to the current generation of "
+    "its family — today sonnet (Sonnet 5), opus (Opus 5.5), haiku (Haiku 4.5), fable "
+    "(Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
+)
+_PRE_CLAUDE_REJECT = (
+    "Invalid Claude model: {m}. Use aliases (sonnet, opus, haiku, fable) or full model names."
+)
+_PRE = {
+    "gemini": (_PRE_GEMINI_MODELS, _PRE_GEMINI_NOTE, _PRE_GEMINI_REJECT,
+               _PRE_GEMINI_MODELS + ["gemini-9-ultra"],
+               ["sonnet", "gpt-5", "claude-sonnet-5", "Gemini-3-pro", ""]),
+    "claude": (_PRE_CLAUDE_MODELS, _PRE_CLAUDE_NOTE, _PRE_CLAUDE_REJECT,
+               ["sonnet", "opus", "haiku", "fable", "sonnet[1m]", "opus[1m]", "haiku[1m]",
+                "fable[1m]", "claude-sonnet-5", "claude-x"],
+               ["gemini-3-pro", "Sonnet", "sonnet[2m]", "gpt-5", "anthropic/claude", ""]),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime,family",
+    [("claude-code", "claude"), ("claude", "claude"), ("gemini-cli", "gemini"), ("gemini", "gemini")],
+)
+async def test_model_surface_matches_the_pre_branch_literals(monkeypatch, runtime, family):
+    from fastapi import HTTPException
+
+    import agent_server.routers.chat as chat_mod
+    from agent_server.models import ModelRequest
+
+    models, note, reject, accepted, rejected = _PRE[family]
+    monkeypatch.setattr(chat_mod.agent_state, "agent_runtime", runtime)
+    monkeypatch.setattr(chat_mod.agent_state, "current_model", None)
+
+    got = await chat_mod.get_model()
+    assert got["runtime"] == runtime
+    assert got["available_models"] == models
+    assert got["note"] == note
+
+    for model in accepted:
+        result = await chat_mod.set_model(ModelRequest(model=model))
+        assert result["status"] == "success" and result["model"] == model, model
+    for model in rejected:
+        with pytest.raises(HTTPException) as exc:
+            await chat_mod.set_model(ModelRequest(model=model))
+        assert exc.value.status_code == 400
+        assert exc.value.detail == reject.format(m=model), model
