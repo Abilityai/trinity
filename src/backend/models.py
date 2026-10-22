@@ -4117,7 +4117,8 @@ class ScheduleResponse(BaseModel):
     # webhook (its creator, the agent owner, an admin). Computed server-side by
     # the same predicate the webhook routes enforce — the client has no numeric
     # user id to compare an owner id against, and the creator's id is not exposed.
-    can_manage_webhook: bool = True
+    # Defaults False: a response built without the predicate claims nothing.
+    can_manage_webhook: bool = False
 
     class Config:
         from_attributes = True

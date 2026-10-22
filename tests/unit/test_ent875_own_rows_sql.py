@@ -146,6 +146,16 @@ def test_a_schedules_history_is_narrowed_before_its_limit(ops):
     assert len(sched.get_schedule_executions("s1", limit=100)) == 15
 
 
+def test_a_schedules_creator_also_sees_its_unattributed_runs_but_no_other_persons(ops):
+    sched, _ = ops
+    rows = [_exec(i, ME, schedule_id="s1") for i in range(2)]
+    rows += [_exec(50 + i, OTHER, schedule_id="s1") for i in range(10)]
+    rows += [_exec(90 + i, None, schedule_id="s1", triggered_by="schedule") for i in range(3)]
+    _insert_exec(rows)
+    mine = sched.get_schedule_executions("s1", limit=5, source_user_id=ME, include_unattributed=True)
+    assert sorted(e.id for e in mine) == ["e00000", "e00001", "e00090", "e00091", "e00092"]
+
+
 # ---- a fan-out batch ----------------------------------------------------------------
 
 def test_a_fan_out_batch_reads_back_only_my_rows(ops):

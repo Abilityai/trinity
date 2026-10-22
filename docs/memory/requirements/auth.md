@@ -165,12 +165,13 @@
 
 ### 2.11 Share Holders See and Steer Only Their Own Turns (trinity-enterprise#875)
 - **Status**: ✅ Implemented (operator ruling 2026-10-15; one flat share grant, no schema change)
-- **Rule**: a person an agent is shared with sees only the executions they started (list, detail, log, schedule history, live stream, running list, queue, fan-out status, fleet list, activity timeline), may end only a turn that is wholly theirs, and may not read the container's shared state (`/chat/history`, `/activity`, `/logs`). The owner, an admin and agent/system/ops/connector keys are unchanged.
+- **Rule**: a person an agent is shared with sees only the executions they started (list, detail, log, schedule history, live stream, running list, queue, fan-out status, fleet list, activity timeline, the Workspace Work tab), may end only a turn that is wholly theirs, and may not read the container's shared state (`/chat/history`, `/activity`, `/logs`). The owner, an admin and agent/system/ops/connector keys are unchanged.
+- **Schedules**: a run of a schedule a share holder created is theirs: it runs at share tier (never owner tier), and its history shows them its cron and webhook runs.
 - **Control verbs**: changing the model and `git pull` with `force_reset` are owner tier; webhook management is the schedule's creator, the agent owner or an admin; start and stop stay open to share holders.
 - **What a share holder will notice**: a shorter list (the panel says "you see the tasks you started"); no turns that carry no user id (Slack, Telegram, VoIP, public-link, scheduled and legacy runs); the MCP `get_chat_history` tool answers 403 for them (their own history is under `chat/history/persistent`).
 - **Upgrade**: webhook URLs minted before this change cannot be attributed to a minter; run `scripts/management/list_webhook_rotation_candidates.py` and rotate what it lists.
 - **Out of scope (recorded)**: loops (ent#837 known limit), `/ws` previews, the Workspace team view, the fleet-wide default tier (ent#926).
-- **Tests**: `tests/unit/test_ent875_viewer_tier.py`, `test_ent875_own_rows_sql.py`, `test_ent875_exec_control_routes.py`
+- **Tests**: `tests/unit/test_ent875_viewer_tier.py`, `test_ent875_own_rows_sql.py`, `test_ent875_exec_control_routes.py`, `test_ent875_workspace_work_own_rows.py`, `test_ent926_agent_key_turn_scope.py`
 - **Flows**: `feature-flows/executions-dashboard.md`, `execution-termination.md`, `execution-queue.md`, `webhook-triggers.md`, `model-selection.md`
 
 ### 2.12 Agent-Key Self-Gate (INV-8, trinity-enterprise#840)
