@@ -946,7 +946,8 @@ async def dispatch_and_await_terminal(
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
-    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    terminal writer does. Also the a2a queued-cancel close (#3651). Fire-and-
+    forget; every caller runs inside a request or task, so a loop is running."""
     activity_service.spawn_close_execution_activity(execution_id, status, error=error)
     event_dispatch_service.spawn_task_terminal_event(
         agent_name, execution_id, terminal_status=status, summary_or_error=error,
