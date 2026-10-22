@@ -6,7 +6,8 @@ a group. The router used to post the execution's own `error` into the chat:
 "Authentication failure: Not logged in · Please run /login. Check subscription
 token or API key configuration." Now a failed turn sends a fixed member-facing
 line, and the error stays on the execution row and in the router's log line for
-the operator. A cancelled turn still says it was cancelled (#679). The
+the operator. A cancelled turn still says it was cancelled (#679), in a fixed
+line: on pull-pilot agents a cancelled row's error can be the operator's error. The
 public-chat twin is #3478.
 
 Driven through `ChannelMessageRouter._run_agent_task` with the dispatch stubbed
@@ -103,17 +104,27 @@ async def test_the_error_stays_with_the_operator(monkeypatch, caplog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reason", ["Execution cancelled by user", "Cancelled by user while queued"])
-async def test_a_cancelled_turn_still_says_it_was_cancelled(monkeypatch, reason):
-    """#679: the cancel reason is written for the person who asked."""
-    _, channel, router = _harness(monkeypatch, SimpleNamespace(status="cancelled", error=reason, response=""))
-    await _run(router, channel)
-    assert _sent(channel) == reason
+@pytest.mark.parametrize("error", OPERATOR_ERRORS)
+async def test_a_cancelled_pull_pilot_turn_never_sends_the_operator_error(monkeypatch, error):
+    """A pull-pilot turn terminated mid-flight keeps the failure body's content
+    (`pull_worker.py` relabels it `cancelled` but leaves `content`), and the
+    pull sink stores that content as the cancelled row's `error`. So a
+    cancelled row's error can be the operator's error; the chat must get the
+    fixed cancelled line instead."""
+    mr, channel, router = _harness(monkeypatch, SimpleNamespace(status="cancelled", error=error, response=""))
+    assert await _run(router, channel) is None
+    text = _sent(channel)
+    assert text == mr.CHANNEL_CANCELLED_MESSAGE
+    assert error not in text
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_turn_with_no_reason_still_says_cancelled(monkeypatch):
-    mr, channel, router = _harness(monkeypatch, SimpleNamespace(status="cancelled", error=None, response=""))
+@pytest.mark.parametrize("error", [None, "", "Execution cancelled by user", "Cancelled by user while queued",
+                                   "[agent_error] caller went away"])
+async def test_a_cancelled_turn_always_says_cancelled_in_the_fixed_line(monkeypatch, error):
+    """#679: a cancelled turn still says it was cancelled, in one fixed line,
+    whatever the row's error holds."""
+    mr, channel, router = _harness(monkeypatch, SimpleNamespace(status="cancelled", error=error, response=""))
     await _run(router, channel)
     assert _sent(channel) == mr.CHANNEL_CANCELLED_MESSAGE
     assert "cancel" in mr.CHANNEL_CANCELLED_MESSAGE.lower()

@@ -6191,7 +6191,7 @@
         "channels",
         "unit"
       ],
-      "description": "A failed channel turn sends the fixed member-facing line, never the execution's error (auth failure, exit code, timeout, capacity, rate limit), in a group and one-to-one, through the real ChannelMessageRouter._run_agent_task; the error stays in the router's log line; a cancelled turn still sends its cancel reason, or a cancelled line when it has none (#679); a raised dispatch sends the same line; a successful turn is untouched. Mutation: restoring the error forwarding turns 14 red."
+      "description": "A failed channel turn sends the fixed member-facing line, never the execution's error (auth failure, exit code, timeout, capacity, rate limit), in a group and one-to-one, through the real ChannelMessageRouter._run_agent_task; the error stays in the router's log line; a cancelled turn always sends the fixed cancelled line (#679), never the row's error, including a pull-pilot terminated turn whose cancelled row carries the operator's error; a raised dispatch sends the same line; a successful turn is untouched. Mutation: restoring the error forwarding turns 14 red; restoring the cancel-reason forwarding turns 8 red."
     },
     {
       "file": "unit/test_ent858_event_stream_owner_state.py",

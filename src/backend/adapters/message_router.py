@@ -343,7 +343,7 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
 # #3603: what a channel member is told when a turn does not answer. A failed
 # turn's error is for the operator and never reaches the chat.
 CHANNEL_FAILURE_MESSAGE = "Sorry, I encountered an error processing your message. Please try again."
-CHANNEL_CANCELLED_MESSAGE = "That request was cancelled before it was answered."
+CHANNEL_CANCELLED_MESSAGE = "That request was cancelled before it was answered."  # always, never the row's error
 
 
 class ChannelMessageRouter:
@@ -861,10 +861,13 @@ class ChannelMessageRouter:
                 # key, an exit code, where to fix a credential) and a channel is
                 # read by its members — every member, in a group. They get a
                 # plain line; the detail stays on the execution row and in the
-                # log line above (the public-chat twin is #3478). A cancel
-                # reason is written for the person who asked (#679) and passes.
+                # log line above (the public-chat twin is #3478). A cancelled
+                # turn still says so (#679), in the fixed line: on a pull-pilot
+                # agent a terminated turn keeps the failure body's content and
+                # the pull sink stores it as the cancelled row's error, so that
+                # error can be the operator's too.
                 if result.status == "cancelled":
-                    response_text = result.error or CHANNEL_CANCELLED_MESSAGE
+                    response_text = CHANNEL_CANCELLED_MESSAGE
                 else:
                     response_text = CHANNEL_FAILURE_MESSAGE
 
