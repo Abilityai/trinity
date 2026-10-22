@@ -225,3 +225,100 @@ def delete_organization() -> bool:
     if active:
         raise _delegations_active(active, "deleting the organization would strand them")
     return db.delete_nevermined_organization()
+
+
+# ---------------------------------------------------------------------------
+# Upstream (Nevermined) — one call per request, inside delegation_slot()
+# ---------------------------------------------------------------------------
+
+def _http_client() -> httpx.AsyncClient:
+    """The outbound client; a seam tests replace with a mock transport."""
+    return httpx.AsyncClient(timeout=UPSTREAM_TIMEOUT_SECONDS)
+
+
+def _busy() -> DelegationError:
+    return DelegationError(
+        503,
+        "nevermined_busy",
+        "Too many Nevermined requests are in flight on this instance. Try again in a few seconds.",
+        headers={"Retry-After": "5"},
+    )
+
+
+def _unreachable() -> DelegationError:
+    return DelegationError(
+        503,
+        "nevermined_unreachable",
+        "Nevermined did not answer. Nothing was changed; try again shortly.",
+    )
+
+
+def _rejected(upstream_status: Optional[int], message: str) -> DelegationError:
+    return DelegationError(
+        502, "nevermined_rejected", message, extra={"upstream_status": upstream_status}
+    )
+
+
+def _configured_organization() -> Dict[str, Any]:
+    """Organization row + decrypted secrets, or 409 `nevermined_not_configured`."""
+    org = db.get_nevermined_organization()
+    secrets = db.get_nevermined_organization_secrets() if org else None
+    if not org or not secrets:
+        raise _not_configured()
+    return {**org, **secrets}
+
+
+async def mint_widget_session(email: Optional[str], *, agent_name: str, actor: str) -> Dict[str, Any]:
+    """Mint a Nevermined widget session for the signed-in person.
+
+    Server-to-server ``POST {api_base}/api/v1/widgets/session``; the session is
+    returned verbatim to the caller and never logged.
+    """
+    org = _configured_organization()
+    email = (email or "").strip()
+    if not email:
+        raise DelegationError(
+            422,
+            "email_required",
+            "Nevermined widget sessions are minted for the signed-in person's email, "
+            "and this account has none. Add a sign-in email, then try again.",
+        )
+    environment = org["environment"]
+    url = NEVERMINED_API_BASES[environment] + "/api/v1/widgets/session"
+    payload = {"orgId": org["org_id"], "email": email, "rawSecret": org["widget_secret"]}
+
+    try:
+        async with delegation_slot():
+            async with _http_client() as client:
+                response = await client.post(url, json=payload)
+    except DelegationBusy:
+        logger.warning("Nevermined widget session for %s by %s: delegation gate busy", agent_name, actor)
+        raise _busy() from None
+    except httpx.HTTPError as exc:
+        # The exception class only — its text can carry the request.
+        logger.warning(
+            "Nevermined widget session for %s by %s: unreachable (%s)",
+            agent_name, actor, type(exc).__name__,
+        )
+        raise _unreachable() from None
+
+    status = response.status_code
+    logger.info(
+        "Nevermined widget session for %s by %s: org=%s environment=%s upstream_status=%s",
+        agent_name, actor, org["org_id"], environment, status,
+    )
+    if status in (401, 403):
+        raise _rejected(
+            status,
+            "Nevermined refused the widget session. The organization id or widget secret "
+            "configured for Nevermined is likely wrong; an admin can update them under Settings.",
+        )
+    if not 200 <= status < 300:
+        raise _rejected(status, f"Nevermined refused the widget session (HTTP {status}).")
+    try:
+        session = response.json()
+    except ValueError:
+        raise _rejected(status, "Nevermined answered the widget session request with an unreadable body.") from None
+    if not isinstance(session, dict):
+        raise _rejected(status, "Nevermined answered the widget session request with an unexpected body.")
+    return {"session": session, "environment": environment, "org_id": org["org_id"]}

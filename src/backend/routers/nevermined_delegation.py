@@ -1,4 +1,4 @@
-# mcp: none — the organization's secrets are admin REST only (no MCP tool, so they never land in a transcript; ent#966 T7); delegation read/revoke tools land in tools/nevermined.ts
+# mcp: none — the organization's secrets are admin REST only (no MCP tool, so they never land in a transcript; ent#966 T7) and widget sessions are minted for the browser panel only; delegation read/revoke tools land in tools/nevermined.ts
 """
 Nevermined card delegation router (trinity-enterprise#965/#966).
 
@@ -14,11 +14,13 @@ on ``code``. No route returns a secret.
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 
-from dependencies import require_admin
+from dependencies import get_owned_agent_by_name, require_admin, require_person
 from models import NeverminedOrganizationState, NeverminedOrganizationUpdate, User
 from services import nevermined_delegation_service as delegation_service
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from services.rate_limiter import enforce as enforce_rate_limit
 
 router = APIRouter(prefix="/api/nevermined", tags=["nevermined"])
 logger = logging.getLogger(__name__)
@@ -96,3 +98,36 @@ async def delete_nevermined_organization(current_user: User = Depends(require_ad
         )
         logger.info("Nevermined organization removed by %s", current_user.username)
     return delegation_service.organization_state()
+
+
+# ---------------------------------------------------------------------------
+# Widget session (person, owner tier)
+# ---------------------------------------------------------------------------
+
+#: A minted session is a bearer credential for Nevermined's widget: no cache,
+#: no proxy, no browser history may keep it.
+NO_STORE = {"Cache-Control": "no-store"}
+
+
+@router.post("/agents/{agent_name}/widget-session")
+async def create_widget_session(
+    agent_name: str = Depends(get_owned_agent_by_name),
+    current_user: User = Depends(require_person),
+):
+    """Mint a Nevermined widget session so the signed-in person can enroll a card
+    with Nevermined and delegate a mandate to this agent. Nevermined holds the
+    card; Trinity only forwards the session."""
+    enforce_rate_limit(
+        f"nvm-session:{current_user.username}:{agent_name}", 10, 60,
+        detail="Too many Nevermined widget sessions requested for this agent.",
+    )
+    try:
+        result = await delegation_service.mint_widget_session(
+            current_user.email, agent_name=agent_name, actor=current_user.username,
+        )
+    except delegation_service.DelegationError as err:
+        raise HTTPException(
+            status_code=err.status_code, detail=err.detail(),
+            headers={**NO_STORE, **(err.headers or {})},
+        )
+    return JSONResponse(content=result, headers=NO_STORE)

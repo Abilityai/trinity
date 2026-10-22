@@ -41,13 +41,22 @@ def _error_messages(path):
     """The message argument of every DelegationError(...) call, literal parts joined."""
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", getattr(node.func, "attr", "")) == "DelegationError":
-            if len(node.args) >= 3:
-                parts = [
-                    n.value for n in ast.walk(node.args[2])
-                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                ]
-                yield node.lineno, "".join(parts)
+        if not isinstance(node, ast.Call):
+            continue
+        name = getattr(node.func, "id", getattr(node.func, "attr", ""))
+        # DelegationError(status, code, message) and the `_rejected(status, message)`
+        # helper that forwards its message into one.
+        position = {"DelegationError": 2, "_rejected": 1}.get(name)
+        if position is None or len(node.args) <= position:
+            continue
+        arg = node.args[position]
+        if isinstance(arg, ast.Name):
+            continue  # a forwarded parameter — its literal is read at the helper's call sites
+        parts = [
+            n.value for n in ast.walk(arg)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)
+        ]
+        yield node.lineno, "".join(parts)
 
 
 def test_no_string_says_trinity_holds_a_card_or_settles():
@@ -80,7 +89,7 @@ def test_raised_refusals_name_nevermined(monkeypatch):
         with pytest.raises(svc.DelegationError) as exc:
             call()
         errors.append(exc.value)
-    errors.append(svc._not_configured())
+    errors.extend([svc._not_configured(), svc._busy(), svc._unreachable()])
     for err in errors:
         assert "Nevermined" in err.message, err.code
         assert not FORBIDDEN.search(err.message)

@@ -241,3 +241,205 @@ class TestProductionWiring:
             for n in ast.walk(tree)
         )
         assert imported and included
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint B — widget session
+# ---------------------------------------------------------------------------
+
+SESSION_TOKEN = "eyJ-session-" + "T" * 32
+SESSION_URL = "/api/nevermined/agents/ent966-a/widget-session"
+
+
+@pytest.fixture
+def session_env(env, monkeypatch):
+    """`env` + an owned agent, an organization, and a mock Nevermined."""
+    import httpx
+    from database import db
+    from routers import nevermined_delegation as router_mod
+    from services import nevermined_delegation_service as svc
+
+    owners = {"ent966-a": {"admin", "ada"}}
+    monkeypatch.setattr(db, "get_agent_owner", lambda name: {"owner_username": "ada"} if name in owners else None)
+    monkeypatch.setattr(db, "can_user_share_agent", lambda user, name: user in owners.get(name, set()))
+    limits = []
+    monkeypatch.setattr(router_mod, "enforce_rate_limit", lambda *a, **k: limits.append(a))
+
+    upstream = {"status": 200, "body": {"token": SESSION_TOKEN, "expiresAt": "2026-10-22T23:00:00Z"},
+                "raise": None, "requests": []}
+
+    def handler(request):
+        upstream["requests"].append(request)
+        if upstream["raise"]:
+            raise upstream["raise"]
+        if isinstance(upstream["body"], (dict, list)):
+            return httpx.Response(upstream["status"], json=upstream["body"])
+        return httpx.Response(upstream["status"], text=upstream["body"])
+
+    monkeypatch.setattr(svc, "_http_client", lambda: httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    _put(env)
+    env.upstream = upstream
+    env.limits = limits
+    env.as_(**OPERATOR)
+    return env
+
+
+class TestWidgetSession:
+    def test_mints_for_the_signed_in_person(self, session_env):
+        import json
+
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 200, r.text
+        assert r.headers["cache-control"] == "no-store"
+        assert r.json() == {"session": {"token": SESSION_TOKEN, "expiresAt": "2026-10-22T23:00:00Z"},
+                            "environment": "sandbox", "org_id": "org-1"}
+        (req,) = session_env.upstream["requests"]
+        assert str(req.url) == "https://api.sandbox.nevermined.app/api/v1/widgets/session"
+        assert json.loads(req.content) == {"orgId": "org-1", "email": "ada@example.com",
+                                           "rawSecret": WIDGET_SECRET}
+        assert session_env.limits == [("nvm-session:ada:ent966-a", 10, 60)]
+        for s in (WIDGET_SECRET, AGENT_KEY):
+            assert s not in r.text
+
+    def test_live_environment_dials_live(self, session_env):
+        session_env.as_()
+        _put(session_env, environment="live", agent_api_key="live:akey-" + "L" * 20)
+        session_env.as_(**OPERATOR)
+        assert session_env.client.post(SESSION_URL).status_code == 200
+        assert session_env.upstream["requests"][-1].url.host == "api.live.nevermined.app"
+
+    def test_not_configured(self, session_env):
+        session_env.as_()
+        session_env.client.delete("/api/nevermined/organization")
+        session_env.as_(**OPERATOR)
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "nevermined_not_configured"
+        assert session_env.upstream["requests"] == []
+
+    def test_no_email(self, session_env):
+        session_env.as_(**{**OPERATOR, "email": None})
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 422 and r.json()["detail"]["code"] == "email_required"
+        assert session_env.upstream["requests"] == []
+
+    def test_not_owner_is_uniform_404(self, session_env):
+        session_env.as_(id=3, username="eve", email="eve@example.com", role="creator")
+        a = session_env.client.post(SESSION_URL)
+        b = session_env.client.post("/api/nevermined/agents/ent966-missing/widget-session")
+        assert a.status_code == b.status_code == 404 and a.json() == b.json()
+        assert session_env.upstream["requests"] == []
+
+    def test_agent_key_is_refused(self, session_env):
+        session_env.as_(**{**OPERATOR, "agent_name": "ent966-a", "mcp_scope": "agent"})
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 403
+        assert session_env.upstream["requests"] == []
+
+    def test_unreachable(self, session_env):
+        import httpx
+
+        session_env.upstream["raise"] = httpx.ConnectTimeout("timed out")
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "nevermined_unreachable"
+        assert r.headers["cache-control"] == "no-store"
+
+    def test_busy(self, session_env, monkeypatch):
+        import contextlib
+        from services import nevermined_delegation_service as svc
+
+        @contextlib.asynccontextmanager
+        async def full():
+            raise svc.DelegationBusy("full")
+            yield  # pragma: no cover
+
+        monkeypatch.setattr(svc, "delegation_slot", full)
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 503 and r.json()["detail"]["code"] == "nevermined_busy"
+        assert r.headers["retry-after"] == "5"
+        assert session_env.upstream["requests"] == []
+
+    @pytest.mark.parametrize("status", [401, 403])
+    def test_rejected_credentials_never_echo_upstream(self, session_env, status):
+        session_env.upstream.update(status=status, body={"error": "bad secret " + WIDGET_SECRET})
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 502
+        detail = r.json()["detail"]
+        assert detail["code"] == "nevermined_rejected" and detail["upstream_status"] == status
+        assert "widget secret" in detail["message"] and "bad secret" not in r.text
+        assert WIDGET_SECRET not in r.text
+
+    def test_upstream_5xx_and_unreadable_body(self, session_env):
+        session_env.upstream.update(status=500, body="boom internal")
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 502 and r.json()["detail"]["upstream_status"] == 500
+        assert "boom" not in r.text
+        session_env.upstream.update(status=200, body="<html>not json</html>")
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 502 and r.json()["detail"]["code"] == "nevermined_rejected"
+
+    def test_rate_limit_fires_before_upstream(self, session_env, monkeypatch):
+        from fastapi import HTTPException
+        from routers import nevermined_delegation as router_mod
+
+        def deny(*a, **k):
+            raise HTTPException(status_code=429, detail="slow down", headers={"Retry-After": "9"})
+
+        monkeypatch.setattr(router_mod, "enforce_rate_limit", deny)
+        r = session_env.client.post(SESSION_URL)
+        assert r.status_code == 429
+        assert session_env.upstream["requests"] == []
+
+    def test_secret_and_token_never_logged(self, session_env, caplog):
+        import httpx
+
+        caplog.set_level(logging.DEBUG)
+        session_env.client.post(SESSION_URL)
+        session_env.upstream.update(status=401, body={"error": "nope " + WIDGET_SECRET})
+        session_env.client.post(SESSION_URL)
+        session_env.upstream["raise"] = httpx.ConnectError("conn " + WIDGET_SECRET)
+        session_env.client.post(SESSION_URL)
+        assert "upstream_status=200" in caplog.text  # the success line was captured
+        for s in (WIDGET_SECRET, AGENT_KEY, SESSION_TOKEN, "Q" * 24, "Z" * 24, "T" * 32):
+            assert s not in caplog.text
+
+
+class TestDelegationGate:
+    @pytest.mark.asyncio
+    async def test_own_gate_never_takes_a_facilitator_slot(self, monkeypatch):
+        """Saturating the delegation gate leaves the paid-chat facilitator gate free."""
+        from services import nevermined_delegation_service as svc
+        from services import nevermined_payment_service as pay
+
+        monkeypatch.setattr(svc, "DELEGATION_SLOT_WAIT_SECONDS", 0.01)
+        held = []
+        for _ in range(svc.NEVERMINED_DELEGATION_MAX_INFLIGHT):
+            cm = svc.delegation_slot()
+            await cm.__aenter__()
+            held.append(cm)
+        with pytest.raises(svc.DelegationBusy):
+            async with svc.delegation_slot():
+                pass
+        async with pay.facilitator_slot():
+            pass  # still free
+        for cm in held:
+            await cm.__aexit__(None, None, None)
+        async with svc.delegation_slot():
+            pass
+
+
+class TestWidgetSessionCensus:
+    def test_route_is_in_the_person_class(self):
+        """#2996: the census walker reads the session route as `person`, the
+        organization routes as `admin_tier` — no listed exception needed."""
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import _route_census as census
+
+        routes = census.walk().routes
+        prefix = "routers/nevermined_delegation.py::"
+        assert routes[prefix + "create_widget_session"].code_class == "person"
+        for name in ("get_nevermined_organization", "put_nevermined_organization",
+                     "delete_nevermined_organization"):
+            assert routes[prefix + name].code_class == "admin_tier"

@@ -22,7 +22,7 @@
         "security",
         "unit"
       ],
-      "description": "Nevermined organization admin routes through the real router + require_admin: configured:false 200, write-only secrets (encrypted, never in a body or log), secret_required, environment_mismatch, delegations_active on env change/key rotation/delete, deleted agent never blocks, user and agent keys refused."
+      "description": "Nevermined organization admin routes through the real router + require_admin: configured:false 200, write-only secrets (encrypted, never in a body or log), secret_required, environment_mismatch, delegations_active on env change/key rotation/delete, deleted agent never blocks, user and agent keys refused. Widget session (POST /api/nevermined/agents/{agent_name}/widget-session): mints for the signed-in email against the environment's fixed API base, Cache-Control no-store, nevermined_not_configured / email_required / uniform 404 / agent key 403 / unreachable / busy + Retry-After / rejected with upstream status only, rate limit before upstream, secrets and session token never logged; own delegation gate leaves the facilitator gate free; census class person/admin_tier."
     },
     {
       "file": "unit/test_ent966_delegation_schema.py",
