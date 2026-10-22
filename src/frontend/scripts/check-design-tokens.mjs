@@ -35,6 +35,7 @@ const EXPECTED_ALIASES = {
   'state-locked':     'rose',
   'brand-claude':     'orange',
   'brand-gemini':     'blue',
+  'brand-opencode':   'teal',
   'accent-purple':    'purple',
   'action-primary':   'indigo',
 }
@@ -44,7 +45,7 @@ const EXPECTED_ALIASES = {
 const KNOWN_FAMILIES = {
   status: new Set(['success', 'warning', 'danger', 'info', 'urgent']),
   state:  new Set(['autonomous', 'locked']),
-  brand:  new Set(['claude', 'gemini']),
+  brand:  new Set(['claude', 'gemini', 'opencode']),
   accent: new Set(['purple']),
   action: new Set(['primary']),
 }

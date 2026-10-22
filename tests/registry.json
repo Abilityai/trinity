@@ -6310,6 +6310,17 @@
         "unit"
       ],
       "description": "OpenCode-shaped failure details (pipe-drop string, dict without the recovery marker) are inert for the #678 reader-race auto-retry signature; the genuine Claude signature still fires."
+    },
+    {
+      "file": "unit/test_2981_terminal_opencode_mode.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-runtime",
+        "terminal",
+        "unit"
+      ],
+      "description": "OpenCode terminal mode (checkpoint H, H3): the pure _cli_command(mode, model) maps opencode to the bare `opencode` TUI, appending `--model <provider/model>` when a model is given (v1.18.32's default `$0 [project]` command declares --model/-m, packages/opencode/src/cli/cmd/tui.ts:81-85); claude/gemini/codex/bash argv unchanged, unknown modes fall to /bin/bash. Executed: the real handle_terminal_session with Docker edges stubbed hands ['opencode','--model',...] to api_exec_create (before H it was ['/bin/bash']) and leaves no registered session."
     }
   ]
 }
