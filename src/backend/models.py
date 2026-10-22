@@ -4176,6 +4176,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False

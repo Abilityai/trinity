@@ -637,7 +637,8 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
         raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
 
 
-async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]):
+async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User],
+                        *, aauth_identity: Optional[str] = None):
     """Bridge one inbound A2A message into the Trinity execution stack.
 
     #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
@@ -658,6 +659,7 @@ async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]
         source_user_id=getattr(current_user, "id", None),
         source_user_email=getattr(current_user, "email", None),
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        a2a_caller_identity=aauth_identity,
     )
 
 
@@ -1360,7 +1362,10 @@ async def _dispatch_jsonrpc(
             return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
 
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
+            result = await _run_a2a_task(
+                agent_name, text, current_user,
+                aauth_identity=getattr(aauth, "identity", None),
+            )
         except SkillGateError as exc:
             task = _gate_task(exc)
             if isinstance(exc, SkillApprovalRequired):

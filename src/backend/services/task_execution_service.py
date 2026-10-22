@@ -1549,6 +1549,8 @@ class TaskExecutionService:
         # #2973: inter-agent chain depth (#2806) the caller already admitted;
         # stamped on the row created here. Ignored when `execution_id` is given.
         chain_depth: Optional[int] = None,
+        # ent#862: AAuth peer identity that triggered this execution.
+        a2a_caller_identity: Optional[str] = None,
         # trinity-enterprise#751: the requester's OWN words, when `message` is a
         # composed prompt (history, sender context, a template). The skill gate
         # scans this, never the composition. None ⇒ `message` is the requester's.
@@ -1659,6 +1661,7 @@ class TaskExecutionService:
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
+                    a2a_caller_identity=a2a_caller_identity,
                 ),
             )
             execution_id = execution.id if execution else None

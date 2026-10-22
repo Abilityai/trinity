@@ -313,6 +313,7 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    Column("a2a_caller_identity", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
