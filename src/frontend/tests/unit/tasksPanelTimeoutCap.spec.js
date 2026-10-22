@@ -11,12 +11,16 @@ import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { nextTick } from 'vue'
 
+// cap: a number, null (read fails), or a map agent → number | Promise (held read).
 const server = vi.hoisted(() => ({ cap: null }))
 vi.mock('axios', () => {
   const instance = {
     get: vi.fn(async (url) => {
       if (url.endsWith('/timeout')) {
-        return server.cap === null ? Promise.reject(new Error('down')) : { data: { execution_timeout_seconds: server.cap } }
+        const agent = url.split('/')[3]
+        const cap = server.cap !== null && typeof server.cap === 'object' ? server.cap[agent] : server.cap
+        if (cap === null) return Promise.reject(new Error('down'))
+        return Promise.resolve(cap).then(c => ({ data: { execution_timeout_seconds: c } }))
       }
       if (url.endsWith('/queue')) return { data: { is_busy: false, queue_length: 0 } }
       if (url.endsWith('/executions/running')) return { data: { executions: [] } }
@@ -57,6 +61,7 @@ describe('task timeout follows the agent cap', () => {
     localStorage.setItem('trinity-task-timeout-fin', '3600')
     const w = await mountPanel()
     expect(options(w)).toEqual([60])
+    expect(w.find('[data-testid="task-timeout"]').element.value).toBe('60')
     expect(w.find('[data-testid="task-timeout-cap"]').text()).toContain('1 min')
 
     await w.find('textarea').setValue('do it')
@@ -77,6 +82,41 @@ describe('task timeout follows the agent cap', () => {
     const w = await mountPanel()
     expect(options(w)).toEqual([300, 900, 1800, 3600, 7200])
     expect(w.find('[data-testid="task-timeout-cap"]').exists()).toBe(false)
+  })
+
+  it('switching agents never shows or posts the previous agent\'s cap, and restores its remembered choice', async () => {
+    let release
+    const held = new Promise((resolve) => { release = resolve })
+    server.cap = { fin: 60, bob: held }
+    localStorage.setItem('trinity-task-timeout-bob', '1800')
+    const w = await mountPanel()
+    expect(options(w)).toEqual([60])
+
+    await w.setProps({ agentName: 'bob' })
+    await flushPromises()
+    expect(w.find('[data-testid="task-timeout-cap"]').exists()).toBe(false)
+    expect(w.find('[data-testid="task-timeout"]').element.value).toBe('1800')
+    await w.find('textarea').setValue('go')
+    await w.find('textarea').trigger('keydown', { key: 'Enter' })
+    await flushPromises()
+    const [, payload] = axios.post.mock.calls.find(([u]) => u === '/api/agents/bob/task')
+    expect(payload.timeout_seconds).toBe(1800)
+
+    release(7200)
+    await flushPromises()
+    expect(options(w)).toEqual([300, 900, 1800, 3600, 7200])
+  })
+
+  it('a late read for the agent the page left is dropped', async () => {
+    let release
+    const held = new Promise((resolve) => { release = resolve })
+    server.cap = { fin: held, bob: 7200 }
+    const w = await mountPanel()
+    await w.setProps({ agentName: 'bob' })
+    await flushPromises()
+    release(60)
+    await flushPromises()
+    expect(options(w)).toEqual([300, 900, 1800, 3600, 7200])
   })
 
   it('an unreadable cap leaves the dropdown as it was', async () => {

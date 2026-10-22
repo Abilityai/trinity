@@ -557,6 +557,7 @@ import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watc
 import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { useAuthStore } from '../stores/auth'
+import { useAgentsStore } from '../stores/agents'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
@@ -589,6 +590,7 @@ const props = defineProps({
 const emit = defineEmits(['create-schedule'])
 
 const authStore = useAuthStore()
+const agentsStore = useAgentsStore()
 
 // State
 const executions = ref([])
@@ -640,10 +642,13 @@ const effectiveTimeout = computed(() => {
 })
 async function loadAgentTimeout() {
   const name = props.agentName
+  // Never show or post another agent's cap while this one's read is in flight.
+  // Uncapped, the backend still clamps to the real cap.
+  agentTimeoutCap.value = null
   try {
-    const response = await axios.get(`/api/agents/${name}/timeout`, { headers: authStore.authHeader })
+    const data = await agentsStore.getAgentTimeout(name)
     if (name !== props.agentName) return
-    const cap = Number(response.data?.execution_timeout_seconds)
+    const cap = Number(data?.execution_timeout_seconds)
     agentTimeoutCap.value = cap > 0 ? cap : null
   } catch {
     if (name === props.agentName) agentTimeoutCap.value = null
@@ -739,10 +744,10 @@ const avgDuration = computed(() => {
 // Load all data
 async function loadAllData() {
   loading.value = true
+  loadAgentTimeout()  // #3626: the dropdown follows on its own; the list does not wait for it
   await Promise.all([
     loadExecutions(),
-    loadQueueStatus(),
-    loadAgentTimeout()
+    loadQueueStatus()
   ])
   loading.value = false
 }
@@ -1327,6 +1332,7 @@ watch(() => props.agentName, () => {
   pendingTasks.value = [] // Clear local tasks when switching agents
   taskDetailsCache.value = {} // Clear cached details (PERF-001)
   expandedTaskId.value = null // Collapse any expanded task
+  taskTimeout.value = parseInt(localStorage.getItem(taskTimeoutKey.value)) || 3600  // this agent's remembered choice
   loadAllData()
   startPolling()
 })
@@ -1353,5 +1359,8 @@ onUnmounted(() => {
 // chip, and the list while a run is in flight) stops with the page and starts
 // again when the page is shown.
 onDeactivated(() => stopPolling())
-onActivated(() => startPolling())
+onActivated(() => {
+  startPolling()
+  loadAgentTimeout()  // #3626: the cap may have changed while the page was cached
+})
 </script>
