@@ -346,6 +346,16 @@ def _restore_unit_sys_modules() -> None:
             continue
         if any(_k == p or _k.startswith(p + ".") for p in _POP_PREFIXES):
             sys.modules.pop(_k, None)
+            _drop_stale_binding(_k)
+
+
+def _drop_stale_binding(name: str) -> None:
+    """#3390: after the pop above, `from services import X` would keep handing out
+    the popped copy while `from services.X import y` imports a fresh one. Only the
+    backend's own packages: a third-party package keeps its bindings."""
+    parent = sys.modules.get(name.rpartition(".")[0])
+    if str(getattr(parent, "__file__", "")).startswith(_BACKEND_STR):
+        _module_split_guard.unbind(name)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +385,59 @@ def _no_foreign_process_signals(request):
             f"{request.node.nodeid} signalled a process outside the test session:\n"
             + "\n".join(refused)
         )
+
+
+# ---------------------------------------------------------------------------
+# #3390: no test may leave a package attribute and its sys.modules entry on two
+# different copies of one module (tests/module_split_guard.py has the why).
+# Hooks rather than an autouse fixture: the teardown hook runs after the item's
+# LAST teardown, class and module fixtures included, which a fixture would miss
+# and which the alphabetical autouse order would make fragile.
+# TRINITY_SPLIT_GUARD=off disables it (the guard's own test uses that as its
+# control run).
+# ---------------------------------------------------------------------------
+_msg_spec = importlib.util.spec_from_file_location(
+    "module_split_guard", Path(__file__).resolve().parent.parent / "module_split_guard.py"
+)
+_module_split_guard = importlib.util.module_from_spec(_msg_spec)
+_msg_spec.loader.exec_module(_module_split_guard)
+sys.modules.setdefault("module_split_guard", _module_split_guard)  # one instance for the tests
+
+_SPLIT_GUARD = (
+    None if os.environ.get("TRINITY_SPLIT_GUARD", "").strip().lower() == "off"
+    else _module_split_guard.Guard()
+)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    if _SPLIT_GUARD is not None:
+        _SPLIT_GUARD.before_test()
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    if _SPLIT_GUARD is None:
+        return (yield)
+    module = item.getparent(pytest.Module)
+    last_in_module = nextitem is None or nextitem.getparent(pytest.Module) is not module
+    try:
+        result = yield
+    finally:
+        _, unrepairable = _SPLIT_GUARD.after_test(last_in_module=last_in_module)
+    if unrepairable:
+        pytest.fail(
+            f"{module.nodeid if module else item.nodeid} left {', '.join(unrepairable)} on two "
+            "copies once its tests and fixtures finished (#3390): the package attribute "
+            "holds one module object and sys.modules another, and the sys.modules entry is "
+            "not the one that was there before, so the guard cannot tell which copy to keep. "
+            "Put back what the test or a fixture put into sys.modules: "
+            "monkeypatch.setitem(sys.modules, ...) and "
+            "module_split_guard.evict(monkeypatch, ...) restore both halves at teardown.",
+            pytrace=False,
+        )
+    return result
 
 
 @pytest.fixture(autouse=True)

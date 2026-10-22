@@ -5334,6 +5334,53 @@ def _migrate_admin_email_not_username(cursor, conn):
     conn.commit()
 
 
+def _migrate_held_gate_turns(cursor, conn):
+    """trinity#3402 — a turn the skill gate stopped is never replayed to the agent.
+
+    * ``gate_hold`` on ``public_chat_messages`` and ``enterprise_portal_messages``:
+      NULL for an ordinary row; otherwise the request id, ``refused:<code>`` or
+      ``named``, and every prompt read leaves the row out.
+    * ``room_gate_holds``: the room messages one agent's gate stopped, per agent.
+    * One backfill: a Workspace turn held before the column existed (since #3166
+      its rows carry the turn's id) is marked from the gate record that names
+      that turn as its origin — an exact match, never a guess from the text.
+      Public-link and channel rows held before the fix carry no turn id and stay
+      unmarked (a stated limit).
+
+    Additive. Idempotent: the backfill touches unmarked rows only.
+    Mirrored by Alembic 0101_held_gate_turns.
+    """
+    for table in ("public_chat_messages", "enterprise_portal_messages"):
+        _safe_add_column(cursor, table, "gate_hold",
+                         f"ALTER TABLE {table} ADD COLUMN gate_hold TEXT")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
+        )
+        """
+    )
+    cursor.execute(HELD_PORTAL_ROWS_BACKFILL)
+    conn.commit()
+
+
+# trinity#3402: shared by both tracks (`0101_held_gate_turns` imports it), so the
+# SQLite and PostgreSQL backfills cannot drift apart.
+HELD_PORTAL_ROWS_BACKFILL = (
+    "UPDATE enterprise_portal_messages "
+    "SET gate_hold = (SELECT MIN(g.request_id) FROM skill_gate_requests g "
+    "                 WHERE g.origin_execution_id = enterprise_portal_messages.execution_id) "
+    "WHERE gate_hold IS NULL AND execution_id IN ("
+    "    SELECT origin_execution_id FROM skill_gate_requests "
+    "    WHERE origin_execution_id IS NOT NULL)"
+)
+
+
 def _migrate_agent_peer_skill_grants(cursor, conn):
     """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
     what an admin assigned needs a grant.
@@ -5799,4 +5846,5 @@ MIGRATIONS = [
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
+    ("held_gate_turns", _migrate_held_gate_turns),
 ]

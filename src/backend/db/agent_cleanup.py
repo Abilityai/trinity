@@ -162,6 +162,9 @@ AGENT_REFS: List[AgentRef] = [
     # explicitly instead — the guard is the test, not the regex.
     #
     # Children before parents, matching the chat and portal pairs above.
+    # trinity#3402: what this agent's skill gate stopped in a room is about
+    # this agent alone, and goes with it.
+    AgentRef("room_gate_holds",              "agent_name",        Policy.CASCADE),
     AgentRef("enterprise_room_messages",     "sender_identity",   Policy.CASCADE,
              extra_filter="sender_kind = 'agent'"),
     AgentRef("enterprise_room_participants", "identity",          Policy.CASCADE,

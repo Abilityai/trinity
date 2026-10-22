@@ -687,6 +687,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
+  refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
+  `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
+  the notice line. Every later wake of that agent leaves those rows out of the transcript
+  and of the text the gate scans (one list feeds both), and so does MCP `read_room` by that
+  agent; other agents and people still read them. The read cursor keeps its success-only
+  rule, so an ordinary post that landed in the held delta is delivered on the next wake; a
+  refusal that clears by itself records nothing and the post comes back. Before this, a held
+  wake left the cursor in place and every later wake asked again for the same post.
+  `room_gate_holds` is an `AGENT_REFS` CASCADE entry, and deliberately carries no
+  `enterprise_` prefix: on the room tables that prefix is the three legacy names' history.
 - **Three tables** — `enterprise_rooms`, `enterprise_room_participants`,
   `enterprise_room_messages`. The `enterprise_` prefix is **retained history, not a
   licensing claim** (the ent#356 portal precedent): every entitled install already holds

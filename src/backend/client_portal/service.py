@@ -3057,7 +3057,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
     history = []
     try:
         # #2694: a window of TYPED turns plus the calls among them — a 180-row
-        # call no longer fills the window on its own.
+        # call no longer fills the window on its own. trinity#3402: a turn the
+        # skill gate held or refused, and its notice, are not in it (the read's
+        # default) — the gate reads only what is typed this turn, so the agent
+        # must never be handed that request as conversation instead.
         history = db.get_portal_thread_window(
             agent_name, email, session_id, typed_limit=_HISTORY_CONTEXT_MESSAGES
         ).rows
@@ -3304,9 +3307,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # trinity-enterprise#751: the message names a gated skill — nothing ran,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
-        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
-                              execution_id, viewer_is_person=gate_is_person)
+        answer = _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
+                                execution_id, viewer_is_person=gate_is_person)
+        # trinity#3402: neither the request nor its notice is ever replayed to
+        # the agent, whatever is decided — an approved run is its own execution.
+        _mark_gate_hold((user_row_id, answer.get("message_id")), e)
+        return answer
     except SkillGateError as e:
+        _mark_gate_hold((user_row_id,), e)   # trinity#3402: nor is a refused one
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
@@ -3550,6 +3558,31 @@ def _gate_requester(email: str, is_person: bool, credential: str | None = None):
                                         credential=credential)
 
 
+def _mark_gate_hold(message_ids, exc) -> None:
+    """trinity#3402: keep a turn the skill gate stopped — the client's message
+    and the notice answering it — out of every later prompt. Never changes the
+    answer: the approval is already raised, or the refusal already given. A
+    failure is an ERROR: until fixed, the row would be replayed."""
+    from services.skill_gate_errors import hold_marker
+
+    ids = [i for i in message_ids if i]
+    try:
+        db.mark_portal_messages_held(ids, hold_marker(exc))
+    except Exception:  # noqa: BLE001
+        logger.error("portal: could not mark the gated turn's messages %s", ids, exc_info=True)
+
+
+def _clear_gate_hold(row_id: str | None) -> None:
+    """trinity#3402: a retry reuses the refused turn's row — drop that verdict.
+    Best-effort: a stale mark only keeps a message that then ran out of history."""
+    if not row_id:
+        return
+    try:
+        db.mark_portal_messages_held([row_id], None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: could not clear the gate mark of reused row %s: %s", row_id, e)
+
+
 def _voice_attribution(voice_call_id: str | None) -> dict:
     """ent#551: the `add_portal_message` kwargs that attribute a row to the
     voice call whose `run_task` produced it — and NOTHING for a typed turn, so
@@ -3640,13 +3673,18 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     row is moved to the retrying turn, so its reply sits under it after a reload.
     """
     try:
-        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
+        # trinity#3402: with held rows — a refused turn is exactly what is retried.
+        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id,
+                                        include_held=True)
         # ent#534: a SPOKEN last line is not a failed typed turn — typing the
         # same words after saying them is a new message, not a retry.
         if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
                 and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
             _stamp_user_turn(recent[-1].get("id"), execution_id)
+            # trinity#3402: the row stands for THIS turn now; an earlier turn's
+            # gate verdict no longer applies (this one gets its own).
+            _clear_gate_hold(recent[-1].get("id"))
             return recent[-1].get("id")
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
         logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
@@ -4796,11 +4834,14 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages: list = []
     truncated = False
+    # trinity#3402: the client's own thread shows a held turn and its notice —
+    # and the reply poll must find that notice as the turn's answer.
     if session_id and limit is not None:
-        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id)
+        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id,
+                                          include_held=True)
     elif session_id:
         window = db.get_portal_thread_window(agent_name, email, session_id,
-                                             typed_limit=_HISTORY_TYPED_TURNS)
+                                             typed_limit=_HISTORY_TYPED_TURNS, include_held=True)
         messages, truncated = window.rows, window.truncated
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per

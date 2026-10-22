@@ -687,6 +687,9 @@ class PublicChatMessage(BaseModel):
     # #903: per-message speaker attribution (thread-scoped channel sessions).
     sender_email: Optional[str] = None
     sender_label: Optional[str] = None
+    # trinity#3402: set when the skill gate stopped this row's turn — never
+    # replayed to the agent (`db/schema.py` documents the values).
+    gate_hold: Optional[str] = None
 
 
 # =========================================================================
