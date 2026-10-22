@@ -103,3 +103,49 @@ def test_source_constant_unchanged_after_codex_render():
     get_platform_system_prompt("codex")
     assert PLATFORM_INSTRUCTIONS == before
     assert "mcp__trinity__" in PLATFORM_INSTRUCTIONS
+
+
+# ---------------------------------------------------------------------------
+# OpenCode (#2981): tools are `trinity_<tool>`, not bare and not Claude-prefixed
+# ---------------------------------------------------------------------------
+
+def test_opencode_prompt_rewrites_prefix_to_server_id():
+    prompt = get_platform_system_prompt("opencode")
+    assert "mcp__trinity__" not in prompt
+    assert "trinity_list_agents" in prompt
+    assert "trinity_chat_with_agent" in prompt
+
+
+def test_opencode_orientation_present_only_for_opencode():
+    heading = "## MCP Tools (OpenCode runtime)"
+    assert get_platform_system_prompt("opencode").startswith(heading)
+    assert get_platform_system_prompt("OpenCode").startswith(heading)
+    for runtime in ("claude-code", "codex", "gemini-cli", ""):
+        assert heading not in get_platform_system_prompt(runtime)
+
+
+def test_opencode_orientation_lists_every_codex_tool_prefixed():
+    """Derived from the Codex note: every tool it names, rendered trinity_<tool>."""
+    import re
+
+    codex_tools = re.findall(r"`([a-z_]+)`", platform_prompt_service._CODEX_MCP_ORIENTATION)
+    codex_tools = [t for t in codex_tools if t != "trinity"]
+    assert codex_tools, "Codex orientation lists no tools"
+    orientation = platform_prompt_service._OPENCODE_MCP_ORIENTATION
+    for tool in codex_tools:
+        assert f"`trinity_{tool}`" in orientation, tool
+    assert "mcp__trinity__" not in orientation
+    assert "`/<skill> [args]`" in orientation
+
+
+def test_opencode_gets_the_unhooked_path_sentence():
+    assert "opencode" not in platform_prompt_service._GUARDRAIL_HOOK_RUNTIMES
+    prompt = get_platform_system_prompt("opencode")
+    assert platform_prompt_service._PATH_DENY_SENTENCE_HOOKED not in prompt
+
+
+def test_source_constant_unchanged_after_opencode_render():
+    before = PLATFORM_INSTRUCTIONS
+    get_platform_system_prompt("opencode")
+    assert PLATFORM_INSTRUCTIONS == before
+    assert "mcp__trinity__" in PLATFORM_INSTRUCTIONS

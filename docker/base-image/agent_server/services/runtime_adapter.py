@@ -39,6 +39,12 @@ class RuntimeCapabilities:
     session_tab_resume: bool = False
     mcp_support: bool = False
     cost_reporting: str = "estimated"  # "native" | "estimated"
+    # #2981: additive, default-preserving (a runtime that forgets to set one is
+    # treated as lacking it).
+    hooks: bool = False              # runs the agent-image guardrail hooks (ent#945)
+    images: bool = False             # image inputs in a turn (#562)
+    plugins: bool = False            # marketplace plugins reinstall on boot
+    subscription_auth: bool = False  # can run on a Claude subscription token
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)

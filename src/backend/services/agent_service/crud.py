@@ -62,7 +62,14 @@ from .fork_to_own import (
     saved_token_not_for_agents,
 )
 from . import snapshot_import
-from .helpers import validate_base_image, is_claude_runtime, validate_runtime
+from .helpers import (
+    validate_base_image,
+    is_claude_runtime,
+    validate_runtime,
+    validate_runtime_model,
+    validate_runtime_provider,
+    render_runtime_provider_env,
+)
 from .lifecycle import RESTRICTED_CAPABILITIES, FULL_CAPABILITIES
 from .capabilities import (
     AGENT_TMPFS_MOUNT,
@@ -1585,6 +1592,7 @@ def _resolve_local_template(config: AgentConfig) -> tuple[dict, Optional[dict]]:
             if isinstance(runtime_config, dict):
                 config.runtime = runtime_config.get("type", config.runtime)
                 config.runtime_model = runtime_config.get("model", config.runtime_model)
+                config.runtime_provider = runtime_config.get("provider", config.runtime_provider)
             elif isinstance(runtime_config, str):
                 config.runtime = runtime_config
             # Phase 9.11: Extract shared folder config from template
@@ -2088,6 +2096,9 @@ def _build_base_env(config: AgentConfig) -> dict:
         # Multi-runtime support
         'AGENT_RUNTIME': config.runtime or 'claude-code',
         'AGENT_RUNTIME_MODEL': config.runtime_model or '',
+        # #2981: the template's runtime.provider block, read per turn by the
+        # OpenCode harness. Same serializer as recovery (helpers).
+        'AGENT_RUNTIME_PROVIDER': render_runtime_provider_env(config.runtime_provider),
         # #1098: redirect scratch (pip/npm/build, ML wheels) off the 100 MB
         # noexec /tmp tmpfs onto the disk-backed, exec-capable home volume.
         # The dir is created at container start by startup.sh.
@@ -3686,6 +3697,14 @@ async def create_agent_internal(
     # startup setup (AGENTS.md mirror / CODEX_HOME) or Gemini's credential inject.
     if config.runtime:
         config.runtime = config.runtime.lower()
+
+    # #2981: the runtime is final, so the runtime/model and runtime/provider
+    # PAIRINGS can be checked too. OpenCode's `-m` takes `provider/model`, and a
+    # malformed provider block would otherwise surface as a failed turn inside
+    # the container, long after creation reported success. Runs AFTER the
+    # lowercase normalization above so a template `runtime: OpenCode` is checked.
+    validate_runtime_model(config.runtime, config.runtime_model)
+    validate_runtime_provider(config.runtime, config.runtime_provider)
 
     # #2215: the SSH-port allocation moved INTO the docker try-block below (just
     # before the container run) — see the comment there. `config.port` is

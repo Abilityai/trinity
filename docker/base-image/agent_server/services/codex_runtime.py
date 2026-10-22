@@ -1088,6 +1088,10 @@ class CodexRuntime(AgentRuntime):
             session_tab_resume=False,    # MVP: Session tab stays Claude/Gemini
             mcp_support=True,            # codex mcp add
             cost_reporting="estimated",  # no native cost → derived from tokens
+            hooks=False,                 # not a guardrail-hook runtime (ent#945)
+            images=False,                # execute_headless ignores images
+            plugins=False,               # plugins_reinstall skips non-Claude
+            subscription_auth=False,     # no auth_override (#1187 decision 7)
         )
 
     def is_available(self) -> bool:

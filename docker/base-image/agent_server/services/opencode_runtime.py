@@ -1239,6 +1239,10 @@ class OpenCodeRuntime(AgentRuntime):
             session_tab_resume=False,   # no cached-UUID --resume machinery
             mcp_support=True,           # MCP servers via opencode.json
             cost_reporting="native",    # step_finish carries a real cost
+            hooks=False,                # not a guardrail-hook runtime (ent#945)
+            images=False,               # execute_headless ignores images
+            plugins=False,              # plugins_reinstall skips non-Claude
+            subscription_auth=False,    # no auth_override (#1187 decision 7)
         )
 
     def is_available(self) -> bool:

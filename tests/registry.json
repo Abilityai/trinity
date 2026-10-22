@@ -6289,6 +6289,27 @@
         "unit"
       ],
       "description": "Container files (checkpoint F). Executed: the runtime-setup section of the SHIPPED startup.sh runs under bash against a tmp home/AGENT_TMPDIR/pre-seed dir — the OpenCode block (case-insensitive match) writes opencode.json (share disabled, autoupdate off) only if absent into exactly the dir opencode_runtime._shared_config_dir() reads ($TMPDIR/opencode/config/opencode), links the pre-seeded node_modules and copies package.json/lock, chmods the root 0700, exports no XDG_/OPENCODE_ var (ruling T3: the harness sets them per turn) and is skipped for every other runtime; the AGENTS.md mirror is a relative symlink to CLAUDE.md for codex ONLY (ruling T8; opencode, claude-code and gemini-cli get none) — tracks later edits, adopts a byte-identical copy, leaves a differing authored file alone with a loud message, repairs a wrong link, idempotent; bash -n passes. Static over the Dockerfile (its consumer is the image build): ARG OPENCODE_VERSION equals every v-version opencode_runtime.py cites; uname -m maps x86_64/aarch64 with a FATAL exit-1 default; the platform package is named explicitly; the opencode --version check sits after the install in the same RUN (#2537 rule); the pre-seeded provider set equals NPM_ALLOWLIST plus the drivers of NATIVE_KEY_ENV's providers, each an exact x.y.z with a test -d; the Go tarball is resolved per arch and verified with go version in the same RUN (ruling T1). Reverting the Dockerfile and startup.sh turns 25 of 27 red."
+    },
+    {
+      "file": "unit/test_2981_backend_registration.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "agent-runtime",
+        "unit"
+      ],
+      "description": "Backend registration of the opencode runtime (checkpoint G): KNOWN_RUNTIME_NAMES accepts opencode in any casing and equals the agent-side KNOWN_RUNTIMES; is_claude_runtime('opencode') is False (subscription gate) and the harness agrees (no auth_override, subscription_auth False); the Session-tab gate refuses resume for opencode and matches the runtime's capability; validate_runtime_model rejects a bare id with a 400 naming the value and provider/model, only for opencode, and its regex is character-identical to the harness _PROVIDER_MODEL_RE with a behavioural parity loop; validate_runtime_provider accepts a valid block, 400s naming each malformed field, 400s a block under any other runtime (G1), and agrees with the harness validate_provider_block on a parity set; render_runtime_provider_env is compact sorted JSON that round-trips through the harness load_provider_block, '' when absent; the real crud._build_base_env bakes it; create and recovery both serialize through the one helper, recovery does not re-validate (G3); create validates after the lowercase normalization."
+    },
+    {
+      "file": "unit/test_opencode_backend_inertness.py",
+      "feature": "#2981",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "OpenCode-shaped failure details (pipe-drop string, dict without the recovery marker) are inert for the #678 reader-race auto-retry signature; the genuine Claude signature still fires."
     }
   ]
 }

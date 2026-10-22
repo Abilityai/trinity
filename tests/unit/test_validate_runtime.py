@@ -103,3 +103,10 @@ def test_codex_is_a_known_runtime():
     ``runtime_adapter.KNOWN_RUNTIMES`` — codex must be accepted."""
     assert "codex" in KNOWN_RUNTIME_NAMES
     validate_runtime("codex")
+
+
+def test_opencode_is_a_known_runtime():
+    """#2981: OpenCode must be accepted at create, any casing."""
+    assert "opencode" in KNOWN_RUNTIME_NAMES
+    validate_runtime("opencode")
+    validate_runtime("OpenCode")

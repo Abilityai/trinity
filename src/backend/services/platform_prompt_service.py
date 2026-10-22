@@ -529,12 +529,46 @@ _CODEX_MCP_ORIENTATION = (
     "\n\n---\n\n"
 )
 
+# OpenCode is a THIRD naming scheme, and it is neither of the other two (#2981).
+# It namespaces every MCP tool as ``<server-id>_<tool>`` — measured against the
+# pinned v1.18.32 (fixture ``tests/fixtures/opencode/run-format-json.synthetic.jsonl``,
+# synthetic until the Before-merge stream capture replaces it). So the Claude
+# prefix is rewritten to the server id rather than stripped: a Codex-style bare
+# ``list_agents`` is an unknown tool to OpenCode, and so is the Claude-style
+# name. The server id is ``trinity`` because that is the key
+# ``trinity_mcp._inject_claude_mcp`` writes into ``.mcp.json``, which is what
+# ``opencode_mcp`` translates from. Like the Codex note, this is prepended at
+# render — NOT a section of PLATFORM_INSTRUCTIONS, so it is not registered in
+# ``_KNOWN_SECTION_HEADINGS``. OpenCode is deliberately not in
+# ``_GUARDRAIL_HOOK_RUNTIMES``: it gets the unhooked protected-paths sentence.
+_OPENCODE_RUNTIMES = frozenset({"opencode"})
+_OPENCODE_MCP_PREFIX = "trinity_"
+
+# Intentionally avoids the literal Claude-prefix token, like the Codex note.
+_OPENCODE_MCP_ORIENTATION = (
+    "## MCP Tools (OpenCode runtime)\n\n"
+    "A Trinity MCP server named `trinity` is configured for you. OpenCode "
+    "namespaces its tools by server id, so call them as `trinity_<tool>` — "
+    "`trinity_list_agents`, `trinity_chat_with_agent`, `trinity_share_file`, "
+    "`trinity_report`, `trinity_list_reports`, `trinity_get_report`, "
+    "`trinity_set_canvas`, `trinity_patch_canvas`, `trinity_get_canvas`, "
+    "`trinity_write_user_memory`, `trinity_set_reminder`, "
+    "`trinity_run_agent_loop`, `trinity_fan_out`, `trinity_get_execution_result`, "
+    "`trinity_get_fan_out_result`, `trinity_list_recent_executions`, "
+    "`trinity_subscribe_to_event`, `trinity_refresh_metric_definitions` — "
+    "exactly as they appear in your tool list. Do not add any other "
+    "vendor-specific prefix. A message whose first line is `/<skill> [args]` "
+    "runs that skill as an OpenCode command; other text is a plain prompt."
+    "\n\n---\n\n"
+)
+
 
 def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     """Rewrite the MCP-tool references in ``instructions`` for ``runtime``.
 
     Codex → strip the Claude-only ``mcp__trinity__`` prefix and prepend a short
-    orientation note. Claude/Gemini/unknown keep the canonical naming (the
+    orientation note. OpenCode → rewrite that prefix to its server-scoped
+    ``trinity_`` form and prepend its own note (#2981). Claude/Gemini/unknown keep the canonical naming (the
     plan's ``default claude-code`` behavior). Any runtime without the file
     guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
     Pure — never mutates the input.
@@ -546,6 +580,10 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
         )
     if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
+    if runtime_key in _OPENCODE_RUNTIMES:
+        return _OPENCODE_MCP_ORIENTATION + instructions.replace(
+            "mcp__trinity__", _OPENCODE_MCP_PREFIX
+        )
     return instructions
 
 

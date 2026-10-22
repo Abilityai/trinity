@@ -1876,7 +1876,7 @@ def _build_version_payload(
             "agent_server": version,
             "base_image": f"trinity-agent-base:{version}"
         },
-        "runtimes": ["claude-code", "gemini-cli", "codex"],
+        "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
         # #1814: the version baked into the running image. Equal to `version`
         # on a normally-built stack; DIFFERENT means the image is stale
         # relative to the code being executed (an in-place upgrade without

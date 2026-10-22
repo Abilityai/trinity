@@ -135,6 +135,12 @@ class GeminiRuntime(AgentRuntime):
             session_tab_resume=False,
             mcp_support=True,
             cost_reporting="estimated",
+            # #2981: no guardrail hooks, `images` accepted but unused, plugins
+            # skipped (not Claude), no auth_override.
+            hooks=False,
+            images=False,
+            plugins=False,
+            subscription_auth=False,
         )
 
     def is_available(self) -> bool:

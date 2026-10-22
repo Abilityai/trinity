@@ -44,11 +44,11 @@ logger = logging.getLogger(__name__)
 # resume/fallback/reaping model, so we run a stateless turn for them instead.
 # ONE backend constant — keep in sync with the agent-side
 # `RuntimeCapabilities.session_tab_resume`.
-RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}
+RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex", "opencode"}
 
 
 def supports_session_resume(agent_name: str) -> bool:
-    """False for runtimes (e.g. Codex) that lack the cached-UUID `--resume`
+    """False for runtimes (Codex, OpenCode) that lack the cached-UUID `--resume`
     machinery. Defaults to True on any lookup failure — assume Claude-like
     so a transient Docker hiccup never silently downgrades a real session."""
     try:

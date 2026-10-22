@@ -86,3 +86,16 @@ def test_supports_resume_defaults_true_on_lookup_failure(monkeypatch):
     monkeypatch.setattr(sessions, "get_agent_container", _boom)
     # Must not raise, and must fail safe to resume-capable.
     assert sessions.supports_session_resume("a") is True
+
+
+def test_opencode_in_no_resume_constant():
+    """#2981: OpenCode has no cached-UUID --resume either."""
+    assert "opencode" in sessions.RUNTIMES_WITHOUT_SESSION_TAB_RESUME
+
+
+def test_supports_resume_false_for_opencode(monkeypatch):
+    monkeypatch.setattr(sessions, "get_agent_container", lambda name: object())
+    monkeypatch.setattr(
+        sessions, "get_agent_status_from_container", lambda c: _status("opencode")
+    )
+    assert sessions.supports_session_resume("a") is False
