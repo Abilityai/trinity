@@ -602,18 +602,110 @@ fi
 # (`_GITIGNORE_PATTERNS` in src/backend/services/git_service.py, applied on git
 # init/push by `_build_gitignore_merge_command`) carries `.tmp/`, so the
 # relocated CODEX_HOME under $TMPDIR is excluded from git without a shell write.
+# Matched on the lowercased value (#1187 casing trap).
+_agent_runtime_lc="$(printf '%s' "${AGENT_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
+case "$_agent_runtime_lc" in
+  codex)
+    # SYMLINK, not a copy (#2981). The copy was made once, on the first boot
+    # that found no AGENTS.md, and then never again — so every later edit to
+    # CLAUDE.md (a git sync, a skill install, an operator change) left the
+    # Codex agent running on a frozen snapshot of its own identity, silently
+    # and with no way to notice. A relative symlink re-resolves on every read,
+    # so the two files cannot diverge. Codex only: OpenCode reads CLAUDE.md
+    # natively and needs no mirror.
+    #
+    # Upgrade path off the copy-era image, in three cases, because a regular
+    # AGENTS.md is ambiguous — it is either the copy this block used to make or
+    # an AGENTS.md the template author deliberately wrote:
+    #   * absent, or a symlink pointing anywhere else  -> (re)link. Self-healing.
+    #   * regular file BYTE-IDENTICAL to CLAUDE.md     -> provably our own
+    #     mirror, so replacing it with the link loses nothing.
+    #   * regular file that DIFFERS                    -> left alone; it may be
+    #     authored. But say so loudly: an unexplained divergence here is exactly
+    #     the failure that was previously silent.
+    if [ -f "/home/developer/CLAUDE.md" ]; then
+        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ] || \
+           cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
+            if [ "$(readlink /home/developer/AGENTS.md 2>/dev/null)" != "CLAUDE.md" ]; then
+                ln -sfn CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
+                    echo "  Linked AGENTS.md -> CLAUDE.md for Codex" || \
+                    echo "  Warning: could not create AGENTS.md symlink"
+            fi
+        else
+            echo "  Warning: AGENTS.md is a regular file whose content differs from" \
+                 "CLAUDE.md — leaving it alone. Codex reads AGENTS.md, so this" \
+                 "agent identity will NOT track CLAUDE.md. Delete AGENTS.md to adopt the mirror."
+        fi
+    fi
+    ;;
+esac
+
 if [ "${AGENT_RUNTIME}" = "codex" ]; then
     echo "Configuring Codex runtime..."
-
-    if [ -f "/home/developer/CLAUDE.md" ] && [ ! -f "/home/developer/AGENTS.md" ]; then
-        cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
-            echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex" || \
-            echo "  Warning: could not create AGENTS.md"
-    fi
 
     CODEX_HOME_DIR="${CODEX_HOME:-${AGENT_TMPDIR}/codex}"
     mkdir -p "${CODEX_HOME_DIR}" 2>/dev/null && chmod 700 "${CODEX_HOME_DIR}" 2>/dev/null || \
         echo "  Warning: could not create CODEX_HOME ${CODEX_HOME_DIR}"
+fi
+
+# === OpenCode runtime setup (#2981) ===
+# Matched on the LOWERCASED runtime value. The Codex block above compares
+# `"${AGENT_RUNTIME}" = "codex"` literally, which is safe only because
+# crud.py lowercases before writing the env var — a single backend change away
+# from silently skipping the whole block (#1187 casing trap). This one does not
+# depend on that.
+#
+# This block only SEEDS the shared OpenCode config dir. It exports nothing: the
+# XDG relocation and the OPENCODE_DISABLE_* switches are set per turn, on the
+# subprocess env only, by agent_server/services/opencode_runtime.py — so they
+# never leak into the agent server, the other runtimes, or an SSH shell. The
+# directory written here is the one `_shared_config_dir()` reads when
+# XDG_CONFIG_HOME is unset: `$AGENT_TMPDIR/opencode/config/opencode` (the
+# runtime resolves the same root from TMPDIR, which AGENT_TMPDIR derives from).
+# $AGENT_TMPDIR is the disk-backed scratch dir (#1098), already covered by the
+# canonical gitignore's `.tmp/` — so startup.sh still writes no .gitignore (#953).
+if [ "$_agent_runtime_lc" = "opencode" ]; then
+    echo "Configuring OpenCode runtime..."
+
+    OPENCODE_ROOT_DIR="${AGENT_TMPDIR}/opencode"
+    OPENCODE_CONFIG_DIR="${OPENCODE_ROOT_DIR}/config/opencode"
+    mkdir -p "${OPENCODE_CONFIG_DIR}" 2>/dev/null || \
+        echo "  Warning: could not create OpenCode config dir ${OPENCODE_CONFIG_DIR}"
+    chmod 700 "${OPENCODE_ROOT_DIR}" 2>/dev/null || true
+
+    # Generated, not shipped, and written only if absent so an operator's own
+    # additions survive a restart. `share: disabled` stops a turn from being
+    # publishable to opencode's hosted share service; autoupdate off keeps the
+    # pinned binary pinned. A custom-provider block is deliberately NOT written
+    # here: it is computed per turn by agent_server/services/opencode_provider.py,
+    # because the agent's .env is re-read at every spawn (#1999) and a block
+    # baked once at boot would be stale from the operator's first change onward.
+    if [ ! -f "${OPENCODE_CONFIG_DIR}/opencode.json" ]; then
+        cat > "${OPENCODE_CONFIG_DIR}/opencode.json" <<'OPENCODE_JSON'
+{
+  "$schema": "https://opencode.ai/config.json",
+  "share": "disabled",
+  "autoupdate": false
+}
+OPENCODE_JSON
+        echo "  Wrote ${OPENCODE_CONFIG_DIR}/opencode.json (privacy defaults)"
+    fi
+
+    # The image pre-seeds the provider npm packages into /opt/trinity/opencode
+    # because OpenCode installs an unbundled one at RUNTIME into
+    # $XDG_CONFIG_HOME/opencode/node_modules — a live npm-registry dependency
+    # on every cold container, and an air-gap failure. Link, don't copy: the
+    # tree is large and the image copy is read-only and shared.
+    if [ -d /opt/trinity/opencode/node_modules ] && \
+       [ ! -e "${OPENCODE_CONFIG_DIR}/node_modules" ]; then
+        ln -s /opt/trinity/opencode/node_modules "${OPENCODE_CONFIG_DIR}/node_modules" \
+            && echo "  Linked pre-seeded OpenCode provider packages" \
+            || echo "  Warning: could not link pre-seeded provider packages"
+        for _f in package.json package-lock.json; do
+            [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ] && \
+                cp "/opt/trinity/opencode/$_f" "${OPENCODE_CONFIG_DIR}/$_f" 2>/dev/null || true
+        done
+    fi
 fi
 
 # Ensure core agent-server dependencies are installed correctly

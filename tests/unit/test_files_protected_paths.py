@@ -236,6 +236,7 @@ _EXPECTED_ANCHORS = (
     "/home/developer/.claude/.credentials.json",   # ent#823
     "/home/developer/.gemini/settings.json",       # ent#823
     "/home/developer/.tmp/codex",                  # ent#823: deleting .tmp is refused
+    "/home/developer/.tmp/opencode",               # #2981: OpenCode XDG root
     "/home/developer/.trinity",
     "/home/developer/.git",
     "/opt/trinity",

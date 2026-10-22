@@ -353,6 +353,7 @@ _GUARDRAIL_PATH_DENY: tuple[str, ...] = (
     "/home/developer/.claude/.credentials.json",
     "/home/developer/.gemini/settings.json",
     "/home/developer/.tmp/codex/*",
+    "/home/developer/.tmp/opencode/*",
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*",

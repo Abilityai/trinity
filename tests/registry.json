@@ -6278,6 +6278,17 @@
         "unit"
       ],
       "description": "Playbook dispatch (checkpoint E, ruling T2): every SKILL.md found through routers/skills.py (skill_search_paths + scan_skills_directory — one reader) renders one per-turn opencode.json `command:` entry {template: \"Follow the skill at <abs SKILL.md> with arguments: $ARGUMENTS\", description: one line, capped} — body never embedded, dirs without SKILL.md skipped, project beats personal, unsafe names skipped with one WARNING, per-turn entries beat the shared config's; split_playbook_prefix dispatches only a scanned name on the first non-blank line (args + riders newline-preserved, bare /name → empty message, unknown /name / mid-text / no slash pass through unchanged) and refuses arguments carrying OpenCode's !`cmd` shell shape (run outside the permission layer, prompt.ts v1.18.32); _build_command emits --command; chat and headless argv on the stubbed subprocess carry --command <name> -- <args> (no separator for a bare /name) and leave no turn dir. Mutation: dropping the --command hand-off turns the execute-path tests red."
+    },
+    {
+      "file": "unit/test_2981_base_image_arch.py",
+      "feature": "#2981",
+      "added": "2026-10-21",
+      "categories": [
+        "agent-runtime",
+        "infrastructure",
+        "unit"
+      ],
+      "description": "Container files (checkpoint F). Executed: the runtime-setup section of the SHIPPED startup.sh runs under bash against a tmp home/AGENT_TMPDIR/pre-seed dir — the OpenCode block (case-insensitive match) writes opencode.json (share disabled, autoupdate off) only if absent into exactly the dir opencode_runtime._shared_config_dir() reads ($TMPDIR/opencode/config/opencode), links the pre-seeded node_modules and copies package.json/lock, chmods the root 0700, exports no XDG_/OPENCODE_ var (ruling T3: the harness sets them per turn) and is skipped for every other runtime; the AGENTS.md mirror is a relative symlink to CLAUDE.md for codex ONLY (ruling T8; opencode, claude-code and gemini-cli get none) — tracks later edits, adopts a byte-identical copy, leaves a differing authored file alone with a loud message, repairs a wrong link, idempotent; bash -n passes. Static over the Dockerfile (its consumer is the image build): ARG OPENCODE_VERSION equals every v-version opencode_runtime.py cites; uname -m maps x86_64/aarch64 with a FATAL exit-1 default; the platform package is named explicitly; the opencode --version check sits after the install in the same RUN (#2537 rule); the pre-seeded provider set equals NPM_ALLOWLIST plus the drivers of NATIVE_KEY_ENV's providers, each an exact x.y.z with a test -d; the Go tarball is resolved per arch and verified with go version in the same RUN (ruling T1). Reverting the Dockerfile and startup.sh turns 25 of 27 red."
     }
   ]
 }
