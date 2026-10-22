@@ -6260,6 +6260,17 @@
       "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against src/backend/services/agent_route_tiers.json (also read at runtime by services/route_tier_service.py): an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
     },
     {
+      "file": "unit/test_ent926_workspace_turn_tier.py",
+      "feature": "trinity-enterprise#926",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "Found testing PR #3778 live: a Workspace turn (triggered_by=public, source_channel=portal, the signed-in email, no source_user_id) is rated as that person — owner/admin owner tier, a shared account a person (no shell even with visitor_shell on), an email-only client a person with no account — while a public-link or channel email never lifts a visitor and a schedule row keeps the creator rule; the route fence (restricted_agent_turn) meets the ledger, so a key with no header or naming an owner turn is fenced while a shared person's turn runs, only-owner or visitor-shell-on turns leave it open, an unreadable ledger fences, non-agent principals never are; the real SQLite ledger read carries source_channel/source_user_email. Mutations: dropping the Workspace rule turns 8 red; a header-only fence turns 3 red."
+    },
+    {
       "file": "unit/test_ent926_turn_tier.py",
       "feature": "abilityai/trinity-enterprise#926",
       "added": "2026-10-16",

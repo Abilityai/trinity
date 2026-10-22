@@ -209,10 +209,10 @@ class ScheduleExecutionsMixin:
     def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
         """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
 
-        The four columns `turn_tier_service` rates a turn by, for every running
-        row. Like the chain-depth read, only `running` counts: every row is
-        inserted RUNNING, so a turn whose process could be making a request is
-        always here.
+        The columns `turn_tier_service` rates a turn by, for every running
+        row — a Workspace turn by its channel and email. Like the chain-depth
+        read, only `running` counts: every row is inserted RUNNING, so a turn
+        whose process could be making a request is always here.
         """
         stmt = (
             select(
@@ -221,6 +221,8 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.source_user_id,
                 schedule_executions.c.schedule_id,
                 schedule_executions.c.triggered_by,
+                schedule_executions.c.source_channel,
+                schedule_executions.c.source_user_email,
             )
             .where(and_(
                 schedule_executions.c.agent_name == agent_name,

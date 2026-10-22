@@ -31,8 +31,18 @@ schedule (and mint its webhook), so rating every schedule run as `owner` would
 let them run their own prompt as an owner-tier turn. The creator is rated like
 any other person; a schedule that cannot be found, or that belongs to another
 agent, fails closed to `share`; one with no recorded creator is the owner's.
+
+A Workspace turn carries no `source_user_id` either: it is stamped with the
+signed-in person's email (`source_channel="portal"`). That email is the
+platform's own record of who is chatting, so the turn is rated as that person —
+the owner or an admin is `owner`, anyone else a shared `person`, never a
+visitor. Only that channel's email counts: a public-link turn shares
+`triggered_by="public"`, but its email is what the visitor typed, and reading
+it as an account would let a visitor claim the owner's tier.
 """
 from typing import Optional, Tuple
+
+from config import PORTAL_SOURCE_CHANNEL
 
 OWNER = "owner"
 SHARE = "share"
@@ -99,6 +109,24 @@ def _schedule_of(db, agent_name: str, execution):
     return True, schedule
 
 
+def _workspace_person(db, execution) -> Tuple[bool, Optional[int]]:
+    """`(is_workspace_turn, user id)` for a Workspace turn: the platform account
+    of the signed-in person it was stamped with, or None when that email has no
+    account (an email-only client the agent is shared with). Not a Workspace
+    turn → `(False, None)`; an unreadable lookup → no account, which rates the
+    turn as a shared person — never higher."""
+    if _field(execution, "source_channel") != PORTAL_SOURCE_CHANNEL:
+        return False, None
+    email = _field(execution, "source_user_email")
+    if not isinstance(email, str) or "@" not in email:
+        return True, None
+    try:
+        user = db.get_user_by_email(email.strip().lower())
+    except Exception:  # noqa: BLE001 - fail closed to a shared person
+        user = None
+    return True, _int_or_none((user or {}).get("id"))
+
+
 def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
                execution=None) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person id) for a turn, by `execution_id` or by the row itself
@@ -125,6 +153,11 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
             if _user_tier(db, creator, agent_name) == OWNER:
                 return OWNER, None, None
             return SHARE, PERSON, _int_or_none(creator)
+        is_workspace, person = _workspace_person(db, execution)
+        if is_workspace:
+            if person is not None and _user_tier(db, person, agent_name) == OWNER:
+                return OWNER, None, None
+            return SHARE, PERSON, person
         trigger = (_field(execution, "triggered_by") or "").lower()
         if trigger in OWNER_CONFIGURED_TRIGGERS:
             return OWNER, None, None
@@ -146,6 +179,8 @@ def turn_person(db, agent_name: str, execution) -> Optional[int]:
         has_schedule, schedule = _schedule_of(db, agent_name, execution)
         if has_schedule and schedule is not None:
             uid = _field(schedule, "owner_id")
+        elif not has_schedule:
+            uid = _workspace_person(db, execution)[1]
     return _int_or_none(uid)
 
 
@@ -183,6 +218,24 @@ def restricts_standing_work(db, agent_name: str, tier: str, kind: Optional[str])
     (schedules, loops, reminders, events)? Same line as the shell: a shared
     person never; a visitor when the owner turned `visitor_shell` off."""
     return tier != OWNER and not shell_allowed(db, agent_name, tier, kind)
+
+
+def running_turn_restricts(db, agent_name: str) -> bool:
+    """Is any RUNNING turn on `agent_name` one that `restricts_standing_work`?
+
+    Read from the ledger, never from a request: an agent key that omits the
+    turn header (a shell `curl`) or names an owner turn still meets the turns
+    actually running, the way its reads do (`running_share_people`, ent#875).
+    An unreadable ledger restricts — the fence fails closed."""
+    try:
+        rows = db.get_running_turn_attribution(agent_name)
+    except Exception:  # noqa: BLE001 - fail closed
+        return True
+    for row in rows:
+        tier, kind, _ = turn_actor(db, agent_name, execution=row)
+        if restricts_standing_work(db, agent_name, tier, kind):
+            return True
+    return False
 
 
 # --- the turn an agent's key is acting in (#2392 header, ent#926) ------------

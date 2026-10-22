@@ -2787,16 +2787,21 @@ OWNER_TIER_TURN_REFUSED = (
 def restricted_agent_turn(principal) -> bool:
     """Whether `principal` is an agent key acting in a turn the platform rates
     below the owner (the shell's line: a shared person always, a visitor when
-    the owner turned `visitor_shell` off, an unknown or foreign turn always)."""
-    run = getattr(principal, "_acting_execution_id", None)
-    if not run or run == _MANUAL_EXECUTION_ID:
+    the owner turned `visitor_shell` off, an unknown or foreign turn always).
+
+    The turn header can only narrow: a call that omits it (a shell `curl` with
+    the agent's key) or names an owner turn is still restricted while any
+    running turn on the agent is (`running_turn_restricts`, the ledger — the
+    rule the key's reads follow, ent#875). The price is the same as there: while
+    a shared person's turn runs, the owner's concurrent runs are fenced too."""
+    agent = getattr(principal, "agent_name", None)
+    if getattr(principal, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return False
     from services import turn_tier_service
     acting = turn_tier_service.acting_turn(db, principal)
-    if acting is None:
-        return False
-    tier, kind, _ = acting
-    return turn_tier_service.restricts_standing_work(db, principal.agent_name, tier, kind)
+    if acting is not None and turn_tier_service.restricts_standing_work(db, agent, acting[0], acting[1]):
+        return True
+    return turn_tier_service.running_turn_restricts(db, agent)
 
 
 def _enforce_standing_work_fence(request, principal: User) -> None:
