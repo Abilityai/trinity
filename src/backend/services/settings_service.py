@@ -421,6 +421,12 @@ class SettingsService:
         """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
         return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
+    def get_public_chat_url_setting(self) -> str:
+        """The stored `public_chat_url` row only (no env fallback), normalised
+        (#3881). For the webhook registrars that have always read the row
+        directly; they must not register a dotted host either."""
+        return normalize_public_url(self.get_setting('public_chat_url', '') or '')
+
     def get_public_chat_url(self) -> str:
         """Get Public Chat URL from settings, fallback to env var.
 

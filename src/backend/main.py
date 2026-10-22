@@ -938,7 +938,7 @@ async def _start_telegram_transport(app: FastAPI) -> None:
 
         # Reconcile webhooks for all existing bindings on startup
         from services.settings_service import settings_service
-        public_url = settings_service.get_setting("public_chat_url", "")
+        public_url = settings_service.get_public_chat_url_setting()
         if public_url:
             bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
@@ -989,7 +989,7 @@ async def _start_whatsapp_transport(app: FastAPI) -> None:
 
         # Backfill webhook_url for existing bindings so UI displays the current URL
         from services.settings_service import settings_service as _settings_svc
-        public_url = _settings_svc.get_setting("public_chat_url", "")
+        public_url = _settings_svc.get_public_chat_url_setting()
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
             bindings = _db.get_all_whatsapp_bindings()

@@ -76,3 +76,32 @@ def test_resolver_strips_a_dot_already_stored_or_in_env(monkeypatch, row, env):
     monkeypatch.setattr(svc, "get_setting", lambda key, default=None: row)
     monkeypatch.setenv("PUBLIC_CHAT_URL", env)
     assert svc.get_public_chat_url() == "https://host.example.com"
+
+
+def test_row_accessor_normalises_without_env_fallback(monkeypatch):
+    svc = ss.SettingsService()
+    monkeypatch.setattr(svc, "get_setting", lambda key, default=None: "https://host.example.com./")
+    assert svc.get_public_chat_url_setting() == "https://host.example.com"
+    monkeypatch.setattr(svc, "get_setting", lambda key, default=None: default)
+    monkeypatch.setenv("PUBLIC_CHAT_URL", "https://env.example.com")
+    assert svc.get_public_chat_url_setting() == ""
+
+
+def test_no_webhook_registrar_reads_the_raw_row():
+    """Telegram startup/connect, WhatsApp and VoIP register webhooks from the
+    stored row. They go through `get_public_chat_url_setting()` so a dotted row
+    stored before the save path normalised can never be registered."""
+    import re
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2] / "src" / "backend"
+    raw = re.compile(r"""\.get_setting\(\s*["']public_chat_url["']""")
+    allowed = {backend / "services" / "settings_service.py", backend / "client_portal" / "service.py"}
+    hits = [
+        f"{p.relative_to(backend)}:{n}"
+        for p in backend.rglob("*.py")
+        if p not in allowed and "enterprise" not in p.parts
+        for n, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1)
+        if raw.search(line)
+    ]
+    assert hits == [], f"raw public_chat_url reads: {hits}"
