@@ -123,8 +123,81 @@ def test_search_tools_aimed_at_owner_only_paths_are_refused_for_a_shared_turn(ho
     assert code == 2
 
 
-def test_a_search_with_no_path_asks_nobody(hook, monkeypatch):
-    assert run(hook, monkeypatch, "Grep", {"pattern": "x"}) == (0, [])
+# ---- searches (PR #3778 review): a search reads everything under its root ---------------
+# Judging Grep/Glob by `path` alone let a search with no path (it runs in the home) or one
+# rooted at the home read every transcript and `.env`, since Grep includes dotfiles.
+
+@pytest.mark.parametrize("tool,tool_input", [
+    ("Grep", {"pattern": "x"}),                                         # no path: the home
+    ("Glob", {"pattern": ".claude/projects/**"}),
+    ("Grep", {"pattern": "x", "path": "/home/developer"}),
+    ("Grep", {"pattern": "x", "path": "~"}),
+    ("Grep", {"pattern": "x", "path": "/home"}),
+    ("Grep", {"pattern": "x", "path": "/"}),
+    ("Glob", {"pattern": "**/*.jsonl", "path": "/home/developer"}),
+    ("Grep", {"pattern": "x", "path": "/var/lib"}),                     # holds the token
+    ("Grep", {"pattern": "x", "path": "/home/developer/workspace", "glob": "../.env"}),
+    ("Glob", {"pattern": "/home/developer/.claude/projects/*.jsonl", "path": "/tmp"}),
+    ("Glob", {"pattern": "~/.env", "path": "/tmp"}),
+])
+def test_a_search_that_reaches_owner_only_files_is_refused_for_a_shared_turn(hook, monkeypatch, tool, tool_input):
+    code, asked = run(hook, monkeypatch, tool, tool_input, tier="share")
+    assert code == 2 and asked == [("agent-a", "exec-1")]
+
+
+@pytest.mark.parametrize("tool_input", [{"pattern": "x"}, {"pattern": "x", "path": "/home/developer"}])
+def test_the_owners_turn_may_search_the_home(hook, monkeypatch, tool_input):
+    code, asked = run(hook, monkeypatch, "Grep", tool_input, tier="owner")
+    assert code == 0 and len(asked) == 1
+
+
+def test_a_search_with_no_path_outside_a_platform_turn_asks_nobody(hook, monkeypatch):
+    assert run(hook, monkeypatch, "Grep", {"pattern": "x"}, run_id=None) == (0, [])
+
+
+def _tmp_home(hook, monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / "workspace" / "src").mkdir(parents=True)
+    (home / "workspace" / "src" / "a.py").write_text("x")
+    monkeypatch.setattr(hook, "HOME", str(home))
+    import file_path_policy as policy
+    real = policy.decide
+    monkeypatch.setattr(policy, "decide", lambda tier, verb, path, home_=str(home): real(tier, verb, path, home_))
+    monkeypatch.setattr(policy, "HOME", str(home))
+    return home
+
+
+def test_a_search_of_an_ordinary_folder_is_allowed_without_asking(hook, monkeypatch, tmp_path):
+    home = _tmp_home(hook, monkeypatch, tmp_path)
+    for tool in ("Grep", "Glob"):
+        code, asked = run(hook, monkeypatch, tool, {"pattern": "*", "path": str(home / "workspace")})
+        assert (code, asked) == (0, []), tool
+
+
+@pytest.mark.parametrize("secret", ["src/.env", "deploy/server.pem", "keys/id.key"])
+def test_a_search_of_a_folder_holding_an_owner_only_file_is_refused(hook, monkeypatch, tmp_path, secret):
+    home = _tmp_home(hook, monkeypatch, tmp_path)
+    target = home / "workspace" / secret
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("SECRET=1")
+    code, asked = run(hook, monkeypatch, "Grep", {"pattern": "SECRET", "path": str(home / "workspace")})
+    assert code == 2 and asked
+
+
+def test_a_search_of_a_folder_with_a_link_out_is_refused(hook, monkeypatch, tmp_path):
+    home = _tmp_home(hook, monkeypatch, tmp_path)
+    (home / ".env").write_text("SECRET=1")
+    (home / "workspace" / "out").symlink_to(home)
+    code, asked = run(hook, monkeypatch, "Grep", {"pattern": "SECRET", "path": str(home / "workspace")})
+    assert code == 2 and asked
+
+
+def test_a_search_too_large_to_check_is_refused_not_waved_through(hook, monkeypatch, tmp_path):
+    home = _tmp_home(hook, monkeypatch, tmp_path)
+    monkeypatch.setattr(hook, "SEARCH_WALK_MAX_ENTRIES", 1)
+    (home / "workspace" / "src" / "b.py").write_text("x")
+    code, asked = run(hook, monkeypatch, "Grep", {"pattern": "x", "path": str(home / "workspace")})
+    assert code == 2 and asked
 
 
 @pytest.mark.parametrize("answer", ["unknown", "unreachable"])
@@ -270,11 +343,12 @@ def test_the_hooks_policy_copy_is_byte_identical_to_the_backends():
         "copy src/backend/services/file_path_policy.py to docker/base-image/hooks/file_path_policy.py")
 
 
-def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools_and_the_shell():
+def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools_the_shell_and_mcp():
     drop_in = json.loads((_HOOKS / "managed-settings.d/60-turn-tier-guard.json").read_text())
     (entry,) = drop_in["hooks"]["PreToolUse"]
     assert set(entry["matcher"].split("|")) == {"Edit", "Write", "NotebookEdit", "MultiEdit",
-                                                "Read", "NotebookRead", "Grep", "Glob", "Bash"}
+                                                "Read", "NotebookRead", "Grep", "Glob", "Bash",
+                                                "mcp__.*"}
     (h,) = entry["hooks"]
     assert h["command"] == "/usr/bin/env"
     assert h["args"] == ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S",
@@ -353,3 +427,44 @@ def test_the_shell_refusal_names_who_the_turn_is_for(hook, monkeypatch, capsys, 
     code, _ = run(hook, monkeypatch, "Bash", {"command": "ls"}, tier="share", shell=False, kind=kind)
     assert code == 2
     assert expected in capsys.readouterr().err
+
+
+# ---- MCP servers the owner configured (PR #3778 review) ----------------------------------
+# The drop-in covered built-in tools only, so a filesystem or exec MCP server in the
+# owner's `.mcp.json` ran unguarded in a shared person's turn: the shell by another name.
+# Such a tool is held to the shell's line; the platform's own `trinity` server is fenced
+# per route by the backend (the turn header) and passes without a lookup.
+
+@pytest.mark.parametrize("tool", ["mcp__filesystem__read_file", "mcp__shell__exec",
+                                  "mcp__plugin_x_y__write",
+                                  "mcp__trinity___x",          # a server named `trinity_`
+                                  "mcp__trinity__fs__read"])   # a server named `trinity__fs`
+def test_a_shared_persons_turn_cannot_use_the_owners_mcp_servers(hook, monkeypatch, tool):
+    code, asked = run(hook, monkeypatch, tool, {"path": "/home/developer/CLAUDE.md"}, tier="share")
+    assert code == 2 and asked == [("agent-a", "exec-1")]
+
+
+@pytest.mark.parametrize("tier,shell", [("owner", True), ("share", True)])
+def test_a_turn_that_may_use_the_shell_may_use_them(hook, monkeypatch, tier, shell):
+    code, asked = run(hook, monkeypatch, "mcp__filesystem__read_file", {}, tier=tier, shell=shell,
+                      kind="visitor" if tier == "share" else None)
+    assert code == 0 and asked
+
+
+@pytest.mark.parametrize("answer", ["unknown", "unreachable"])
+def test_no_answer_keeps_the_owners_mcp_servers_closed(hook, monkeypatch, answer):
+    assert run(hook, monkeypatch, "mcp__filesystem__read_file", {}, tier=answer)[0] == 2
+
+
+@pytest.mark.parametrize("tool", ["mcp__trinity__chat_with_agent", "mcp__trinity__list_agents"])
+def test_the_platforms_own_server_passes_without_asking(hook, monkeypatch, tool):
+    assert run(hook, monkeypatch, tool, {"agent_name": "b"}, tier="share") == (0, [])
+
+
+def test_an_mcp_tool_outside_a_platform_turn_asks_nobody(hook, monkeypatch):
+    assert run(hook, monkeypatch, "mcp__filesystem__read_file", {}, run_id="") == (0, [])
+
+
+def test_the_mcp_refusal_names_the_owners_servers(hook, monkeypatch, capsys):
+    code, _ = run(hook, monkeypatch, "mcp__filesystem__read_file", {}, tier="share", kind="person")
+    assert code == 2 and "MCP" in capsys.readouterr().err

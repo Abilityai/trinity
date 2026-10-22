@@ -2634,6 +2634,10 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     if not (db.can_user_share_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name, manage=True)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    # ent#926: an agent's key resolves to its owner, so an owner check inside a
+    # handler (a force-reset pull) would pass it in a shared person's turn.
+    if restricted_agent_turn(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWNER_TIER_TURN_REFUSED)
 
 
 # ---------------------------------------------------------------------------
@@ -2736,44 +2740,51 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
     return person if person else NO_ROWS_USER_ID
 
 
-# Routes that set up work which later runs as the agent's owner: a schedule (and
-# its webhook), a loop, a reminder, an event and an event subscription. An agent
-# key acting in a turn that may not do that is refused here, at the one auth
-# entry point, like the ephemeral and ops fences (ent#926 ruling 2026-10-19).
-_STANDING_WORK_ROUTES = (
-    ("POST", re.compile(r"^/api/agents/[^/]+/schedules$")),
-    ("PUT", re.compile(r"^/api/agents/[^/]+/schedules/[^/]+$")),
-    ("POST", re.compile(r"^/api/agents/[^/]+/schedules/[^/]+/(enable|trigger|webhook|webhook/secret)$")),
-    ("POST", re.compile(r"^/api/agents/[^/]+/loops$")),
-    ("POST", re.compile(r"^/api/agents/[^/]+/reminders$")),
-    ("POST", re.compile(r"^/api/events$")),
-    ("POST", re.compile(r"^/api/agents/[^/]+/emit-event$")),
-    ("POST", re.compile(r"^/api/agents/[^/]+/event-subscriptions$")),
-    ("PUT", re.compile(r"^/api/event-subscriptions/[^/]+$")),
-)
+# An agent key acting in a turn the platform restricts (a shared person's, or a
+# visitor's once the owner turned `visitor_shell` off) is refused, at the one
+# auth entry point like the ephemeral and ops fences, on every route the route
+# census rates owner tier, on standing work (schedules and their webhooks and
+# triggers, loops, reminders, events, event subscriptions: work that later runs
+# as the owner), and on an agent-naming route the census has never seen (ent#926
+# ruling 2026-10-19; PR #3778 review: a fixed list of regexes left every other
+# owner-tier route open, because the agent's key resolves to its owner). The
+# table is `services/agent_route_tiers.json`, held to the code by the census test.
 
 STANDING_WORK_REFUSED = (
     "This turn is for a person the agent is shared with (or a visitor the owner has "
     "limited), so it cannot set up work that runs later as the agent's owner: schedules, "
     "loops, reminders and events. Ask the agent's owner to set it up."
 )
+OWNER_TIER_TURN_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), and this is something only the agent's owner may do. Ask the agent's "
+    "owner to do it."
+)
 
 
-def _enforce_standing_work_fence(request, principal: User) -> None:
-    method = (getattr(request, "method", "") or "").upper()
-    path = request.scope["path"] if hasattr(request, "scope") else ""
-    if not any(m == method and rx.match(path) for m, rx in _STANDING_WORK_ROUTES):
-        return
+def restricted_agent_turn(principal) -> bool:
+    """Whether `principal` is an agent key acting in a turn the platform rates
+    below the owner (the shell's line: a shared person always, a visitor when
+    the owner turned `visitor_shell` off, an unknown or foreign turn always)."""
     run = getattr(principal, "_acting_execution_id", None)
     if not run or run == _MANUAL_EXECUTION_ID:
-        return
+        return False
     from services import turn_tier_service
     acting = turn_tier_service.acting_turn(db, principal)
     if acting is None:
-        return
+        return False
     tier, kind, _ = acting
-    if turn_tier_service.restricts_standing_work(db, principal.agent_name, tier, kind):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=STANDING_WORK_REFUSED)
+    return turn_tier_service.restricts_standing_work(db, principal.agent_name, tier, kind)
+
+
+def _enforce_standing_work_fence(request, principal: User) -> None:
+    from services import route_tier_service
+    method = (getattr(request, "method", "") or "").upper()
+    refused = route_tier_service.refused_in_restricted_turn(method, request)
+    if refused is None or not restricted_agent_turn(principal):
+        return
+    detail = STANDING_WORK_REFUSED if refused == "standing_work" else OWNER_TIER_TURN_REFUSED
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def agent_viewer_tier(current_user: User, agent_name: str) -> str:

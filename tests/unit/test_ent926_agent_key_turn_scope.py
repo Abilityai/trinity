@@ -246,3 +246,117 @@ def test_no_row_is_stamped_with_the_bare_caller_id():
                     and isinstance(node.value.value, ast.Name) and node.value.value.id == "current_user"):
                 offenders.append(f"{path.relative_to(root)}:{node.value.lineno}")
     assert offenders == [], f"use turn_tier_service.turn_origin_user_id: {offenders}"
+
+
+# ---- owner-tier routes: refused by default in a restricted turn (PR #3778 review) ---------
+# The standing-work fence was nine regexes, so every other owner-tier route an agent's key
+# could reach (`POST /git/sync`, `/git/reset-to-main-preserve-state`, a force-reset pull)
+# still ran at owner tier in a shared person's turn: the key resolves to the owner. The
+# fence now reads the route census at runtime: an `owner` row, or an agent-naming route
+# with no row at all, is refused for an agent key in a restricted turn unless its row says
+# why it may pass (`restricted_turn`).
+
+import json as _json
+import re as _re
+from pathlib import Path as _Path
+
+_TABLE = _json.loads((_Path(dep.__file__).resolve().parent / "services" / "agent_route_tiers.json").read_text())
+
+
+def _concrete(template):
+    """A request path for a route template: the agent is agent-a, every other param x."""
+    path = _re.sub(r"\{(agent_name|name)\}", AGENT, template)
+    return _re.sub(r"\{[^}]+\}", "x", path)
+
+
+class _RoutedReq:
+    """A request as FastAPI hands it to a dependency: the matched route is in the scope."""
+
+    def __init__(self, method, template):
+        self.method = method
+        self.scope = {"path": _concrete(template), "route": SimpleNamespace(path=template)}
+
+
+OWNER_ROWS = sorted(k for k, r in _TABLE.items()
+                    if r["tier"] == "owner" and r["method"] != "WEBSOCKET" and not r.get("restricted_turn"))
+OPEN_ROWS = sorted(k for k, r in _TABLE.items()
+                   if (r["tier"] != "owner" or r.get("restricted_turn")) and not r.get("standing_work")
+                   and r["method"] != "WEBSOCKET")
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/api/agents/agent-a/git/sync"),
+    ("POST", "/api/agents/agent-a/git/reset-to-main-preserve-state"),
+    ("PUT", "/api/agents/agent-a/git/auto-sync"),
+    ("POST", "/api/agents/agent-a/credentials/inject"),
+])
+def test_the_reviewers_owner_tier_routes_are_refused_in_a_shared_persons_turn(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+@pytest.mark.parametrize("key", OWNER_ROWS)
+def test_every_owner_tier_route_is_refused_in_a_shared_persons_turn(key, visitor_shell):
+    row = _TABLE[key]
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-mate"))
+    assert exc.value.status_code == 403, key
+    dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-owner"))
+
+
+@pytest.mark.parametrize("key", OPEN_ROWS)
+def test_a_route_a_shared_person_may_use_stays_open_to_the_agent_in_their_turn(key, visitor_shell):
+    row = _TABLE[key]
+    dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-mate"))
+
+
+def test_an_agent_route_the_census_has_never_seen_is_owner_tier(visitor_shell):
+    req = _RoutedReq("POST", "/api/agents/{agent_name}/brand-new-power")
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-mate"))
+    dep._enforce_standing_work_fence(req, _key("e-owner"))
+
+
+def test_a_route_that_names_no_agent_is_not_the_census_s_question(visitor_shell):
+    dep._enforce_standing_work_fence(_RoutedReq("GET", "/api/agents"), _key("e-mate"))
+
+
+def test_a_visitor_reaches_owner_tier_routes_only_while_the_owner_allows_the_shell(visitor_shell):
+    req = _Req("POST", "/api/agents/agent-a/git/sync")
+    dep._enforce_standing_work_fence(req, _key("e-visitor"))
+    visitor_shell["visitor_shell"] = False
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-visitor"))
+
+
+def test_an_owner_check_inside_a_handler_refuses_a_restricted_turn(visitor_shell):
+    """`POST /git/pull` is accessor tier; its `force_reset` is owner tier inside the
+    handler (`assert_agent_owner`), which the agent's key passed as the owner."""
+    with pytest.raises(dep.HTTPException) as exc:
+        dep.assert_agent_owner(_key("e-mate"), AGENT)
+    assert exc.value.status_code == 403
+    for run in ("e-owner", "manual", None):
+        dep.assert_agent_owner(_key(run), AGENT)
+
+
+def test_the_census_ships_with_the_backend():
+    """Read at runtime, so it lives in a directory the backend image copies."""
+    backend = _Path(dep.__file__).resolve().parent
+    dockerfile = (backend.parents[1] / "docker/backend/Dockerfile").read_text()
+    assert "COPY ../../src/backend/services /app/services/" in dockerfile
+    from services import route_tier_service
+    assert route_tier_service.TABLE == _TABLE
+
+
+def test_the_files_surface_rates_an_agent_key_in_a_shared_turn_as_that_share(visitor_shell):
+    """AC3: an agent key is KEY tier on the Files routes, where an `instructions.manage`
+    grant lets it rewrite CLAUDE.md. Acting for a shared person it is that person's tier."""
+    from services.agent_service import files
+    from services import file_path_policy as policy
+    assert files._caller_tier(_key("e-mate"), AGENT) == policy.SHARE
+    assert not policy.decide(files._caller_tier(_key("e-mate"), AGENT), "write", "CLAUDE.md").allowed
+    for run in ("e-owner", "manual", None):
+        assert files._caller_tier(_key(run), AGENT) == policy.KEY

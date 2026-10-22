@@ -906,12 +906,14 @@
  "event_subscriptions.py::create_event_subscription": {
   "method": "POST",
   "path": "/api/agents/{name}/event-subscriptions",
+  "standing_work": true,
   "tier": "owner"
  },
  "event_subscriptions.py::emit_event_for_agent": {
   "method": "POST",
   "path": "/api/agents/{name}/emit-event",
   "reason": "ent#926: owner tier for people (assert_agent_owner in the handler; deliveries run as the platform). Agent keys keep the #2973 sibling-emit path, fenced in restricted turns",
+  "standing_work": true,
   "tier": "owner"
  },
  "event_subscriptions.py::list_agent_events": {
@@ -1066,6 +1068,7 @@
   "method": "POST",
   "path": "/api/agents/{name}/loops",
   "reason": "legacy",
+  "standing_work": true,
   "tier": "accessor"
  },
  "messages.py::get_proactive_shares": {
@@ -1106,7 +1109,8 @@
  "monitoring.py::trigger_health_check": {
   "method": "POST",
   "path": "/api/monitoring/agents/{agent_name}/check",
-  "tier": "owner"
+  "reason": "ent#293: a health probe on an agent the caller can already see is a use, not a grant (AuthorizedAgentByName); the owner gate was only named in the docstring",
+  "tier": "accessor"
  },
  "nevermined.py::configure_nevermined": {
   "method": "POST",
@@ -1233,6 +1237,7 @@
   "method": "POST",
   "path": "/api/agents/{name}/reminders",
   "reason": "legacy",
+  "standing_work": true,
   "tier": "accessor"
  },
  "reminders.py::list_reminders_endpoint": {
@@ -1262,6 +1267,7 @@
   "method": "POST",
   "path": "/api/agents/{name}/schedules",
   "reason": "legacy",
+  "standing_work": true,
   "tier": "accessor"
  },
  "schedules.py::delete_schedule": {
@@ -1273,6 +1279,7 @@
  "schedules.py::disable_schedule": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/disable",
+  "restricted_turn": "allow: disabling a schedule only lowers what runs later as the owner",
   "tier": "owner"
  },
  "schedules.py::disable_webhook_secret": {
@@ -1284,18 +1291,21 @@
  "schedules.py::enable_schedule": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/enable",
+  "standing_work": true,
   "tier": "owner"
  },
  "schedules.py::generate_webhook": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
   "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "standing_work": true,
   "tier": "resource"
  },
  "schedules.py::generate_webhook_secret": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/webhook/secret",
   "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "standing_work": true,
   "tier": "resource"
  },
  "schedules.py::get_agent_executions": {
@@ -1361,12 +1371,14 @@
  "schedules.py::trigger_schedule": {
   "method": "POST",
   "path": "/api/agents/{name}/schedules/{schedule_id}/trigger",
+  "standing_work": true,
   "tier": "owner"
  },
  "schedules.py::update_schedule": {
   "method": "PUT",
   "path": "/api/agents/{name}/schedules/{schedule_id}",
   "reason": "the schedule's creator or admin (db.update_schedule)",
+  "standing_work": true,
   "tier": "resource"
  },
  "seat_decisions.py::list_seat_decisions": {
@@ -1667,7 +1679,8 @@
  "telegram.py::list_telegram_groups": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/telegram/groups",
-  "tier": "owner"
+  "reason": "ent#264: group ids and titles for owner, shared and admin (AuthorizedAgentByName); was declared owner, but the owner gate was only named in the docstring",
+  "tier": "accessor"
  },
  "telegram.py::send_telegram_group_message": {
   "method": "POST",

@@ -10,10 +10,17 @@ The table is read against the code, not trusted:
   * every live agent-naming route has a row, every row has a live route (a
     renamed handler or a changed path must be re-declared);
   * a row declared ``owner`` must show an owner/admin gate in the handler or in
-    the helper named in ``via``; a row declared ``accessor`` must NOT;
+    the helper named in ``via``; a row declared ``accessor`` must NOT. A gate is
+    read from the code's identifiers (names and attributes on the AST), so a
+    gate name in a comment, docstring or message string does not count;
   * the accessor rows tagged ``legacy`` are the debt list - a shrink-only
     ratchet. A new accessor row needs a real reason, and the legacy count may
     only fall (lower ``LEGACY_ACCESSOR_BASELINE`` when you tighten a route).
+
+The table also drives the auth entry point at runtime
+(``services/route_tier_service.py``): an agent's key in a restricted turn is
+refused every ``owner`` row and every ``standing_work`` row. ``restricted_turn``
+on an owner row lets that key through, and must say why.
 
 Static (AST, stdlib only) on purpose: importing the assembled app in the unit
 island is skipped in whole-directory runs, which would make this guard decorative.
@@ -29,7 +36,7 @@ import pytest
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 _ROUTERS = _BACKEND / "routers"
-_TABLE = Path(__file__).with_name("agent_route_tiers.json")
+_TABLE = _BACKEND / "services" / "agent_route_tiers.json"
 
 HTTP = {"get", "post", "put", "delete", "patch", "websocket"}
 TIERS = {"owner", "accessor", "self", "public", "internal", "resource"}
@@ -48,7 +55,7 @@ ACCESSOR_GATE = re.compile(
     r"accessible_agent_names|_assert_agent_accessible)\b")
 
 _HOW_TO = (
-    "Declare it in tests/unit/agent_route_tiers.json: tier 'owner' (default - use an "
+    "Declare it in src/backend/services/agent_route_tiers.json: tier 'owner' (default - use an "
     "OwnedAgent dependency or assert_agent_owner), or another tier with a reason a "
     "reviewer can read. Accessor tier means a person the agent is merely shared with "
     "may call it; say why that is intended.")
@@ -74,6 +81,23 @@ def _names_an_agent(full: str) -> bool:
             or full.startswith("/api/agent-dashboard/{name}"))
 
 
+def identifiers(node: ast.AST) -> frozenset[str]:
+    """Every name and attribute the code under `node` uses (decorators included).
+    Comments are not on the AST and strings are not identifiers, so neither can
+    stand in for a gate."""
+    out = set()
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            out.add(n.id)
+        elif isinstance(n, ast.Attribute):
+            out.add(n.attr)
+    return frozenset(out)
+
+
+def shows(gate: re.Pattern, names) -> bool:
+    return any(gate.fullmatch(name) for name in names)
+
+
 def scan_source(src: str, fname: str) -> dict[str, dict]:
     """key -> {method, path, segment} for every agent-naming route in one file."""
     tree = ast.parse(src)
@@ -89,10 +113,8 @@ def scan_source(src: str, fname: str) -> dict[str, dict]:
             full = pre.get(getattr(d.func.value, "id", ""), "") + d.args[0].value
             if not _names_an_agent(full):
                 continue
-            seg = "\n".join(ast.get_source_segment(src, x) or "" for x in n.decorator_list)
-            seg += "\n" + (ast.get_source_segment(src, n) or "")
             found[f"{fname}::{n.name}"] = {"method": d.func.attr.upper(), "path": full,
-                                           "segment": seg}
+                                           "names": identifiers(n)}
     return found
 
 
@@ -103,11 +125,11 @@ def live_routes() -> dict[str, dict]:
     return out
 
 
-_DEF_CACHE: dict[str, list[str]] | None = None
+_DEF_CACHE: dict[str, list[frozenset]] | None = None
 
 
-def _bodies(name: str) -> list[str]:
-    """Source of every function called `name` in the backend (private submodule excluded)."""
+def _bodies(name: str) -> list[frozenset]:
+    """Identifiers of every function called `name` in the backend (private submodule excluded)."""
     global _DEF_CACHE
     if _DEF_CACHE is None:
         _DEF_CACHE = {}
@@ -121,18 +143,19 @@ def _bodies(name: str) -> list[str]:
                 continue
             for n in ast.walk(tree):
                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    _DEF_CACHE.setdefault(n.name, []).append(ast.get_source_segment(src, n) or "")
+                    _DEF_CACHE.setdefault(n.name, []).append(identifiers(n))
     return _DEF_CACHE.get(name, [])
 
 
-def _gate_text(live: dict, row: dict) -> str:
-    text = live["segment"]
+def _gate_names(live: dict, row: dict) -> frozenset:
+    names = set(live["names"])
     via = row.get("via", "")
     if via:
         bodies = _bodies(via)
         assert bodies, f"'via' names {via!r}, which is not a function in the backend"
-        text += "\n" + "\n".join(bodies)
-    return text
+        for body in bodies:
+            names |= body
+    return frozenset(names)
 
 
 TABLE: dict[str, dict] = json.loads(_TABLE.read_text())
@@ -170,8 +193,8 @@ def test_the_row_describes_the_route(key):
 @pytest.mark.parametrize("key", sorted(k for k in set(TABLE) & set(LIVE)
                                         if TABLE[k]["tier"] in ("owner", "accessor")))
 def test_a_declared_tier_matches_the_gate_in_the_code(key):
-    row, text = TABLE[key], _gate_text(LIVE[key], TABLE[key])
-    owner, accessor = bool(OWNER_GATE.search(text)), bool(ACCESSOR_GATE.search(text))
+    row, names = TABLE[key], _gate_names(LIVE[key], TABLE[key])
+    owner, accessor = shows(OWNER_GATE, names), shows(ACCESSOR_GATE, names)
     if row["tier"] == "owner":
         assert owner, f"{key} is declared owner but shows no owner/admin gate (add one, or re-declare)"
     else:
@@ -227,10 +250,76 @@ def test_the_scanner_finds_agent_routes_and_only_those():
 
 def test_the_scanner_reads_gates_from_the_handler():
     found = scan_source(_SYNTH, "synth.py")
-    assert ACCESSOR_GATE.search(found["synth.py::thing"]["segment"])
-    assert not OWNER_GATE.search(found["synth.py::thing"]["segment"])
-    assert not (ACCESSOR_GATE.search(found["synth.py::danger"]["segment"])
-                or OWNER_GATE.search(found["synth.py::danger"]["segment"]))
+    assert shows(ACCESSOR_GATE, found["synth.py::thing"]["names"])
+    assert not shows(OWNER_GATE, found["synth.py::thing"]["names"])
+    assert not (shows(ACCESSOR_GATE, found["synth.py::danger"]["names"])
+                or shows(OWNER_GATE, found["synth.py::danger"]["names"]))
+
+
+_SYNTH_COMMENTED = '''
+from fastapi import APIRouter
+router = APIRouter(prefix="/api/agents")
+
+@router.post("/{agent_name}/danger")
+async def danger(agent_name: str, current_user=Depends(get_current_user)):
+    """Owner only: callers must pass assert_agent_owner."""
+    # OwnedAgentByName would be the right dependency here
+    raise HTTPException(403, "assert_agent_owner failed")
+'''
+
+
+def test_a_gate_named_only_in_a_comment_docstring_or_string_does_not_count():
+    """PR #3778 review: the check was a regex over source text."""
+    names = scan_source(_SYNTH_COMMENTED, "synth.py")["synth.py::danger"]["names"]
+    assert not shows(OWNER_GATE, names)
+
+
+# ---- the runtime fence reads this table (PR #3778 review) -------------------------------
+
+def test_runtime_flags_are_well_formed():
+    for key, row in TABLE.items():
+        assert row.get("standing_work") in (None, True), key
+        if "restricted_turn" in row:
+            assert row["tier"] == "owner", f"{key}: restricted_turn only loosens an owner row"
+            assert row["restricted_turn"].startswith("allow: ") and len(row["restricted_turn"]) >= 30, (
+                f"{key}: say why an agent's key may use it in a shared person's turn")
+
+
+def test_standing_work_routes_that_name_no_agent_are_live():
+    """The two standing-work routes the census has no row for are pinned by method and
+    template, so a renamed route fails here instead of dropping out of the fence."""
+    import sys
+    sys.path.insert(0, str(_BACKEND))
+    try:
+        from services.route_tier_service import STANDING_WORK_UNNAMED, names_an_agent
+    finally:
+        sys.path.remove(str(_BACKEND))
+    live = set()
+    for f in sorted(_ROUTERS.rglob("*.py")):
+        src = f.read_text()
+        tree = ast.parse(src)
+        pre = _prefixes(tree)
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for d in n.decorator_list:
+                    if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                            and d.func.attr in HTTP and d.args and isinstance(d.args[0], ast.Constant)):
+                        live.add((d.func.attr.upper(),
+                                  pre.get(getattr(d.func.value, "id", ""), "") + d.args[0].value))
+    for method, template in STANDING_WORK_UNNAMED:
+        assert (method, template) in live, f"{method} {template} is not a live route"
+        assert not names_an_agent(template)
+
+
+def test_the_runtime_reads_the_same_agent_naming_test_as_the_census():
+    import sys
+    sys.path.insert(0, str(_BACKEND))
+    try:
+        from services.route_tier_service import names_an_agent
+    finally:
+        sys.path.remove(str(_BACKEND))
+    for path in [r["path"] for r in TABLE.values()] + ["/api/agents", "/api/templates/{name}"]:
+        assert names_an_agent(path) == _names_an_agent(path), path
 
 
 def test_an_undeclared_synthetic_route_would_be_reported():

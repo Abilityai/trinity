@@ -320,10 +320,15 @@ def _caller_tier(current_user, agent_name: str) -> str:
     owner gate (owner or admin), SHARE any other person (a share holder, by JWT
     or by their own user-scope key), KEY every agent, system, connector or ops
     key."""
-    from dependencies import is_person_principal
+    from dependencies import is_person_principal, restricted_agent_turn
     if _passes_owner_tier(current_user, agent_name):
         return _policy.OWNER
     if is_person_principal(current_user):
+        return _policy.SHARE
+    # ent#926: an agent's key acting for a shared person (or a limited visitor)
+    # is that person's tier, so its `instructions.manage` / `skills.manage`
+    # grants do not rewrite instructions on their behalf.
+    if restricted_agent_turn(current_user):
         return _policy.SHARE
     return _policy.KEY
 

@@ -29,6 +29,17 @@ without its own). So a shared person's turn gets no Bash at all; the owner's
 turns keep it, and so do channel and public-link visitors unless the owner
 turned the `visitor_shell` guardrail off. The platform answers that (`shell` in
 the turn-tier reply); every Bash call in a platform turn asks it once.
+
+A search reads everything under its root, so Grep/Glob are judged by the tree,
+not the `path` argument alone: a search with no path (it runs in the home), one
+rooted at or above the home or a fixed owner-only location, one whose name
+filter leaves its root, or one whose folder holds an owner-only file (bounded
+walk; too large to check counts as holding one) takes the owner tier.
+
+MCP servers the owner added (`.mcp.json`, plugins) are matched too: a
+filesystem or exec server is the shell by another name, so their tools follow
+the shell's line. The platform's own `trinity` server passes here; the backend
+fences it per route from the turn header the MCP server forwards.
 """
 import json
 import os
@@ -45,11 +56,17 @@ HTTP_TIMEOUT_SECONDS = 4
 ENVIRON_MAX_BYTES = 1 << 20
 RESPONSE_MAX_BYTES = 4096
 MAX_ID_LEN = 128
+# A search of a folder holding more than this is refused in a shared turn rather
+# than checked partly (narrow the search instead).
+SEARCH_WALK_MAX_ENTRIES = 5000
+SEARCH_OWNER_TIER = "owner_tier_search"
 
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 READ_TOOLS = {"Read", "NotebookRead"}
 SEARCH_TOOLS = {"Grep", "Glob"}
 SHELL_TOOLS = {"Bash"}
+MCP_PREFIX = "mcp__"
+PLATFORM_MCP_PREFIX = "mcp__trinity__"
 
 COULD_NOT_CHECK = (
     "Trinity could not be reached to check whose turn this is, so this path was not "
@@ -63,9 +80,24 @@ SHELL_VISITOR_OFF = (
     "This conversation comes from a channel or a public link, and the agent's owner "
     "has turned off running commands for those. Answer without the shell."
 )
+MCP_OWNER_ONLY = (
+    "This turn is for a person the agent is shared with, and the MCP servers the agent's "
+    "owner added are owner-only (they can reach files and commands the agent's own tools "
+    "may not). Answer without them, or ask the agent's owner."
+)
+MCP_VISITOR_OFF = (
+    "This conversation comes from a channel or a public link, and the agent's owner has "
+    "turned off running commands for those, which includes the MCP servers the owner "
+    "added. Answer without them."
+)
 OWNER_ONLY = (
     "This turn is for a person the agent is shared with, and that path is owner-only. "
     "Ask the agent's owner to do it."
+)
+SEARCH_OWNER_ONLY = (
+    "This turn is for a person the agent is shared with, and that search would read "
+    "owner-only files (a search with no path runs over the agent's whole home). Search "
+    "a narrower folder that holds only ordinary files, or ask the agent's owner."
 )
 
 
@@ -106,10 +138,73 @@ def targets(tool: str, tool_input: dict) -> list:
         if not raw:
             return []
         # A search aimed at a directory reads what is under it; aimed at a file it
-        # reads the file. Either way the path must pass both, so the answer never
-        # depends on what happens to exist.
+        # reads the file. Either way the path itself must pass both; what lies
+        # under it is `search_refusal`'s question.
         return [("list", raw), ("read", raw)]
     return []
+
+
+def _escapes_root(pattern: str) -> bool:
+    """A glob filter that can name files outside the search root."""
+    return bool(pattern) and (pattern.startswith(("/", "~"))
+                              or ".." in pattern.replace("\\", "/").split("/"))
+
+
+def _owner_only_anchors(policy) -> tuple:
+    """Fixed locations that hold owner-tier-to-read files, from the shared
+    policy's own path-anchored patterns, plus the home itself (its top level
+    holds `.env`, `.mcp.json` and the rest by basename)."""
+    patterns = (policy.CREDENTIAL_PATH_PATTERNS + policy.RUNTIME_CONFIG_PATTERNS
+                + policy.PATH_ALIAS_PATTERNS + policy.TRINITY_CREDENTIAL_COPY_PATTERNS
+                + policy.SECRET_FILE_CLASS_PATTERNS)
+    return (HOME,) + tuple(policy.deny_anchor(p, HOME) for p in patterns if "/" in p)
+
+
+def _tree_holds_owner_only(policy, root: str) -> bool:
+    """Whether a search of `root` would read a file a shared person may not.
+
+    Walks the tree (bounded): any file the policy keeps at owner tier to read, a
+    link to a folder (the search may follow it anywhere), or more entries than
+    the bound counts as reaching one, so a search too large to check is refused,
+    never waved through."""
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        for name in dirnames + filenames:
+            seen += 1
+            if seen > SEARCH_WALK_MAX_ENTRIES:
+                return True
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                real = os.path.realpath(full)
+                if os.path.isdir(real) or not policy.decide(policy.SHARE, "read", real).allowed:
+                    return True
+            elif name in filenames and not policy.decide(policy.SHARE, "read", full).allowed:
+                return True
+    return False
+
+
+def search_refusal(policy, tool: str, tool_input: dict):
+    """(verb, path, code) when a Grep/Glob would reach owner-tier files for a
+    shared person, else None (PR #3778 review: judging the `path` argument
+    alone let a search with no path, which runs in the home, or one rooted at
+    the home read every transcript and `.env`; Grep includes dotfiles).
+
+    Refused, unless the turn is the owner's: no path; a root that is the home,
+    above it, or above any fixed owner-only location; a glob filter that can
+    leave the root; a root whose tree holds an owner-only file."""
+    raw = tool_input.get("path") or ""
+    if not raw:
+        return ("search", HOME, SEARCH_OWNER_TIER)
+    root = resolve(raw)
+    if any(root == a or a.startswith(root.rstrip("/") + "/") for a in _owner_only_anchors(policy)):
+        return ("search", root, SEARCH_OWNER_TIER)
+    # Glob's `pattern` and Grep's `glob` name files (Grep's `pattern` is the text).
+    name_filter = tool_input.get("pattern" if tool == "Glob" else "glob")
+    if isinstance(name_filter, str) and _escapes_root(name_filter):
+        return ("search", root, SEARCH_OWNER_TIER)
+    if os.path.isdir(root) and _tree_holds_owner_only(policy, root):
+        return ("search", root, SEARCH_OWNER_TIER)
+    return None
 
 
 def ask_tier(container_env: dict, agent: str, run: str) -> str:
@@ -170,8 +265,9 @@ def turn_context():
     return agent, run, container
 
 
-def guard_shell(tool: str) -> None:
-    """The shell: allow only a turn the platform says may use it."""
+def guard_shell(tool: str, *, verb: str = "exec") -> None:
+    """The shell (and anything as strong): allow only a turn the platform says
+    may use it."""
     agent, run, container = turn_context()
     if not run:
         allow()  # no platform turn: a terminal or manual shell
@@ -179,9 +275,21 @@ def guard_shell(tool: str) -> None:
     if shell:
         allow()
     if tier == "unreachable":
-        deny(COULD_NOT_CHECK, tool=tool, verb="exec", tier=tier)
-    reason = SHELL_VISITOR_OFF if kind == "visitor" else SHELL_OWNER_ONLY
-    deny(reason, tool=tool, verb="exec", tier=tier, kind=kind)
+        deny(COULD_NOT_CHECK, tool=tool, verb=verb, tier=tier)
+    if verb == "mcp":
+        reason = MCP_VISITOR_OFF if kind == "visitor" else MCP_OWNER_ONLY
+    else:
+        reason = SHELL_VISITOR_OFF if kind == "visitor" else SHELL_OWNER_ONLY
+    deny(reason, tool=tool, verb=verb, tier=tier, kind=kind)
+
+
+def is_platform_mcp_tool(tool: str) -> bool:
+    """A tool of the platform's own `trinity` MCP server (a reserved name the
+    owner cannot redefine). Claude Code names tools `mcp__<server>__<tool>`, so a
+    server called `trinity_` or `trinity__x` shares the prefix; neither leaves a
+    remainder that is one plain tool name."""
+    rest = tool[len(PLATFORM_MCP_PREFIX):] if tool.startswith(PLATFORM_MCP_PREFIX) else ""
+    return bool(rest) and not rest.startswith("_") and "__" not in rest
 
 
 def main() -> None:
@@ -190,8 +298,15 @@ def main() -> None:
     tool_input = data.get("tool_input") or {}
     if tool in SHELL_TOOLS:
         guard_shell(tool)
+    if tool.startswith(MCP_PREFIX):
+        # The platform's server is fenced per route by the backend, which reads
+        # this turn from the request header. Any other server is the owner's,
+        # and a filesystem or exec server is the shell by another name.
+        if is_platform_mcp_tool(tool):
+            allow()
+        guard_shell(tool, verb="mcp")
     pairs = targets(tool, tool_input)
-    if not pairs:
+    if not pairs and tool not in SEARCH_TOOLS:
         allow()
 
     import file_path_policy as policy
@@ -202,6 +317,10 @@ def main() -> None:
         decision = policy.decide(policy.SHARE, verb, path)
         if not decision.allowed:
             refused.append((verb, path, decision.code))
+    if tool in SEARCH_TOOLS and not refused:
+        searched = search_refusal(policy, tool, tool_input)
+        if searched:
+            refused.append(searched)
     if not refused:
         allow()
 
@@ -215,7 +334,8 @@ def main() -> None:
         allow()
     if tier == "unreachable":
         deny(COULD_NOT_CHECK, tool=tool, verb=verb, path=path, tier=tier)
-    deny(OWNER_ONLY, tool=tool, verb=verb, path=path, tier=tier, rule=code)
+    deny(SEARCH_OWNER_ONLY if code == SEARCH_OWNER_TIER else OWNER_ONLY,
+         tool=tool, verb=verb, path=path, tier=tier, rule=code)
 
 
 if __name__ == "__main__":
