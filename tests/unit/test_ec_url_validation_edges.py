@@ -478,6 +478,16 @@ def test_C12_an_unencodable_ascii_host_is_a_named_refusal(url):
     assert "idna" not in str(exc.value).lower()
 
 
+def test_C12_the_trusted_a2a_path_refuses_an_unencodable_host_by_name():
+    """The trusted-network arm resolves the host itself; a codec refusal there
+    must fall through to the ordinary refusal, not escape as UnicodeError."""
+    with pytest.raises(uv.A2AEndpointUrlError) as exc:
+        uv.validate_a2a_endpoint_url(
+            "http://a..example.com/", trusted_entries=["*.example.com"], resolver=FaithfulResolver()
+        )
+    assert exc.value.reason == "endpoint_not_https"
+
+
 @pytest.mark.parametrize(
     "url",
     [

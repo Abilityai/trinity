@@ -114,6 +114,10 @@ def reject_embedded_credentials(url: str) -> None:
     A protocol-relative `//tok@host` already has its authority, so it gets no
     assumed scheme — the same `had_authority` rule as `strip_url_credentials`
     (#3323).
+
+    A URL `urlparse` cannot parse returns without raising unless the shared
+    userinfo regex finds a credential. Callers must run their URL validator
+    next (every caller runs `validate_skills_library_url`), which refuses it.
     """
     text = url.strip()
     # `https://` + `//tok@host` parses with an EMPTY netloc, so `.username` is
