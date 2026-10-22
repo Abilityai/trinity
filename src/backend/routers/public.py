@@ -754,8 +754,9 @@ async def get_public_chat_history(
             message_count=0
         )
 
-    # Get messages (oldest first for display)
-    messages = db.get_recent_public_chat_messages(chat_session.id, limit=100)
+    # Get messages (oldest first for display). trinity#3402: the visitor's own
+    # history shows a held message and its notice; only prompts leave them out.
+    messages = db.get_recent_public_chat_messages(chat_session.id, limit=100, include_held=True)
 
     return PublicChatHistoryResponse(
         messages=[

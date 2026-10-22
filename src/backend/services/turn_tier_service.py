@@ -9,6 +9,8 @@ command run; the Gemini/Codex runtimes ask it before they start at all.
 The answer comes from the execution row (who started the turn), never from the
 agent: the hook identifies the turn by `TRINITY_EXECUTION_ID` in the claude
 process's launch environment, which the agent cannot change once it is running.
+The agent key's own reads start from the ledger instead (`running_share_people`,
+trinity-enterprise#875), so a header it omits or forges can only narrow them.
 
   owner    the person is the agent's owner or an admin, or the turn was started
            by something set up at owner tier (a schedule rates as its creator)
@@ -22,6 +24,13 @@ The shell (and running on Gemini/Codex, which no hook can scope) is owner tier,
 with one owner-controlled exception: visitors, by the per-agent guardrail
 `visitor_shell` (default on, so channel agents keep working). A shared person's
 turn never gets it (ruling 2026-10-19).
+
+A schedule run carries no `source_user_id`: the person behind it is the
+schedule's creator (`agent_schedules.owner_id`). A share holder may create a
+schedule (and mint its webhook), so rating every schedule run as `owner` would
+let them run their own prompt as an owner-tier turn. The creator is rated like
+any other person; a schedule that cannot be found, or that belongs to another
+agent, fails closed to `share`; one with no recorded creator is the owner's.
 """
 from typing import Optional, Tuple
 
@@ -41,9 +50,9 @@ OWNER_CONFIGURED_TRIGGERS = frozenset({
     "schedule", "system", "reminder", "loop", "validation", "webhook", "manual", "event",
 })
 
-# `schedule_id` sentinel for rows that are not a real schedule's (reminders,
-# replays): there is no creator to look up.
-_NOT_A_SCHEDULE = "__manual__"
+# The `schedule_id` of a run that belongs to no schedule (reminders, replays):
+# there is no creator to look up.
+_NO_SCHEDULE_IDS = frozenset({"", "__manual__"})
 
 VISITOR_SHELL_KEY = "visitor_shell"
 
@@ -70,26 +79,53 @@ def _int_or_none(value) -> Optional[int]:
     return number if number > 0 else None
 
 
-def turn_actor(db, agent_name: str, execution_id: str) -> Tuple[str, Optional[str], Optional[int]]:
-    """(tier, kind, person id). `kind` is `person` or `visitor` for a share turn
-    and None otherwise; the person id is the user a share turn is for, if any."""
-    execution = db.get_execution(execution_id)
-    if execution is None or execution.agent_name != agent_name:
+def _field(execution, name: str):
+    if isinstance(execution, dict):
+        return execution.get(name)
+    return getattr(execution, name, None)
+
+
+def _schedule_of(db, agent_name: str, execution):
+    """`(has_schedule, schedule-or-None)` for a run's schedule on `agent_name`."""
+    sid = _field(execution, "schedule_id")
+    if not isinstance(sid, str) or sid in _NO_SCHEDULE_IDS:
+        return False, None
+    try:
+        schedule = db.get_schedule(sid)
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable schedule rates as share
+        schedule = None
+    if schedule is None or _field(schedule, "agent_name") != agent_name:
+        return True, None
+    return True, schedule
+
+
+def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
+               execution=None) -> Tuple[str, Optional[str], Optional[int]]:
+    """(tier, kind, person id) for a turn, by `execution_id` or by the row itself
+    (`execution`: any object or dict carrying `agent_name`, `source_user_id`,
+    `schedule_id` and `triggered_by`). `kind` is `person` or `visitor` for a
+    share turn and None otherwise; the person id is the user a share turn is
+    for, if any."""
+    if execution is None:
+        execution = db.get_execution(execution_id) if execution_id else None
+    if execution is None or _field(execution, "agent_name") != agent_name:
         return UNKNOWN, None, None
-    user_id = getattr(execution, "source_user_id", None)
+    user_id = _field(execution, "source_user_id")
     if user_id is None:
         # A schedule-backed turn is its creator's: a person the agent is shared
         # with may create a schedule, and its runs must not be the owner's.
-        schedule_id = getattr(execution, "schedule_id", None)
-        if schedule_id and schedule_id != _NOT_A_SCHEDULE:
-            schedule = db.get_schedule(schedule_id)
-            creator = getattr(schedule, "owner_id", None) if schedule else None
-            if creator is None:
+        has_schedule, schedule = _schedule_of(db, agent_name, execution)
+        if has_schedule:
+            if schedule is None:
                 return SHARE, VISITOR, None
+            creator = _field(schedule, "owner_id")
+            if creator is None:
+                # No recorded creator: the owner's alone (the webhook rule, ent#875).
+                return OWNER, None, None
             if _user_tier(db, creator, agent_name) == OWNER:
                 return OWNER, None, None
             return SHARE, PERSON, _int_or_none(creator)
-        trigger = (getattr(execution, "triggered_by", "") or "").lower()
+        trigger = (_field(execution, "triggered_by") or "").lower()
         if trigger in OWNER_CONFIGURED_TRIGGERS:
             return OWNER, None, None
         return SHARE, VISITOR, None
@@ -98,8 +134,30 @@ def turn_actor(db, agent_name: str, execution_id: str) -> Tuple[str, Optional[st
     return SHARE, PERSON, _int_or_none(user_id)
 
 
-def turn_tier(db, agent_name: str, execution_id: str) -> str:
-    return turn_actor(db, agent_name, execution_id)[0]
+def turn_tier(db, agent_name: str, execution_id: Optional[str] = None, *, execution=None) -> str:
+    return turn_actor(db, agent_name, execution_id, execution=execution)[0]
+
+
+def turn_person(db, agent_name: str, execution) -> Optional[int]:
+    """The platform user a turn is for: its `source_user_id`, or for a schedule
+    run with none, the schedule's creator. None when the turn has no person."""
+    uid = _field(execution, "source_user_id")
+    if uid is None:
+        has_schedule, schedule = _schedule_of(db, agent_name, execution)
+        if has_schedule and schedule is not None:
+            uid = _field(schedule, "owner_id")
+    return _int_or_none(uid)
+
+
+def running_share_people(db, agent_name: str) -> set:
+    """The people (user ids; None for a turn with no person) of every RUNNING
+    share-tier turn on `agent_name`. Read from the ledger, never from a request,
+    so no header the agent sends can change it."""
+    people = set()
+    for row in db.get_running_turn_attribution(agent_name):
+        if turn_tier(db, agent_name, execution=row) == SHARE:
+            people.add(turn_person(db, agent_name, row))
+    return people
 
 
 def visitor_shell_allowed(db, agent_name: str) -> bool:

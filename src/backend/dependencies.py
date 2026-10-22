@@ -2711,33 +2711,55 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
     """The person an agent key's reads are narrowed to, or None for the full view.
 
     trinity-enterprise#875 left an agent's key at the full view; an agent acts
-    for whoever chats with it, so in a turn for a person the agent is merely
-    shared with, its own reads are that person's (ent#926):
+    for whoever chats with it, so while it runs a turn for a person the agent is
+    merely shared with, its own reads are that person's (ent#926).
 
-      * not an agent key, no header, or `manual` (no platform turn) -> None;
-      * the turn is `owner` tier (the owner, an admin, or something the owner
-        configured)                                                    -> None;
-      * a `share` turn -> its person's id; with no platform user (a public link,
-        a channel) -> `NO_ROWS_USER_ID`;
-      * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`.
+    The `X-Trinity-Execution-Id` header is NOT proof of which turn a request
+    comes from: nothing on this side stops a running turn from calling the API
+    with the agent's key and omitting the header, sending `manual`, or naming
+    another turn. So the decision starts from the LEDGER — the people of the
+    agent's running `share`-tier turns (`turn_tier_service.running_share_people`)
+    — and the header can only narrow further, never widen:
 
-    The turn is the KEY's agent's, whatever agent the route names. Honest in a
-    shared person's turn because that turn has no shell and cannot read the
-    agent's key (the turn-tier hook), so only the platform's MCP config sends
-    the header. A visitor's turn keeps the shell while the owner leaves
-    `visitor_shell` on, and a shell reaches everything the agent can: that is
-    the trust the toggle states, not a guarantee this function gives."""
+      * not an agent key                                   -> None;
+      * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`;
+      * the header names a `share` turn -> that turn's person, provided no other
+        person's share turn is running (otherwise `NO_ROWS_USER_ID`);
+      * otherwise (no header, `manual`, an `owner`-tier turn): no share turn
+        running -> None (the full view); exactly one person's -> that person;
+        several, or one with no platform user (a public link, a channel)
+        -> `NO_ROWS_USER_ID`.
+
+    Fails closed: a ledger that cannot be read returns `NO_ROWS_USER_ID`. The
+    turn is the KEY's agent's, whatever agent the route names."""
     agent = getattr(current_user, "agent_name", None)
     if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
         return None
-    run = getattr(current_user, "_acting_execution_id", None)
-    if not run or run == _MANUAL_EXECUTION_ID:
-        return None
     from services import turn_tier_service
-    tier, _kind, person = turn_tier_service.acting_turn(db, current_user)
-    if tier == turn_tier_service.OWNER:
+    try:
+        people = turn_tier_service.running_share_people(db, agent)
+        run = getattr(current_user, "_acting_execution_id", None)
+        if run and run != _MANUAL_EXECUTION_ID:
+            execution = db.get_execution(run)
+            tier = turn_tier_service.turn_tier(db, agent, execution=execution)
+            if tier == turn_tier_service.UNKNOWN:
+                return NO_ROWS_USER_ID
+            if tier == turn_tier_service.SHARE:
+                person = turn_tier_service.turn_person(db, agent, execution)
+                if person is None or people - {person}:
+                    return NO_ROWS_USER_ID
+                return person
+            # An owner-tier header widens nothing: fall through to the ledger.
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable ledger narrows to nothing
+        logger.warning("[ent#926] acting-turn read failed", exc_info=True)
+        return NO_ROWS_USER_ID
+    if not people:
         return None
-    return person if person else NO_ROWS_USER_ID
+    if len(people) == 1:
+        (person,) = people
+        if isinstance(person, int) and person > 0:
+            return person
+    return NO_ROWS_USER_ID
 
 
 # An agent key acting in a turn the platform restricts (a shared person's, or a

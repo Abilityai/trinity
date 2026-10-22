@@ -149,7 +149,8 @@ def test_the_route_404s_an_unknown_execution():
 def _sched_db(*, creator, creator_user, can_share, schedule_id="s1", trigger="schedule"):
     db = _db(execution=_exec(user_id=None, triggered_by=trigger), user=creator_user, can_share=can_share)
     db.get_execution.return_value.schedule_id = schedule_id
-    db.get_schedule.return_value = SimpleNamespace(owner_id=creator) if creator is not False else None
+    db.get_schedule.return_value = (SimpleNamespace(agent_name=AGENT, owner_id=creator)
+                                    if creator is not False else None)
     return db
 
 
@@ -173,6 +174,21 @@ def test_a_schedule_that_is_gone_fails_closed():
     from services import turn_tier_service as t
     db = _sched_db(creator=False, creator_user=None, can_share=False)
     assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+
+
+def test_a_schedule_of_another_agent_fails_closed():
+    """ent#875: a run naming a schedule that is not this agent's is not its creator's."""
+    from services import turn_tier_service as t
+    db = _sched_db(creator=1, creator_user={"username": "owner", "role": "user"}, can_share=True)
+    db.get_schedule.return_value = SimpleNamespace(agent_name="agent-b", owner_id=1)
+    assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+
+
+def test_a_schedule_with_no_recorded_creator_is_the_owners():
+    """ent#875: a schedule predating creator tracking was the owner's alone."""
+    from services import turn_tier_service as t
+    db = _sched_db(creator=None, creator_user=None, can_share=False)
+    assert t.turn_actor(db, AGENT, "e1") == ("owner", None, None)
 
 
 def test_a_reminder_row_is_not_looked_up_as_a_schedule():

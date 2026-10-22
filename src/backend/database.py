@@ -1858,6 +1858,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1898,9 +1902,10 @@ class DatabaseManager:
         )
 
     def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
-                                source_user_id=None):
+                                source_user_id=None, include_unattributed=False):
         return self._schedule_ops.get_schedule_executions(
-            schedule_id, limit, source_user_id=source_user_id)
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1967,9 +1972,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
@@ -2726,8 +2732,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)
@@ -3027,21 +3034,30 @@ class DatabaseManager:
         cost: float = None,
         sender_email: str = None,
         sender_label: str = None,
+        gate_hold: str = None,
     ):
         return self._public_chat_ops.add_message(
             session_id, role, content, cost,
-            sender_email=sender_email, sender_label=sender_label,
+            sender_email=sender_email, sender_label=sender_label, gate_hold=gate_hold,
         )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None,
+                                 include_held: bool = False):
+        return self._public_chat_ops.get_session_messages(
+            session_id, limit, sender_email=sender_email, include_held=include_held)
 
     def get_recent_public_chat_messages(
         self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+        include_held: bool = False,
     ):
+        # trinity#3402: rows the skill gate stopped are left out unless asked for.
         return self._public_chat_ops.get_recent_messages(
-            session_id, limit, sender_email=sender_email, since=since,
+            session_id, limit, sender_email=sender_email, since=since, include_held=include_held,
         )
+
+    def mark_public_chat_messages_held(self, message_ids: list, gate_hold: str) -> int:
+        # trinity#3402: a held / refused turn and its notice are never replayed.
+        return self._public_chat_ops.mark_messages_held(message_ids, gate_hold)
 
     def prune_public_chat_session(self, session_id: str, keep: int) -> int:
         # ent#600: bound a Telegram group session that records every visible message.

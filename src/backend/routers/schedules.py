@@ -938,8 +938,9 @@ async def get_schedule_executions(
 ):
     """Get execution history for a schedule.
 
-    A share holder sees only the runs they started (trinity-enterprise#875);
-    the owner, an admin and agent keys see every run."""
+    A share holder sees only the runs they started (trinity-enterprise#875),
+    plus — on a schedule they created — its cron and webhook runs, which carry
+    no user; the owner, an admin and agent keys see every run."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(
@@ -951,7 +952,9 @@ async def get_schedule_executions(
     if scope is None:
         executions = db.get_schedule_executions(schedule_id, limit=limit)
     else:
-        executions = db.get_schedule_executions(schedule_id, limit=limit, source_user_id=scope)
+        executions = db.get_schedule_executions(
+            schedule_id, limit=limit, source_user_id=scope,
+            include_unattributed=getattr(schedule, "owner_id", None) == scope)
     return [ExecutionResponse(**e.model_dump()) for e in executions]
 
 

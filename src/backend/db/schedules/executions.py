@@ -206,6 +206,32 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
+        """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
+
+        The four columns `turn_tier_service` rates a turn by, for every running
+        row. Like the chain-depth read, only `running` counts: every row is
+        inserted RUNNING, so a turn whose process could be making a request is
+        always here.
+        """
+        stmt = (
+            select(
+                schedule_executions.c.id,
+                schedule_executions.c.agent_name,
+                schedule_executions.c.source_user_id,
+                schedule_executions.c.schedule_id,
+                schedule_executions.c.triggered_by,
+            )
+            .where(and_(
+                schedule_executions.c.agent_name == agent_name,
+                schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+            ))
+        )
+        # No LIMIT: a row cut off here would be a share turn missed, which
+        # fails open. `idx_executions_status` keeps the read small.
+        with get_engine().connect() as conn:
+            return [dict(row) for row in conn.execute(stmt).mappings()]
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -533,12 +559,15 @@ class ScheduleExecutionsMixin:
             return result.rowcount > 0
 
     def get_schedule_executions(
-        self, schedule_id: str, limit: int = 50, *, source_user_id: Optional[int] = None
+        self, schedule_id: str, limit: int = 50, *, source_user_id: Optional[int] = None,
+        include_unattributed: bool = False,
     ) -> List[ScheduleExecution]:
         """Get execution history for a schedule.
 
         `source_user_id` (trinity-enterprise#875): only that user's runs, before
-        the LIMIT; a scheduled run carries no user and is not a share holder's."""
+        the LIMIT; a scheduled run carries no user and is not a share holder's —
+        unless `include_unattributed`, which the router sets only when that user
+        CREATED the schedule: its cron and webhook runs (no user) are theirs."""
         stmt = (
             select(schedule_executions)
             .where(schedule_executions.c.schedule_id == schedule_id)
@@ -546,7 +575,10 @@ class ScheduleExecutionsMixin:
             .limit(limit)
         )
         if source_user_id is not None:
-            stmt = stmt.where(schedule_executions.c.source_user_id == source_user_id)
+            mine = schedule_executions.c.source_user_id == source_user_id
+            if include_unattributed:
+                mine = or_(mine, schedule_executions.c.source_user_id.is_(None))
+            stmt = stmt.where(mine)
         with get_engine().connect() as conn:
             return [
                 self._row_to_schedule_execution(row)

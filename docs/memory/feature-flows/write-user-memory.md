@@ -63,7 +63,7 @@ The fix is a server-side gated write: the agent never supplies a user email. The
   ```json
   { "agent_notes": "...", "conversation_summary": "..." }
   ```
-  `agent_notes` is written by this tool. `conversation_summary` is written by the background summarizer (`services/platform_prompt_service.summarize_user_memory_background`). Legacy plaintext rows (written before #895) are transparently surfaced as `conversation_summary` on read — see `db/public_links._parse_memory_blob`.
+  `agent_notes` is written by this tool. `conversation_summary` is written by the background summarizer (`services/platform_prompt_service.summarize_user_memory_background`), which never reads a gated request that did not run, nor its notice (trinity#3402 — rows with a `gate_hold` are left out of `get_recent_public_chat_messages` by default). Legacy plaintext rows (written before #895) are transparently surfaced as `conversation_summary` on read — see `db/public_links._parse_memory_blob`.
 - **Read** (`db.get_or_create_public_user_memory`): `SELECT` by `(agent_name, user_email)`; `INSERT` if not found. Returns the parsed dict `{id, agent_name, user_email, agent_notes, conversation_summary, message_count, created_at, updated_at}` — `src/backend/db/public_links.py:get_or_create_user_memory`
 - **Write — agent_notes only** (`db.update_public_user_memory_agent_notes`): read-modify-write that replaces only the `agent_notes` key — `src/backend/db/public_links.py:update_user_memory_agent_notes`
 - **Write — conversation_summary only** (`db.update_public_user_memory_conversation_summary`): used by the background summarizer; never invoked from this tool — `src/backend/db/public_links.py:update_user_memory_conversation_summary`
