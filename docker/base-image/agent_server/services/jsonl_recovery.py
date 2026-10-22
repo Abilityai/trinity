@@ -58,6 +58,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..model_context import pick_context_window
 from ..models import CompactEvent, ExecutionMetadata
+from .provider_pricing import turn_cost
 
 logger = logging.getLogger(__name__)
 
@@ -787,7 +788,7 @@ def _recover_metadata_from_jsonl(
     populated = False
 
     if result_record is not None:
-        cost = result_record.get("total_cost_usd")
+        cost = turn_cost(result_record)
         dur = result_record.get("duration_ms")
         turns = result_record.get("num_turns")
         if cost is not None:
