@@ -585,3 +585,52 @@ class TestTransportLifecycle:
         await t.stop()
         t.on_event.assert_not_awaited()
         assert await _redis(server).llen("test:album:1:-100:g1:items") == 1
+
+    @pytest.mark.asyncio
+    async def test_a_restart_inside_the_orphan_window_still_delivers(self, monkeypatch):
+        """Restart before the album is old enough to count as an orphan, and no
+        further item ever arrives: the start-time sweep sees nothing, so the
+        transport must sweep again once the album has aged into the window."""
+        server = _server()
+        now = [1_000_000]  # the album's age is the clock's, not the test's speed
+        dead = _coalescer(server, _Sink(), window_s=60, clock_ms=lambda: now[0])
+        await dead.add("1", "-100:g1", _photo(1, caption="restarted at once"))
+        await dead.add("1", "-100:g1", _photo(2))
+        await dead.stop()
+
+        _, t = _transport(monkeypatch)
+        t._albums = _coalescer(server, t._flush_album, orphan_after_ms=100,
+                               clock_ms=lambda: now[0])
+        await t.start()
+        await asyncio.sleep(0)
+        t.on_event.assert_not_awaited()  # 0 ms old: too young for the start-time sweep
+        now[0] += 3_000  # the album ages; no further item ever arrives
+        await asyncio.sleep(0.4)
+        t.on_event.assert_awaited_once()
+        assert t.on_event.await_args.args[0]["message"]["caption"] == "restarted at once"
+        await t.stop()
+
+    @pytest.mark.asyncio
+    async def test_two_workers_restarting_deliver_the_album_once(self, monkeypatch):
+        server = _server()
+        now = [1_000_000]
+        dead = _coalescer(server, _Sink(), window_s=60, clock_ms=lambda: now[0])
+        await dead.add("1", "-100:g1", _photo(1, caption="one turn"))
+        await dead.add("1", "-100:g1", _photo(2))
+        await dead.stop()
+
+        workers = []
+        for _ in range(2):
+            _, t = _transport(monkeypatch)
+            t._albums = _coalescer(server, t._flush_album, orphan_after_ms=100,
+                                   clock_ms=lambda: now[0])
+            workers.append(t)
+        await asyncio.gather(*(t.start() for t in workers))
+        await asyncio.sleep(0)
+        assert sum(t.on_event.await_count for t in workers) == 0
+        now[0] += 3_000
+        await asyncio.sleep(0.5)
+        assert sum(t.on_event.await_count for t in workers) == 1
+        assert await _redis(server).llen("test:album:1:-100:g1:items") == 0
+        for t in workers:
+            await t.stop()

@@ -67,6 +67,9 @@ class TelegramWebhookTransport(ChannelTransport):
                 await self._albums.sweep_orphans()
             except Exception as e:
                 logger.warning(f"Telegram album sweep at start failed (non-fatal): {e}")
+            # An album buffered seconds before the restart is too young for
+            # that sweep; without this, only a later album item would collect it.
+            self._albums.schedule_sweep_after_start()
         logger.info("Telegram webhook transport ready")
 
     async def stop(self) -> None:

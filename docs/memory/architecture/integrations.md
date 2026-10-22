@@ -22,7 +22,7 @@
 
 ### Telegram albums — cross-worker inbound coalescing (ent#934)
 
-An album arrives as one update per item (`media_group_id`) on either uvicorn worker. `adapters/transports/inbound_coalescer.py::InboundCoalescer` buffers them in Redis and hands the group to `on_flush` once: a per-arrival `seq` + WATCH/MULTI drain makes only the last item's timer flush, with no leader lease; a tombstone sends late items through on their own; an `:open` sorted set drives the orphan sweep (start + throttled on add) and the per-binding cap. Fail-open: any Redis error hands the item back to the normal path. Telegram-free — the merge is `telegram_adapter.merge_album_updates`. Webhook dedup is per `update_id` (`SET NX`), because the old watermark dropped updates Telegram delivers out of order. Flow: `feature-flows/telegram-integration.md` → Albums.
+An album arrives as one update per item (`media_group_id`) on either uvicorn worker. `adapters/transports/inbound_coalescer.py::InboundCoalescer` buffers them in Redis and hands the group to `on_flush` once: a per-arrival `seq` + WATCH/MULTI drain makes only the last item's timer flush, with no leader lease; a tombstone sends late items through on their own; an `:open` sorted set drives the orphan sweep (start, once more after the orphan window, and throttled on add) and the per-binding cap. Fail-open: any Redis error hands the item back to the normal path. Telegram-free — the merge is `telegram_adapter.merge_album_updates`. Webhook dedup is per `update_id` (`SET NX`), because the old watermark dropped updates Telegram delivers out of order. Flow: `feature-flows/telegram-integration.md` → Albums.
 
 ### Telegram group conversation context (ent#600)
 

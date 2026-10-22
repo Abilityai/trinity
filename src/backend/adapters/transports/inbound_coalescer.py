@@ -27,7 +27,12 @@ How exactly-once works without a leader lease:
   later, the same outcome as a late item.)
 
 Orphans: a restart (or a dead worker) leaves items in Redis with no timer.
-`sweep_orphans()` runs at transport start and, throttled, after any `add`; an
+`sweep_orphans()` runs at transport start, once more `orphan_after_ms +
+window_s` later (`schedule_sweep_after_start` — a group buffered just before
+the restart is too young for the first sweep, and no further item may ever
+arrive), and, throttled, after any `add`. Every worker runs these sweeps; the
+drain is one MULTI over the group's keys under WATCH, so the first worker to
+drain gets the items and any other drains an empty list — one delivery. An
 orphan younger than `recover_max_age_ms` is delivered (`recovered=True`), an
 older one is dropped with a WARN naming the group and the item count.
 
@@ -181,6 +186,10 @@ class InboundCoalescer:
                 "processed on its own", group_id,
             )
             return None, 0
+        # The per-scope cap is check-then-act, not atomic across workers: two
+        # workers can each admit a new group at the cap, overshooting it by at
+        # most one group per worker. Accepted — it bounds Redis use per bot,
+        # it is not a security boundary.
         if await r.zscore(self._open_scope_key(scope), member) is None:
             if await r.zcard(self._open_scope_key(scope)) >= self._max_open_per_scope:
                 logger.warning(
@@ -277,6 +286,15 @@ class InboundCoalescer:
                     "timer (restart?) — too old to deliver", group_id, len(items), age_ms // 1000,
                 )
         return len(stale)
+
+    def schedule_sweep_after_start(self) -> None:
+        """One more sweep once a group buffered just before this start has aged
+        past `orphan_after_ms`. Cancelled by `stop()`. Call from a running loop."""
+        self._spawn(self._sweep_after(self._orphan_after_ms / 1000 + self._window_s))
+
+    async def _sweep_after(self, delay_s: float) -> None:
+        await asyncio.sleep(delay_s)
+        await self._safe_sweep()
 
     def _maybe_sweep(self) -> None:
         if self._clock_ms() - self._last_sweep_ms >= _SWEEP_INTERVAL_MS:
