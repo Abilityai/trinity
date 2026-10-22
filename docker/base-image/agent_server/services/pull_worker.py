@@ -504,10 +504,25 @@ async def _run_and_report(
         if persisted:
             _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
 
+        # #3487: a refused attempt may be answered "run it again". While it is
+        # being reported there is no process and no pending entry, so a
+        # terminate would find nothing and the next attempt would spawn anyway.
+        # Hold the turn as pending across the report: a cancel landing here is
+        # recorded and the next attempt is skipped and reported `cancelled`.
+        hold = capable and not terminated and body.get("status") != "success"
+        if hold:
+            registry.register_pending(
+                execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+            )
         replies: list = []
-        delivered = await _deliver_result(
-            client, execution_id, body, backend_url, mcp_key, deadline, reply_sink=replies
-        )
+        try:
+            delivered = await _deliver_result(
+                client, execution_id, body, backend_url, mcp_key, deadline, reply_sink=replies
+            )
+        except BaseException:
+            if hold:
+                registry.discard_pending(execution_id)
+            raise
         if delivered and persisted:
             _delete_pull_result(execution_id)
 
@@ -515,12 +530,15 @@ async def _run_and_report(
         # this credential". Only a capable, un-terminated worker follows it.
         retry = (replies[-1] if replies else {}).get("retry") if delivered else None
         if not (capable and not terminated and isinstance(retry, dict) and retry.get("claim_token")):
+            if hold:
+                registry.discard_pending(execution_id)
             return
         claim_token = retry["claim_token"]
         override = _build_auth_override(retry.get("auth_override"), runtime)
         timeout = retry.get("timeout_seconds")
         if isinstance(timeout, (int, float)) and timeout > 0:
-            turn_timeout = int(timeout)
+            # Never longer than the limit this claim was given.
+            turn_timeout = min(turn_timeout, int(timeout))
         logger.warning(
             "[#3487] %s: re-running pulled turn %s (attempt %s) on %s",
             agent_name, execution_id, retry.get("attempt"),

@@ -628,21 +628,34 @@ in one call. Instead:
    `db.rotate_claim_token` (old → new token, atomic, `running` only), rebuilds the
    walk from `backlog_metadata["subscription_walk"]` (or starts one), attributes
    the refusal to the credential the attempt actually ran on, and calls
-   `advance_subscription_walk` with the remaining budget (agent timeout minus the
-   time since the claim's `started_at`).
+   `advance_subscription_walk` with the scrubbed error text (staged runtime
+   secrets + `sanitize_text`) and the remaining budget (the row's own turn limit
+   — its `timeout_seconds` clamped to the agent timeout — minus the time since
+   the claim's `started_at`; the retry's `timeout_seconds` never exceeds it). A
+   container fault (`is_container_fault`) never walks, as on push.
 3. A rung → the reply is `{"applied": false, "retry": {claim_token, auth_override,
    timeout_seconds, attempt}}`. No terminal is written, so the sync waiter keeps
    waiting. The worker re-runs the SAME turn under the same claim and lease with
    that credential staged for redaction, and POSTs again with the new token.
 4. No rung → the result is applied as before, but with the walk's
-   "Tried: …" trail on the FAILED row, the refused attempts' cost rolled in, the
+   "Tried: …" trail on the FAILED row, the EARLIER refused attempts' cost rolled
+   in (the last one is the terminal and carries its own cost), the
    once-per-hour exhausted notice, and no one-shot `spawn_subscription_failure`.
-5. Served → `_commit_after_success`: `commit_subscription_walk` + the SUB-004
-   attribution, and the summary is saved for `result_from_execution_row`
-   (`subscription_switch`, push parity).
+5. Served → `_commit_before_success`, BEFORE the terminal CAS (which wakes the
+   caller): won by another token rotation, it runs `commit_subscription_walk`,
+   re-points the SUB-004 attribution and saves the summary for
+   `result_from_execution_row` (`subscription_switch`, push parity), so the woken
+   caller already reads `switched=True`. A duplicate success POST loses the
+   rotation and commits nothing twice.
 
 A duplicate POST of an attempt that already won (lost 200, resend) carries the
-superseded token: it gets the stored retry again and records nothing. A worker
+superseded token: it gets the stored retry again and records nothing — but
+only while that retry's token still owns the row (`db.holds_claim_token`). The
+walk state records the digest of the token that owns it; after a lease requeue
+and a re-claim, a late POST of the old claim is not told to retry (409), and the
+new claim starts its own walk. Between attempts the worker holds the turn as
+pending in its process registry, so a terminate that lands while a refusal is
+being reported skips the next attempt and reports `cancelled`. A worker
 that cannot follow (older image, non-Claude runtime, a restarted worker
 resending from disk) keeps the pre-#3487 path. The #1085 governor is not
 consulted — push has no such gate, and its pause is armed by several agents

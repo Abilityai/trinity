@@ -130,6 +130,14 @@ class TestDbOps:
             conn.execute(update(queue_db.t.schedule_executions).values(status="failed"))
         assert queue_db.ops.rotate_claim_token("exec-1", "t0", "t1") is False
 
+    def test_holds_claim_token_reads_the_current_owner(self, queue_db):
+        assert queue_db.ops.holds_claim_token("exec-1", "t0") is True
+        assert queue_db.ops.holds_claim_token("exec-1", "other") is False
+        assert queue_db.ops.holds_claim_token("exec-1", "") is False
+        queue_db.ops.rotate_claim_token("exec-1", "t0", "t1")
+        assert queue_db.ops.holds_claim_token("exec-1", "t0") is False
+        assert queue_db.ops.holds_claim_token("exec-1", "t1") is True
+
     def test_metadata_is_written_only_by_the_owning_token(self, queue_db):
         assert queue_db.ops.set_backlog_metadata_for_token("exec-1", "stale", '{"x":1}') is False
         assert queue_db.ops.set_backlog_metadata_for_token("exec-1", "t0", '{"x":2}') is True
@@ -170,6 +178,9 @@ class FakePullDB:
             self.row["claim_token"] = new
             return True
         return False
+
+    def holds_claim_token(self, execution_id, token):
+        return self.row["status"] == self.S.RUNNING and self.row["claim_token"] == token
 
     def set_backlog_metadata_for_token(self, execution_id, token, meta):
         if self.row["claim_token"] != token:
@@ -319,6 +330,116 @@ class TestTheSinkWalksInPlace:
         assert "tok-sub-b" not in json.dumps(details)
 
 
+class TestReviewFindings:
+    """PR #3883 review: each of these failed on the first version of the sink."""
+
+    def test_a_late_post_after_a_reclaim_is_not_told_to_retry(self, sink):
+        """Lease requeue + re-claim stamps a new token. A late POST of the old
+        attempt must not be answered `retry` (the turn would run twice)."""
+        first = _post(sink, token="t0")
+        assert first.kind == "retry"
+        sink.db.row["claim_token"] = "t-reclaimed"  # requeue_expired_lease + claim_next_queued
+        late = _post(sink, token="t0")
+        assert late.kind != "retry"
+        assert sink.switch_db.record_rate_limit_event.call_count == 1
+
+    def test_a_reclaimed_turn_starts_its_own_walk(self, sink):
+        first = _post(sink, token="t0", cost=0.05)
+        assert first.kind == "retry"
+        sink.db.row["claim_token"] = "t-reclaimed"
+        again = _post(sink, token="t-reclaimed")
+        assert again.kind == "retry"
+        assert len(sink.db.walk_state()["walk"]["attempts"]) == 1, \
+            "the previous claim's walk must not carry into the new claim"
+        assert sink.db.walk_state()["attempt_cost"] == pytest.approx(0.0)
+
+    def test_a_single_refusal_is_billed_once(self, sink):
+        sink.db.row["started_at"] = _now_iso(-3590)  # no room: the first refusal is the terminal
+        out = _post(sink, token="t0", cost=0.20)
+        assert out.kind == "applied" and out.status == sink.db.S.FAILED
+        assert sink.db.terminals[0][1].cost == pytest.approx(0.20)
+
+    def test_the_last_refusal_of_a_walk_is_billed_once(self, sink):
+        r1 = _post(sink, token="t0", cost=0.10)
+        r2 = _post(sink, token=r1.retry["claim_token"], applied="oauth_token", cost=0.20)
+        r3 = _post(sink, token=r2.retry["claim_token"], applied="api_key", error_code="auth", cost=0.30)
+        assert r3.kind == "applied"
+        assert sink.db.terminals[0][1].cost == pytest.approx(0.60)
+
+    def test_the_woken_caller_sees_the_committed_switch(self, sink, monkeypatch):
+        """Push commits the walk and re-points SUB-004 BEFORE the terminal is
+        written; the caller woken by the CAS must read `switched=True`."""
+        seen = {}
+
+        def _deliver(execution, applied_status):
+            seen["summary"] = sink.db.walk_state().get("summary")
+            seen["attributed"] = list(sink.db.attributed)
+        monkeypatch.setattr(sink.pcs, "_spawn_post_turn_delivery", _deliver)
+        r1 = _post(sink, token="t0")
+        out = _post(sink, token=r1.retry["claim_token"], status="success", applied="oauth_token")
+        assert out.kind == "applied"
+        assert seen["summary"]["switched"] is True
+        assert seen["attributed"] == ["sub-b"]
+
+    def test_a_duplicate_success_commits_once(self, sink):
+        r1 = _post(sink, token="t0")
+        _post(sink, token=r1.retry["claim_token"], status="success", applied="oauth_token")
+        dup = _post(sink, token=r1.retry["claim_token"], status="success", applied="oauth_token")
+        assert dup.kind == "replayed"
+        assert sink.wired.performed == ["sub-b"]
+        assert len(sink.db.terminals) == 1
+
+    def test_the_retry_timeout_is_capped_at_the_rows_own_limit(self, sink):
+        sink.db.row["backlog_metadata"] = json.dumps({"timeout_seconds": 120})
+        out = _post(sink, token="t0")
+        assert out.kind == "retry"
+        assert out.retry["timeout_seconds"] <= 120
+
+    def test_the_refusal_text_is_scrubbed_before_it_is_recorded(self, sink, monkeypatch):
+        staged = "STAGED-runtime-secret-0123456789"
+        monkeypatch.setattr(sink.pcs, "get_staged_values", lambda: [staged])
+        _post(sink, token="t0", content=f"usage limit reached for {staged}")
+        recorded = sink.switch_db.record_rate_limit_event.call_args.kwargs["error_message"]
+        assert staged not in recorded
+        assert staged not in sink.db.row["backlog_metadata"]
+        assert staged not in json.dumps(sink.audit.call_args.kwargs["details"])
+
+    def test_a_container_fault_never_walks(self, sink):
+        out = _post(sink, token="t0", error_code="auth",
+                    content="Claude Code is not available in this container")
+        assert out.kind == "applied" and out.status == sink.db.S.FAILED
+        assert sink.db.row["claim_token"] == "t0", "nothing rotated"
+        assert sink.switch_db.record_rate_limit_event.call_count == 0
+
+
+class TestTheRouteReturnsTheRetry:
+    """The route's `retry` branch is the only thing that hands the worker its
+    instruction; without it the outcome falls through to a 409."""
+
+    def test_a_retry_outcome_is_a_200_with_the_instruction(self, monkeypatch):
+        from unittest.mock import patch
+
+        monkeypatch.setenv("INTERNAL_API_SECRET", "unit-secret")
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from routers.internal import pull_router
+        from services.pull_coordination_service import ResultApplyOutcome
+
+        app = FastAPI()
+        app.include_router(pull_router)
+        retry = {"claim_token": "t1", "auth_override": {"oauth_token": "x"},
+                 "timeout_seconds": 300, "attempt": 1}
+        with patch("services.pull_coordination_service.handle_task_result",
+                   AsyncMock(return_value=ResultApplyOutcome("retry", "running", retry=retry))):
+            r = TestClient(app).post(
+                "/api/internal/tasks/exec-1/result",
+                json={"claim_token": "t0", "status": "failed", "error_code": "billing"},
+                headers={"X-Internal-Secret": "unit-secret"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json() == {"applied": False, "retry": retry}
+
+
 # ===========================================================================
 # D — the rebuilt result carries the walk summary
 # ===========================================================================
@@ -432,6 +553,42 @@ class TestTheWorkerFollowsTheInstruction:
         assert runtime.execute_headless.await_count == 0, "terminated before spawn"
         assert len(client.posts) == 1, "no re-run"
         assert client.posts[0][1]["metadata"]["terminated"] is True
+
+    def test_a_cancel_between_attempts_stops_the_walk(self, worker, monkeypatch):
+        """A terminate that lands while the refused attempt is being reported
+        (no process, not yet the next spawn) must still reach the turn."""
+        from fastapi import HTTPException
+        from agent_server.services.process_registry import ProcessRegistry
+        import agent_server.services.process_registry as pr
+
+        registry = ProcessRegistry()
+        monkeypatch.setattr(pr, "get_process_registry", lambda: registry)
+        runtime = SimpleNamespace(
+            supports_auth_override=True,
+            execute_headless=AsyncMock(side_effect=HTTPException(status_code=429, detail="limit")),
+        )
+        worker.install(runtime)
+        retry = {"claim_token": "t1", "auth_override": {"oauth_token": "tok-b"}, "timeout_seconds": 300}
+
+        cancels = []
+
+        class _CancelDuringPost(worker.FakeClient):
+            async def post(self, url, json=None, headers=None):
+                if not self.posts:
+                    cancels.append(registry.terminate("exec-w"))
+                return await super().post(url, json=json, headers=headers)
+
+        client = _CancelDuringPost(post_responses=[
+            worker.FakeResp(200, {"applied": False, "retry": retry}),
+            worker.FakeResp(200, {"applied": True}),
+        ])
+        asyncio.run(worker.pw._run_and_report(self._claim(), client, "http://b", "k", "alpha"))
+        assert cancels[0]["success"] is True, "the turn must be reachable between attempts"
+        assert runtime.execute_headless.await_count == 1, "no spawn after the cancel"
+        assert len(client.posts) == 2
+        assert client.posts[1][1]["claim_token"] == "t1"
+        assert client.posts[1][1]["status"] == "cancelled"
+        assert registry.list_pending_ids() == []
 
     def test_a_restarted_worker_resending_a_result_does_not_ask_to_walk(self, worker, monkeypatch, tmp_path):
         pw = worker.pw

@@ -1597,6 +1597,9 @@ class DatabaseManager:
     def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
         return self._schedule_ops.rotate_claim_token(execution_id, old_token, new_token)
 
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        return self._schedule_ops.holds_claim_token(execution_id, claim_token)
+
     def set_backlog_metadata_for_token(self, execution_id: str, claim_token: str, backlog_metadata: str) -> bool:
         return self._schedule_ops.set_backlog_metadata_for_token(execution_id, claim_token, backlog_metadata)
 

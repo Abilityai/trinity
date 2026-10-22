@@ -357,6 +357,26 @@ class ScheduleQueueMixin:
             )
             return result.rowcount > 0
 
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        """True while a ``running`` row is still owned by ``claim_token`` (#3487).
+
+        The execution model does not carry ``claim_token``; this is how the pull
+        sink tells a duplicate of the attempt it just answered from a late POST
+        of a claim the lease reaper has since re-queued and re-delivered."""
+        if not claim_token:
+            return False
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(schedule_executions.c.id).where(
+                    and_(
+                        schedule_executions.c.id == execution_id,
+                        schedule_executions.c.status == TaskExecutionStatus.RUNNING,
+                        schedule_executions.c.claim_token == claim_token,
+                    )
+                )
+            ).first()
+            return row is not None
+
     def set_backlog_metadata_for_token(
         self, execution_id: str, claim_token: str, backlog_metadata: str
     ) -> bool:
