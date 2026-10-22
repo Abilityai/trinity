@@ -13,6 +13,7 @@ routers.settings re-exports these functions for backward compatibility.
 import json
 import logging
 import os
+import re
 import time
 from typing import List, Optional
 from database import db
@@ -422,11 +423,15 @@ class SettingsService:
         return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
     def get_public_chat_url(self) -> str:
-        """Get Public Chat URL from settings, fallback to env var."""
+        """Get Public Chat URL from settings, fallback to env var.
+
+        Normalised on read too (#3881), so a row stored before the save path
+        stripped a trailing host dot, or a dotted env value, never reaches a
+        webhook or a link."""
         url = self.get_setting('public_chat_url')
         if url:
-            return url.rstrip('/')
-        return os.getenv('PUBLIC_CHAT_URL', '').rstrip('/')
+            return normalize_public_url(url)
+        return normalize_public_url(os.getenv('PUBLIC_CHAT_URL', ''))
 
     def get_slack_transport_mode(self) -> str:
         """Get Slack transport mode: 'socket' (default) or 'webhook'."""
@@ -1117,6 +1122,20 @@ def clear_secret_setting(key: str) -> bool:
 def has_secret_setting(key: str) -> bool:
     """Whether a credential-bearing setting is configured in the DB."""
     return settings_service.has_secret_setting(key)
+
+
+def normalize_public_url(url: str) -> str:
+    """Trim whitespace and a trailing `/`, and drop a trailing dot from the host
+    (#3881). `host.example.com.` is the same name, but its TLS certificate is
+    for `host.example.com`, so Telegram (and any strict client) refuses it."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    url = (url or "").strip().rstrip("/")
+    parts = urlsplit(url)
+    if not (parts.hostname or "").endswith("."):
+        return url
+    netloc = re.sub(r"\.+(?=(:\d+)?$)", "", parts.netloc)
+    return urlunsplit(parts._replace(netloc=netloc)).rstrip("/")
 
 
 def classify_advertised_url(url: str) -> str:
