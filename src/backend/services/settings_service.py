@@ -13,7 +13,6 @@ routers.settings re-exports these functions for backward compatibility.
 import json
 import logging
 import os
-import re
 import time
 from typing import List, Optional
 from database import db
@@ -1134,7 +1133,11 @@ def normalize_public_url(url: str) -> str:
     parts = urlsplit(url)
     if not (parts.hostname or "").endswith("."):
         return url
-    netloc = re.sub(r"\.+(?=(:\d+)?$)", "", parts.netloc)
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    host, colon, port = hostport.rpartition(":")
+    if not (colon and port.isdigit()):
+        host, colon, port = hostport, "", ""
+    netloc = f"{userinfo}{at}{host.rstrip('.')}{colon}{port}"
     return urlunsplit(parts._replace(netloc=netloc)).rstrip("/")
 
 
