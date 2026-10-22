@@ -43,7 +43,8 @@ def rooms_db(tmp_path, monkeypatch):
     )
 
     from conftest import ensure_schema_tables
-    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages")
+    ensure_schema_tables("enterprise_rooms", "enterprise_room_participants", "enterprise_room_messages",
+                         "room_gate_holds")   # trinity#3402: an agent's room read leaves out its holds
 
     from sqlalchemy import insert
     with get_engine().begin() as conn:
