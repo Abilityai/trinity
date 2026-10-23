@@ -517,6 +517,12 @@ async function load() {
       return
     }
     data.value = body
+    // A pending record for the delegation already bound is a leftover (R-I3).
+    const boundId = body.funded ? body.delegation?.delegation_id : null
+    if (boundId && readPending(name)?.delegationId === boundId) {
+      clearPending(name)
+      pending.value = null
+    }
     hasLoaded.value = true
     lastLoadedAt.value = Date.now()
     error.value = ''

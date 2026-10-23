@@ -71,7 +71,6 @@ export const COPY = Object.freeze({
   embedNetwork: 'The Nevermined card form could not reach Nevermined. Check your connection and try again.',
   embedPayment: 'Nevermined could not confirm the card. Try again or use another card.',
   embedUnknown: 'The Nevermined card form reported an error. Try again.',
-  closeForm: 'Close the Nevermined form',
   // Revoke (checkpoint B).
   revokeTitle: 'Revoke this mandate at Nevermined?',
   revoked: 'Mandate revoked at Nevermined.',
@@ -403,6 +402,9 @@ export const REDIRECT_MAX_AGE_MS = 30 * 60 * 1000
 export function newNonce() {
   try {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+    if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+      return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')
+    }
   } catch { /* fall through */ }
   let out = ''
   for (let i = 0; i < 4; i++) out += Math.random().toString(36).slice(2, 10)
@@ -471,7 +473,7 @@ export function redirectReturn(query, stored, now = Date.now()) {
   const one = (v) => (Array.isArray(v) ? v[0] : v)
   const state = one(q.state)
   const ids = unwrapSuccess({ delegationId: one(q.delegationId), paymentMethodId: one(q.paymentMethodId) })
-  if (typeof state !== 'string' || !state || !ids || !ids.paymentMethodId) return { outcome: 'incomplete' }
+  if (typeof state !== 'string' || !state || !ids) return { outcome: 'incomplete' }
   if (!stored || typeof stored.nonce !== 'string') return { outcome: 'no_pending' }
   if (stored.nonce !== state) return { outcome: 'state_mismatch' }
   if (typeof stored.at !== 'number' || now - stored.at > REDIRECT_MAX_AGE_MS || now < stored.at) {

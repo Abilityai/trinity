@@ -5,7 +5,7 @@
  * to turn the ent#966 GET shape into a state, a money string and a recovery
  * action; the panel's own mount spec proves the wiring. These run in node.
  */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   spendingView,
   recoveryFor,
@@ -411,6 +411,19 @@ describe('newNonce / persistNonce / readNonce / clearNonce', () => {
     expect(a).not.toBe(b)
   })
 
+  it('without randomUUID the nonce comes from getRandomValues: 32 hex chars (R-I5)', () => {
+    const real = globalThis.crypto
+    const getRandomValues = vi.fn((arr) => real.getRandomValues(arr))
+    vi.stubGlobal('crypto', { getRandomValues })
+    try {
+      const n = newNonce()
+      expect(n).toMatch(/^[0-9a-f]{32}$/)
+      expect(getRandomValues).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('round-trips per agent; another agent reads null; clear removes it', () => {
     const store = memStore()
     expect(persistNonce('a', { nonce: 'n1', at: 100 }, store)).toBe(true)
@@ -456,9 +469,18 @@ describe('redirectReturn — every outcome', () => {
     expect(redirectReturn(Q, { nonce: 'n1', at: NOW + 60_000 }, NOW).outcome).toBe('expired')
   })
 
+  it('ok without paymentMethodId: optional on the bind, like the embedded path (R-I1)', () => {
+    const q = { ...Q }
+    delete q.paymentMethodId
+    const r = redirectReturn(q, { nonce: 'n1', at: NOW }, NOW)
+    expect(r).toEqual({ outcome: 'ok', delegationId: 'dlg_12345678' })
+    expect(r.paymentMethodId).toBeUndefined()
+    expect(redirectReturn({ ...Q, paymentMethodId: 'bad id' }, { nonce: 'n1', at: NOW }, NOW).outcome).toBe('incomplete')
+  })
+
   it('incomplete: a missing key or an id off the bind pattern, before the nonce is consulted', () => {
     const stored = { nonce: 'n1', at: NOW }
-    for (const k of ['paymentMethodId', 'delegationId', 'state']) {
+    for (const k of ['delegationId', 'state']) {
       const q = { ...Q }
       delete q[k]
       expect(redirectReturn(q, stored, NOW).outcome, k).toBe('incomplete')
