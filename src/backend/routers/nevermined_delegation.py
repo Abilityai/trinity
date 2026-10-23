@@ -233,6 +233,13 @@ async def revoke_agent_delegation(
         _raise(err)
 
     credential_requirements_service.invalidate_report_cache(agent_name)
+    if result.get("already_revoked"):  # a concurrent revoke already audited it
+        return {
+            "revoked": True,
+            "delegation_id": result["delegation_id"],
+            "env_removed": False,
+            "env_note": result["env_note"],
+        }
     await platform_audit_service.log(
         event_type=AuditEventType.CREDENTIALS,
         event_action="nevermined_delegation_revoke",

@@ -662,6 +662,19 @@ class TestReadDelegation:
         assert sibling.status_code == missing.status_code == 404 and sibling.json() == missing.json()
         assert len(dlg_env.upstream["requests"]) == 1  # only the self read dialled Nevermined
 
+    def test_agent_key_with_reach_to_a_sibling_still_gets_the_uniform_404(self, dlg_env, monkeypatch):
+        """An `agent_permissions` edge lets the access gate admit the sibling
+        (ent#629 "may call"); reading its budget stays self-only."""
+        from database import db
+
+        monkeypatch.setattr(db, "is_agent_permitted", lambda src, dst: (src, dst) == ("ent966-a", "ent966-b"))
+        _bind_row(dlg_env, agent="ent966-b", delegation_id="b-0123456789")
+        dlg_env.as_(**{**OPERATOR, "agent_name": "ent966-a", "mcp_scope": "agent"})
+        sibling = dlg_env.client.get("/api/nevermined/agents/ent966-b/delegation")
+        missing = dlg_env.client.get("/api/nevermined/agents/ent966-missing/delegation")
+        assert sibling.status_code == missing.status_code == 404 and sibling.json() == missing.json()
+        assert dlg_env.upstream["requests"] == []
+
     def test_single_flight_shares_one_upstream_call(self, dlg_env):
         import asyncio
         from database import db
@@ -1032,6 +1045,23 @@ class TestRevoke:
         assert dlg_env.agent["reads"] == 0
         assert dlg_env.client.get(DLG_URL).json()["funded"] is False
         assert dlg_env.audit.await_args.kwargs["details"]["env_removed"] is False
+
+    def test_lost_local_race_skips_env_and_audit(self, dlg_env, monkeypatch):
+        """A concurrent revoke stamped the row first: Nevermined already refuses
+        the mandate, so this request touches neither the env nor the audit log."""
+        from database import db
+
+        _bind_row(dlg_env)
+        audits_before = dlg_env.audit.await_count
+        monkeypatch.setattr(db, "revoke_agent_delegation", lambda row_id, revoked_by: None)
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["revoked"] is True and body["delegation_id"] == DLG_ID and body["env_removed"] is False
+        assert "Nevermined" in body["env_note"] and "concurrent" in body["env_note"]
+        assert len(dlg_env.upstream["requests"]) == 1  # upstream-first order is unchanged
+        assert dlg_env.agent["injects"] == [] and dlg_env.agent["reads"] == 0
+        assert dlg_env.audit.await_count == audits_before
 
     def test_env_removal_failure_still_revokes(self, dlg_env):
         _bind_row(dlg_env)

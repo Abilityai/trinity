@@ -736,6 +736,9 @@ async def bind_delegation(
 REVOKE_NOTE_AGENT_DOWN = (
     "agent_not_running — key is inert (mandate revoked at Nevermined); removed at next bind"
 )
+REVOKE_NOTE_CONCURRENT = (
+    "already_revoked — the Nevermined mandate was already revoked by a concurrent request"
+)
 
 
 async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> Dict[str, Any]:
@@ -782,7 +785,17 @@ async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> 
     if not (200 <= status < 300 or status == 404):
         raise _rejected(status, f"Nevermined refused the revocation (HTTP {status}); the mandate is still active.")
 
-    db.revoke_agent_delegation(row["id"], revoked_by)
+    if db.revoke_agent_delegation(row["id"], revoked_by) is None:
+        logger.info("Nevermined delegation revoke for %s by %s: already revoked concurrently", agent_name, actor)
+        return {
+            "revoked": True,
+            "delegation_id": delegation_id,
+            "environment": org["environment"],
+            "api_key_injected": bool(row["api_key_injected"]),
+            "env_removed": False,
+            "env_note": REVOKE_NOTE_CONCURRENT,
+            "already_revoked": True,
+        }
 
     keys = ["NVM_DELEGATION_ID"]
     if row["api_key_injected"]:
