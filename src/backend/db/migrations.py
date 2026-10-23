@@ -4912,6 +4912,25 @@ def _migrate_execution_conversation_key(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_idempotency_claim_token(cursor, conn):
+    """#3298 — an idempotency claim names its owner.
+
+    One nullable column on `idempotency_keys`. A claim left `in_flight` by a dead
+    process can now be reclaimed safely: attach/complete/release compare-and-set
+    on the token, so the original request, if it was only slow, cannot overwrite
+    or delete the reclaimer's row. Nullable, no backfill: a pre-existing claim
+    has no token and is matched by `IS NULL`.
+    PostgreSQL half: Alembic `0102_idempotency_claim_token`.
+    """
+    _safe_add_column(
+        cursor,
+        "idempotency_keys",
+        "claim_token",
+        "ALTER TABLE idempotency_keys ADD COLUMN claim_token TEXT",
+    )
+    conn.commit()
+
 def _migrate_metric_points_restatement(cursor, conn):
     """trinity-enterprise#729 — a corrected value restates its row (R45).
 
@@ -5808,4 +5827,5 @@ MIGRATIONS = [
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
+    ("idempotency_claim_token", _migrate_idempotency_claim_token),
 ]

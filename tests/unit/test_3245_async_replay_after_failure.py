@@ -878,8 +878,10 @@ def test_both_seams_reclaim_right_after_begin():
                    if isinstance(s, ast.Assign) and isinstance(s.value, ast.Call)
                    and ast.unparse(s.value.func) == "idempotency_service.begin")
         nxt = body[idx + 1]
+        # #3298: the stale in_flight claim is reclaimed first, then the ended
+        # receipt — both straight after `begin`, with nothing in between.
         assert isinstance(nxt, ast.Assign) and ast.unparse(nxt) == \
-            "idem = _reclaim_ended_receipt(idem, name=name)", seam
+            "idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)", seam
 
 
 _CLAIM_WRITERS = {"complete", "fail", "upgrade_snapshot", "attach_execution"}
