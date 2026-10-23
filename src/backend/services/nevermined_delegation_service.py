@@ -724,8 +724,8 @@ async def bind_delegation(
         raise _agent_unreachable(type(exc).__name__) from None
 
     logger.info(
-        "Nevermined delegation bound to %s by %s (environment=%s, api_key_injected=%s)",
-        agent_name, actor, org["environment"], api_key_injected,
+        "Nevermined delegation bound to %s by %s (environment=%s, agent_key_written=%s)",
+        agent_name, actor, org["environment"], "yes" if api_key_injected else "no",
     )
     state = delegation_state(agent_name, configured=True, row=row, live=live)
     state["effective"] = "next_execution"
@@ -816,8 +816,8 @@ async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> 
             env_note = "agent_unreachable — key is inert (mandate revoked at Nevermined); removed at next bind"
 
     logger.info(
-        "Nevermined delegation revoked for %s by %s (env_removed=%s, api_key_removed=%s)",
-        agent_name, actor, env_removed, bool(row["api_key_injected"]) and env_removed,
+        "Nevermined delegation revoked for %s by %s (env_removed=%s, agent_key_removed=%s)",
+        agent_name, actor, env_removed, "yes" if row["api_key_injected"] and env_removed else "no",
     )
     return {
         "revoked": True,
