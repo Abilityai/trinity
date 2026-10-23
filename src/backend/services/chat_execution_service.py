@@ -256,6 +256,16 @@ async def prepare_chat_execution(
         user_email=current_user.email or current_user.username,
         subscription_id=_chat_subscription_id,
     )
+    # #3380: name the thread on the row, so a watchdog-claimed result (#2944)
+    # can still write its reply there. Fail-open: a missing link only means a
+    # recovered turn's reply stays on the row, as before.
+    if task_execution_id:
+        try:
+            db.set_execution_chat_session(task_execution_id, session.id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[Chat] Could not link execution {task_execution_id} to its chat session: {e}"
+            )
 
     # Track chat start activity
     # triggered_by: "agent" for agent-to-agent, "mcp" for user MCP calls, "user" for UI chat

@@ -153,9 +153,56 @@ _RECOVERED_NOTICE = (
     "> ℹ️ Recovered by the watchdog: the backend lost the connection that was "
     "waiting for this turn (a restart mid-run), so the result below was claimed "
     "from the agent's retained terminal afterwards. The execution row, cost and "
-    "session are complete; a chat thread that was waiting on this turn may not "
-    "show this reply. (#2944)"
+    "session are complete; a chat that was open on this turn shows the reply "
+    "once reloaded. (#2944, #3380)"
 )
+
+
+def _write_recovered_chat_reply(agent_name: str, execution_id: str) -> bool:
+    """Write a claimed /chat turn's reply into the thread it answers (#3380).
+
+    The live path writes the assistant message in
+    `chat_execution_service._finalize_chat_success`; a turn the watchdog claims
+    never reaches it. The row names its thread (`chat_session_id`, stamped by
+    `prepare_chat_execution`) — any other turn has none and is left alone. The
+    message is built from the PERSISTED row, so it carries what the row
+    carries: the sanitized response (with the recovered notice), cost, context
+    and tool summary. Returns whether a message was written; never raises.
+    """
+    try:
+        session_id = db.get_execution_chat_session_id(execution_id)
+        if not session_id:
+            return False
+        row = db.get_execution(execution_id)
+        if row is None or row.status != TaskExecutionStatus.SUCCESS:
+            return False
+        session = db.get_chat_session(session_id)
+        if session is None or session.agent_name != agent_name:
+            return False
+        from db.write_params import ChatMessageFields
+
+        db.add_chat_message(
+            session_id=session.id,
+            agent_name=agent_name,
+            user_id=session.user_id,
+            user_email=session.user_email,
+            role="assistant",
+            content=row.response or "",
+            fields=ChatMessageFields(
+                cost=row.cost,
+                context_used=row.context_used,
+                context_max=row.context_max,
+                tool_calls=row.tool_calls,
+                execution_time_ms=row.duration_ms,
+                subscription_id=row.subscription_id,
+            ),
+        )
+        return True
+    except Exception as e:  # noqa: BLE001 — the claim itself already stands
+        logger.warning(
+            f"[Watchdog] writing the recovered chat reply for {execution_id} failed: {e}"
+        )
+        return False
 
 
 def _classify_retained_response(response) -> tuple:
@@ -371,6 +418,11 @@ async def _claim_retained_result(
         logger.warning(
             f"[Watchdog] companion-activity close failed for {execution_id}: {e}"
         )
+    # #3380: a /chat turn's reply goes into its thread too, as the live path
+    # writes it. Only after a won SUCCESS — a lost CAS returned above, and a
+    # failed turn writes no assistant message on the live path either.
+    if result.status == TaskExecutionStatus.SUCCESS:
+        _write_recovered_chat_reply(agent_name, execution_id)
     if report is not None:
         report.results_recovered += 1
     if stats is not None:
