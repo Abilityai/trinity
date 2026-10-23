@@ -546,7 +546,8 @@ class ScheduleStatsMixin:
 
     def first_autonomous_success_at(self) -> Optional[str]:
         """``started_at`` of the earliest SUCCESS with an autonomous trigger
-        (schedule / webhook), or None (ent#437).
+        (schedule / webhook / retry — #3363: a run that only succeeded on its
+        retry is still an autonomous success), or None (ent#437).
 
         The warm-ask milestone. One ``LIMIT 1`` read; the caller memoises the
         answer in ``system_settings`` once it exists, so this runs only while
@@ -554,7 +555,7 @@ class ScheduleStatsMixin:
         """
         sql = (
             "SELECT started_at FROM schedule_executions "
-            "WHERE status = 'success' AND triggered_by IN ('schedule', 'webhook') "
+            "WHERE status = 'success' AND triggered_by IN ('schedule', 'webhook', 'retry') "
             "ORDER BY started_at ASC LIMIT 1"
         )
         with get_engine().connect() as conn:
