@@ -1020,9 +1020,21 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
     )
     error_code, error = _split_error_code(error)
+    # #3487: a pulled turn that walked the subscription pool carries the same
+    # summary a pushed one returns (`subscription_switch`, #3470 shape).
+    subscription_switch = None
+    try:
+        walk_state = json.loads(getattr(execution, "backlog_metadata", None) or "{}").get(
+            "subscription_walk"
+        )
+        if isinstance(walk_state, dict) and isinstance(walk_state.get("summary"), dict):
+            subscription_switch = walk_state["summary"]
+    except (TypeError, ValueError, AttributeError):
+        subscription_switch = None
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
+        subscription_switch=subscription_switch,
         response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
