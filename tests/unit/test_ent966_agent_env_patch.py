@@ -182,3 +182,56 @@ class TestQuotingParity:
     def test_round_trips_through_the_real_reader(self, patch, reader, value, tmp_path):
         out = patch.set_keys("", {"NVM_API_KEY": value})
         assert _parsed(reader, out, tmp_path)["NVM_API_KEY"] == value
+
+
+class TestValuesOf:
+    """`values_of` reads a key exactly as the agent's own reader does (R9):
+    every line that sets it, in file order, unquoted the way
+    `execution_env.unquote_env_value` unquotes. It is the eye of the bind
+    refusal — the value it returns is what the agent would send to Nevermined."""
+
+    ROUND_TRIP = [
+        'a"b',
+        r"a\b",
+        r"a\\\"b",
+        "with spaces",
+        "k=v=w",
+        "has # hash",
+        "$(id)`whoami`",
+    ]
+
+    @pytest.mark.parametrize("value", ROUND_TRIP)
+    def test_round_trips_what_set_keys_writes(self, patch, value):
+        assert patch.values_of(patch.set_keys("", {"NVM_API_KEY": value}), "NVM_API_KEY") == [value]
+
+    HAND_WRITTEN = [
+        "NVM_API_KEY=bare-value\n",
+        "NVM_API_KEY=  padded bare value  \n",
+        "  NVM_API_KEY = spaced-equals\n",
+        "NVM_API_KEY='single \\\"quoted'\n",
+        'NVM_API_KEY="dq \\" and \\\\ inside"\n',
+        'NVM_API_KEY="trailing\\\\"\n',
+        "NVM_API_KEY=a=b=c\n",
+        "NVM_API_KEY=x\r\nOTHER=y\r\n",
+    ]
+
+    @pytest.mark.parametrize("text", HAND_WRITTEN)
+    def test_agrees_with_the_real_reader_on_hand_written_shapes(self, patch, reader, text, tmp_path):
+        expected = _parsed(reader, text, tmp_path)["NVM_API_KEY"]
+        assert patch.values_of(text, "NVM_API_KEY") == [expected]
+
+    def test_bare_and_single_quoted_lines(self, patch):
+        text = "NVM_API_KEY=  bare value  \nNVM_API_KEY='lit\\\"eral'\n"
+        assert patch.values_of(text, "NVM_API_KEY") == ["bare value", 'lit\\"eral']
+
+    def test_two_lines_setting_the_key_give_both_values_in_order(self, patch):
+        text = 'OTHER=o\nNVM_API_KEY="first"\n# NVM_API_KEY=commented\nNVM_API_KEY=second\n'
+        assert patch.values_of(text, "NVM_API_KEY") == ["first", "second"]
+
+    def test_absent_key_is_empty(self, patch):
+        assert patch.values_of("OTHER=o\nNVM_API_KEY_SUFFIX=x\nPREFIX_NVM_API_KEY=y\n", "NVM_API_KEY") == []
+        assert patch.values_of("", "NVM_API_KEY") == []
+
+    def test_a_malformed_key_is_rejected(self, patch):
+        with pytest.raises(ValueError):
+            patch.values_of("A=b\n", "NVM-API-KEY")

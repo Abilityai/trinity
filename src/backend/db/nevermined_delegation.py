@@ -251,16 +251,3 @@ class NeverminedDelegationOperations:
                 .values(revoked_at=now, revoked_by=revoked_by)
             )
         return now if result.rowcount > 0 else None
-
-    def latest_prior_api_key_injected(self, agent_name: str) -> bool:
-        """Whether the agent's most recent earlier binding introduced
-        `NVM_API_KEY` (H1: a revoke with the agent down leaves the key in
-        `.env`, and the next bind must not forget Trinity put it there)."""
-        with get_engine().connect() as conn:
-            value = conn.execute(
-                select(agent_delegations.c.api_key_injected)
-                .where(agent_delegations.c.agent_name == agent_name)
-                .order_by(agent_delegations.c.created_at.desc(), agent_delegations.c.id.desc())
-                .limit(1)
-            ).scalar()
-        return bool(value)

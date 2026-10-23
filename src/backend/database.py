@@ -3878,9 +3878,6 @@ class DatabaseManager:
     def revoke_agent_delegation(self, row_id, revoked_by):
         return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
 
-    def latest_prior_agent_delegation_api_key_injected(self, agent_name):
-        return self._nevermined_delegation_ops.latest_prior_api_key_injected(agent_name)
-
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================

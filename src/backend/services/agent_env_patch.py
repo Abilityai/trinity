@@ -27,9 +27,9 @@ credential file.
 from __future__ import annotations
 
 import re
-from typing import Dict, Iterable, Mapping
+from typing import Dict, Iterable, List, Mapping
 
-__all__ = ["format_env_line", "set_keys", "remove_keys", "has_key"]
+__all__ = ["format_env_line", "set_keys", "remove_keys", "values_of"]
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 #: What counts as "a line for KEY" — the same shape the PAT patcher matches
@@ -107,7 +107,49 @@ def remove_keys(env_text: str, keys: Iterable[str]) -> str:
     )
 
 
-def has_key(env_text: str, key: str) -> bool:
-    """Whether any line sets ``key`` (value not inspected)."""
+def _unquote(value: str) -> str:
+    """Mirror of the agent reader's ``execution_env.unquote_env_value`` (#2023):
+    one matched quote pair is stripped; inside a DOUBLE-quoted value only, one
+    scan reverses the writer's escapes (``\\"`` → ``"``, ``\\\\`` → ``\\``); a
+    single-quoted value is taken verbatim; anything else is returned as is."""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        inner = value[1:-1]
+        if value[0] != '"':
+            return inner
+        out = []
+        i = 0
+        while i < len(inner):
+            ch = inner[i]
+            if ch == "\\" and i + 1 < len(inner) and inner[i + 1] in ('"', "\\"):
+                out.append(inner[i + 1])
+                i += 2
+            else:
+                out.append(ch)
+                i += 1
+        return "".join(out)
+    return value
+
+
+def values_of(env_text: str, key: str) -> List[str]:
+    """Every value the file sets for ``key``, in file order, each exactly as the
+    agent's own reader (``execution_env.parse_env_file``) would see it — so a
+    caller comparing one knows what the agent would actually send (ent#966 R9).
+
+    Line matching mirrors the READER, not ``_LINE_KEY_RE``: the line is
+    stripped, a comment / blank / ``=``-less line is skipped, the key is the
+    stripped text before the first ``=`` (so ``KEY = v`` counts) and the value
+    is the stripped remainder, unquoted as above. That is a superset of the
+    lines ``set_keys`` rewrites — the right direction for a refusal: a hand
+    shape this module would not rewrite is still one the agent reads.
+    """
     _check_key(key)
-    return any(_line_key(line) == key for line in env_text.splitlines())
+    found: List[str] = []
+    for raw in env_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        if name.strip() != key:
+            continue
+        found.append(_unquote(value.strip()))
+    return found
