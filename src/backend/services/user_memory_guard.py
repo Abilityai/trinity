@@ -395,12 +395,15 @@ _ROLE_LABEL = re.compile(
 )
 #: Any-case role label that opens a forged turn: an instruction or an
 #: assistant-style reply after it ("System: macOS 14" and "Assistant: Maria (her
-#: EA)" are labels and pass). Matched on the folded line.
+#: EA)" are labels and pass). Matched on the folded line. A note about the
+#: person reads like the person speaking ("User: always wants bullet points",
+#: "User: I'm based in Berlin"), so `user:` opens one only before a takeover.
 _ROLE_TURN = re.compile(
-    r"(?:system|assistant|human|developer|user)\s*:\s*"
+    r"(?:system|assistant|human|developer)\s*:\s*"
     r"(?:sure\b|okay\b|ok\b|of\s+course\b|certainly\b|absolutely\b|i\s+will\b|i'll\b|i\s+am\b|i'm\b"
     r"|i\s+can\b|you\s+(?:are|must|should|will)\b|always\b|never\b|from\s+now\s+on\b|ignore\b|disregard\b"
     r"|reply\b|respond\b|answer\b|act\b|follow\b|obey\b|send\b|share\b|tell\b|reveal\b|do\s+not\b|don't\b)"
+    r"|user\s*:\s*(?:you\s+(?:are|must|should|will)\b|from\s+now\s+on\b|ignore\b|disregard\b)"
 )
 _ENVELOPE_PHRASE = re.compile(r"\[\s*(?:end\s+of\s+memory|memory\s+about\s+this\s+person)\b")
 #: Headings of the composed system prompt that a note has no reason to repeat
@@ -505,7 +508,8 @@ _TOOL_INVOCATION = re.compile(_IMPERATIVE_AT + (
 #: note AND never a legitimate decision. A decision that bans the practice
 #: ("Ban curl | sh installers in CI") is not in imperative position and passes.
 _SHELL_DIRECTIVE = re.compile(_IMPERATIVE_AT + (
-    r"(?:(?:call|run|use|send|share|paste|attach|upload|include|read|open|cat|print|show|post|email|give)\b"
+    r"(?:(?:call|run|use|send|share|paste|attach|upload|include|read|open|cat|print|show|post|email|give"
+    r"|return|forward|disclose|reveal|(?:reply|respond|answer)\s+with)\b"
     r"[^.\n]{0,60}?\.env\b"
     r"|(?:(?:run|execute|exec|type|paste|enter)\s+)?['\"`]?"
     r"(?:sudo\s+(?:rm|chmod|chown|curl|wget|sh|bash|zsh|apt(?:-get)?|pip3?|npm|systemctl|kill|dd|mkfs"
@@ -518,20 +522,29 @@ _SHELL_DIRECTIVE = re.compile(_IMPERATIVE_AT + (
     r")"
 ))
 _MCP_ID = re.compile(r"\bmcp__[a-z0-9_-]+")
+#: A fetched script piped to a shell, in any position — decisions only. A
+#: decision renders outside the envelope and none needs a runnable installer
+#: line ("Ban curl | sh installers in CI" names no URL and passes); a note may
+#: record one as a fact ("Installs tools with curl … | sh").
+_FETCH_PIPE_TO_SHELL = re.compile(
+    r"\b(?:curl|wget)\b[^|\n]{0,200}?(?:(?:https?|ftp)://|[\w.-]{1,100}\.[a-z]{2,24}/)"
+    r"[^|\n]{0,200}\|\s*(?:sudo\s+)?(?:ba|z|k|c)?sh\b"
+)
 
 # -- memory_link_in_instruction ----------------------------------------------
 
 #: Link targets: URLs, `www.`/`mailto:`, IPv4, an email address (operator
 #: ruling 2026-10-23: an address inside an instruction is the same exfiltration
 #: shape as a link), a bare domain with a path, and a bare domain on a common
-#: TLD ("Visit example.io …" — never "Node.js", whose `.js` is not on the list).
+#: TLD ("Visit example.io …" — never "Node.js" or "setup.sh": a file extension
+#: first, `.js` and `.sh` are not on the list).
 _URL = re.compile(
     r"\b[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.[a-z]{2,24}\b"
     r"|(?:\b(?:https?|ftps?|file|wss?)://|\bwww\.|\bmailto:)[^\s<>\"'`]+"
     r"|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?(?:/[^\s<>\"'`]*)?"
     r"|\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.[a-z]{2,24}/[^\s<>\"'`]*"
     r"|\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.(?:com|net|org|io|ai|dev|app|co|me|info|biz|xyz|site"
-    r"|online|link|page|sh|gg|ly|to|tv|us|uk|de|fr|eu|ru|cn|in|cloud|tech|store|shop|blog|live|news|top"
+    r"|online|link|page|gg|ly|to|tv|us|uk|de|fr|eu|ru|cn|in|cloud|tech|store|shop|blog|live|news|top"
     r"|example|invalid|test)\b(?![.\w-])"
 )
 _LINK_SLOT = ""   # private-use: same length as the link it replaces, matched by no verb
@@ -595,7 +608,7 @@ def _hits(lines: Sequence[str], invisible_as: str, rules: Sequence[str], *,
     """``{rule: [hit, …]}`` for one spelling variant. ``prescriptive`` (a seat
     decision) keeps only what can never describe a legitimate decision: the
     marker and instruction rules, a shell command or secrets file given as an
-    order, an MCP tool id and a slotted URL."""
+    order, a fetched script piped to a shell, an MCP tool id and a slotted URL."""
     v = _views(lines, invisible_as)
     flat, starts = _join(v.folded)
     hits: Dict[str, List[_Hit]] = {rule: [] for rule in rules}
@@ -627,8 +640,9 @@ def _hits(lines: Sequence[str], invisible_as: str, rules: Sequence[str], *,
         for m in _URL_WITH_SLOT.finditer(text):
             add(RULE_LINK, text, m.start(), m.end(), starts2, SLOT_REASON)
     if prescriptive and RULE_TOOL in hits:
-        for m in _MCP_ID.finditer(text):
-            add(RULE_TOOL, text, m.start(), m.end(), starts2)
+        for rx in (_MCP_ID, _FETCH_PIPE_TO_SHELL):
+            for m in rx.finditer(text):
+                add(RULE_TOOL, text, m.start(), m.end(), starts2)
     slotted = _URL.sub(lambda m: _LINK_SLOT * len(m.group()), text)
     # Sentences are sliced, never searched with pos/endpos: `^` in a pattern
     # does not match at a `pos` > 0, so every sentence after the first would
@@ -729,8 +743,9 @@ def prepare_summary(text: str, *, previous: str = "") -> Tuple[str, List[str]]:
 
 #: What can never describe a legitimate seat decision ("Use the vendor tool for
 #: X" is a decision): the marker and instruction rules, a shell command or
-#: secrets file given as an order, an MCP tool id and a slotted URL. The tool
-#: INVOCATION and link DIRECTIVE checks do not apply.
+#: secrets file given as an order, a fetched script piped to a shell, an MCP
+#: tool id and a slotted URL. The tool INVOCATION and link DIRECTIVE checks do
+#: not apply.
 DECISION_RULES = ALL_RULES
 
 
