@@ -70,6 +70,21 @@ def test_save_stores_and_repoints_without_the_dot(monkeypatch, raw):
     assert repointed == ["https://host.example.com"]
 
 
+def test_normalise_passes_a_malformed_authority_through_unchanged():
+    """`urlsplit` raises on an unterminated IPv6 bracket. The normaliser runs
+    BEFORE `classify_advertised_url` on the save path, so it must hand the
+    input through (not raise) and leave the refusal to the classifier."""
+    assert ss.normalize_public_url("https://[::1") == "https://[::1"
+
+
+def test_save_refuses_a_malformed_authority_with_422_not_500(monkeypatch):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        _put(monkeypatch, "https://[::1")
+    assert exc.value.status_code == 422
+
+
 @pytest.mark.parametrize("row, env", [("https://host.example.com.", ""), (None, "https://host.example.com./")])
 def test_resolver_strips_a_dot_already_stored_or_in_env(monkeypatch, row, env):
     svc = ss.SettingsService()

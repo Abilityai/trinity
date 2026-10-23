@@ -1136,7 +1136,13 @@ def normalize_public_url(url: str) -> str:
     from urllib.parse import urlsplit, urlunsplit
 
     url = (url or "").strip().rstrip("/")
-    parts = urlsplit(url)
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # A malformed authority (`https://[::1`). Hand the input through: on the
+        # save path this runs before `classify_advertised_url`, which answers
+        # 422 for it, so raising here would turn that refusal into a 500.
+        return url
     if not (parts.hostname or "").endswith("."):
         return url
     userinfo, at, hostport = parts.netloc.rpartition("@")
