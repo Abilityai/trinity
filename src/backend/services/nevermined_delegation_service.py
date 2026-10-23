@@ -19,6 +19,7 @@ Upstream failures are logged by status code only — never the response body.
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 import re
@@ -590,6 +591,28 @@ async def _inject_agent_env(client: httpx.AsyncClient, agent_name: str, env_text
         )
 
 
+def _refuse_foreign_agent_key(env_text: str, org_agent_key: str) -> None:
+    """R9 (plan premise 6): bind never overwrites a key Trinity did not write.
+
+    Every value the agent's `.env` sets for `NVM_API_KEY` — duplicates included,
+    parsed exactly as the agent's own reader parses them — must equal the
+    organization's agent key. One that differs is a key a person set by hand,
+    and the bind is refused before any row or write. The organization's own key
+    (left behind by a revoke while the agent was down, H1) passes. Constant-time
+    compare; neither value is logged, returned or audited.
+    """
+    expected = org_agent_key.encode("utf-8")
+    for value in agent_env_patch.values_of(env_text, "NVM_API_KEY"):
+        if not hmac.compare_digest(value.encode("utf-8"), expected):
+            raise DelegationError(
+                409,
+                "agent_key_present",
+                "This agent already holds an NVM_API_KEY that Trinity did not write. Remove it "
+                "from the agent's credentials, then bind the Nevermined mandate again — the "
+                "mandate you created still exists at Nevermined.",
+            )
+
+
 def _active_binding_error(row: Dict[str, Any]) -> DelegationError:
     return DelegationError(
         409,
@@ -656,10 +679,11 @@ async def bind_delegation(
     actor: str,
     created_by: str,
 ) -> Dict[str, Any]:
-    """Bind a Nevermined delegation to the agent. Order (plan addendum):
+    """Bind a Nevermined delegation to the agent. Order (plan addendum + R9):
     active row → 409 · agent running → 409 · ONE upstream verify · `.env` read ·
-    row insert · re-read + inject · compensate (delete the inserted row) on
-    inject failure. The org check and the rate limit ran in the router."""
+    a hand-set NVM_API_KEY → 409 agent_key_present · row insert · re-read +
+    inject · compensate (delete the inserted row) on inject failure. The org
+    check and the rate limit ran in the router."""
     org = require_organization()
     validate_delegation_id(delegation_id)
     if payment_method_id is not None:
@@ -685,10 +709,11 @@ async def bind_delegation(
     try:
         async with _agent_client(agent_name) as client:
             env_text = await _read_agent_env(client, agent_name)
-            api_key_injected = (
-                not agent_env_patch.has_key(env_text, "NVM_API_KEY")
-                or db.latest_prior_agent_delegation_api_key_injected(agent_name)
-            )
+            _refuse_foreign_agent_key(env_text, org["agent_api_key"])
+            # With a foreign key refused above, every NVM_API_KEY a bind writes is
+            # Trinity's own (R9). The column, the response field, the audit detail
+            # and revoke's False branch stay as the record of older or synthetic rows.
+            api_key_injected = True
             try:
                 row = db.insert_agent_delegation(
                     agent_name, delegation_id, payment_method_id, provider,
@@ -733,8 +758,19 @@ async def bind_delegation(
     return state
 
 
+#: Prefixes (`agent_not_running —` / `agent_unreachable —`) are what the panel
+#: keys on. The delegation id left in `.env` is inert; the organization's agent
+#: key is NOT — it is the live key until the next bind rewrites it or a person
+#: removes it (R10).
 REVOKE_NOTE_AGENT_DOWN = (
-    "agent_not_running — key is inert (mandate revoked at Nevermined); removed at next bind"
+    "agent_not_running — the Nevermined mandate is revoked and the delegation id is inert; "
+    "the organization's agent key stays in the agent's .env until the next bind rewrites it "
+    "or you remove it"
+)
+REVOKE_NOTE_AGENT_UNREACHABLE = (
+    "agent_unreachable — the Nevermined mandate is revoked and the delegation id is inert; "
+    "the organization's agent key stays in the agent's .env until the next bind rewrites it "
+    "or you remove it"
 )
 REVOKE_NOTE_CONCURRENT = (
     "already_revoked — the Nevermined mandate was already revoked by a concurrent request"
@@ -813,7 +849,7 @@ async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> 
                 "Nevermined delegation revoke for %s by %s: env removal failed (%s)",
                 agent_name, actor, type(exc).__name__,
             )
-            env_note = "agent_unreachable — key is inert (mandate revoked at Nevermined); removed at next bind"
+            env_note = REVOKE_NOTE_AGENT_UNREACHABLE
 
     logger.info(
         "Nevermined delegation revoked for %s by %s (env_removed=%s, agent_key_removed=%s)",

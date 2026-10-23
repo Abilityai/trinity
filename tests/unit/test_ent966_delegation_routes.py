@@ -929,13 +929,52 @@ class TestBind:
         state = dlg_env.client.get(DLG_URL).json()
         assert state["delegation"]["delegation_id"] == DLG_ID and len(state["history"]) == 1
 
-    def test_pre_existing_api_key_is_not_claimed(self, dlg_env):
-        dlg_env.agent["env"] = "NVM_API_KEY=hand-pasted-personal-key\n"
+    def test_hand_set_api_key_refuses_the_bind_and_writes_nothing(self, dlg_env):
+        """R9 (premise 6): bind never overwrites a key Trinity did not write.
+        The one read-only verify has already happened; the refusal inserts no
+        row, writes nothing to the agent and never echoes the key."""
+        seed = "NVM_API_KEY=hand-pasted-personal-key\n"
+        dlg_env.agent["env"] = seed
         r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
-        assert r.status_code == 201 and r.json()["api_key_injected"] is False
-        assert dlg_env.audit.await_args.kwargs["details"]["api_key_injected"] is False
-        # the org key still overwrites the value (Premise 6), but revoke will leave it
-        assert _env_keys(dlg_env.agent["env"])["NVM_API_KEY"] == f'"{AGENT_KEY}"'
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["code"] == "agent_key_present"
+        assert "Nevermined" in r.json()["detail"]["message"]
+        assert "hand-pasted-personal-key" not in r.text
+        assert len(dlg_env.upstream["requests"]) == 1  # the ONE verify, nothing after it
+        assert dlg_env.agent["injects"] == []
+        assert dlg_env.agent["env"] == seed  # byte-identical
+        # no audit row for a refused bind: the last one is still the fixture's organization set
+        assert dlg_env.audit.await_args.kwargs["event_action"] == "nevermined_organization_set"
+        state = dlg_env.client.get(DLG_URL).json()
+        assert state["funded"] is False and state["history"] == []
+
+    def test_a_second_line_with_a_different_key_is_refused_too(self, dlg_env):
+        """Duplicates included: the agent's reader is last-wins, so a foreign
+        value on ANY line is a key the agent might send."""
+        from services import agent_env_patch
+
+        seed = agent_env_patch.format_env_line("NVM_API_KEY", AGENT_KEY) + "\nNVM_API_KEY=other\n"
+        dlg_env.agent["env"] = seed
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "agent_key_present"
+        assert dlg_env.agent["injects"] == [] and dlg_env.agent["env"] == seed
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []
+
+    def test_trinitys_own_left_behind_key_binds_and_is_removed_on_revoke(self, dlg_env):
+        """The organization's key exactly as `format_env_line` writes it (what a
+        revoke with the agent down leaves behind) is Trinity's own: bind
+        proceeds, claims it, and revoke removes it."""
+        from services import agent_env_patch
+
+        dlg_env.agent["env"] = agent_env_patch.format_env_line("NVM_API_KEY", AGENT_KEY) + "\n"
+        assert dlg_env.agent["env"] == f'NVM_API_KEY="{AGENT_KEY}"\n'
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 201, r.text
+        assert r.json()["api_key_injected"] is True
+        assert dlg_env.audit.await_args.kwargs["details"]["api_key_injected"] is True
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200 and r.json()["env_removed"] is True
+        assert "NVM_API_KEY" not in _env_keys(dlg_env.agent["env"])
 
     def test_rebind_carries_api_key_injected_after_a_revoke_with_the_agent_down(self, dlg_env):
         """H1: revoke while the agent is down leaves NVM_API_KEY in .env; the
@@ -991,6 +1030,10 @@ class TestRevoke:
         assert "Nevermined" in dlg_env.client.delete(DLG_URL).json()["detail"]["message"]
 
     def test_hand_configured_key_survives_revoke(self, dlg_env):
+        """Exercises the column's False branch on a SYNTHETIC row (an older or
+        hand-inserted binding with `api_key_injected = 0`). Since R9 a real bind
+        never produces such a row — a hand-set key refuses the bind instead; the
+        real sequence is `TestBind.test_hand_set_api_key_refuses_the_bind_and_writes_nothing`."""
         _bind_row(dlg_env, api_key_injected=0)
         dlg_env.agent["env"] = 'NVM_API_KEY=personal\nNVM_DELEGATION_ID="x"\nNVM_ENVIRONMENT=live\n'
         r = dlg_env.client.delete(DLG_URL)

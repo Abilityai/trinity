@@ -116,8 +116,12 @@ Owner (ent#967 panel)
     ├─ delegation_slot() → ONE Nevermined GET /api/v1/delegation/{id}/transactions
     │     404 → 422 delegation_not_found · non-active status → 422 delegation_inactive
     │     absent status → bind proceeds (live.status "unknown") · timeout → 503 nevermined_unreachable
-    ├─ agent GET /api/credentials/read (.env) → insert row (api_key_injected = NVM_API_KEY absent
-    │     OR the most recent prior row's flag) — partial unique index race → 409 bind_in_progress
+    ├─ agent GET /api/credentials/read (.env) → any NVM_API_KEY value in it that is not the
+    │     organization's agent key (every line, parsed as the agent's reader parses it,
+    │     constant-time) → 409 agent_key_present — no row, no write (R9: Trinity never
+    │     overwrites a key it did not write; its own left-behind key passes)
+    ├─ insert row (api_key_injected = always true since R9; the column stays as the record of
+    │     older or synthetic rows) — partial unique index race → 409 bind_in_progress
     ├─ re-read .env → agent_env_patch.set_keys(NVM_DELEGATION_ID, NVM_API_KEY, NVM_ENVIRONMENT)
     │     → agent POST /api/credentials/inject (disallowed_paths policy checked)
     │     inject fails → delete ONLY the inserted row by id → 503 agent_unreachable
@@ -136,6 +140,8 @@ Owner, shared user, or the agent itself (self only)
     │     else 503/502 and nothing local changes)
     ├─ row revoked_at/by → best-effort env: remove NVM_DELEGATION_ID (+ NVM_API_KEY,
     │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note
+    │     (the delegation id left behind is inert; the organization's agent key is live until the
+    │     next bind rewrites it or a person removes it)
     └─ audit nevermined_delegation_revoke → 200 {revoked, delegation_id, env_removed, env_note}
 ```
 
