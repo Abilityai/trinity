@@ -112,8 +112,13 @@ async def create_reminder_endpoint(
         detail="Reminder rate limit exceeded for this agent.",
     )
 
-    # Idempotency — caller header wins, else a key over the RAW input.
-    scope = idempotency_service.make_agent_scope(name)
+    # Idempotency — caller header wins, else a key over the RAW input. A header
+    # key is the caller's (trinity-enterprise#830); the derived one stays the
+    # agent's, out of any header key's reach.
+    scope = (
+        idempotency_service.make_caller_scope(name, current_user) if idempotency_key
+        else idempotency_service.make_agent_scope(name)
+    )
     key = idempotency_key or idempotency_service.derive_reminder_key(
         name, data.message, data.raw_fire_spec()
     )

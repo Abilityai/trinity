@@ -2888,6 +2888,7 @@ async def dispatch_parallel_task(
     idem, replay = dispatch_admission_service.begin_task_idempotency(
         name=name,
         idempotency_key=idempotency_key,
+        current_user=current_user,
     )
     if replay is not None:
         await dispatch_admission_service.audit_idempotent_replay(
