@@ -426,6 +426,24 @@ non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection
 overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
 holdover list is empty).
 
+**The one chart that owns its loading face (trinity-enterprise#968, operator ruling
+2026-10-22).** The Workspace agent band's activity chart is a waveform signature
+(`components/portal/ActivityWave.vue`, geometry in `utils/activityWave.js`): four rounded
+beats per day mirrored on the centre line, each a clipped pill of that day's sources, the
+seams softened by a vertical blur. A beam wiping that in reads as a loading bar over a
+signature, so this chart — and only this chart — renders its own loading face: the resting
+beats breathe as a slow travelling wave (CSS `scaleY`, staggered per beat) while an indigo
+glint sweeps across them (one SMIL gradient translate), and on arrival each beat grows out
+of the centre line left to right with slight overshoot (~1.5s end to end). What makes it an
+exception rather than a precedent: the PHASES are still `utils/scanlinePhase.js`'s — a
+cache-hit mount lands straight in `loaded` and never animates (the band is rebuilt on every
+chat-tab switch with its numbers in hand), a background refresh never re-enters `loading`,
+an empty week snaps (`reveal=false`) rather than celebrates, and `prefers-reduced-motion`
+stills the breathing, drops the SMIL glint and skips the reveal. Only the fallback timer
+differs (`WAVE_REVEAL_FALLBACK_MS`, 1.6s, since 700ms would cut the reveal mid-flight).
+The allowlist in `tests/unit/portalLoadingTreatment.spec.js` no longer lists the band; a
+second chart wanting its own face is a new ruling, not a copy of this one.
+
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
 loaded content must FILL the zone (a full-height flex column, rather than be measured by
@@ -496,7 +514,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 
 ### D. Data loading & refresh
 
-12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface.
+12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface. One named exception (operator ruling 2026-10-22, trinity-enterprise#968): the Workspace agent band's activity wave owns its loading face — resting beats breathing under a glint, then growing in — under the scanline's own phase rules; it is a signature, not a spinner, and it is the only chart so exempted.
 13. First load animates; background refresh is invisible — stale-while-revalidate, in-place swap.
 14. Loading means "no data yet", never "fetch in flight"; cache hits skip the animation; reduced motion is honored.
 
@@ -528,6 +546,7 @@ The recurring failure modes, in one place:
 | `dark:text-gray-500` on meta text | `dark:text-gray-300` (secondary) or `-400` (tertiary) |
 | A new skeleton/spinner for a loading chart | The scanline primitive, keyed off store state |
 | A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
+| A second chart with its own bespoke loading motion | The scanline primitive — the Workspace band's wave is a named exception (§6, trinity-enterprise#968), not a pattern |
 | A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
 | A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |
