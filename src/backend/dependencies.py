@@ -861,8 +861,10 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
             record_acting_turn(request, principal)
-            if principal._acting_execution_id:
-                _enforce_standing_work_fence(request, principal)
+            # PR #3778 review: for EVERY agent key, header or not — the fence
+            # judges a header-less request by the ledger (`restricted_agent_turn`),
+            # so a curl with the agent's key cannot skip it by omitting the header.
+            _enforce_standing_work_fence(request, principal)
             return principal
 
     # Both JWT and MCP key failed

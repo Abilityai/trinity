@@ -67,6 +67,11 @@ SEARCH_TOOLS = {"Grep", "Glob"}
 SHELL_TOOLS = {"Bash"}
 MCP_PREFIX = "mcp__"
 PLATFORM_MCP_PREFIX = "mcp__trinity__"
+# Claude Code's MCP RESOURCE tools are not `mcp__*` names, but they read through
+# the owner's servers just the same (PR #3778 review): a server exposing files as
+# resources is the filesystem by another name. Judged by the server they target.
+MCP_RESOURCE_TOOLS = frozenset({"ReadMcpResourceTool", "ListMcpResourcesTool"})
+PLATFORM_MCP_SERVER = "trinity"
 
 COULD_NOT_CHECK = (
     "Trinity could not be reached to check whose turn this is, so this path was not "
@@ -303,6 +308,13 @@ def main() -> None:
         # this turn from the request header. Any other server is the owner's,
         # and a filesystem or exec server is the shell by another name.
         if is_platform_mcp_tool(tool):
+            allow()
+        guard_shell(tool, verb="mcp")
+    if tool in MCP_RESOURCE_TOOLS:
+        # Only the platform's own server is fenced elsewhere (per route, by the
+        # backend); a resource read or a listing across every server is the
+        # owner's server like any other `mcp__*` call.
+        if (tool_input.get("server") or "") == PLATFORM_MCP_SERVER:
             allow()
         guard_shell(tool, verb="mcp")
     pairs = targets(tool, tool_input)

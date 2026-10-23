@@ -7,6 +7,11 @@ CI). This module lets the auth entry point ask the same table which routes an
 agent's key may not use while it acts for a turn the platform restricts:
 
   * every `owner` row, unless the row carries `restricted_turn` with a reason;
+  * every `resource` row, on the same terms (PR #3778 review): a resource
+    gate is creator-or-owner, and an agent key carries the OWNER's id and
+    username, so in a shared person's turn it passes for every owner-created
+    schedule — reading a webhook URL (a bearer credential that starts an
+    owner-tier run) or deleting the owner's schedules;
   * every row flagged `standing_work` (work that later runs as the owner);
   * an agent-naming route with NO row (the private submodule's, or one added
     since the table was read): owner tier, the census's own default;
@@ -26,6 +31,7 @@ _TABLE_PATH = Path(__file__).with_name("agent_route_tiers.json")
 TABLE: dict = json.loads(_TABLE_PATH.read_text())
 
 OWNER = "owner"
+RESOURCE = "resource"
 
 # Standing work on routes whose path names no agent (so the census has no row).
 STANDING_WORK_UNNAMED = frozenset({
@@ -94,6 +100,6 @@ def refused_in_restricted_turn(method: str, request) -> Optional[str]:
         return "owner_tier" if names_an_agent(template) else None
     if row.get("standing_work"):
         return "standing_work"
-    if row.get("tier") == OWNER and not row.get("restricted_turn"):
+    if row.get("tier") in (OWNER, RESOURCE) and not row.get("restricted_turn"):
         return "owner_tier"
     return None

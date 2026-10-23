@@ -2,7 +2,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|Write|NotebookEdit|MultiEdit|Read|NotebookRead|Grep|Glob|Bash|mcp__.*",
+        "matcher": "Edit|Write|NotebookEdit|MultiEdit|Read|NotebookRead|Grep|Glob|Bash|mcp__.*|ReadMcpResourceTool|ListMcpResourcesTool",
         "hooks": [
           {
             "type": "command",

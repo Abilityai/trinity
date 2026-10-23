@@ -348,7 +348,7 @@ def test_the_drop_in_registers_the_guard_in_exec_form_for_the_file_tools_the_she
     (entry,) = drop_in["hooks"]["PreToolUse"]
     assert set(entry["matcher"].split("|")) == {"Edit", "Write", "NotebookEdit", "MultiEdit",
                                                 "Read", "NotebookRead", "Grep", "Glob", "Bash",
-                                                "mcp__.*"}
+                                                "mcp__.*", "ReadMcpResourceTool", "ListMcpResourcesTool"}
     (h,) = entry["hooks"]
     assert h["command"] == "/usr/bin/env"
     assert h["args"] == ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S",
@@ -468,3 +468,21 @@ def test_an_mcp_tool_outside_a_platform_turn_asks_nobody(hook, monkeypatch):
 def test_the_mcp_refusal_names_the_owners_servers(hook, monkeypatch, capsys):
     code, _ = run(hook, monkeypatch, "mcp__filesystem__read_file", {}, tier="share", kind="person")
     assert code == 2 and "MCP" in capsys.readouterr().err
+
+
+
+# PR #3778 review: the MCP RESOURCE tools read through the owner's servers too.
+@pytest.mark.parametrize("tool,tool_input", [
+    ("ReadMcpResourceTool", {"server": "filesystem", "uri": "file:///home/developer/.env"}),
+    ("ListMcpResourcesTool", {}),                      # a listing across every server
+    ("ListMcpResourcesTool", {"server": "filesystem"}),
+])
+def test_an_owner_mcp_resource_read_is_refused_in_a_shared_turn(hook, monkeypatch, tool, tool_input):
+    code, _ = run(hook, monkeypatch, tool, tool_input, tier="share")
+    assert code == 2
+
+
+@pytest.mark.parametrize("tool", ["ReadMcpResourceTool", "ListMcpResourcesTool"])
+def test_the_platform_servers_resources_and_the_owners_own_turn_are_allowed(hook, monkeypatch, tool):
+    assert run(hook, monkeypatch, tool, {"server": "trinity", "uri": "trinity://x"}, tier="share")[0] == 0
+    assert run(hook, monkeypatch, tool, {"server": "filesystem"}, tier="owner")[0] == 0
