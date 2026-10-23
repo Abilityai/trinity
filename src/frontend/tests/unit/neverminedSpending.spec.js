@@ -14,8 +14,19 @@ import {
   retryAfterSeconds,
   statusBadge,
   COPY,
+  ACTIONS,
   FORBIDDEN_WORDING,
   POSITIVE_WORDING,
+  unwrapSuccess,
+  unwrapSession,
+  inlineWidth,
+  envNoteTone,
+  embedErrorMessage,
+  revokeMessage,
+  persistPending,
+  readPending,
+  clearPending,
+  PENDING_PREFIX,
 } from '@/utils/neverminedSpending.js'
 import { apiErrorCode } from '@/utils/apiError.js'
 
@@ -122,6 +133,9 @@ describe('expiryParts', () => {
 describe('recoveryFor', () => {
   it('a named code selects the recovery action', () => {
     expect(recoveryFor('agent_not_running', 409, 'bind')).toBe('retry_bind')
+    // Addendum 2026-10-23 (F4): a hand-set NVM_API_KEY blocks the bind; the
+    // admin removes it and binds the same ids — the same recovery.
+    expect(recoveryFor('agent_key_present', 409, 'bind')).toBe('retry_bind')
     expect(recoveryFor('delegation_active', 409, 'bind')).toBe('reread')
     expect(recoveryFor('bind_in_progress', 409, 'bind')).toBe('reread')
     expect(recoveryFor('nevermined_not_configured', 409, 'mint')).toBe('reread')
@@ -210,5 +224,132 @@ describe('COPY — Nevermined holds the card (ent#932)', () => {
   it('carries the positive literal the wording guard requires', () => {
     expect(strings.some(([, s]) => POSITIVE_WORDING.test(s))).toBe(true)
     expect(COPY.subtitle).toContain('Nevermined holds the card')
+  })
+})
+
+const WALLET = '0x' + 'a'.repeat(40)
+const SESSION = { sessionToken: 'tok', userId: 'u1', userWallet: WALLET, apiKeyHash: 'h', expiresAt: '2099-01-01T00:00:00Z' }
+
+describe('unwrapSuccess — setupCard ids → the bind body', () => {
+  it('accepts both ids matching the bind pattern', () => {
+    expect(unwrapSuccess({ delegationId: 'dlg_12345678', paymentMethodId: 'pm_abcdefgh' }))
+      .toEqual({ delegationId: 'dlg_12345678', paymentMethodId: 'pm_abcdefgh' })
+  })
+  it('paymentMethodId is optional on the bind', () => {
+    expect(unwrapSuccess({ delegationId: 'dlg_12345678' })).toEqual({ delegationId: 'dlg_12345678' })
+  })
+  it('anything off-pattern is null — no POST is made with it', () => {
+    expect(unwrapSuccess(null)).toBeNull()
+    expect(unwrapSuccess({})).toBeNull()
+    expect(unwrapSuccess({ delegationId: 'short' })).toBeNull()
+    expect(unwrapSuccess({ delegationId: 'dlg 12345678' })).toBeNull()
+    expect(unwrapSuccess({ delegationId: 'x'.repeat(129) })).toBeNull()
+    expect(unwrapSuccess({ delegationId: 'dlg_12345678', paymentMethodId: 'pm/../x1' })).toBeNull()
+    expect(unwrapSuccess({ delegationId: 'dlg_12345678', paymentMethodId: 42 })).toBeNull()
+  })
+  it('8 and 128 characters are the inclusive bounds', () => {
+    expect(unwrapSuccess({ delegationId: 'a'.repeat(8) })).not.toBeNull()
+    expect(unwrapSuccess({ delegationId: 'a'.repeat(128) })).not.toBeNull()
+    expect(unwrapSuccess({ delegationId: 'a'.repeat(7) })).toBeNull()
+  })
+})
+
+describe('unwrapSession — TD-7 tolerant read of the forwarded Nevermined body', () => {
+  it('bare, .session and .data all yield the five keys the SDK checks', () => {
+    expect(unwrapSession(SESSION)).toEqual(SESSION)
+    expect(unwrapSession({ session: SESSION, extra: 1 })).toEqual(SESSION)
+    expect(unwrapSession({ data: { ...SESSION, junk: 'x' } })).toEqual(SESSION)
+  })
+  it('a missing key, an empty string or a non-0x wallet is null', () => {
+    expect(unwrapSession(null)).toBeNull()
+    expect(unwrapSession({})).toBeNull()
+    expect(unwrapSession({ ...SESSION, apiKeyHash: undefined })).toBeNull()
+    expect(unwrapSession({ ...SESSION, sessionToken: '' })).toBeNull()
+    expect(unwrapSession({ ...SESSION, userWallet: 'abc' })).toBeNull()
+  })
+})
+
+describe('inlineWidth — the SDK clamps inline frames to [440, 720]', () => {
+  it('clamps and floors', () => {
+    expect(inlineWidth(300)).toBe(440)
+    expect(inlineWidth(500.7)).toBe(500)
+    expect(inlineWidth(1200)).toBe(720)
+    expect(inlineWidth(Infinity)).toBe(720)
+  })
+})
+
+describe('envNoteTone — keyed on the backend prefix only (addendum W3)', () => {
+  it('maps the two prefixes', () => {
+    expect(envNoteTone('agent_not_running — the Nevermined mandate is revoked …')).toBe('stopped')
+    expect(envNoteTone('agent_unreachable — the Nevermined mandate is revoked …')).toBe('unreachable')
+    expect(envNoteTone('something else')).toBe('other')
+    expect(envNoteTone(null)).toBeNull()
+  })
+})
+
+describe('embedErrorMessage — userMessage first, never the raw message', () => {
+  it('prefers userMessage and falls back per code', () => {
+    expect(embedErrorMessage({ code: 'NETWORK', message: 'ECONNRESET at upstream-host', userMessage: 'Try later' })).toBe('Try later')
+    expect(embedErrorMessage({ code: 'UNAUTHORIZED', message: 'jwt bad' })).toBe(COPY.embedUnauthorized)
+    expect(embedErrorMessage({ code: 'PAYMENT_NOT_CONFIRMED', message: 'x' })).toBe(COPY.embedPayment)
+    expect(embedErrorMessage({ code: 'UNKNOWN', message: 'stack' })).toBe(COPY.embedUnknown)
+    expect(embedErrorMessage({ code: 'NETWORK', message: 'secret detail' })).not.toContain('secret')
+  })
+})
+
+describe('revokeMessage — the §4.4 confirmation', () => {
+  it('names Nevermined as the card holder and states the amount', () => {
+    const m = revokeMessage('$6.00')
+    expect(m).toContain('Nevermined holds the card')
+    expect(m).toContain('The remaining $6.00 cannot be spent through this agent')
+    expect(FORBIDDEN_WORDING.test(m)).toBe(false)
+  })
+  it('an unknown amount is not invented', () => {
+    expect(revokeMessage('unknown')).toContain('The remaining balance cannot be spent')
+    expect(revokeMessage('—')).not.toContain('—')
+  })
+  it('the ruled action labels are wording-guard clean', () => {
+    expect(ACTIONS.revokeConfirm).toBe('Revoke mandate')
+    expect(ACTIONS.retryBind).toBe('Retry bind')
+    for (const [k, v] of Object.entries(ACTIONS)) expect(FORBIDDEN_WORDING.test(v), k).toBe(false)
+  })
+})
+
+describe('pending — a Nevermined mandate not yet bound, per agent', () => {
+  function memStore() {
+    const m = new Map()
+    return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => m.set(k, String(v)), removeItem: (k) => m.delete(k), m }
+  }
+  const REC = { agent: 'a', delegationId: 'dlg_12345678', paymentMethodId: 'pm_abcdefgh', provider: 'stripe', at: 1 }
+
+  it('persist → read round-trips under nvm-pending:<agent>', () => {
+    const s = memStore()
+    expect(persistPending(REC, s)).toBe(true)
+    expect([...s.m.keys()]).toEqual([`${PENDING_PREFIX}a`])
+    expect(PENDING_PREFIX).toBe('nvm-pending:')
+    expect(readPending('a', s)).toEqual(REC)
+  })
+  it('another agent reads nothing; clear removes it', () => {
+    const s = memStore()
+    persistPending(REC, s)
+    expect(readPending('b', s)).toBeNull()
+    clearPending('a', s)
+    expect(readPending('a', s)).toBeNull()
+  })
+  it('a malformed or mismatched record is null, never thrown', () => {
+    const s = memStore()
+    s.setItem(`${PENDING_PREFIX}a`, '{not json')
+    expect(readPending('a', s)).toBeNull()
+    s.setItem(`${PENDING_PREFIX}a`, JSON.stringify({ ...REC, agent: 'b' }))
+    expect(readPending('a', s)).toBeNull()
+    s.setItem(`${PENDING_PREFIX}a`, JSON.stringify({ ...REC, delegationId: 'bad' }))
+    expect(readPending('a', s)).toBeNull()
+  })
+  it('a storage that throws degrades to memory-only (false / null)', () => {
+    const boom = { getItem() { throw new Error('blocked') }, setItem() { throw new Error('blocked') }, removeItem() { throw new Error('blocked') } }
+    expect(persistPending(REC, boom)).toBe(false)
+    expect(readPending('a', boom)).toBeNull()
+    expect(() => clearPending('a', boom)).not.toThrow()
+    expect(persistPending(REC, null)).toBe(false)
   })
 })
