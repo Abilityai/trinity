@@ -2708,6 +2708,14 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
+    # The platform default is a Claude model id: a Codex or Gemini agent runs on
+    # its own model instead (`task_execution_service._default_model_for`).
+    try:
+        from services.docker_service import get_agent_runtime
+        if get_agent_runtime(agent_name) != "claude-code":
+            return None
+    except Exception as e:  # noqa: BLE001 — an unknown runtime keeps the default
+        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
     try:
         from services import settings_service
         return settings_service.get_platform_default_model() or None
@@ -2764,7 +2772,7 @@ def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | Non
         # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
         # payload layer (a length rule there would refuse before the 403 that
         # this principal has no control at all), and every sibling field on that
-        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # model IS bounded — `message` is `max_length=100_000`. Without this an
         # authenticated caller can post a megabyte-long `model` and have it
         # echoed verbatim into the error body. Truncated rather than dropped:
         # naming what was refused is the whole point of the message.
