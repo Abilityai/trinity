@@ -6193,6 +6193,17 @@
       "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
     },
     {
+      "file": "unit/test_ent822_shared_folder_links.py",
+      "feature": "trinity-enterprise#822",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "A link planted in a shared folder never reaches the consumer's files: over a temp home with shared-in/A holding an ABSOLUTE link to .claude, PUT/DELETE/download/preview/list through it are 403 resolved_path_mismatch and the target is untouched, while an ordinary shared file reads 200 (reproduced live in two containers 2026-10-22). The agent server's own writers write through files.write_bytes_nofollow: credential injection refuses a link in a parent or as the file (403, target untouched, the link not replaced) and writes ordinary credentials 0600; snapshot restore skips a member under a linked directory or that is a link and restores the rest; the writer refuses empty/absolute/traversal paths. Mutations: each writer's pre-fix code turns its 2 tests red."
+    },
+    {
       "file": "unit/test_ent820_agent_server_no_follow_writes.py",
       "feature": "trinity-enterprise#820",
       "added": "2026-10-16",
