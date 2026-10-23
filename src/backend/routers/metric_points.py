@@ -141,18 +141,25 @@ def _ops_int(key: str, fallback: int) -> int:
       basis while the sweep was disabled would enforce a window nothing is
       actually pruning to.
 
+    A negative value is garbage too (#3089): clamping it to `0` would lift the
+    cap. Every reader that REPORTS the cap goes through this function, so the
+    report cannot disagree with what the write path enforces.
+
     (`PUT /api/settings/{key}` can no longer write garbage to either key, but a
     hand-edited row still can.)
     """
     raw, _source = settings_service.resolve_ops_setting(key)
     try:
-        return max(int(raw), 0)
+        value = int(raw)
     except (TypeError, ValueError):
+        value = -1
+    if value < 0:
         logger.warning(
-            "[Metrics] Unparseable %s=%r — using the built-in default %s",
+            "[Metrics] Unusable %s=%r — using the built-in default %s",
             key, raw, fallback,
         )
         return fallback
+    return value
 
 
 @router.post(
