@@ -235,3 +235,41 @@ class TestValuesOf:
     def test_a_malformed_key_is_rejected(self, patch):
         with pytest.raises(ValueError):
             patch.values_of("A=b\n", "NVM-API-KEY")
+
+
+class TestOneLineMatcher:
+    """D12 (validate round 2, W4): `values_of`, `set_keys` and `remove_keys`
+    must agree on what a `KEY=` line is. A hand-spaced `KEY = value` line is
+    one the agent's reader honours, so the bind check sees it — and the writer
+    and the remover must then rewrite / drop THAT line, not append a second
+    one that revoke later removes while the spaced original stays live."""
+
+    SPACED = "A=1\nNVM_API_KEY = hand-spaced-org-key\nB=2\n"
+
+    def test_values_of_sees_the_spaced_line(self, patch, reader, tmp_path):
+        assert patch.values_of(self.SPACED, "NVM_API_KEY") == ["hand-spaced-org-key"]
+        assert _parsed(reader, self.SPACED, tmp_path)["NVM_API_KEY"] == "hand-spaced-org-key"
+
+    def test_set_keys_replaces_the_spaced_line_in_place(self, patch, reader, tmp_path):
+        out = patch.set_keys(self.SPACED, {"NVM_API_KEY": "new"})
+        assert out == 'A=1\nNVM_API_KEY="new"\nB=2\n'
+        assert patch.values_of(out, "NVM_API_KEY") == ["new"]
+        assert _parsed(reader, out, tmp_path)["NVM_API_KEY"] == "new"
+
+    def test_remove_keys_removes_the_spaced_line(self, patch, reader, tmp_path):
+        out = patch.remove_keys(self.SPACED, ["NVM_API_KEY"])
+        assert out == "A=1\nB=2\n"
+        assert patch.values_of(out, "NVM_API_KEY") == []
+        assert "NVM_API_KEY" not in _parsed(reader, out, tmp_path)
+
+    @pytest.mark.parametrize("line", ["NVM_API_KEY\t=\tv\n", "  NVM_API_KEY  =v\n", "\tNVM_API_KEY= v\n"])
+    def test_tabs_and_runs_of_blanks_around_the_equals_count_too(self, patch, line):
+        assert patch.values_of(line, "NVM_API_KEY") == ["v"]
+        assert patch.set_keys(line, {"NVM_API_KEY": "n"}) == 'NVM_API_KEY="n"\n'
+        assert patch.remove_keys(line, ["NVM_API_KEY"]) == ""
+
+    @pytest.mark.parametrize("line", ["export NVM_API_KEY=v\n", "# NVM_API_KEY=v\n", "NVM_API_KEY_X=v\n", "X NVM_API_KEY=v\n"])
+    def test_lines_no_function_treats_as_the_key(self, patch, line):
+        assert patch.values_of(line, "NVM_API_KEY") == []
+        assert patch.set_keys(line, {"NVM_API_KEY": "n"}) == line + 'NVM_API_KEY="n"\n'
+        assert patch.remove_keys(line, ["NVM_API_KEY"]) == line

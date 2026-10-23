@@ -32,9 +32,13 @@ from typing import Dict, Iterable, List, Mapping
 __all__ = ["format_env_line", "set_keys", "remove_keys", "values_of"]
 
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-#: What counts as "a line for KEY" — the same shape the PAT patcher matches
-#: (leading blanks, then ``KEY=``), so both writers agree on the file.
-_LINE_KEY_RE = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=")
+#: What counts as "a line for KEY" — ONE matcher for ``set_keys``,
+#: ``remove_keys`` and ``values_of`` (ent#966 D12): leading blanks, the key,
+#: optional blanks, ``=``. The blanks before ``=`` are what the agent's reader
+#: tolerates (``KEY = v``); with two matchers a hand-spaced org-key line passed
+#: the bind check, ``set_keys`` appended a second line, and revoke removed only
+#: that one while reporting the key gone.
+_LINE_KEY_RE = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)[ \t]*=")
 
 
 def _check_key(key: str) -> str:
@@ -135,21 +139,18 @@ def values_of(env_text: str, key: str) -> List[str]:
     agent's own reader (``execution_env.parse_env_file``) would see it — so a
     caller comparing one knows what the agent would actually send (ent#966 R9).
 
-    Line matching mirrors the READER, not ``_LINE_KEY_RE``: the line is
-    stripped, a comment / blank / ``=``-less line is skipped, the key is the
-    stripped text before the first ``=`` (so ``KEY = v`` counts) and the value
-    is the stripped remainder, unquoted as above. That is a superset of the
-    lines ``set_keys`` rewrites — the right direction for a refusal: a hand
-    shape this module would not rewrite is still one the agent reads.
+    Line matching is ``_LINE_KEY_RE`` — the same matcher ``set_keys`` and
+    ``remove_keys`` use (D12), which also mirrors the reader: a comment /
+    blank / ``=``-less line is skipped, blanks around the key and before the
+    ``=`` are tolerated (so ``KEY = v`` counts), and the value is the stripped
+    remainder, unquoted as above. A line this function sees is therefore one
+    the writer rewrites and the remover drops, and vice versa.
     """
     _check_key(key)
     found: List[str] = []
     for raw in env_text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
+        match = _LINE_KEY_RE.match(raw)
+        if not match or match.group(1) != key:
             continue
-        name, _, value = line.partition("=")
-        if name.strip() != key:
-            continue
-        found.append(_unquote(value.strip()))
+        found.append(_unquote(raw[match.end():].strip()))
     return found
