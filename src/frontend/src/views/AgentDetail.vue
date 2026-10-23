@@ -210,6 +210,7 @@
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
+              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" />
             </div>
 
             <!-- A2A Tab Content (trinity-enterprise#158) -->
@@ -463,6 +464,7 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import NeverminedSpendingPanel from '../components/NeverminedSpendingPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
