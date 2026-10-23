@@ -2998,7 +2998,7 @@ class CanaryStatusResponse(BaseModel):
 
     enabled: bool = Field(
         ...,
-        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        description="CANARY_ENABLED is 1/true/yes/on (any case). Answers the disabled case; "
         "default-OFF is the normal state for most installs.",
     )
     status: str = Field(
