@@ -290,3 +290,179 @@ def test_noqa_inv8_suppresses_line():
     assert find_violations(src, "slack.py") == []
     # without the marker it IS flagged
     assert find_violations(src.replace("  # noqa: inv8", ""), "slack.py")
+
+
+# --------------------------------------------------------------------------- #
+# trinity-enterprise#840: no hand-copied agent-key self-gate, anywhere in the
+# backend. `dependencies.assert_own_agent` is the one spelling the route census
+# recognises (AGENT_CALLABLE_SELF); an inline copy is correct and invisible, and
+# seat_decisions shipped without one for that reason (trinity-enterprise#839).
+# The matcher lives in `_route_census.py` so the private submodule's twin runs
+# the same one over its own tree.
+# --------------------------------------------------------------------------- #
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _route_census as _rc  # noqa: E402
+
+# (path under src/backend, qualname) -> why it keeps its own comparison.
+_SELF_GATE_ALLOWLIST: dict[tuple[str, str], str] = {
+    ("routers/aauth_person.py", "assert_own_key"): (
+        "stricter than assert_own_agent: the agent's OWN key only, so a person is "
+        "refused too (403 aauth_agent_only, trinity-enterprise#878)"
+    ),
+}
+
+
+def _hand_copies() -> list[tuple[str, str, int]]:
+    out = []
+    for path in _rc.backend_files():
+        rel = path.relative_to(_rc.BACKEND).as_posix()
+        for qual, lineno in _rc.hand_copied_self_gates(ast.parse(path.read_text(encoding="utf-8"))):
+            out.append((rel, qual, lineno))
+    return out
+
+
+def test_no_hand_copied_agent_self_gate():
+    found = _hand_copies()
+    offenders = [f"  {rel}:{line} {qual}" for rel, qual, line in found
+                 if (rel, qual) not in _SELF_GATE_ALLOWLIST]
+    assert not offenders, (
+        "Hand-copied agent-key self-gate(s) — call dependencies.assert_own_agent("
+        "current_user, <path agent>, detail=...) as the handler's FIRST statement and "
+        "list the route in AGENT_CALLABLE_SELF (tests/unit/_route_census.py):\n"
+        + "\n".join(offenders)
+    )
+    stale = set(_SELF_GATE_ALLOWLIST) - {(rel, qual) for rel, qual, _ in found}
+    assert not stale, f"stale _SELF_GATE_ALLOWLIST entries: {sorted(stale)}"
+
+
+_SELF_GATE_SPELLINGS = [
+    # the original inline copy
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # reversed operands
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and agent_name != current_user.agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # getattr, bound to a local first (share_agent_file's spelling)
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    actor = getattr(current_user, 'agent_name', None)\n"
+    "    if actor and actor != agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # getattr inline
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if getattr(current_user, 'agent_name', None) and "
+    "getattr(current_user, 'agent_name', None) != agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # the predicate the helper uses, copied
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    caller = agent_principal_name(current_user)\n"
+    "    if caller is not None and caller != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # `not ==`
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and not current_user.agent_name == name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # a module helper the handler calls (reminders' `_self_gate`)
+    "def _self_gate(current_user: User, name: str) -> None:\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # a CurrentUser principal
+    "def h(agent_name: str, current_user: CurrentUser):\n"
+    "    if current_user.agent_name and current_user.agent_name != agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # an unannotated helper (the house style of many module helpers)
+    "def _gate(current_user, name):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # Optional[User], Annotated[User, ...] and string annotations
+    "def _gate(current_user: Optional[User], name: str):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    "def h(name: str, current_user: Annotated[User, Depends(get_current_user)]):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    "def _gate(current_user: 'User', name: str):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # `not in (None, name)`
+    "def _gate(current_user: User, name: str):\n"
+    "    if current_user.agent_name not in (None, name):\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # a factory's exception, and a prebuilt one
+    "def _gate(current_user: User, name: str):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise _forbidden()\n",
+    "def _gate(current_user: User, name: str):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        raise FORBIDDEN\n",
+    # a hand-built 403 response
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        return JSONResponse(status_code=403, content={'detail': 'no'})\n",
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        return JSONResponse(status_code=status.HTTP_403_FORBIDDEN, content={})\n",
+    # the path agent aliased to a local first
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    target = agent_name\n"
+    "    if current_user.agent_name and current_user.agent_name != target:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # equal-or-else-refuse
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if not current_user.agent_name or current_user.agent_name == name:\n"
+    "        pass\n"
+    "    else:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+]
+
+_SELF_GATE_BENIGN = [
+    # the helper itself, in use
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    assert_own_agent(current_user, name, detail='no')\n",
+    # a ROW's agent, not the principal's (execution ownership)
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    execution = db.get_execution('x')\n"
+    "    if execution.agent_name != agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='not this agent')\n",
+    # a header checked against the principal, not the path agent
+    "def h(x_source_agent: str, current_user: User = Depends(get_current_user)):\n"
+    "    if x_source_agent != current_user.agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # the same comparison deciding a branch, not refusing
+    "def h(agent_name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and current_user.agent_name != agent_name:\n"
+    "        return None\n",
+    # refusing every agent key is a different gate (canvas `_gate_human_only`)
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='humans only')\n",
+    # a body field, not a principal
+    "def h(agent_name: str, body: NotificationCreate):\n"
+    "    if body.agent_name != agent_name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    # the helper's own shape: an equality that returns, with no refusing `else`
+    "def gate(current_user: User, agent_name: str):\n"
+    "    caller = agent_principal_name(current_user)\n"
+    "    if caller is None or caller == agent_name:\n"
+    "        return\n"
+    "    raise HTTPException(status_code=403, detail='no')\n",
+    # an unannotated parameter that is not named like a principal
+    "def h(execution, agent_name):\n"
+    "    if execution.agent_name != agent_name:\n"
+    "        raise HTTPException(status_code=404, detail='Execution not found')\n",
+    # a 200 response is not a refusal
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if current_user.agent_name and current_user.agent_name != name:\n"
+    "        return JSONResponse(status_code=200, content={'delivered': False})\n",
+]
+
+
+@pytest.mark.parametrize("src", _SELF_GATE_SPELLINGS, ids=[f"spelling-{i}" for i in range(len(_SELF_GATE_SPELLINGS))])
+def test_the_self_gate_matcher_finds_every_spelling(src):
+    assert _rc.hand_copied_self_gates(ast.parse(src)), "hand-copied self-gate not found"
+
+
+@pytest.mark.parametrize("src", _SELF_GATE_BENIGN, ids=[f"benign-{i}" for i in range(len(_SELF_GATE_BENIGN))])
+def test_the_self_gate_matcher_spares_other_comparisons(src):
+    assert _rc.hand_copied_self_gates(ast.parse(src)) == []

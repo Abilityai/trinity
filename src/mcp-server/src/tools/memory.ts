@@ -72,8 +72,8 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
           .string()
           .optional()
           .describe(
-            "Agent name override. Defaults to the agent whose MCP key is making this call. " +
-            "Omit in normal use."
+            "For a user-scoped key only. An agent-scoped key always writes for its own agent; " +
+            "naming another is refused."
           ),
       }),
       execute: async (

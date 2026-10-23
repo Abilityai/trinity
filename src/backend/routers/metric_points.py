@@ -69,7 +69,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from database import db
-from dependencies import AuthorizedAgent, get_current_user
+from dependencies import AuthorizedAgent, assert_own_agent, get_current_user
 from models import (
     METRIC_BATCH_MAX_BYTES,
     MetricPointsBatch,
@@ -184,11 +184,7 @@ async def record_metric_points(
     against what it meant to send.
     """
     # --- self-gate (before any read: the answer must not vary by existence) --
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only record metrics as itself",
-        )
+    assert_own_agent(current_user, name, detail="Agent-scoped key may only record metrics as itself")
 
     rate_limiter.enforce(
         f"agent_metrics:{name}",

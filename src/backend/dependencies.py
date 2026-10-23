@@ -5,7 +5,7 @@ import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Annotated
+from typing import Any, Callable, Optional, Annotated
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -2615,6 +2615,48 @@ def assert_agent_access(current_user: User, agent_name: str, *, detail: str = "A
     if not (db.can_user_access_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+OWN_AGENT_DETAIL = "Agent-scoped key may only act as its own agent"
+
+
+def assert_own_agent(
+    current_user: User,
+    agent_name: str,
+    *,
+    detail: Any = OWN_AGENT_DETAIL,
+    refusal: Optional[Callable[[], HTTPException]] = None,
+) -> None:
+    """The agent-key self-gate (trinity-enterprise#840) — 403 when an
+    agent-scoped key names an agent other than its own.
+
+    An agent key resolves to its owner carrying the owner's role, so
+    ``AuthorizedAgent`` / ``assert_agent_access`` answer "may this key reach that
+    agent" (since ent#629: itself, its permission-edge targets, the agents it
+    spawned), never "is it acting on its own agent". A route an agent key may
+    call that reads or changes one agent's state calls this as its FIRST
+    statement, after the docstring, on its ``get_current_user`` principal and
+    the path agent. That shape is what the route census
+    (``tests/unit/_route_census.py``) recognises for ``AGENT_CALLABLE_SELF``, and
+    it runs before any lookup, so the refusal says nothing about the target
+    (#186).
+
+    A no-op for every principal that is not an agent key — a person, a
+    ``user`` / ``system`` / connector key, the event loopback — exactly like the
+    hand copies it replaced: whether those may reach another agent is the
+    access check's question, not this one's. The predicate is
+    ``agent_principal_name``, the one ``agent_may_reach`` uses.
+
+    ``detail`` is the route's own message. ``refusal`` builds the exception
+    instead, for a router whose access dependency answers a uniform 404 and
+    whose self refusal must stay byte-identical to it.
+    """
+    caller = agent_principal_name(current_user)
+    if caller is None or caller == agent_name:
+        return
+    if refusal is not None:
+        raise refusal()
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "Not authorized") -> None:
