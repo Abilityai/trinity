@@ -210,7 +210,7 @@
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
-              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" />
+              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" :notify="showNotification" />
             </div>
 
             <!-- A2A Tab Content (trinity-enterprise#158) -->

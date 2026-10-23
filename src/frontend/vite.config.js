@@ -75,7 +75,7 @@ export default defineConfig({
   // whether one is found depends on how its caller happens to be wired, so the rule
   // lists them all. Guard: tests/unit/optimizeDepsIncludeGuard.spec.js.
   optimizeDeps: {
-    include: ['mermaid', 'qrcode'],
+    include: ['mermaid', 'qrcode', '@nevermined-io/ui-widgets'],
   },
   server: {
     port: 80,

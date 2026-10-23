@@ -49,7 +49,175 @@ export const COPY = Object.freeze({
   mandateId: 'Nevermined mandate',
   transactionsLink: 'Transactions at Nevermined',
   pastMandates: 'Past Nevermined mandates',
+  // Enroll → bind (checkpoint B).
+  opening: 'Opening the Nevermined card form…',
+  binding: 'Binding the Nevermined mandate to this agent…',
+  overlayOpen: 'The Nevermined card form is open over this page. Press Esc to close it.',
+  funded: 'Funded through Nevermined. The agent can spend from the mandate at its next run.',
+  apiKeyKept: 'The agent already held a Nevermined API key — only the Nevermined mandate id was added.',
+  alreadyFunded: 'This agent was already funded through Nevermined.',
+  mandateExists: 'The mandate already exists at Nevermined; if you do not retry, revoke it there.',
+  pendingBanner: 'A Nevermined mandate was created but not bound to this agent.',
+  pendingDiscardNote: 'Discard keeps the mandate at Nevermined; revoke it there if you do not want it.',
+  sdkLoadFailed: 'Could not load the Nevermined widget. Check your connection and try again.',
+  invalidSession: "Nevermined returned a session Trinity's widget could not use.",
+  invalidSessionNote:
+    'A user without a Nevermined smart-account wallet also lands here; check the account at Nevermined.',
+  sessionExpired: 'The Nevermined session expired — start again.',
+  badIds: 'Nevermined returned ids Trinity could not use. Nothing was bound.',
+  newMandate: 'Create a new Nevermined mandate',
+  embedUnauthorized:
+    'Nevermined refused the card form session. The session may have expired, or the widget key may not allow this origin.',
+  embedNetwork: 'The Nevermined card form could not reach Nevermined. Check your connection and try again.',
+  embedPayment: 'Nevermined could not confirm the card. Try again or use another card.',
+  embedUnknown: 'The Nevermined card form reported an error. Try again.',
+  closeForm: 'Close the Nevermined form',
+  // Revoke (checkpoint B).
+  revokeTitle: 'Revoke this mandate at Nevermined?',
+  revoked: 'Mandate revoked at Nevermined.',
+  revokeFailed: 'The Nevermined mandate is still active.',
 })
+
+/**
+ * Action labels the rulings fix verbatim (plan §4.4 / addendum). They sit
+ * beside copy that names Nevermined; they are wording-guard clean but are
+ * not required to carry the name themselves.
+ */
+export const ACTIONS = Object.freeze({
+  retryBind: 'Retry bind',
+  discard: 'Discard',
+  revokeConfirm: 'Revoke mandate',
+  tryAgain: 'Try again',
+})
+
+/** The §4.4 revoke confirmation, with the amount Nevermined reported. */
+export function revokeMessage(remaining) {
+  const amount = remaining && remaining !== DASH && remaining !== 'unknown' ? remaining : 'remaining balance'
+  const lead = amount === 'remaining balance' ? 'The remaining balance' : `The remaining ${amount}`
+  return (
+    "Nevermined will refuse the agent's next paid call immediately. " +
+    `${lead} cannot be spent through this agent. Nevermined holds the card; nothing about the card changes.`
+  )
+}
+
+/** Per-code fallback copy for an SDK `EmbedError` without a `userMessage`. */
+export function embedErrorMessage(e) {
+  if (e && typeof e.userMessage === 'string' && e.userMessage.trim()) return e.userMessage
+  switch (e?.code) {
+    case 'UNAUTHORIZED': return COPY.embedUnauthorized
+    case 'NETWORK': return COPY.embedNetwork
+    case 'PAYMENT_NOT_CONFIRMED': return COPY.embedPayment
+    default: return COPY.embedUnknown
+  }
+}
+
+/** The pattern `NeverminedDelegationBind` enforces on both ids (ent#966). */
+export const ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/
+
+/**
+ * `setupCard`'s `onSuccess` result → the bind body's ids, or null.
+ * `paymentMethodId` is optional on the bind; a present but malformed one fails.
+ */
+export function unwrapSuccess(result) {
+  if (!result || typeof result !== 'object') return null
+  const { delegationId, paymentMethodId } = result
+  if (typeof delegationId !== 'string' || !ID_PATTERN.test(delegationId)) return null
+  if (paymentMethodId === undefined || paymentMethodId === null || paymentMethodId === '') {
+    return { delegationId }
+  }
+  if (typeof paymentMethodId !== 'string' || !ID_PATTERN.test(paymentMethodId)) return null
+  return { delegationId, paymentMethodId }
+}
+
+const SESSION_STRINGS = ['sessionToken', 'userId', 'expiresAt', 'apiKeyHash']
+
+function isWidgetSession(s) {
+  return Boolean(
+    s && typeof s === 'object'
+      && SESSION_STRINGS.every((k) => typeof s[k] === 'string' && s[k])
+      && typeof s.userWallet === 'string' && s.userWallet.startsWith('0x'),
+  )
+}
+
+/**
+ * The widget-session body forwarded verbatim by the backend → the five keys
+ * the SDK's `initialize` checks (TD-7): bare, or under `.session` / `.data`.
+ */
+export function unwrapSession(body) {
+  for (const candidate of [body, body?.session, body?.data]) {
+    if (isWidgetSession(candidate)) {
+      const { sessionToken, userId, userWallet, apiKeyHash, expiresAt } = candidate
+      return { sessionToken, userId, userWallet, apiKeyHash, expiresAt }
+    }
+  }
+  return null
+}
+
+/** Inline iframe width: the slot's width clamped to the SDK's [440, 720]. */
+export const INLINE_MIN_WIDTH = 440
+export const INLINE_MAX_WIDTH = 720
+export const INLINE_HEIGHT = 720
+export function inlineWidth(measured) {
+  const n = Number.isFinite(measured) ? measured : INLINE_MAX_WIDTH
+  return Math.min(INLINE_MAX_WIDTH, Math.max(INLINE_MIN_WIDTH, Math.floor(n)))
+}
+
+/**
+ * A revoke's `env_note` → a tone, keyed on the backend's prefix only. The
+ * sentence itself is rendered verbatim (addendum 2026-10-23, W3).
+ */
+export function envNoteTone(note) {
+  if (typeof note !== 'string') return null
+  if (note.startsWith('agent_not_running')) return 'stopped'
+  if (note.startsWith('agent_unreachable')) return 'unreachable'
+  return 'other'
+}
+
+// ---- pending: a mandate created at Nevermined, not yet bound in Trinity ----
+
+export const PENDING_PREFIX = 'nvm-pending:'
+
+function sessionStore(storage) {
+  if (storage !== undefined) return storage
+  try {
+    return typeof window !== 'undefined' && window.sessionStorage ? window.sessionStorage : null
+  } catch {
+    return null
+  }
+}
+
+/** Persist `{agent, delegationId, paymentMethodId?, provider, at}` for its agent. */
+export function persistPending(pending, storage) {
+  const store = sessionStore(storage)
+  if (!store || !pending?.agent) return false
+  try {
+    store.setItem(PENDING_PREFIX + pending.agent, JSON.stringify(pending))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The persisted pending record for `agent`, or null (malformed → null). */
+export function readPending(agent, storage) {
+  const store = sessionStore(storage)
+  if (!store || !agent) return null
+  try {
+    const raw = store.getItem(PENDING_PREFIX + agent)
+    if (!raw) return null
+    const p = JSON.parse(raw)
+    if (!p || p.agent !== agent || !unwrapSuccess(p)) return null
+    return p
+  } catch {
+    return null
+  }
+}
+
+export function clearPending(agent, storage) {
+  const store = sessionStore(storage)
+  if (!store || !agent) return
+  try { store.removeItem(PENDING_PREFIX + agent) } catch { /* storage blocked */ }
+}
 
 /** Rendered for a number Nevermined did not report — never a derived figure. */
 export const UNKNOWN = 'unknown'
@@ -158,7 +326,9 @@ export function recoveryFor(code, status, phase = 'read') {
     case 'delegation_inactive':
       return 'new_mandate'
     case 'agent_not_running':
-      // The mandate already exists at Nevermined: start the agent, bind the same ids.
+    case 'agent_key_present':
+      // The mandate already exists at Nevermined: fix the agent (start it, or
+      // remove its hand-set NVM_API_KEY), then bind the same ids.
       return 'retry_bind'
     case 'nevermined_busy':
     case 'nevermined_unreachable':
