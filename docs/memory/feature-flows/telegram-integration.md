@@ -95,16 +95,30 @@ Two routers are registered in `main.py:523-524`:
 ### Transport: `src/backend/adapters/transports/telegram_webhook.py`
 
 `TelegramWebhookTransport` extends `ChannelTransport`:
-- `start()` / `stop()` (lines 25-32) — No-ops; transport is passive (FastAPI endpoint handles requests).
+- `start()` / `stop()` — the transport is passive (FastAPI endpoint handles requests). `start()` sweeps album buffers a restart left in Redis, now and once more after the orphan window; `stop()` cancels pending album timers (ent#934, see **Albums** below).
 - `handle_webhook(request, webhook_secret)` (line 34) — Core inbound handler:
   1. Resolve binding by `webhook_secret` via DB
   2. Validate `X-Telegram-Bot-Api-Secret-Token` header
   3. Parse JSON body
-  4. Dedup by `update_id` (skip if <= `last_update_id`)
-  5. Update `last_update_id` in DB
+  4. Dedup by `update_id`: each id is claimed once per bot (`SET NX` on `trinity:telegram:update:{binding_id}:{update_id}`, 24 h), falling back to `update_id <= last_update_id` when Redis is unavailable (ent#934)
+  5. Advance `last_update_id` in DB (forward only — `WHERE last_update_id < :id`)
   6. Inject `_bot_id` and `_agent_name` into update dict
   7. `asyncio.create_task(_process_update(...))` — returns 200 immediately
-- `_process_update(update, binding)` (line 79) — Commands are handled directly; regular messages go through `on_event()` → adapter → router pipeline.
+- `_process_update(update, binding)` — Commands are handled directly; an album item (`media_group_id`, not from a bot) is buffered (see **Albums**); everything else goes through `on_event()` → adapter → router pipeline.
+- `_flush_album(updates, recovered)` — merges a flushed album with `telegram_adapter.merge_album_updates` and sends it through `on_event()` once.
+
+### Albums (ent#934)
+
+Telegram sends an album (2–10 photos, documents, videos or audio files sent together) as **one update per item**, all sharing a `media_group_id` that is unique only within the chat, with the caption on one item. The Bot API has no way to fetch an album, so the items are collected as they arrive and reach the agent as **one** turn.
+
+- **Buffer**: `adapters/transports/inbound_coalescer.py::InboundCoalescer`, in **Redis** — production runs `uvicorn --workers 2`, and the items of one album are separate webhook POSTs that land on either worker. Key: `trinity:telegram:album:{binding_id}:{chat_id}:{media_group_id}` (`:items` list, `:seq` counter, `:flushed` tombstone), plus an `:open` sorted set for the sweep and the per-binding cap.
+- **When it flushes**: `ALBUM_FLUSH_WINDOW_S` (1.5 s) after the album's **last** item — every item re-arms it — or at once at `ALBUM_MAX_ITEMS` (10). Each arrival arms a timer on the worker that received it with its own `seq`; a timer drains only if `seq` is still its own (WATCH + MULTI), so exactly one worker sends the album, with no leader lease.
+- **Merge**: `telegram_adapter.merge_album_updates` orders items by `message_id` (arrival order is not stable), keeps the first item as the base, takes the caption and `caption_entities` from whichever item has them, and a reply-to / forum topic from any item. `_extract_files` returns every item's files in order (largest photo size each); `_extract_media_context` writes one line — `[User sent an album of 3 photos: <caption>]`, or `[User sent an album of 4 items (2 photos, 1 document, 1 video): <caption>]` plus the document names and a note that videos/audio are not readable. `metadata.album_size` = N.
+- **Group trigger rules** are decided once, on the merged message (`parse_message`), so a tagged caption on any item triggers one turn with every file, and an untagged album in a mention-mode group is observed once as a unit. `_is_bot_mentioned` reads `caption` / `caption_entities` as well as `text` / `entities` — before ent#934 a tag in a caption (album or single photo) was never seen.
+- **Never silent**: a Redis error hands the item back to the normal path (one turn, today's behaviour) after a best-effort flush of what was buffered; an item that arrives after its album flushed becomes its own turn (INFO log); an oversized item (>64 KB of JSON) or a 51st open album on one bot is not buffered (WARN). A failed drain is retried three times, then left for the sweep (ERROR log).
+- **Restart**: buffered items survive in Redis. `start()` sweeps albums with no live timer, and sweeps once more 11.5 s later (`orphan_after_ms` + window — an album buffered just before a restart is too young for the first sweep, and no further item may arrive); any later add also sweeps, throttled. One younger than 60 s is delivered (`recovered`), an older one is dropped with a WARN naming the `media_group_id` and item count. Both workers sweep; the drain is one WATCH/MULTI, so the album is delivered once. The 50-open-albums cap per bot is check-then-act and can overshoot by one album per worker (accepted).
+- **Rate limits / uploads**: one album is one message for the per-user rate limit and one upload for the 5-per-window file limit (before, items 6–10 of an album were refused). The per-turn caps still apply — `CHANNEL_MAX_FILES` 10 and a 10 MB total for images; an image past the total is skipped and named as skipped in the agent's context.
+- **Privacy Mode**: in a group with Privacy Mode on, Telegram only delivers messages that mention the bot, so the untagged items of a tagged album may never arrive. Nothing on the backend can recover them.
 
 **Webhook lifecycle functions** (module-level):
 - `register_webhook(agent_name, public_url)` — Calls Telegram `setWebhook` with URL + secret_token + `allowed_updates: ["message", "my_chat_member", "chat_member"]`. Updates `webhook_url` in DB on success.
@@ -256,7 +270,7 @@ Bot tokens are encrypted at rest using AES-256-GCM via `CredentialEncryptionServ
 The message router restricts public channel users to `WebSearch,WebFetch` by default (configurable via `channel_allowed_tools` setting). No `Read`, `Bash`, `Write`, or `Edit` tools — prevents credential exfiltration from agent containers.
 
 ### Update Deduplication
-`last_update_id` column prevents replay attacks. Updates with `update_id <= last_update_id` are silently dropped (`telegram_webhook.py:62-65`).
+Each `update_id` is claimed once per bot in Redis (`SET NX`, 24 h TTL) — Telegram delivers over up to 40 parallel connections and documents that updates can arrive out of order, so the old "`update_id <= last_update_id` is a duplicate" rule dropped real updates that lost the race (album items, ent#934). With Redis unavailable the `last_update_id` watermark is the fallback; its write only moves forward.
 
 ### Bot-Agent Uniqueness
 - `agent_name` is UNIQUE in `telegram_bindings` — one bot per agent
@@ -462,7 +476,7 @@ This enables the agent to:
 
 | Condition | trigger_mode=mention | trigger_mode=all | trigger_mode=observe |
 |-----------|---------------------|-----------------|---------------------|
-| @mention in entities | ✅ Process | ✅ Process | ✅ Process |
+| @mention in entities or caption entities (ent#934) | ✅ Process | ✅ Process | ✅ Process |
 | Reply to bot's message | ✅ Process | ✅ Process | ✅ Process |
 | Regular message (no mention) | 👁 Observe — recorded as group context, no turn (ent#600; was ❌ Skip) | ✅ Process | ✅ Process (agent may skip reply) |
 | `/command@botname` | ✅ Process (counts as tagged, ent#600) | ✅ Process | ✅ Process |

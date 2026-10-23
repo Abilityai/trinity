@@ -145,6 +145,7 @@
   - Per-agent bots (one bot per agent, token encrypted via AES-256-GCM)
   - Bidirectional text chat (users message bot → agent responds via HTML formatting)
   - Photo and document support (download, text extraction for plain text files)
+  - Albums arrive as one turn (ent#934): items sharing a `media_group_id` are buffered in Redis (cross-worker) and merged — every file in `message_id` order, the caption from whichever item had it, one media-context line; flush 1.5 s after the last item or at 10 items; trigger rules decided once on the merged message; a mention in a caption counts as a mention. A restart inside the window delivers albums under 60 s old and drops older ones with a WARN
   - Webhook mode (production) — returns 200 immediately, processes async
   - Webhook reconciliation on backend startup (re-registers all active bots)
   - Bot commands: `/start`, `/help`, `/reset` (clear conversation)
@@ -168,7 +169,7 @@
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
-  - Update dedup via `last_update_id` tracking
+  - Update dedup per `update_id` (Redis `SET NX`, 24 h), with the forward-only `last_update_id` watermark as the Redis-down fallback (ent#934 — the watermark alone dropped out-of-order deliveries)
   - Bot token values never logged
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 - **Future Phases**:

@@ -6193,6 +6193,17 @@
       "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
     },
     {
+      "file": "unit/test_ent822_shared_folder_links.py",
+      "feature": "trinity-enterprise#822",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "A link planted in a shared folder never reaches the consumer's files: over a temp home with shared-in/A holding an ABSOLUTE link to .claude, PUT/DELETE/download/preview/list through it are 403 resolved_path_mismatch and the target is untouched, while an ordinary shared file reads 200 (reproduced live in two containers 2026-10-22). The agent server's own writers write through files.write_bytes_nofollow: credential injection refuses a link in a parent or as the file (403, target untouched, the link not replaced) and writes ordinary credentials 0600; snapshot restore skips a member under a linked directory or that is a link and restores the rest; the writer refuses empty/absolute/traversal paths. Mutations: each writer's pre-fix code turns its 2 tests red."
+    },
+    {
       "file": "unit/test_ent820_agent_server_no_follow_writes.py",
       "feature": "trinity-enterprise#820",
       "added": "2026-10-16",
@@ -6225,6 +6236,16 @@
         "agent-lifecycle"
       ],
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_2891_randomly_guard.py",
+      "feature": "#2891",
+      "added": "2026-10-20",
+      "categories": [
+        "unit",
+        "devex"
+      ],
+      "description": "The pytest-randomly guard (tests/testing_utils/randomly_guard.py, via the tests/testkit symlink): opted_in reads the invocation (--randomly-seed, -p randomly, -prandomly, TRINITY_RANDOM_ORDER=1, PYTEST_ADDOPTS); enforce raises a UsageError naming both ways out when the plugin is active and the run did not opt in, is a no-op without the plugin, and passes an explicit seed or the env opt-in; the banner names the seed and how to reproduce/disable; both conftests (tests/ and the sealed unit/ island) wire it with tryfirst, and the four run-*.sh scripts pin -p no:randomly."
     },
     {
       "file": "unit/test_3584_public_link_clear_expiry.py",

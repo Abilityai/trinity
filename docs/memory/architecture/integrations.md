@@ -20,6 +20,10 @@
 
 **WebSocket auth** (C-002, #550): `/ws` uses single-use opaque tickets, not a JWT in the URL: `POST /api/ws/ticket` mints a 32-byte urlsafe ticket (Redis, 30s TTL); client connects `/ws?ticket=...`; backend atomically `GETDEL`s then accepts. Closes the JWT-leak surface (nginx logs, history, proxies); CSWSH mitigated because minting needs the JWT in an `Authorization` header (CORS-blocked cross-origin). `/ws/events` still accepts `?token=trinity_mcp_*` for external scripts (scoped, revocable). `mint_ticket` optional `ttl_seconds` (default 30s, ceiling 600s); VoIP mints call-bound tickets (`scope="voip:{call_id}"`, 180s) since PSTN dial+ring exceeds 30s. Impl: `services/ws_ticket_service.py` + `routers/ws_tickets.py`.
 
+### Telegram albums — cross-worker inbound coalescing (ent#934)
+
+An album arrives as one update per item (`media_group_id`) on either uvicorn worker. `adapters/transports/inbound_coalescer.py::InboundCoalescer` buffers them in Redis and hands the group to `on_flush` once: a per-arrival `seq` + WATCH/MULTI drain makes only the last item's timer flush, with no leader lease; a tombstone sends late items through on their own; an `:open` sorted set drives the orphan sweep (start, once more after the orphan window, and throttled on add) and the per-binding cap. Fail-open: any Redis error hands the item back to the normal path. Telegram-free — the merge is `telegram_adapter.merge_album_updates`. Webhook dedup is per `update_id` (`SET NX`), because the old watermark dropped updates Telegram delivers out of order. Flow: `feature-flows/telegram-integration.md` → Albums.
+
 ### Telegram group conversation context (ent#600)
 
 A tagged group turn is answered with the group's recent conversation. Policy lives in `services/telegram_group_context.py` (bounds, `format_group_history`, `reply_quote_line`, `group_context_status`); the pipeline is `adapters/message_router.py`.
