@@ -758,8 +758,19 @@ async def bind_delegation(
     return state
 
 
+#: Prefixes (`agent_not_running —` / `agent_unreachable —`) are what the panel
+#: keys on. The delegation id left in `.env` is inert; the organization's agent
+#: key is NOT — it is the live key until the next bind rewrites it or a person
+#: removes it (R10).
 REVOKE_NOTE_AGENT_DOWN = (
-    "agent_not_running — key is inert (mandate revoked at Nevermined); removed at next bind"
+    "agent_not_running — the Nevermined mandate is revoked and the delegation id is inert; "
+    "the organization's agent key stays in the agent's .env until the next bind rewrites it "
+    "or you remove it"
+)
+REVOKE_NOTE_AGENT_UNREACHABLE = (
+    "agent_unreachable — the Nevermined mandate is revoked and the delegation id is inert; "
+    "the organization's agent key stays in the agent's .env until the next bind rewrites it "
+    "or you remove it"
 )
 REVOKE_NOTE_CONCURRENT = (
     "already_revoked — the Nevermined mandate was already revoked by a concurrent request"
@@ -838,7 +849,7 @@ async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> 
                 "Nevermined delegation revoke for %s by %s: env removal failed (%s)",
                 agent_name, actor, type(exc).__name__,
             )
-            env_note = "agent_unreachable — key is inert (mandate revoked at Nevermined); removed at next bind"
+            env_note = REVOKE_NOTE_AGENT_UNREACHABLE
 
     logger.info(
         "Nevermined delegation revoked for %s by %s (env_removed=%s, agent_key_removed=%s)",
