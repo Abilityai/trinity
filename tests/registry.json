@@ -6325,6 +6325,36 @@
         "security"
       ],
       "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
+    },
+    {
+      "file": "../src/frontend/tests/unit/boundedRegion3451.mount.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "design-system"
+      ],
+      "description": "#3451 (mounted): BoundedRegion, the bounded viewport of design-system p28 — a named, keyboard-reachable region (role region, aria-label, tabindex 0); `fill` puts it in a flex column from a 0px basis with the 20rem floor and one-axis scroll, never `flex-1` (whose 0% basis falls back to content height in an auto-height column and regrows the page); without `fill` the consumer sets the cap; consumer test id and classes pass through to the region; scrollToTop() returns it to the first row. Mutation-proven (`grow basis-0` -> `flex-1` turns it red)."
+    },
+    {
+      "file": "../src/frontend/tests/unit/operationsBoundedLists3451.mount.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "operations"
+      ],
+      "description": "#3451 (mounted, Operations with the real Notifications and Executions panels over the real stores): each list tab renders one region holding its rows, states and Load more (last), with the stated total outside it; the chain from the region to the page root is unbroken (every link a flex column with `grow basis-0`, never `flex-1`, `w-full` wherever `mx-auto`); Health and Reports keep the plain page; a poll keeps the region node and its scrollTop while a filter change starts it at the top (Executions, Notifications); the Notifications bulk actions sit in the list header and the Executions running count in the count row, so neither moves the list; the Needs Response stale banner holds through an in-flight poll instead of blinking. Mutation-proven."
+    },
+    {
+      "file": "../src/frontend/tests/unit/executionsStoreWindow3451.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "executions"
+      ],
+      "description": "#3451: the fleet executions store keeps the reader's loaded window — a refresh while the panel is mounted re-reads every row Load more added (pages of at most 200, the route's cap), one row past the window decides hasMore (no Load more on an exhausted or exactly-one-page list), rows that shift between pages are shown once, a filter change outranks a poll or Load more in flight (generation token), a poll tick, WebSocket trigger or Stop refresh asked for during a read runs once after it (never racing the append, never dropped, a burst coalesced), every list read carries the 30 s bound, a WebSocket schedule event reads nothing while no panel shows the list, and a panel that mounts again starts from page one. The walk reads on past rows repeated between its pages, so the window and hasMore stay whole. Real store against an in-memory GET /api/executions honouring limit/offset. Mutation-proven (each guard removed turns its case red)."
     }
   ]
 }
