@@ -4,6 +4,7 @@ Platform Prompt Service — Single source of truth for platform instructions.
 Builds the system prompt that is injected into every Claude Code invocation
 via --append-system-prompt. Replaces the old file-based CLAUDE.local.md injection.
 """
+import fnmatch
 import logging
 import re
 from dataclasses import dataclass, replace
@@ -359,7 +360,18 @@ _GUARDRAIL_PATH_DENY: tuple[str, ...] = (
     "/opt/trinity/*",
     "/etc/claude-code/*",
 )
-_PATH_DENY_LIST = ", ".join(f"`{p}`" for p in _GUARDRAIL_PATH_DENY)
+# The same file's `path_allow` (#3868): names the slash-free deny rules skip.
+# `.env.example` holds variable names only and the compatibility check needs it.
+_GUARDRAIL_PATH_ALLOW: tuple[str, ...] = (".env.example",)
+# Each exception is named beside the slash-free rule it carves out of (`.env.*`).
+_PATH_DENY_LIST = ", ".join(
+    f"`{p}`" + "".join(
+        f" (except `{a}`, which holds variable names only and is yours to write)"
+        for a in _GUARDRAIL_PATH_ALLOW
+        if "/" not in p and fnmatch.fnmatch(a, p)
+    )
+    for p in _GUARDRAIL_PATH_DENY
+)
 # Only Claude Code runs the file guardrail hook, and only on its Write/Edit
 # tools — Bash is not path-gated. Codex and Gemini have no per-tool hook, so
 # telling them their tools refuse these paths would be a false assurance. The
