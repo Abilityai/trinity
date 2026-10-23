@@ -6238,6 +6238,17 @@
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
     },
     {
+      "file": "unit/test_3603_channel_failure_reply.py",
+      "feature": "#3603",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "channels",
+        "unit"
+      ],
+      "description": "A failed channel turn sends the fixed member-facing line, never the execution's error (auth failure, exit code, timeout, capacity, rate limit), in a group and one-to-one, through the real ChannelMessageRouter._run_agent_task; the error stays in the router's log line; a cancelled turn always sends the fixed cancelled line (#679), never the row's error, including a pull-pilot terminated turn whose cancelled row carries the operator's error; a raised dispatch sends the same line; a successful turn is untouched. Mutation: restoring the error forwarding turns 14 red; restoring the cancel-reason forwarding turns 8 red."
+    },
+    {
       "file": "unit/test_2891_randomly_guard.py",
       "feature": "#2891",
       "added": "2026-10-20",
@@ -6325,6 +6336,27 @@
         "security"
       ],
       "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignDraft.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#539: the pure rules behind Select all / Deselect all in Assign shared skills (utils/skillAssignDraft.js) over every row type: Select all adds only unticked, non-deprecated, assignable rows that are not a set's; Deselect all removes every ticked listed row except a set's; both keep a name the dialog does not list. Every disabled reason and its precedence, the counted enabled titles, and what a save removes (set-held kept unless the sets are untrusted), which saves must confirm first (a removed skill with an approval requirement, case-insensitive; never a set-held or conflict name; any other removal with the approval map unread), plus the confirm's words and the refused-name title clause. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignSelectAll.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#539, MOUNTED through the real Teleport: Select all / Deselect all change only the draft (no write), Save then sends the expected body (the unlisted assignment kept, the set's row never sent), Reset restores the saved set, every disabled state carries its reason, the dialog never opens on Deselect all, focus is re-homed whenever a control it sat on is disabled or removed (bulk click, manual tick, Reset, Save, Confirm), and Save confirms (Cancel focused) before dropping an approval requirement, deciding on a gate map re-read at save time (failed read, unresolved set, double click and a dialog closed mid-read covered). Mutation-proven (27 mutants)."
     },
     {
       "file": "unit/test_3363_retry_cron_parity.py",

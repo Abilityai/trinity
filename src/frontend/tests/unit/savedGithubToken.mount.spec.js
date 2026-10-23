@@ -51,7 +51,7 @@ beforeEach(() => {
 describe('the token field', () => {
   it('names the saved token, is not required, and an override is explicit', async () => {
     const w = mount(SavedGithubTokenField, { props: { hasSaved: true, inputId: 't', modelValue: '' } })
-    expect(w.find('[data-testid="github-token-saved"]').exists()).toBe(true)
+    expect(w.find('[data-testid="github-token-saved"]').text()).toContain('Settings → MCP Keys → Personal GitHub Token')
     expect(w.find('[data-testid="github-token-input"]').exists()).toBe(false)
     expect(w.text()).not.toContain('*')
     await w.find('[data-testid="github-token-toggle"]').trigger('click')
@@ -97,7 +97,7 @@ describe('fork-to-own at create', () => {
     saved.value = false
     const w = await forkForm()
     expect(await submit(w)).toBeUndefined()
-    expect(dom().text()).toContain('Settings → GitHub token')
+    expect(dom().text()).toContain('Settings → MCP Keys → Personal GitHub Token')
   })
 
   it('a typed override rides the payload', async () => {
@@ -138,7 +138,7 @@ describe('binding an agent to a repo you own', () => {
     await w.find('form').trigger('submit')
     await flushPromises()
     expect(bindAgentToOwnRepo).not.toHaveBeenCalled()
-    expect(w.text()).toContain('Settings → GitHub token')
+    expect(w.text()).toContain('Settings → MCP Keys → Personal GitHub Token')
   })
 
   it('an override left EMPTY sends nothing — never the broad saved token', async () => {

@@ -222,7 +222,7 @@ async def configure_telegram_bot(
 
     # Register webhook if public URL is available
     from services.settings_service import settings_service
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
     warning: Optional[str] = None
     if public_url:
         from adapters.transports.telegram_webhook import register_webhook
