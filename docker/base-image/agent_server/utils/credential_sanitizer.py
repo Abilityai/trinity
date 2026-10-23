@@ -448,6 +448,13 @@ REDACTION_PLACEHOLDER = "***REDACTED***"
 # userinfo the #3770 regex stops short of (`app:ab"cd@db`). So a `_URL/_URI/
 # _ENDPOINT` value leaves the set only when it is a plain URL; anything else —
 # including anything that fails to parse — stays in (fail-closed).
+#
+# The other non-secret suffixes are exempted on the value too (second #3876
+# review): `DB_HOST=Server=x;Pwd=…`, `MONGO_HOST=mongodb://app:ab"cd@db/app` and
+# `DATABASE_PROJECT=Host=db;Password=…` carry a credential no other pass sees.
+# A `_HOST/_REPO/_PROJECT/…` value leaves the set only when it is a plain
+# config value — no `;@?#%"'`, whitespace, backslash or `://` — which a
+# hostname, `org/repo`, a region or a project id never needs.
 _NON_SECRET_NAME_SUFFIXES = (
     "_HOST", "_HOSTNAME", "_DOMAIN", "_PORT",
     "_REPO", "_REPOSITORY", "_BRANCH", "_ORG", "_OWNER", "_TEAM_ID",
@@ -460,6 +467,8 @@ _SECRET_NAME_WORDS = (
     "HOOK", "SIGN", "DSN", "PAT",
 )
 _PLAIN_URL_SCHEMES = frozenset({"http", "https", "ws", "wss"})
+# What a plain `_HOST/_REPO/…` value never contains (second #3876 review).
+_NOT_PLAIN_CONFIG_CHARS = frozenset(";@?#%\"' \t\r\n\\")
 # A path segment of a plain URL: short, unencoded, and not token-shaped.
 _PLAIN_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]{0,32}\Z")
 _SECRET_SEGMENT_WORDS = (
@@ -469,12 +478,18 @@ _SECRET_SEGMENT_WORDS = (
 
 
 def _is_token_shaped(segment: str) -> bool:
-    """16+ chars mixing letters and digits: what an opaque credential looks like."""
-    return (
-        len(segment) >= 16
-        and any(c.isdigit() for c in segment)
-        and any(c.isalpha() for c in segment)
-    )
+    """16+ characters: what an opaque credential looks like.
+
+    Whatever the alphabet (second #3876 review) — a capability URL's last
+    segment can be letters only, a private feed id digits only. A real path
+    word that long is rare enough that keeping it redacted is the cheap side."""
+    return len(segment) >= 16
+
+
+def _is_plain_config_value(value: str) -> bool:
+    """True only for a `_HOST/_REPO/_PROJECT/…` value that can carry no
+    credential: none of `;@?#%"'`, whitespace, backslash or `://` (#3876)."""
+    return "://" not in value and not any(c in _NOT_PLAIN_CONFIG_CHARS for c in value)
 
 
 def _is_plain_url(value: str) -> bool:
@@ -516,7 +531,9 @@ def _is_credential_value(var_name: str, var_value: str) -> bool:
         return True
     if upper.endswith(_URL_NAME_SUFFIXES):
         return not _is_plain_url(var_value)
-    return not upper.endswith(_NON_SECRET_NAME_SUFFIXES)
+    if upper.endswith(_NON_SECRET_NAME_SUFFIXES):
+        return not _is_plain_config_value(var_value)
+    return True
 
 
 def _load_credential_values() -> Set[str]:

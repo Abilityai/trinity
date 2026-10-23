@@ -213,3 +213,39 @@ def test_pat_is_a_secret_word(monkeypatch):
     refresh_credential_values()
 
     assert "placeholder-pat-value" in get_credential_values()
+
+
+# --- Second review: the name-exempt suffixes need the value check too --------
+# `_HOST/_REPO/_PROJECT/_WORKSPACE/…` were exempted on the name alone — the
+# same class as `_URL` above. A value there can carry its credential where
+# neither `redact_url_userinfo` nor the `KEY=value` pass looks, so it leaves
+# the set only when it holds none of `;@?#%"'`, whitespace, backslash or `://`.
+@pytest.mark.parametrize("name, value", [
+    ("DB_HOST", "Server=x;Pwd=hunter2hunter2"),
+    ("MONGO_HOST", 'mongodb://app:ab"cd@db/app'),
+    ("DATABASE_PROJECT", "Host=db;Password=placeholder-pwd"),
+    ("FIBERY_HOST", "user:placeholder-pass@acme.fibery.io"),
+    ("GITHUB_REPO", "https://placeholder0token@github.com/acme/repo"),
+    ("FIBERY_WORKSPACE", "acme placeholder-secret"),
+    ("GITHUB_ORG", "acme\\placeholder-secret"),
+    ("AWS_REGION", "eu-central-1#placeholder0frag"),
+])
+def test_secret_bearing_name_exempt_values_stay_redacted(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    refresh_credential_values()
+
+    assert value in get_credential_values()
+    assert value not in sanitize_text(f"using {value} now")
+
+
+# A path segment of 16+ characters is token-shaped whatever its alphabet:
+# a capability URL's last segment can be letters only, a feed id digits only.
+@pytest.mark.parametrize("name, value", [
+    ("SLACK_RESPONSE_URL", "https://hooks.slack.com/actions/T0/B0/abcdefghijklmnopqrst"),
+    ("GOOGLE_FEED_URL", "https://example.com/feed/12345678901234567890"),
+])
+def test_a_long_path_segment_is_token_shaped_whatever_its_alphabet(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    refresh_credential_values()
+
+    assert value in get_credential_values()
