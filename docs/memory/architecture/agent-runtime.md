@@ -12,7 +12,9 @@
 
 ### Agent Containers
 
-**Base image** `trinity-agent-base:latest`: Python 3.13, Node.js 20, Go 1.21, Claude Code (latest), common Python packages.
+**Base image** `trinity-agent-base:latest`: Python 3.13, Node.js 24, Go 1.21, Claude Code (latest), common Python packages.
+
+**Node major vs the persistent npx cache (#3886):** the Node runtime is in the image, but `~/.npm/_npx` is on the home volume and survives a recreate, and npx reuses a cached tree without rebuilding it — so after a Node major bump an npx-launched MCP server with a native addon fails with `NODE_MODULE_VERSION` mismatch. `startup.sh` stamps the image's Node major in `~/.trinity/node-major` and drops `~/.npm/_npx` when it differs (a cache with no stamp predates the stamp and counts as a change); project `node_modules` are never touched. Every Node pin in images and CI is held to a non-EOL LTS line by `tests/unit/test_3886_node_runtime_lifecycle.py` — date-dependent by design, so the day a pinned line reaches end-of-life every PR goes red.
 
 **Internal server** `agent-server.py` (FastAPI, port 8000):
 - `/api/chat` - Claude Code execution (messages persisted to database)
