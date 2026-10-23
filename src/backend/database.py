@@ -865,15 +865,31 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
+# #3825: printed when boot leaves the admin password alone because it was
+# changed in the app after this ADMIN_PASSWORD value was applied. Literal text
+# plus the username only: nothing derived from either password reaches a log.
+_ADMIN_ENV_SKIPPED_NOTE = (
+    "ADMIN_PASSWORD not re-applied to admin user '%s': the password was changed "
+    "in the app after this value was applied. To reset it from .env, set a "
+    "different value and restart."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
     Reuses the dialect-agnostic ``UserOperations`` (already on SQLAlchemy Core)
-    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB;
-    updates the password when the env password no longer verifies.
+    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB, and
+    re-applies the env password only when it differs from the one last applied
+    (#3825, ``utils.admin_identity.env_apply_decision``).
     """
+    from db.settings import SettingsOperations
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision, fingerprint_value,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
     if not admin_password:
         print(_NO_ADMIN_AT_BOOT_NOTE)
         return
@@ -882,32 +898,52 @@ def _ensure_admin_user_engine():
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     user_ops = UserOperations()
-    existing = user_ops.get_user_by_username(admin_username)
+    settings_ops = SettingsOperations()
+    existing = user_ops.get_user_by_username(name)
     if existing is None:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Created admin user '{admin_username}' with hashed password")
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+        print(f"Created admin user '{name}' with hashed password")
         return
 
-    existing_hash = existing.get("password")
-    needs_update = False
-    if existing_hash and not existing_hash.startswith("$2"):
-        needs_update = existing_hash == admin_password  # plaintext → bcrypt
-    elif existing_hash:
-        try:
-            needs_update = not pwd_context.verify(admin_password, existing_hash)
-        except Exception:
-            needs_update = True
-    else:
-        needs_update = True
-    if needs_update:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Updated admin user '{admin_username}' password")
+    action, record = env_apply_decision(
+        admin_password, existing.get("password"),
+        settings_ops.get_setting_value(ADMIN_ENV_FINGERPRINT_KEY), name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        print(f"Updated admin user '{name}' password")
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+
+
+def _record_admin_env_fingerprint(cursor, conn, name, hashed):
+    """SQLite half of the #3825 fingerprint write (see `env_apply_decision`)."""
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value
+
+    cursor.execute(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, hashed), utc_now_iso()),
+    )
+    conn.commit()
 
 
 def _ensure_admin_user(cursor, conn):
-    """Ensure the admin user exists with properly hashed password."""
+    """Ensure the admin user exists with properly hashed password.
+
+    Re-applies `ADMIN_PASSWORD` only when it differs from the value last applied
+    (#3825), so a password changed in the app survives a restart."""
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
 
     # Warn operators if ADMIN_PASSWORD doesn't meet complexity requirements
     if admin_password:
@@ -922,7 +958,7 @@ def _ensure_admin_user(cursor, conn):
         except ImportError:
             pass  # password_validation module not available during early init
 
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (name,))
     existing = cursor.fetchone()
 
     if existing is None:
@@ -940,39 +976,37 @@ def _ensure_admin_user(cursor, conn):
         cursor.execute("""
             INSERT INTO users (username, password_hash, role, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (admin_username, hashed, "admin", now, now))
+        """, (name, hashed, "admin", now, now))
         conn.commit()
-        print(f"Created admin user '{admin_username}' with hashed password")
-    else:
-        # Check if existing password needs update (migration or change)
-        existing_hash = existing[1]
-        should_update = False
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
+        print(f"Created admin user '{name}' with hashed password")
+        return
 
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not admin_password:
+        return
 
-        if existing_hash and not existing_hash.startswith("$2"):
-            # Password is likely plaintext (bcrypt hashes start with $2)
-            if admin_password and existing_hash == admin_password:
-                should_update = True
-                print(f"Migrating admin user '{admin_username}' password from plaintext to bcrypt")
-        elif admin_password:
-            # Check if environment password matches DB hash
-            try:
-                if not pwd_context.verify(admin_password, existing_hash):
-                    should_update = True
-                    print(f"Environment password changed - updating admin user '{admin_username}'")
-            except Exception as e:
-                print(f"Error verifying password hash: {e}")
-                should_update = True
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-        if should_update and admin_password:
-            hashed = pwd_context.hash(admin_password)
-            cursor.execute("""
-                UPDATE users SET password_hash = ?, updated_at = ?
-                WHERE username = ?
-            """, (hashed, utc_now_iso(), admin_username))
-            conn.commit()
+    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_ENV_FINGERPRINT_KEY,))
+    row = cursor.fetchone()
+    action, record = env_apply_decision(
+        admin_password, existing[1], row[0] if row else None, name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        if existing[1] and not existing[1].startswith("$2"):
+            print(f"Migrating admin user '{name}' password from plaintext to bcrypt")
+        else:
+            print(f"Environment password changed - updating admin user '{name}'")
+        cursor.execute("""
+            UPDATE users SET password_hash = ?, updated_at = ?
+            WHERE username = ?
+        """, (pwd_context.hash(admin_password), utc_now_iso(), name))
+        conn.commit()
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
 
 
 class DatabaseManager:

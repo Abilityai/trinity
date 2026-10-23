@@ -4557,6 +4557,31 @@ class UserRoleUpdate(BaseModel):
     role: str
 
 
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / portal
+    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
+
+
 class UpdateMyEmailRequest(BaseModel):
     email: str
     # trinity-enterprise#720: the 6-digit code sent to `email` by

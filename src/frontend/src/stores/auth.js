@@ -297,6 +297,24 @@ export const useAuthStore = defineStore('auth', {
       }
     },
 
+    // #3825: change the signed-in account's own password. The server signs every
+    // OTHER session of the account out and returns a fresh token for this one,
+    // which replaces ours — the old token is now refused. Errors propagate: the
+    // panel names them next to the form.
+    // `revokeApiKeys` also revokes the MCP API keys this person created (never
+    // their agents' keys); the session cutoff does not reach keys otherwise.
+    async changePassword(currentPassword, newPassword, revokeApiKeys = false) {
+      const { data } = await axios.put('/api/users/me/password', {
+        current_password: currentPassword,
+        new_password: newPassword,
+        revoke_api_keys: revokeApiKeys,
+      })
+      this.token = data.access_token
+      localStorage.setItem(TOKEN_KEY, data.access_token)
+      this.setupAxiosAuth()
+      return data
+    },
+
     // #3164: whether the signed-in user has a personal GitHub token saved in
     // Settings — PRESENCE only, the value never leaves the backend. Fork-to-own
     // and repo binding use it in place of a typed token. A failed read answers
