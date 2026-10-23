@@ -17,13 +17,10 @@ QA'ing it on Linux, neither visible on the author's macOS:
 And one this QA pass found, which is not a portability bug at all but was in the
 same lines:
 
-3. **A single quote in the password breaks the droplet's first boot.** It is
-   interpolated into a single-quoted shell assignment in the user-data. The
-   password rules demand a special character and `'` is one, so
-   `Tr0ub4dor's!Horse` passes this script's check AND the backend's, then writes
-   `export ADMIN_PASSWORD='Tr0ub4dor's!Horse'` — a syntax error. The droplet is
-   created and billing before it fails, the operator watches a 15-minute progress
-   bar end in a timeout, and recovery is a rebuild.
+3. **A single quote in an interpolated value breaks the droplet's first boot.**
+   The image tag is interpolated into a single-quoted shell assignment in the
+   user-data, so a `'` in it is a syntax error. The droplet is created and
+   billing before it fails, and recovery is a rebuild.
 
 The round-trip test is EXECUTED rather than pattern-matched: it runs the script's
 own quoting through a shell and compares to the input, so it fails for any
@@ -82,11 +79,11 @@ def test_every_single_quoted_interpolation_in_the_user_data_is_quoted() -> None:
     """The rule, not two spellings of it: every '${VAR}' in the heredoc is a _Q.
 
     A raw value in single quotes breaks first boot on any value containing `'`.
-    Checking only the secrets left the image tag as another such site."""
+    """
     heredoc = re.search(r"<<USERDATA\n(.*?)\nUSERDATA$", _script(), re.S | re.M)
     assert heredoc, "the user-data heredoc is gone"
     interpolated = re.findall(r"'\$\{([A-Za-z_]+)\}'", heredoc.group(1))
-    assert {"ADMIN_PASSWORD_Q", "TRINITY_IMAGE_TAG_Q"} <= set(interpolated)
+    assert "TRINITY_IMAGE_TAG_Q" in interpolated
     raw = [v for v in interpolated if not v.endswith("_Q")]
     assert not raw, f"unquoted value(s) inside single quotes in the user-data: {raw}"
 
@@ -134,25 +131,21 @@ def _run_installer(tmp_path: Path, *, snap: bool, stdin: str, home: bool = True,
     )
 
 
+_ANSWERS = "\n\ny\n"  # default region, default name, confirm
+
+
 @pytest.mark.parametrize("snap", [False, True], ids=["package-doctl", "snap-doctl"])
 @pytest.mark.parametrize(
-    "password,tag",
-    [
-        ("CorrectHorse!7Battery", "v0.9.5-rc2"),
-        ("Tr0ub4dor's!Horse", "v0.9.5-it's"),
-        ("Sh$ell`tick!7Aa\\", "v0.9.5-rc2"),
-    ],
+    "tag",
+    ["v0.9.5-rc2", "v0.9.5-it's", "v0.9.5-$x`y`\\"],
     ids=["plain", "apostrophes", "shell-metachars"],
 )
 def test_generated_user_data_parses_and_carries_each_value_intact(
-    tmp_path: Path, snap: bool, password: str, tag: str,
+    tmp_path: Path, snap: bool, tag: str,
 ) -> None:
     """The heredoc context is what matters, which only a shell parsing the real
     file tests."""
-    proc = _run_installer(
-        tmp_path, snap=snap, image_tag=tag,
-        stdin=f"{password}\n{password}\n\n\ny\n",
-    )
+    proc = _run_installer(tmp_path, snap=snap, image_tag=tag, stdin=_ANSWERS)
     assert "no public IP yet" in proc.stderr, proc.stderr  # reached the end, via the stub
     user_data = tmp_path / "user-data.sh"
     assert user_data.is_file(), "doctl was never handed a user-data file"
@@ -160,7 +153,7 @@ def test_generated_user_data_parses_and_carries_each_value_intact(
     where = Path((tmp_path / "user-data.sh.path").read_text()).parent
     expected = tmp_path / ("home" if snap else "tmp")
     assert where == expected, f"user-data written to {where}, a {'snap' if snap else 'package'} doctl reads {expected}"
-    assert not list(where.glob("trinity-user-data.*")), "the EXIT trap left the secrets file behind"
+    assert not list(where.glob("trinity-user-data.*")), "the EXIT trap left the user-data file behind"
 
     syntax = subprocess.run(["bash", "-n", str(user_data)], capture_output=True, text=True)
     assert syntax.returncode == 0, f"first boot would die on a syntax error:\n{syntax.stderr}"
@@ -170,22 +163,22 @@ def test_generated_user_data_parses_and_carries_each_value_intact(
     exports = "\n".join(l for l in text.splitlines() if l.startswith("export "))
     probe = f"""
 {exports}
-printf '%s\\n%s' "$ADMIN_PASSWORD" "$TRINITY_IMAGE_TAG"
+printf '%s\\n%s' "$ADMIN_PASSWORD_SOURCE" "$TRINITY_IMAGE_TAG"
 """
     out = subprocess.run(
         ["bash", "-c", probe], capture_output=True, text=True, timeout=30,
         env={"PATH": "/usr/bin:/bin"},
     )
     assert out.returncode == 0, out.stderr
-    assert out.stdout == f"{password}\n{tag}"
+    assert out.stdout == f"browser\n{tag}"
 
 
 def test_the_installer_asks_for_no_claude_credential(tmp_path: Path) -> None:
     """Connecting Claude belongs to the onboarding overlay's blocking step, which
     checks the credential with Anthropic before saving it (trinity-enterprise#582).
-    The installer takes a password, a region and a name, and the droplet's first
-    boot registers nothing: three answers plus the confirmation reach the end."""
-    proc = _run_installer(tmp_path, snap=False, stdin="CorrectHorse!7Battery\nCorrectHorse!7Battery\n\n\ny\n")
+    The installer takes a region and a name, and the droplet's first boot
+    registers nothing: two answers plus the confirmation reach the end."""
+    proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS)
     assert "no public IP yet" in proc.stderr, proc.stderr
     assert "setup-token" not in proc.stderr and "sk-ant-" not in proc.stderr, proc.stderr
     user_data = (tmp_path / "user-data.sh").read_text()
@@ -193,12 +186,12 @@ def test_the_installer_asks_for_no_claude_credential(tmp_path: Path) -> None:
 
 
 def test_a_snap_doctl_without_home_is_refused_before_any_question(tmp_path: Path) -> None:
-    """Checks first, questions second: the operator must not type two secrets
+    """Checks first, questions second: the operator must not answer questions
     only to learn there is nowhere doctl can read the setup file from."""
     proc = _run_installer(tmp_path, snap=True, home=False, stdin="")
     assert proc.returncode == 1
     assert "installed as a snap but $HOME is not set" in proc.stderr, proc.stderr
-    assert "password" not in proc.stderr.lower(), "it asked for the password before refusing"
+    assert "region" not in proc.stderr.lower(), "it asked a question before refusing"
 
 
 @pytest.mark.parametrize(
@@ -230,37 +223,14 @@ def test_shquote_round_trips_through_a_shell(secret: str) -> None:
     assert out.stdout == secret, f"round-trip changed the secret: {out.stdout!r}"
 
 
-@pytest.mark.parametrize("status", [0, 1], ids=["install-ok", "install-failed"])
-def test_first_boot_removes_cloud_inits_copies_of_the_password(
-    tmp_path: Path, status: int,
-) -> None:
-    """#3799: cloud-init keeps user-data on disk for the droplet's lifetime.
-
-    The generated script's own EXIT trap runs against a fake /var/lib/cloud
-    tree, on success and on a failed install.
-    """
-    password = "CorrectHorse!7Battery"
-    proc = _run_installer(tmp_path, snap=False, stdin=f"{password}\n{password}\n\n\ny\n")
+def test_no_admin_password_reaches_the_droplets_user_data(tmp_path: Path) -> None:
+    """#3799: user-data outlives first boot. cloud-init rewrites user-data.txt on
+    every boot, pickles it into obj.pkl, and the metadata service serves it for
+    the droplet's life, so no shred can keep a password in it from leaking. The
+    installer asks for none, and first boot leaves the admin to /setup."""
+    proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS)
     assert "no public IP yet" in proc.stderr, proc.stderr
-    trap = next(
-        (l for l in (tmp_path / "user-data.sh").read_text().splitlines()
-         if l.startswith("trap ") and l.endswith(" EXIT")),
-        None,
-    )
-    assert trap, "the user-data has no EXIT trap cleaning cloud-init's copies"
-
-    cloud = tmp_path / "cloud"
-    inst = cloud / "instances" / "123456"
-    (inst / "scripts").mkdir(parents=True)
-    for f in ("user-data.txt", "user-data.txt.i", "scripts/part-001"):
-        (inst / f).write_text(f"export ADMIN_PASSWORD='{password}'\n")
-    (inst / "boot-finished").write_text("")
-
-    run = subprocess.run(
-        ["bash", "-c", f"set -euo pipefail\n{trap.replace('/var/lib/cloud', str(cloud))}\nexit {status}"],
-        capture_output=True, text=True, timeout=30, env={"PATH": "/usr/bin:/bin"},
-    )
-    assert run.returncode == status, run.stderr
-    leftover = [p for p in cloud.rglob("*") if p.is_file() and password in p.read_text()]
-    assert not leftover, f"password still on disk in {leftover}"
-    assert (inst / "boot-finished").exists(), "the trap removed more than the user-data copies"
+    assert "password" not in proc.stderr.lower(), "the installer still asks for a password"
+    user_data = (tmp_path / "user-data.sh").read_text()
+    assert "ADMIN_PASSWORD=" not in user_data, "an admin password is in the user-data"
+    assert "export ADMIN_PASSWORD_SOURCE=browser" in user_data
