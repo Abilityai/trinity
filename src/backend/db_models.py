@@ -549,6 +549,16 @@ class SystemSettingUpdate(BaseModel):
 # Public Agent Link Models (Phase 12.2: Public Agent Links)
 # =========================================================================
 
+def _check_link_expiry(v: Optional[str]) -> Optional[str]:
+    """Reject an `expires_at` that is not an ISO timestamp (#3583)."""
+    if v:
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("expires_at must be an ISO 8601 timestamp")
+    return v
+
+
 class PublicLinkCreate(BaseModel):
     """Request model for creating a public link.
 
@@ -559,12 +569,16 @@ class PublicLinkCreate(BaseModel):
     expires_at: Optional[str] = None  # ISO timestamp for expiration
     link_type: str = "chat"  # currently only 'chat' is supported
 
+    _expiry = field_validator("expires_at")(_check_link_expiry)
+
 
 class PublicLinkUpdate(BaseModel):
     """Request model for updating a public link."""
     name: Optional[str] = None
     enabled: Optional[bool] = None
     expires_at: Optional[str] = None
+
+    _expiry = field_validator("expires_at")(_check_link_expiry)
 
 
 class PublicLink(BaseModel):
@@ -673,6 +687,9 @@ class PublicChatMessage(BaseModel):
     # #903: per-message speaker attribution (thread-scoped channel sessions).
     sender_email: Optional[str] = None
     sender_label: Optional[str] = None
+    # trinity#3402: set when the skill gate stopped this row's turn — never
+    # replayed to the agent (`db/schema.py` documents the values).
+    gate_hold: Optional[str] = None
 
 
 # =========================================================================

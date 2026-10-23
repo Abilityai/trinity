@@ -44,7 +44,7 @@ from fastapi.routing import APIRoute
 from database import db
 from db.write_params import TaskExecutionFields
 from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
-from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
+from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, TaskExecutionStatus, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
@@ -78,6 +78,7 @@ from services.platform_prompt_service import build_public_channel_caller_prompt
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
+    _close_unclaimed_turn,
     dispatch_and_await_terminal,
     get_task_execution_service,
     terminate_execution_on_agent,
@@ -436,6 +437,37 @@ def _exec_field(row: Any, name: str) -> Any:
     if isinstance(row, dict):
         return row.get(name)
     return getattr(row, name, None)
+
+
+def _bearer_started_by(row: Any, current_user: Optional[User]) -> bool:
+    """Did THIS bearer credential start this task through A2A? (#3751)
+
+    The bearer twin of AAuth's `execution_owned_by` and the payer binding: a
+    task handle answers only for the credential that sent it. All three must
+    match what `_mint_a2a_execution` / `_run_a2a_task` stamped:
+
+    * `triggered_by == "a2a"` — the same person's UI chat, `/task` or MCP
+      `chat_with_agent` rows on this agent are not A2A tasks, and `tasks/cancel`
+      must never reach them;
+    * `source_user_id` — set, and the caller's (AAuth and paid rows carry none);
+    * `source_mcp_key_id` — the caller's key, or None on both sides for a
+      signed-in person. The key, not the user, is the identity: every agent key
+      of one owner resolves to that owner's user id and role, so the user id
+      alone would let a sibling agent poll another agent's task. A re-minted key
+      therefore loses its in-flight tasks, as it loses its `messageId`
+      namespace (`_a2a_idem_scope`, which keys on the same credential).
+
+    No owner/admin override: an agent key carries its owner's role. Who may see
+    every run of an agent is the execution REST surface's question, not the
+    A2A task handle's."""
+    if current_user is None or _exec_field(row, "triggered_by") != "a2a":
+        return False
+    started_by = _exec_field(row, "source_user_id")
+    return (
+        started_by is not None
+        and started_by == getattr(current_user, "id", None)
+        and _exec_field(row, "source_mcp_key_id") == getattr(current_user, "mcp_key_id", None)
+    )
 
 
 def _text_from_message(message: Dict[str, Any]) -> str:
@@ -1333,6 +1365,10 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     if status == "queued":
         cancelled = bool(db.cancel_queued_execution(
             exec_id, reason="Cancelled by A2A caller"))
+        if cancelled:
+            # #3651: the cancel CAS winner owes the #1804 close + terminal event.
+            _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                  "Cancelled by A2A caller")
     else:
         cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
     if not cancelled:
@@ -1688,6 +1724,10 @@ async def _dispatch_jsonrpc(
         # read via _exec_field so both the model and a dict work.
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: a bearer caller reads only a task it started; anyone else gets
+        # the unknown-id answer, byte for byte (no existence oracle).
+        if aauth is None and not _bearer_started_by(row, current_user):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
     # ---- tasks/cancel -----------------------------------------------------
@@ -1699,6 +1739,9 @@ async def _dispatch_jsonrpc(
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: and cancels only its own, before anything is signalled.
+        if aauth is None and not _bearer_started_by(row, current_user):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
@@ -1715,6 +1758,10 @@ async def _dispatch_jsonrpc(
             # CAS inside cancel_queued_execution is what makes a lost race honest.
             cancelled = bool(db.cancel_queued_execution(
                 exec_id, reason="Cancelled by A2A caller"))
+            if cancelled:
+                # #3651: same close + terminal event as _bound_task_rpc.
+                _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                      "Cancelled by A2A caller")
         else:
             cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
 

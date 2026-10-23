@@ -44,7 +44,7 @@
     "src/frontend/tests/unit/portalFailedTurn.spec.js": 1,
     "src/frontend/tests/unit/portalFiles.spec.js": 2,
     "src/frontend/tests/unit/portalLeaveSpecificRoute.spec.js": 1,
-    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 14,
+    "src/frontend/tests/unit/portalLoadingTreatment.spec.js": 13,
     "src/frontend/tests/unit/portalLoops.spec.js": 3,
     "src/frontend/tests/unit/portalMarkdownTypography.spec.js": 1,
     "src/frontend/tests/unit/portalModelChoice.spec.js": 1,
@@ -62,7 +62,7 @@
     "src/frontend/tests/unit/portalUnreadLiveness.spec.js": 2,
     "src/frontend/tests/unit/portalVoiceDictation.spec.js": 1,
     "src/frontend/tests/unit/portalVoiceLayoutMotion.spec.js": 2,
-    "src/frontend/tests/unit/portalVoiceMode.spec.js": 10,
+    "src/frontend/tests/unit/portalVoiceMode.spec.js": 9,
     "src/frontend/tests/unit/portalVoiceModePersistence.spec.js": 1,
     "src/frontend/tests/unit/portalWork.spec.js": 5,
     "src/frontend/tests/unit/refreshTreatment.spec.js": 2,
@@ -91,7 +91,7 @@
     "src/frontend/tests/unit/workspaceSignOut.spec.js": 2
   },
   "totals": {
-    "source_text_reads": 271,
+    "source_text_reads": 270,
     "specs_reading_source": 86
   }
 }

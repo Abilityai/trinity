@@ -185,3 +185,24 @@ export function serverSkewMs(dateHeader, clientNowMs) {
   const skew = serverMs - clientNowMs
   return Math.abs(skew) < 2000 ? 0 : skew
 }
+
+/**
+ * A backend UTC timestamp as a `<input type="datetime-local">` value
+ * (`YYYY-MM-DDTHH:mm`) in the browser's LOCAL time (#3584).
+ *
+ * The input has no time zone: it shows and returns local wall-clock time, and
+ * `new Date(value)` reads it back as local. Feeding it the UTC string's own
+ * characters (`iso.slice(0, 16)`) made every untouched Save shift the instant
+ * by the browser's UTC offset. Empty in, empty out.
+ *
+ * @param {string|null|undefined} timestamp - ISO 8601 timestamp (UTC if no zone)
+ * @returns {string}
+ */
+export function toDatetimeLocalInput(timestamp) {
+  if (!timestamp) return ''
+  const d = parseUTC(timestamp)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}

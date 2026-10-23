@@ -227,7 +227,9 @@ def build_portal_context_summary(agent_name: str, email: str, session_id: str) -
     Same truncation rule as the Agent Detail summary. Platform `system` rows are
     skipped (the ent#523 lesson: they are the platform speaking about the
     thread, not a party to it), and an earlier call's spoken rows are labelled
-    so the model knows which of its own lines were said aloud.
+    so the model knows which of its own lines were said aloud. A turn the skill
+    gate held or refused, and its notice, are not read at all (trinity#3402 —
+    `get_portal_messages`' default).
     """
     try:
         rows = db.get_portal_messages(agent_name, email, limit=_CONTEXT_ROWS, session_id=session_id)

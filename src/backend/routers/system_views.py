@@ -9,7 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 
 from database import db
-from dependencies import get_current_user
+from dependencies import require_person
+from services.agent_service.helpers import visible_agent_names
 from db_models import (
     User,
     SystemView,
@@ -20,10 +21,24 @@ from db_models import (
 
 
 router = APIRouter(prefix="/api/system-views", tags=["system-views"])
+# Every route takes `require_person`: system views are a person's saved UI
+# filters, and the router is not exposed over MCP (trinity-enterprise#872).
+
+
+def _scoped_counts(views: List[SystemView], current_user: User) -> List[SystemView]:
+    """`agent_count` over the agents the caller may see; an admin's views are
+    unchanged (trinity-enterprise#872)."""
+    visible = visible_agent_names(current_user)
+    if visible is None:
+        return views
+    tags = db.get_tags_for_agents(sorted(visible))
+    return [v.model_copy(update={"agent_count": sum(
+        1 for agent_tags in tags.values() if set(agent_tags) & set(v.filter_tags))})
+        for v in views]
 
 
 @router.get("", response_model=SystemViewList)
-async def list_system_views(current_user: User = Depends(get_current_user)):
+async def list_system_views(current_user: User = Depends(require_person)):
     """
     List all system views accessible to the current user.
 
@@ -31,13 +46,13 @@ async def list_system_views(current_user: User = Depends(get_current_user)):
     Views are sorted alphabetically by name.
     """
     views = db.list_user_system_views(str(current_user.id))
-    return SystemViewList(views=views)
+    return SystemViewList(views=_scoped_counts(views, current_user))
 
 
 @router.post("", response_model=SystemView, status_code=201)
 async def create_system_view(
     data: SystemViewCreate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Create a new system view.
@@ -61,13 +76,13 @@ async def create_system_view(
         raise HTTPException(status_code=400, detail="Color must be a hex code (e.g., #8B5CF6)")
 
     view = db.create_system_view(str(current_user.id), data)
-    return view
+    return _scoped_counts([view], current_user)[0]
 
 
 @router.get("/{view_id}", response_model=SystemView)
 async def get_system_view(
     view_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Get a system view by ID.
@@ -83,14 +98,14 @@ async def get_system_view(
     if not view:
         raise HTTPException(status_code=404, detail="View not found")
 
-    return view
+    return _scoped_counts([view], current_user)[0]
 
 
 @router.put("/{view_id}", response_model=SystemView)
 async def update_system_view(
     view_id: str,
     data: SystemViewUpdate,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Update a system view.
@@ -122,13 +137,13 @@ async def update_system_view(
     if not view:
         raise HTTPException(status_code=404, detail="View not found")
 
-    return view
+    return _scoped_counts([view], current_user)[0]
 
 
 @router.delete("/{view_id}", status_code=204)
 async def delete_system_view(
     view_id: str,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_person)
 ):
     """
     Delete a system view.

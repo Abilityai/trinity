@@ -4,7 +4,7 @@
 
 ## How do I share an agent with a teammate?
 
-Open the agent detail page, click the **Access** tab (visible to the owner), enter your teammate's email, and click **Add person**. They can then sign in to the Workspace with a code emailed to them and use the agent there. Sharing does not create a platform account or add the email to the login whitelist — whether they also get the operator UI is their platform role, which an admin sets on their row or in **Settings → Access**. Their row shows **Active** if they already have a Trinity account, or **Pending** ("No platform account — uses the Workspace"); each row also carries an off-by-default toggle that lets the agent message that person proactively. Click **Remove** on a row to revoke access at any time. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+Open the agent detail page, click the **Settings** tab and pick **People** in the rail (visible to the owner; it is the former Access tab), enter your teammate's email, and click **Add person**. They can then sign in to the Workspace with a code emailed to them and use the agent there. Sharing does not create a platform account or add the email to the login whitelist — whether they also get the operator UI is their platform role, which an admin sets on their row or in **Settings → Access**. Their row shows **Active** if they already have a Trinity account, or **Pending** ("No platform account — uses the Workspace"); each row also carries an off-by-default toggle that lets the agent message that person proactively. Click **Remove** on a row to revoke access at any time. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
 ## What can my teammate do with an agent I've shared with them?
 
@@ -14,9 +14,9 @@ Shared operators get interact-level access: they can chat with the agent, run ta
 
 That's by design. Shared users see only their own chat messages with an agent — each person's conversation history is private to them. Only admins can see all messages. If your teammate needs the content of a past conversation, share it with them directly. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
-## What's the difference between the Access tab and the Sharing tab?
+## What's the difference between Settings › People and the Sharing tab?
 
-The **Access** tab manages the people the agent is shared with — your teammates, who use it in the Workspace, and in the Trinity UI too if their role is `operator` or above. The **Sharing** tab manages external clients — people without a Trinity account who reach the agent through Slack, Telegram, WhatsApp, voice calls, public links, or the Workspace, identified by verified email. The Sharing tab also holds the Restricted/Open access switch with pending access requests, the **Public chat model** and **Additional instructions** that apply only to outside audiences (public links, channels, paid chat — never your own chats or schedules), channel configuration, a read-only client roster, and the public links and file sharing panels. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
+**Settings › People** (formerly the Access tab) manages the people the agent is shared with — your teammates, who use it in the Workspace, and in the Trinity UI too if their role is `operator` or above. The **Sharing** tab manages external clients — people without a Trinity account who reach the agent through Slack, Telegram, WhatsApp, voice calls, public links, or the Workspace, identified by verified email. The Sharing tab also holds the Restricted/Open access switch with pending access requests, the **Public chat model** and **Additional instructions** that apply only to outside audiences (public links, channels, paid chat — never your own chats or schedules), channel configuration, a read-only client roster, and the public links panel; file sharing lives under Settings › Storage. See [Agent Sharing](../sharing-and-access/agent-sharing.md).
 
 ## What user roles does Trinity have and what can each one do?
 
@@ -32,7 +32,7 @@ Each role has a limit on how many agents it can own: by default creators get 10,
 
 ## What role does a new user get the first time they log in?
 
-The role comes from their email whitelist entry: each whitelisted email carries a default role that is assigned on first login, and it falls back to the basic **user** role if none was set. Adding someone through an agent's Access tab or approving their access request creates no account and no whitelist entry — they use the Workspace with an emailed code. A **user** account works in the Workspace only; an admin raises someone to `operator` or above via **Settings** → **Access** → **User Management** (or the role select on their Access-tab row) to give them the operator UI. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
+The role comes from their email whitelist entry: each whitelisted email carries a default role that is assigned on first login, and it falls back to the basic **user** role if none was set. Adding someone through an agent's Settings › People or approving their access request creates no account and no whitelist entry — they use the Workspace with an emailed code. A **user** account works in the Workspace only; an admin raises someone to `operator` or above via **Settings** → **Access** → **User Management** (or the role select on their row there) to give them the operator UI. See [Roles and Permissions](../getting-started/roles-and-permissions.md).
 
 ## Can people sign up for my Trinity instance on their own?
 
@@ -81,6 +81,10 @@ The backend builds a link as `FRONTEND_URL` + `/chat/{token}`, and `FRONTEND_URL
 ## Are public links rate limited?
 
 Yes, with fixed limits rather than per-link settings: 30 messages a minute per IP address and 60 a minute per link, plus a cap on how often one IP can look up links. Email verification codes are limited to 3 requests per email every 10 minutes. See [Public Links](../sharing-and-access/public-links.md#limitations).
+
+## What expiry values does a public link accept?
+
+A date and time, or none. In the **Create Public Link** dialog the **Expiration (optional)** field is a date-and-time picker; leave it empty and the link never expires. Over the API, `expires_at` is an ISO 8601 timestamp such as `2026-12-31T23:59:00Z`, omitted or empty for no expiry; any other value is refused with `422` and no link is written. Once the time passes, visitors get the expired notice and the link's card shows **Expired**; edit the link to move or clear the date. See [Public Links](../sharing-and-access/public-links.md).
 
 ## What's the difference between a public link, sharing, and the Workspace?
 
@@ -148,7 +152,7 @@ On the agent's **Sharing** tab, the **Portal clients** list shows everyone the a
 
 ## Are there limits on how much a client can send through the Workspace?
 
-Yes, per client. Chat sends are limited per client per agent — 20 per minute and 300 per hour by default — and file sends per client at 20 per minute and 100 per hour, each answered with a 429 that names the reason (*Too many messages to this agent.*, *Too many uploads.*); admins tune them with `PORTAL_CHAT_BURST_LIMIT` / `PORTAL_CHAT_HOURLY_LIMIT` and `PORTAL_UPLOAD_BURST_LIMIT` / `PORTAL_UPLOAD_HOURLY_LIMIT` on the backend. A message can be up to 8,000 characters — the composer counts down over the last 500 and holds **Send** past the limit. Files are capped at 25 MB each and 20 per drop, turns on one chat are serialized (a second message waits for the one running), and sign-in codes carry brute-force protection. The agent's own execution timeout and parallel capacity apply on top. See [Workspace](../sharing-and-access/workspace.md) and the [single-server guide](../guides/deploying/single-server.md#rate-limits-and-caps).
+Yes, per client. Chat sends are limited per client per agent — 20 per minute and 300 per hour by default — and file sends per client at 20 per minute and 100 per hour, each answered with a 429 that names the reason (*Too many messages to this agent.*, *Too many uploads.*); admins tune them with `PORTAL_CHAT_BURST_LIMIT` / `PORTAL_CHAT_HOURLY_LIMIT` and `PORTAL_UPLOAD_BURST_LIMIT` / `PORTAL_UPLOAD_HOURLY_LIMIT` on the backend. A message can be up to 100,000 characters — the composer counts down over the last 500 and holds **Send** past the limit. Files are capped at 25 MB each and 20 per drop, turns on one chat are serialized (a second message waits for the one running), and sign-in codes carry brute-force protection. The agent's own execution timeout and parallel capacity apply on top. See [Workspace](../sharing-and-access/workspace.md) and the [single-server guide](../guides/deploying/single-server.md#rate-limits-and-caps).
 
 ## Can my own product sign a customer into the Workspace on their behalf?
 

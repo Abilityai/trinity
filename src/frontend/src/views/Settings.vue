@@ -1762,7 +1762,7 @@ Example:
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">MCP Server URL</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Configure the external MCP server URL shown on the API Keys page. Leave empty to auto-detect from hostname.
+                Configure the external MCP server URL shown on the API Keys page. Leave empty to auto-detect from the hostname, using https when the reverse proxy reports an HTTPS connection.
               </p>
             </div>
             <div class="px-6 py-4">

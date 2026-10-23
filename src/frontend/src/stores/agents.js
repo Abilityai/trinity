@@ -1199,6 +1199,36 @@ export const useAgentsStore = defineStore('agents', {
         headers: authStore.authHeader
       })
       return response.data
+    },
+
+    // Execution timeout (TIMEOUT-001 / #665) — the per-agent cap every run
+    // inherits. Surfaced in Settings › General (trinity-enterprise#353).
+    async getAgentTimeout(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/timeout`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setAgentTimeout(name, seconds) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/timeout`, {
+        execution_timeout_seconds: seconds
+      }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // S3 (#384) — adopt origin/main as the new baseline, keeping instance
+    // state. Settings › General › Danger zone (trinity-enterprise#887).
+    async resetToMainPreserveState(name) {
+      const authStore = useAuthStore()
+      const response = await axios.post(`/api/agents/${name}/git/reset-to-main-preserve-state`, {}, {
+        headers: authStore.authHeader
+      })
+      return response.data
     }
   }
 })

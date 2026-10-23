@@ -278,6 +278,12 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   `message/stream` (SSE), `tasks/get`, `tasks/cancel`;
   `tasks/resubscribe` returns an explicit unsupported error. Bearer auth
   is a Trinity MCP API key, fail-closed 401 before any envelope parse.
+  A bearer `tasks/get` / `tasks/cancel` answers only for a task that same
+  credential started through A2A (`triggered_by='a2a'`, its user id AND key
+  id; #3751) — owner, admin and sibling keys of one owner get the unknown-id
+  `Task not found`. AAuth callers are bound by `execution_owned_by`, payers by
+  the payer binding. This scopes the A2A task handle; the REST execution
+  routes are scoped separately (trinity-enterprise#875).
   Protocol errors ride the JSON-RPC envelope at HTTP 200; auth is the
   deliberate exception.
 - **FR-4 — Per-caller dedup (Invariant #18)**: a repeated `messageId`

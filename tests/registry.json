@@ -4610,7 +4610,7 @@
         "unit",
         "security"
       ],
-      "description": "The operator queue stops handing a person's email to a machine key (trinity-enterprise#715). GET /api/operator-queue, /{id} and /agents/{name} give every non-person principal (agent, system, ops, connector, portal_delegate, a user scope carrying an agent identity, an unknown scope) exactly the allowlisted machine key set, pinned as a literal on file and native rows whose person fields are all non-null; a person (JWT, user key) reads every field, which is also the classification guard (a new column fails until classified). One arm presents a real minted agent key with no overrides. The platform's heads-ups about a person (the ent#499 problem report, the ent#308 inbox collision), raised through their real emitters, are never listed to a machine and 404 on the item route, while a person still reads them; both are platform alarms, and every prefix the reads treat as about a person is a reserved prefix (so the file write-back and the resume wake treat it as a platform alarm too). The file write-back names no person on delivery or reconstruction, and an answered collision alert is never written into the agent's file. The clear-resolved /ws trigger is the count only. The composed prompt no longer promises responded_by. Call-site mutations red: the allowlist, the row filter, the item 404, both write-back lines, the reserved prefix, the trigger, the prompt, and a new unclassified column."
+      "description": "The operator queue stops handing a person's email to a machine key (trinity-enterprise#715). GET /api/operator-queue, /{id} and /agents/{name} give every non-person principal (agent, system, ops, connector, portal_delegate, a user scope carrying an agent identity, an unknown scope) exactly the allowlisted machine key set, pinned as a literal on file and native rows whose person fields are all non-null; a person (JWT, user key) reads every field, which is also the classification guard (a new column fails until classified). One arm presents a real minted agent key with no overrides. The platform's heads-ups about a person (the ent#499 problem report, the ent#308 inbox collision), raised through their real emitters, are never listed to a machine and 404 on the item route, while a person still reads them; both are platform alarms, and every prefix the reads treat as about a person is a reserved prefix (so the file write-back and the resume wake treat it as a platform alarm too). The file write-back names no person on delivery or reconstruction, and an answered collision alert is never written into the agent's file. The clear-resolved /ws trigger is the count only. The composed prompt no longer promises responded_by. Call-site mutations red: the allowlist, the row filter, the item 404, both write-back lines, the reserved prefix, the trigger, the prompt, and a new unclassified column. trinity-enterprise#780: every handler on the queue's routers is driven with a real minted agent key and the real system key (as trinity-system) over both heads-ups through their real emitters: the agent's own readback and the item route 404 them exactly like an unknown id, both lists omit them while listing the key's own ask, respond/cancel/bulk-cancel refuse a machine by name, a raise with a heads-up's id is refused 422 before the replay lookup, a withdraw 404s and leaves it pending, /stats is numbers only (clear-resolved is the one named exemption). A census places every handler (the #2996 walker and the live routers must agree) and checks by shape that every door returning rows consults is_about_a_person; a second census classifies every read of a queue row in the backend, every queue accessor, every ending observer, every data module that queries the table itself and every other way to reach it (the read-side twin of test_1677). Mutations red: the readback 404 reverted, kept-but-dropped, narrowed and shadowed; a new unplaced handler; _for_principal dropped from a door or from its own filter; a person check moved below the read; the raise replay moved above validation; a new unclassified read; a new unplaced accessor; the table reached through a data module's re-export; a new ending observer; a new data module importing the table."
     },
     {
       "file": "unit/test_2845_retry_trigger_sets.py",
@@ -5395,6 +5395,17 @@
       "description": "The opt-in keyset (cursor) walk on GET /api/operator-queue (trinity-enterprise#815): within one walk no id is returned twice and every row matching at the start and when reached is returned exactly once while the queue changes. Inserts ahead of and behind the cursor (incl. a file-seam row with an old created_at); all five pending→ended writers between pages (ordering as of a watermark W = start − 300 s); a status=pending walk with answers; a permission change mid-walk; platform-alert priority changes through the walk's Redis priority snapshot (fakeredis), an alert raised mid-walk pinned to rank 4; a hypothesis property test (derandomize) over random interleavings of every write. The commit-lag bound: a write stamped before the walk began is not repeated, and a commit past the margin is logged at error. Strict cursor decoding (422 naming cursor; cursor+offset 422; filter mismatch 422; expired walk 410; Redis unreachable or failing 503; the decoded-bytes cap isolated); a forged token never widens visibility; an over-cap sort key (incl. non-ASCII and quote-heavy legacy ids) ends the page with has_more true, next_cursor null and a warning, and every issued cursor decodes; offset mode's order is unchanged; the walk statement compiles on postgresql and sqlite with one set of shared expressions. Mutation-proven."
     },
     {
+      "file": "unit/test_3302_queue_list_order.py",
+      "feature": "#3302",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "unit",
+        "database"
+      ],
+      "description": "Pins the offset-mode order of GET /api/operator-queue that the operator-queue UI reads past its first page (#3302, src/frontend/src/utils/operatorQueueRead.js): every pending row precedes every ended row whatever their priorities and timestamps; the rows after the pending section are the ended rows, newest ending first; offset pages concatenate to the whole order; total counts the page's own WHERE (filters, not the page); the undelivered and closed-by-filer flags are the same whatever status/limit/offset the read carries. Real router in a small FastAPI app over a fresh SQLite file. Mutation-proven (pending sorted last fails two tests)."
+    },
+    {
       "file": "mcp-server/src/operator_queue_list.test.ts",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
@@ -6036,6 +6047,39 @@
       "description": "A gated request held from the Chat tab is saved once to the chat session with its notice (source gate:<request_id>), the 202 names the session, a foreign session id falls back to the sender's own, and a failed save still answers pending. A person re-sending the same request while one is pending gets it back ahead of the caps; an agent, another person, another text or a decided request each raise their own. The session read carries the request's state and decision text; the voice context leaves held rows out."
     },
     {
+      "file": "unit/test_3402_workspace_held_history.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A Workspace turn the skill gate held or refused never reaches a later prompt: the next cold turn has neither the held request nor its notice, whatever was decided, nor a refused request; a held turn with no pre-created row is kept out by its mark alone; the client's thread and the reply poll still show both; a retried refused message that then runs is conversation again; the voice summary leaves them out; the voice-delta cursor skips a held notice; the registered migration marks rows held before the column. Real schema and the real gate backstop. Mutation-proven at each call site."
+    },
+    {
+      "file": "unit/test_3402_public_group_held_rows.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "A public link's next turn (sync and async) and the MEM-001 summary never see a held or refused request; the visitor's message is marked as it is stored when it invokes a gated skill, before the gate decides; a message or group chatter stored while the gate map cannot be read is left unmarked, and the verdict marks a turn the gate then refuses; the visitor's own history still shows it; a held or quote-held Telegram group turn and group chatter naming a gated skill are marked, and the group history block leaves them out; the store excludes marked rows by default and a verdict never overwrites a verdict; the registered migration runs twice on the old shape. Mutation-proven."
+    },
+    {
+      "file": "unit/test_3402_room_gate_holds.py",
+      "feature": "#3402",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "The room re-hold loop: a later wake does not raise a second approval for a held post; a warm wake still gets the ordinary post that shared the held one's delta; a new request is still held; another agent still reads the post; a rejected request does not come back after the skill is un-gated; a standing refusal is recorded and a transient one is not; a wake left with nothing to answer dispatches nothing; MCP read_room by the agent leaves its holds out; a failed holds read re-holds rather than shows; holds are per agent and written once; AGENT_REFS cascade. Real schema and the real gate. Mutation-proven."
+    },
+    {
       "file": "unit/test_3590_rebuild_pull_env.py",
       "feature": "#3590",
       "added": "2026-10-12",
@@ -6122,6 +6166,165 @@
         "skills"
       ],
       "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
+    },
+    {
+      "file": "unit/test_ent820_files_tier_census.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "files",
+        "auth",
+        "audit",
+        "unit"
+      ],
+      "description": "The agent Files surface's ruled tier per verb: every /files route in routers/agent_files.py has a census row and runs its gate; the file_path_policy.decide() table for owner, share and key; a share holder (JWT or user-scope key) refused instruction, skills and run-code writes; owner/admin/agent-key paths kept; one audit row per write/delete/mkdir; share holders refused on an unverified image while agent keys pass; the projected list (hidden withheld, restricted flags); hard-linked reads refused below the owner tier."
+    },
+    {
+      "file": "unit/test_ent820_path_policy_parity.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
+    },
+    {
+      "file": "unit/test_ent822_shared_folder_links.py",
+      "feature": "trinity-enterprise#822",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "A link planted in a shared folder never reaches the consumer's files: over a temp home with shared-in/A holding an ABSOLUTE link to .claude, PUT/DELETE/download/preview/list through it are 403 resolved_path_mismatch and the target is untouched, while an ordinary shared file reads 200 (reproduced live in two containers 2026-10-22). The agent server's own writers write through files.write_bytes_nofollow: credential injection refuses a link in a parent or as the file (403, target untouched, the link not replaced) and writes ordinary credentials 0600; snapshot restore skips a member under a linked directory or that is a link and restores the rest; the writer refuses empty/absolute/traversal paths. Mutations: each writer's pre-fix code turns its 2 tests red."
+    },
+    {
+      "file": "unit/test_ent820_agent_server_no_follow_writes.py",
+      "feature": "trinity-enterprise#820",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "files",
+        "unit"
+      ],
+      "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
+    },
+    {
+      "file": "unit/test_3751_a2a_bearer_task_scope.py",
+      "feature": "#3751",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "a2a",
+        "auth",
+        "unit"
+      ],
+      "description": "Bearer A2A tasks/get and tasks/cancel answer only for the credential that started the task through A2A, through the real _dispatch_jsonrpc: the starter (key, JWT, agent key, shared user) reads and cancels its own (running and queued); a sibling agent key of the same owner, the owner's key, the owner signed in, a shared user, an admin and the system key get Task not found on get and cancel, with no terminate/queued-cancel/audit; the refusal is byte-identical to an unknown id; same-principal rows not triggered by a2a, rows with no starting user and a re-minted key are refused; the row _mint_a2a_execution writes is pollable by its caller only; AAuth still goes through execution_owned_by. Mutations: removing the gate turns 21 red, removing the triggered_by check turns 5 red."
+    },
+    {
+      "file": "unit/test_3813_rename_agent_name_env.py",
+      "feature": "#3813",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "unit",
+        "agent-lifecycle"
+      ],
+      "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
+    },
+    {
+      "file": "unit/test_2891_randomly_guard.py",
+      "feature": "#2891",
+      "added": "2026-10-20",
+      "categories": [
+        "unit",
+        "devex"
+      ],
+      "description": "The pytest-randomly guard (tests/testing_utils/randomly_guard.py, via the tests/testkit symlink): opted_in reads the invocation (--randomly-seed, -p randomly, -prandomly, TRINITY_RANDOM_ORDER=1, PYTEST_ADDOPTS); enforce raises a UsageError naming both ways out when the plugin is active and the run did not opt in, is a no-op without the plugin, and passes an explicit seed or the env opt-in; the banner names the seed and how to reproduce/disable; both conftests (tests/ and the sealed unit/ island) wire it with tryfirst, and the four run-*.sh scripts pin -p no:randomly."
+    },
+    {
+      "file": "unit/test_3584_public_link_clear_expiry.py",
+      "feature": "#3584",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "public-links",
+        "unit"
+      ],
+      "description": "A public link's expiry can be removed, and only on purpose: on real SQLite, update_public_link(clear_expiry=True) sets expires_at NULL, an update without an expiry (rename, toggle) keeps it, a new one replaces it; through the real PUT handler, an expires_at sent as null or empty clears it (model_fields_set), one left out is kept, one sent is stored. The frontend half (local-time datetime-local round trip, untouched Save omits the expiry, cleared field sends null) is src/frontend/tests/unit/publicLinkExpiry.spec.js. Mutations: reverting the router turns 6 red; reverting PublicLinksPanel.vue turns 7 frontend tests red."
+    },
+    {
+      "file": "unit/test_ent858_event_stream_owner_state.py",
+      "feature": "trinity-enterprise#858",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
+    },
+    {
+      "file": "unit/test_ent860_room_wake_access.py",
+      "feature": "trinity-enterprise#860",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "unit"
+      ],
+      "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
+      "file": "unit/test_3390_module_split_guard.py",
+      "feature": "#3390",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "unit",
+        "test-isolation",
+        "reliability"
+      ],
+      "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
+    },
+    {
+      "file": "unit/test_3651_recovery_companion_close.py",
+      "feature": "#3651",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "Once an execution row is terminal, zero of its companion activities (caller agent_collaboration, self_task) stay `started`, whichever writer wrote it: watchdog and startup _recover_execution, lease-reaper park, stale-slot reclaim and the bulk stale sweep close a direct-dispatch companion that has no backlog_metadata; the bulk sweep leaves tool_call rows alone; a lease re-queue leaves the companion to the re-delivery; a bulk FAILED companion is still upgraded by a late SUCCESS; the AAuth inbound record (triggered_by='a2a') is never rewritten; the a2a queued-cancel CAS winner closes and emits the terminal event, a lost cancel does neither."
+    },
+    {
+      "file": "unit/test_ent419_memory_poisoning_gates.py",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "mcp"
+      ],
+      "description": "Anti-poisoning gates on agent-written user memory (MEM-001): the write-boundary screen through the real router (each of memory_prompt_marker / memory_instruction / memory_tool_directive / memory_link_in_instruction refused with its code and the line the agent sent, nothing stored, the log carries rule and line never the text; folded spellings \u2014 zero-width, full-width, Hangul filler, combining marks, split across a line break, case; a benign table of facts, preferences, open loops, plain links and the false positives an adversarial review found; the cheap misses it found), the exemption keyed on the hit (an old hit kept is not counted again; old lines reordered, re-contextualised or respelled into a new hit are refused; a split across old and new is refused), copy-back normalisation (the rendered block stored clean; a whole-block copy-back keeps only the agent-notes section), the non-creating previous-notes read over real SQLite, AC 4 (a channel write resolves ent#549's one-to-one speaker stamp; a group turn writes no one's memory), the trust envelope on the real format_user_memory_block (nonce'd open/close lines, every splitlines() line margined incl. \\r / NEL / U+2028, forged ends and platform structure only ever margined, control characters removed, summary inside, decisions after the reminder, render failure drops memory, fresh nonce, a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer (a tripping line is dropped and the rest kept, all lines dropped keeps the previous summary, each message clamped, the conversation margined inside its prompt), seat decisions (any line terminator refused, markers / instructions / an MCP tool id / a slotted URL refused with a sentence receipt, business-rule decisions accepted, legacy rows rendered on one line, the same one-to-one rule in _seat_for, the block's framing line pinned against the guard), the Telegram history defang, AST pins (the router stores only what prepare_write returned; the summarizer screens before it stores; one agent-notes writer across src/backend), the structural-heading list pinned against the composed prompt, totality (Hypothesis) and time budgets on adversarial and summarizer-sized input."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/memory.test.ts",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "mcp",
+        "security"
+      ],
+      "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
     }
   ]
 }

@@ -39,6 +39,11 @@ from services import a2a_gate  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+# #3751: a bearer caller polls/cancels only a task it started through A2A. Rows
+# these tests poll as the fixture user carry that user's starter fields.
+_STARTED_BY_ALICE = {"triggered_by": "a2a", "source_user_id": 1, "source_mcp_key_id": "k1"}
+
+
 # --------------------------------------------------------------------------- #
 # Card generator honesty (pure unit)
 # --------------------------------------------------------------------------- #
@@ -321,7 +326,7 @@ def test_message_send_idempotent_replay_does_not_reexecute(client):
 # tasks/get + tasks/cancel
 # --------------------------------------------------------------------------- #
 def test_tasks_get_maps_status(client):
-    client.state["executions"]["exec-9"] = {"agent_name": "bot", "status": "success", "response": "done"}
+    client.state["executions"]["exec-9"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "success", "response": "done"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "exec-9"}})
     task = r.json()["result"]
     assert task["status"]["state"] == "completed"
@@ -335,7 +340,7 @@ def test_tasks_get_unknown_or_foreign_is_task_not_found(client):
 
 
 def test_tasks_cancel(client):
-    client.state["executions"]["exec-c"] = {"agent_name": "bot", "status": "running"}
+    client.state["executions"]["exec-c"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "running"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-c"}})
     assert r.json()["result"]["status"]["state"] == "canceled"
     assert client.state["terminated"] == ("bot", "exec-c")
@@ -344,7 +349,7 @@ def test_tasks_cancel(client):
 def test_tasks_cancel_queued_row_cancels_in_backlog_not_on_agent(client):
     """A queued execution has no container process — cancelling must go through
     the backlog CAS, not a registry call that 404s and reports success anyway."""
-    client.state["executions"]["exec-q"] = {"agent_name": "bot", "status": "queued"}
+    client.state["executions"]["exec-q"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "queued"}
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-q"}})
     assert r.json()["result"]["status"]["state"] == "canceled"
@@ -357,7 +362,7 @@ def test_tasks_cancel_queued_row_cancels_in_backlog_not_on_agent(client):
 def test_tasks_cancel_reports_failure_when_terminate_fails(client):
     """The bool from terminate_execution_on_agent is the caller's only honest
     signal — a discarded False told the caller "canceled" for a live task."""
-    client.state["executions"]["exec-r"] = {"agent_name": "bot", "status": "running"}
+    client.state["executions"]["exec-r"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": "running"}
     client.state["terminate_result"] = False
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-r"}})
@@ -366,7 +371,7 @@ def test_tasks_cancel_reports_failure_when_terminate_fails(client):
 
 @pytest.mark.parametrize("status", ["success", "failed", "cancelled"])
 def test_tasks_cancel_terminal_row_is_not_cancelable(client, status):
-    client.state["executions"]["exec-t"] = {"agent_name": "bot", "status": status}
+    client.state["executions"]["exec-t"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": status}
     r = client.http.post("/a2a/bot", json={
         "jsonrpc": "2.0", "id": 1, "method": "tasks/cancel", "params": {"id": "exec-t"}})
     assert r.json()["error"]["code"] == -32002
@@ -568,7 +573,7 @@ def test_message_send_in_flight_duplicate_is_retryable_error(client, monkeypatch
     ("running", "working"), ("queued", "submitted"), ("weird", "working"),
 ])
 def test_tasks_get_state_mapping_all(client, status, expected):
-    client.state["executions"]["e"] = {"agent_name": "bot", "status": status, "response": "r", "error": "boom"}
+    client.state["executions"]["e"] = {**_STARTED_BY_ALICE, "agent_name": "bot", "status": status, "response": "r", "error": "boom"}
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "e"}})
     assert r.json()["result"]["status"]["state"] == expected
 
@@ -629,7 +634,8 @@ def test_tasks_get_accepts_object_row_not_only_dict(client):
     """Regression (live-caught): db.get_execution returns a ScheduleExecution
     OBJECT, not a dict — tasks/get must read via attribute access, not .get()."""
     client.state["executions"]["obj-1"] = types.SimpleNamespace(
-        agent_name="bot", status="success", response="from object", error=None)
+        agent_name="bot", status="success", response="from object", error=None,
+        **_STARTED_BY_ALICE)
     r = client.http.post("/a2a/bot", json={"jsonrpc": "2.0", "id": 1, "method": "tasks/get", "params": {"id": "obj-1"}})
     task = r.json()["result"]
     assert task["status"]["state"] == "completed"

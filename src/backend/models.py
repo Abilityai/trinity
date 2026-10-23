@@ -321,6 +321,10 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # #3872: a persisted git config exists (the repo is bound) — set by the
+    # detail endpoint only; the header reserves its GitHub row on it at first
+    # paint. None = not resolved (the list path never reads it).
+    git_configured: Optional[bool] = None
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
@@ -496,6 +500,9 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -1531,10 +1538,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)
@@ -2995,7 +2998,7 @@ class CanaryStatusResponse(BaseModel):
 
     enabled: bool = Field(
         ...,
-        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        description="CANARY_ENABLED is 1/true/yes/on (any case). Answers the disabled case; "
         "default-OFF is the normal state for most installs.",
     )
     status: str = Field(
