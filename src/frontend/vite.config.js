@@ -38,9 +38,9 @@ const devSecurityHeaders = {
     "img-src 'self' data: blob: https:; " +
     "media-src 'self' blob:; " +
     "font-src 'self'; " +
-    "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +
+    "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev https://api.sandbox.nevermined.app https://api.live.nevermined.app; " +
     "object-src 'self' blob:; " +
-    "frame-src 'self' blob:; " +
+    "frame-src 'self' blob: https://embed.nevermined.app; " +
     "frame-ancestors 'self'; " +
     "base-uri 'self'; " +
     "form-action 'self'",

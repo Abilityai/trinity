@@ -27,6 +27,20 @@ import {
   readPending,
   clearPending,
   PENDING_PREFIX,
+  buildRedirectUrl,
+  newNonce,
+  persistNonce,
+  readNonce,
+  clearNonce,
+  NONCE_PREFIX,
+  redirectReturn,
+  hasRedirectReturn,
+  isFrameBlocked,
+  REDIRECT_MAX_AGE_MS,
+  RETURN_MISMATCH,
+  FALLBACK_CAUSES,
+  neverReadyMessage,
+  retryHoldLabel,
 } from '@/utils/neverminedSpending.js'
 import { apiErrorCode } from '@/utils/apiError.js'
 
@@ -351,5 +365,151 @@ describe('pending — a Nevermined mandate not yet bound, per agent', () => {
     expect(readPending('a', boom)).toBeNull()
     expect(() => clearPending('a', boom)).not.toThrow()
     expect(persistPending(REC, null)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Checkpoint C — redirect fallback, redirect return, Retry-After hold
+// ---------------------------------------------------------------------------
+
+function memStore() {
+  const m = new Map()
+  return {
+    getItem: (k) => (m.has(k) ? m.get(k) : null),
+    setItem: (k, v) => m.set(k, String(v)),
+    removeItem: (k) => m.delete(k),
+    raw: m,
+  }
+}
+
+describe('buildRedirectUrl', () => {
+  it("is Nevermined's hosted /cards/setup page with exactly the four params", () => {
+    const url = new URL(buildRedirectUrl({
+      sessionToken: 'tok en', returnUrl: 'https://trinity.example.com/agents/a', state: 'n-1', provider: 'stripe',
+    }))
+    expect(url.origin).toBe('https://embed.nevermined.app')
+    expect(url.pathname).toBe('/cards/setup')
+    expect([...url.searchParams.keys()]).toEqual(['sessionToken', 'returnUrl', 'state', 'provider'])
+    expect(url.searchParams.get('sessionToken')).toBe('tok en')
+    expect(url.searchParams.get('returnUrl')).toBe('https://trinity.example.com/agents/a')
+    expect(url.searchParams.get('state')).toBe('n-1')
+    expect(url.searchParams.get('provider')).toBe('stripe')
+  })
+
+  it('defaults provider to stripe', () => {
+    const url = new URL(buildRedirectUrl({ sessionToken: 't', returnUrl: 'https://x/agents/a', state: 's' }))
+    expect(url.searchParams.get('provider')).toBe('stripe')
+  })
+})
+
+describe('newNonce / persistNonce / readNonce / clearNonce', () => {
+  it('nonces are non-empty and distinct', () => {
+    const a = newNonce()
+    const b = newNonce()
+    expect(typeof a).toBe('string')
+    expect(a.length).toBeGreaterThanOrEqual(16)
+    expect(a).not.toBe(b)
+  })
+
+  it('round-trips per agent; another agent reads null; clear removes it', () => {
+    const store = memStore()
+    expect(persistNonce('a', { nonce: 'n1', at: 100 }, store)).toBe(true)
+    expect(store.raw.has(NONCE_PREFIX + 'a')).toBe(true)
+    expect(readNonce('a', store)).toEqual({ nonce: 'n1', at: 100 })
+    expect(readNonce('b', store)).toBeNull()
+    clearNonce('a', store)
+    expect(readNonce('a', store)).toBeNull()
+  })
+
+  it('malformed or absent storage reads null, never throws', () => {
+    const store = memStore()
+    store.setItem(NONCE_PREFIX + 'a', '{not json')
+    expect(readNonce('a', store)).toBeNull()
+    store.setItem(NONCE_PREFIX + 'a', JSON.stringify({ nonce: '', at: 1 }))
+    expect(readNonce('a', store)).toBeNull()
+    expect(readNonce('a', null)).toBeNull()
+    expect(persistNonce('a', { nonce: 'x', at: 1 }, null)).toBe(false)
+  })
+})
+
+describe('redirectReturn — every outcome', () => {
+  const Q = { paymentMethodId: 'pm_12345678', delegationId: 'dlg_12345678', state: 'n1' }
+  const NOW = 1_000_000
+
+  it('ok: the stored nonce matches within 30 minutes → the ids', () => {
+    expect(redirectReturn(Q, { nonce: 'n1', at: NOW - 1000 }, NOW)).toEqual({
+      outcome: 'ok', delegationId: 'dlg_12345678', paymentMethodId: 'pm_12345678',
+    })
+  })
+
+  it('state_mismatch: another nonce', () => {
+    expect(redirectReturn(Q, { nonce: 'other', at: NOW }, NOW).outcome).toBe('state_mismatch')
+  })
+
+  it('no_pending: nothing stored in this tab', () => {
+    expect(redirectReturn(Q, null, NOW).outcome).toBe('no_pending')
+  })
+
+  it('expired: older than 30 minutes (and a stored time in the future)', () => {
+    expect(redirectReturn(Q, { nonce: 'n1', at: NOW - REDIRECT_MAX_AGE_MS - 1 }, NOW).outcome).toBe('expired')
+    expect(redirectReturn(Q, { nonce: 'n1', at: NOW - REDIRECT_MAX_AGE_MS }, NOW).outcome).toBe('ok')
+    expect(redirectReturn(Q, { nonce: 'n1', at: NOW + 60_000 }, NOW).outcome).toBe('expired')
+  })
+
+  it('incomplete: a missing key or an id off the bind pattern, before the nonce is consulted', () => {
+    const stored = { nonce: 'n1', at: NOW }
+    for (const k of ['paymentMethodId', 'delegationId', 'state']) {
+      const q = { ...Q }
+      delete q[k]
+      expect(redirectReturn(q, stored, NOW).outcome, k).toBe('incomplete')
+    }
+    expect(redirectReturn({ ...Q, delegationId: 'bad id' }, stored, NOW).outcome).toBe('incomplete')
+    expect(redirectReturn(null, stored, NOW).outcome).toBe('incomplete')
+  })
+
+  it('hasRedirectReturn: any one of the three keys counts', () => {
+    expect(hasRedirectReturn({ tab: 'nevermined' })).toBe(false)
+    expect(hasRedirectReturn({ state: 'x' })).toBe(true)
+    expect(hasRedirectReturn(Q)).toBe(true)
+    expect(hasRedirectReturn(undefined)).toBe(false)
+  })
+})
+
+describe('isFrameBlocked', () => {
+  it('true only for a frame-src violation', () => {
+    expect(isFrameBlocked({ violatedDirective: 'frame-src' })).toBe(true)
+    expect(isFrameBlocked({ violatedDirective: 'frame-src https://embed.nevermined.app' })).toBe(true)
+    expect(isFrameBlocked({ violatedDirective: 'connect-src' })).toBe(false)
+    expect(isFrameBlocked({})).toBe(false)
+  })
+})
+
+describe('retryAfterSeconds feeds the Retry bind hold', () => {
+  const err = (status, headers = {}) => ({ response: { status, headers } })
+  it('429 / 503 hold for the header seconds; 409 holds nothing', () => {
+    expect(retryAfterSeconds(err(429, { 'retry-after': '3' }))).toBe(3)
+    expect(retryAfterSeconds(err(503, {}))).toBe(5)
+    expect(retryAfterSeconds(err(409, { 'retry-after': '3' }))).toBeNull()
+  })
+  it('the button names the seconds left, then plain Retry bind', () => {
+    expect(retryHoldLabel(3)).toBe('Retry bind (3 s)')
+    expect(retryHoldLabel(0)).toBe(ACTIONS.retryBind)
+  })
+})
+
+describe('checkpoint C copy stays inside the wording rules', () => {
+  it('fallback causes and the never-ready line name Nevermined; nothing matches FORBIDDEN', () => {
+    for (const c of FALLBACK_CAUSES) {
+      expect(c).toMatch(/Nevermined/)
+      expect(FORBIDDEN_WORDING.test(c), c).toBe(false)
+    }
+    const ready = neverReadyMessage('https://trinity.example.com')
+    expect(ready).toMatch(/Nevermined/)
+    expect(ready).toContain('https://trinity.example.com.')
+    expect(FORBIDDEN_WORDING.test(ready)).toBe(false)
+  })
+  it('the redirect-return refusal is the ruling\'s sentence verbatim', () => {
+    expect(RETURN_MISMATCH).toBe("The return did not match this browser's request. Nothing was bound.")
+    expect(FORBIDDEN_WORDING.test(RETURN_MISMATCH)).toBe(false)
   })
 })

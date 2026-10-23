@@ -557,7 +557,9 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // ent#967 (D30): Nevermined's redirect return carries no `tab` (its returnUrl takes no query).
+  const tab = route.query.tab ?? (route.query.delegationId && route.query.state ? 'nevermined' : undefined)
+  const resolvedTab = tab ? resolveDeepLinkTab(tab) : null
   // #2900: no tab named (or one that names nothing). The view is KeepAlive-
   // cached, so it may be showing a tab remembered from the last visit — make
   // the URL say so, or a reload would land somewhere else.
