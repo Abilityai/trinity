@@ -44,7 +44,12 @@ with the code. Inside the Workspace such a member keeps the **team view**: signe
 (`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
 (`agent_page._client_scope`), voice and model choice — the narrower client view is for people
 without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
-before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+before). **The code page is not a second door for a platform account (#3922).** An address the
+platform email login would admit (`service.platform_email_login_admits`: email login on, the policy
+allows codes, allow-listed) gets no portal session: after its code verifies, `/auth/verify` answers
+409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
+platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
+prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
