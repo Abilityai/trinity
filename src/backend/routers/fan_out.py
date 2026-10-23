@@ -21,8 +21,9 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
-from dependencies import get_current_user, get_authorized_agent, resolve_source_agent
+from dependencies import get_current_user, get_authorized_agent, resolve_source_agent, viewer_row_scope
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from models import (
     FanOutBatchStatus,
     FanOutRequest,
@@ -164,8 +165,8 @@ async def fan_out(
             model=request.model,
             system_prompt=request.system_prompt,
             allowed_tools=request.allowed_tools,
-            source_user_id=current_user.id,
-            source_user_email=current_user.email,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email),
             source_agent_name=source_agent,
             # #2389: the credential actually presented, never the forgeable X-MCP-Key-* headers.
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
@@ -229,6 +230,7 @@ _FAN_OUT_ID_RE = re.compile(r"^fo_[A-Za-z0-9_-]{1,64}$")
 async def get_fan_out_status(
     fan_out_id: str,
     name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
 ):
     """Read one fan-out batch back from its execution rows (#2670).
 
@@ -251,7 +253,11 @@ async def get_fan_out_status(
     if not _FAN_OUT_ID_RE.match(fan_out_id or ""):
         raise HTTPException(status_code=404, detail="Fan-out not found")
 
-    rows = db.get_fan_out_executions(name, fan_out_id)
+    # trinity-enterprise#875: a share holder reads back only the batch rows they
+    # dispatched (filtered in SQL); a batch with none of theirs is the uniform 404.
+    scope = viewer_row_scope(current_user, name)
+    rows = (db.get_fan_out_executions(name, fan_out_id) if scope is None
+            else db.get_fan_out_executions(name, fan_out_id, source_user_id=scope))
     if not rows:
         raise HTTPException(status_code=404, detail="Fan-out not found")
 

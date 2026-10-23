@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access, principal_reach
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access, is_person_principal, principal_reach
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -408,6 +408,13 @@ async def emit_event_for_agent(
     Alternative to POST /api/events for cases where the source agent
     needs to be explicitly specified (e.g., admin triggering events).
     """
+    # ent#926: owner tier for PEOPLE. Deliveries run as the platform (admin
+    # JWT), so a person the agent is merely shared with must not fire them in its
+    # name. Agent keys keep the #2973 "emit for a sibling" path; an agent key
+    # acting in a restricted turn is refused by the standing-work fence.
+    if is_person_principal(current_user):
+        assert_agent_owner(current_user, name, detail="Only the agent's owner can emit events in its name")
+
     # Validate event_type format
     if not re.match(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$", data.event_type):
         raise HTTPException(

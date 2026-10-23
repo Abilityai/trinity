@@ -31,6 +31,7 @@ from .gemini_cli_args import (
 )
 from .headless_executor import _valid_session_id
 from .process_registry import get_process_registry
+from . import turn_scope
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 
 logger = logging.getLogger(__name__)
@@ -202,6 +203,8 @@ class GeminiRuntime(AgentRuntime):
                 status_code=503,
                 detail="Gemini CLI is not available in this container"
             )
+        # ent#926: no hook scopes a shared person's turn here, so none runs.
+        await turn_scope.require_owner_tier("Gemini CLI", execution_id)
 
         # Minted here so a cold retry keeps the same id (#817 tag, #2433 registry).
         execution_id = execution_id or str(uuid.uuid4())
@@ -714,6 +717,8 @@ class GeminiRuntime(AgentRuntime):
                 status_code=503,
                 detail="Gemini CLI is not available in this container"
             )
+        # ent#926: no hook scopes a shared person's turn here, so none runs.
+        await turn_scope.require_owner_tier("Gemini CLI", execution_id)
 
         try:
             # Get GEMINI_API_KEY from environment

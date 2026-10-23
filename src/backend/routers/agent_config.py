@@ -10,6 +10,8 @@ from models import (
 )
 from database import db
 from dependencies import (
+    row_is_viewers,
+    viewer_row_scope,
     require_person_or_capability,
     require_admin,
     reject_non_interactive_principal,
@@ -418,6 +420,20 @@ async def get_agent_capacity(
     capacity = get_capacity_manager()
     slot_state = await capacity.get_slot_state(agent_name, max_tasks)
 
+    # ent#875: a slot carries the first 100 characters of the prompt that holds it
+    # and that turn's execution id. A share holder sees only the slots their own
+    # turns hold; the counts below (`active_slots`, `available_slots`) are numbers,
+    # not text, so they keep describing the whole agent.
+    scope = viewer_row_scope(current_user, agent_name)
+
+    def _visible(slot) -> bool:
+        if scope is None:
+            return True
+        row = db.get_execution(slot.execution_id)
+        return bool(row) and getattr(row, "agent_name", None) == agent_name and row_is_viewers(
+            scope, getattr(row, "source_user_id", None)
+        )
+
     # Convert to response model
     slots = [
         SlotInfo(
@@ -428,6 +444,7 @@ async def get_agent_capacity(
             duration_seconds=s.duration_seconds
         )
         for s in slot_state.slots
+        if _visible(s)
     ]
 
     return AgentCapacity(
@@ -740,6 +757,13 @@ def _validate_guardrails_payload(body: dict) -> dict:
                     detail=f"{field} entries must be non-empty strings up to {_GUARDRAILS_MAX_STRING} chars",
                 )
         cleaned[field] = value
+
+    # ent#926: may channel and public-link visitors' turns use the shell (and run
+    # on Gemini/Codex)? Read live per turn by turn_tier_service; absent = on.
+    if "visitor_shell" in body:
+        if not isinstance(body["visitor_shell"], bool):
+            raise HTTPException(status_code=400, detail="visitor_shell must be true or false")
+        cleaned["visitor_shell"] = body["visitor_shell"]
 
     return cleaned
 

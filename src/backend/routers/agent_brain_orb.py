@@ -22,6 +22,7 @@ import httpx
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from dependencies import AuthorizedAgentByName, CurrentUser, OwnedAgentByName, agent_may_reach
 from services import brain_orb_postprocess, brain_orb_voice_service, idempotency_service, rate_limiter
 # Runtime-resolved flags (#85): system_settings override → BRAIN_ORB_* env
@@ -334,8 +335,8 @@ async def post_brain_orb_action(
                     postprocess_result = await brain_orb_postprocess.dispatch_postprocess(
                         agent_name,
                         transcript_path=str(snapshot["path"]),
-                        source_user_id=current_user.id,
-                        source_user_email=getattr(current_user, "email", None),
+                        source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                        source_user_email=turn_tier_service.turn_origin_email(db, current_user, getattr(current_user, "email", None)),
                     )
                 else:
                     postprocess_result = {
@@ -391,8 +392,8 @@ async def _dispatch_process_transcript(agent_name: str, payload: dict, current_u
         agent_name,
         transcript_path=transcript_path or None,
         transcript_text=transcript_text or None,
-        source_user_id=current_user.id,
-        source_user_email=getattr(current_user, "email", None),
+        source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+        source_user_email=turn_tier_service.turn_origin_email(db, current_user, getattr(current_user, "email", None)),
     )
     return {"ok": bool(dispatched.get("dispatched")), **dispatched}
 

@@ -159,4 +159,29 @@
 - **Tests**: `tests/unit/test_837_workspace_only_floor.py` (the floor on real routes and real JWTs/keys, the named refusal, agent ≤ owner, the Workspace doors, the unfloored resolver's caller pin, the terminal and `/ws/events` doors, sharing writes no whitelist row), `tests/unit/test_837_workspace_route_census.py` (the marked set, and every operator-side call in the Workspace's own frontend files), `tests/unit/test_837_ws_workspace_event_kinds.py` (the `/ws` kind allowlist: identity, both delivery paths, the wiring), `tests/unit/test_837_whitelist_grant.py`, `tests/unit/test_837_shared_canvas_workspace_viewer.py`, `tests/unit/test_837_cli_workspace_only.py`, `tests/unit/test_837_role_change_audit.py` (the role route's audit row and interactive gate), `tests/unit/test_837_assigned_user_inbox.py` (a `user` answers an assigned ask; an assignment alone does not reach the Inbox), `tests/test_access_control.py::TestWorkspaceOnlyRung` (live), frontend `workspaceOnly.spec.js`, `workspaceOnlyRouterGuard.spec.js`, `websocketWorkspaceOnly.spec.js`, `loginRedirect.spec.js`, `portalSidebarWorkspaceOnly.mount.spec.js`, `accessPanelMembers.mount.spec.js`, `agentAssignmentsShare.mount.spec.js`.
 - **Flows**: `feature-flows/role-model.md`, `feature-flows/agent-sharing.md`, `feature-flows/email-authentication.md`
 
+### 2.11 Share Holders See and Steer Only Their Own Turns (trinity-enterprise#875)
+- **Status**: ✅ Implemented (operator ruling 2026-10-15; one flat share grant, no schema change)
+- **Rule**: a person an agent is shared with sees only the executions they started (list, detail, log, schedule history, live stream, running list, queue, fan-out status, fleet list, activity timeline, the Workspace Work tab), may end only a turn that is wholly theirs, and may not read the container's shared state (`/chat/history`, `/activity`, `/logs`). The owner, an admin and agent/system/ops/connector keys are unchanged.
+- **Schedules**: a run of a schedule a share holder created is theirs: it runs at share tier (never owner tier), and its history shows them its cron and webhook runs.
+- **Control verbs**: changing the model and `git pull` with `force_reset` are owner tier; webhook management is the schedule's creator, the agent owner or an admin; start and stop stay open to share holders.
+- **What a share holder will notice**: a shorter list (the panel says "you see the tasks you started"); no turns that carry no user id (Slack, Telegram, VoIP, public-link, scheduled and legacy runs); the MCP `get_chat_history` tool answers 403 for them (their own history is under `chat/history/persistent`).
+- **Upgrade**: webhook URLs minted before this change cannot be attributed to a minter; run `scripts/management/list_webhook_rotation_candidates.py` and rotate what it lists.
+- **Out of scope (recorded)**: loops (ent#837 known limit), `/ws` previews, the Workspace team view. The fleet-wide default tier is §2.12 (ent#926).
+- **Tests**: `tests/unit/test_ent875_viewer_tier.py`, `test_ent875_own_rows_sql.py`, `test_ent875_exec_control_routes.py`, `test_ent875_workspace_work_own_rows.py`, `test_ent926_agent_key_turn_scope.py`
+- **Flows**: `feature-flows/executions-dashboard.md`, `execution-termination.md`, `execution-queue.md`, `webhook-triggers.md`, `model-selection.md`
+
+---
+
+### 2.12 A Turn Is Held to What Its Person May Do (trinity-enterprise#926)
+- **Status**: ✅ Implemented (operator rulings 2026-10-16 and 2026-10-19)
+- **Rule**: an agent acts for whoever chats with it, so its own tools are held to that person's tier, decided by the platform from the execution row:
+  - **owner** — the owner, an admin, or something set up at owner tier (a schedule rates as its creator): everything, as before;
+  - **shared person** — the Files API's paths, no shell, no Gemini/Codex turn, no standing work (schedules, loops, reminders, events), reads of executions narrowed to their own;
+  - **visitor** (Slack, Telegram, WhatsApp, a public link, voice, a paid call) — the Files API's share paths; the shell, Gemini/Codex and standing work while the owner's **"Channel and public visitors may run commands"** switch is on.
+- **Owner setting**: `visitor_shell` in Settings › Guardrails (default **on**, so channel agents behave as before; saved immediately, applies to the next message, no restart). The switch's text states the trade-off: the shell reaches everything the agent can.
+- **Every new route that names an agent declares its tier**; the default is owner, and CI fails on an undeclared route (`src/backend/services/agent_route_tiers.json`, also read at runtime: an agent's key acting for a shared person is refused every owner-tier route). Routes still at accessor tier only by the old default are a shrink-only list, ruled per route.
+- **What a shared person will notice**: the agent refuses to run commands or edit its own instructions for them and says so; on a Gemini or Codex agent their message is refused with a reason naming what the owner can do; asking the agent to set a reminder or a schedule is refused.
+- **Tests**: `tests/unit/test_ent926_turn_tier.py`, `test_ent926_turn_tier_hook.py`, `test_ent926_runtime_turn_scope.py`, `test_ent926_agent_key_turn_scope.py`, `test_ent926_agent_route_census.py`; `src/mcp-server/src/turn-context.test.ts`; `src/frontend/tests/unit/guardrailsVisitorShell.spec.js`
+- **Architecture**: `architecture/security.md` §5f, §5g
+
 ---

@@ -59,6 +59,9 @@ CREDENTIAL_PATH_PATTERNS = (
     ".claude/settings.json",
     ".claude/settings.local.json",
     ".git/config",
+    # The subscription token the agent server hot-reloads (#1089). Agent-owned
+    # and outside the home, so no home pattern ever reached it (ent#926).
+    "/var/lib/trinity/*",
 )
 # Other spellings of a home-dir path: /proc/self/{cwd,root}/... and /dev/fd/N
 # lead back into the home dir.
@@ -80,6 +83,13 @@ SECRET_FILE_CLASS_PATTERNS = (
     ".docker/config.json",
     ".config/gh/hosts.yml",
     ".gemini/oauth_creds.json",
+    # Conversation history the runtimes keep on disk (ent#926): every person's
+    # turns with the agent, so a share holder reads only their own through the
+    # session routes. Project memory under `.claude/projects` stays readable.
+    ".claude/projects/*.jsonl",
+    ".claude/history.jsonl",
+    ".codex/sessions/*",
+    ".gemini/tmp/*/chats/*",
     "*.key",
     "*.pem",
     "*.p12",
@@ -91,6 +101,9 @@ TRINITY_PATTERNS = (
 )
 SYSTEM_PATTERNS = (
     "/opt/trinity/*",
+    # The guard hooks' own evidence (`/logs/guardrails.jsonl`), agent-owned so
+    # the hooks can append; no tool call writes there (ent#926).
+    "/logs/*",
     "/etc/claude-code/*",
     "/etc/*",
     "/sys/*",
@@ -114,6 +127,10 @@ RUNS_CODE_FILES = (
 # `.local/lib` is the Python user-site (`pip install --user` in the base image):
 # a `.pth` or `usercustomize.py` there runs at the next `python3` the agent starts.
 RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib")
+# The agent server's own code, agent-owned outside the home (ent#926): `/app` is
+# on PYTHONPATH, so a `sitecustomize.py` there runs in every python process, and
+# `startup.sh` runs at boot.
+RUNS_CODE_PATHS = ("/app", "/app/*")
 
 # The agent server's platform floor: what its routes never write or delete,
 # for every caller, the platform included (it cannot tell callers apart). By
@@ -161,6 +178,7 @@ _CLASS_PATTERNS = (
     (SECRET_CLASS, SECRET_FILE_CLASS_PATTERNS),
     (TRINITY, TRINITY_PATTERNS),
     (SYSTEM, SYSTEM_PATTERNS),
+    (RUNS_CODE, RUNS_CODE_PATHS),
 )
 
 # The backend route floors.

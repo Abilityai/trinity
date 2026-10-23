@@ -787,17 +787,37 @@ class TestEmitEndpointsStateTheFlag:
         assert db.create_agent_event.call_args.kwargs["source_agent"] == "worker-a"
         assert dispatch.trigger_subscription.call_args.kwargs["agent_originated"] is True
 
-    def test_emit_for_agent_by_a_human_accessor_is_not_vouched(self):
-        """`emit_event_for_agent` is `AuthorizedAgent`-gated — READ access, not
-        ownership — so `worker-a` here is a name a human accessor CHOSE. The event row
-        still records it (that is the endpoint's contract), but certifying it to the
-        subscriber would hand a human `triggered_by='agent'`, an `actor_type='agent'`
-        SEC-001 row and a collaboration edge on an agent they merely share: this
-        issue's own primitive, re-minted one level up and signed by the backend."""
+    def test_emit_for_agent_by_a_human_accessor_is_refused(self):
+        """ent#926: a person the agent is merely shared with may not emit in its
+        name at all (deliveries run as the platform). Before that, this was the
+        case below: accepted, recorded, and not vouched."""
+        import dependencies
+        from fastapi import HTTPException
         from models import EmitEventRequest
         from routers.event_subscriptions import emit_event_for_agent
 
-        with _emit_env() as (db, dispatch):
+        with _emit_env() as (db, dispatch), \
+                patch.object(dependencies.db, "can_user_share_agent", lambda u, a: False):
+            with pytest.raises(HTTPException) as exc:
+                asyncio.run(emit_event_for_agent(
+                    "worker-a", EmitEventRequest(event_type="prediction.resolved"), _p(username="alice")
+                ))
+        assert exc.value.status_code == 403
+        db.create_agent_event.assert_not_called()
+        dispatch.trigger_subscription.assert_not_called()
+
+    def test_emit_for_agent_by_the_human_owner_is_not_vouched(self):
+        """`worker-a` here is a name a HUMAN chose. The event row still records it
+        (that is the endpoint's contract), but certifying it to the subscriber would
+        hand a human `triggered_by='agent'`, an `actor_type='agent'` SEC-001 row and
+        a collaboration edge: this issue's own primitive, re-minted one level up and
+        signed by the backend. Since ent#926 only the owner reaches this as a human."""
+        import dependencies
+        from models import EmitEventRequest
+        from routers.event_subscriptions import emit_event_for_agent
+
+        with _emit_env() as (db, dispatch), \
+                patch.object(dependencies.db, "can_user_share_agent", lambda u, a: True):
             asyncio.run(emit_event_for_agent(
                 "worker-a", EmitEventRequest(event_type="prediction.resolved"), _p(username="alice")
             ))

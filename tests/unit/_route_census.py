@@ -524,6 +524,9 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agents.py::agent_execution_result": (
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)"),
+    "routers/agents.py::agent_execution_turn_tier": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+        "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "structured output an agent publishes about itself (self-check)"),
     "routers/aauth_person.py::request_person_token": (

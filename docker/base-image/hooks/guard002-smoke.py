@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 MANAGED = "/etc/claude-code/managed-settings.json"
+DROP_IN_DIR = "/etc/claude-code/managed-settings.d"
 READ_ONLY_CONFIG = "/opt/trinity/read-only-config.json"
 LOG_PATH = "/logs/guardrails.jsonl"
 
@@ -33,6 +34,18 @@ CASES = {
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/.env.local"}}, 2),
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/.env.example"}}, 0),
     ],
+    # No TRINITY_EXECUTION_ID at build time = no platform turn: a protected path
+    # passes, an ordinary one passes. The tier lookup itself is covered by unit tests.
+    "turn-tier-guard.py": [
+        ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
+        ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/CLAUDE.md"}}, 0),
+        ({"tool_name": "Read", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
+        # The shell is owner tier in a platform turn (ent#926); outside one it runs.
+        ({"tool_name": "Bash", "tool_input": {"command": "ls"}}, 0),
+        # Likewise a search with no path and an owner-added MCP server's tool.
+        ({"tool_name": "Grep", "tool_input": {"pattern": "x"}}, 0),
+        ({"tool_name": "mcp__filesystem__read_file", "tool_input": {"path": "/etc/hosts"}}, 0),
+    ],
     "read-only-guard.py": [
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/app.py"}}, 2),
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/notes.txt"}}, 0),
@@ -48,6 +61,12 @@ def main() -> int:
     with open(MANAGED) as f:
         managed = json.load(f)
     entries = [h for phase in managed["hooks"].values() for e in phase for h in e["hooks"]]
+    # Drop-ins are validated by the CLI one file at a time (a bad one voids only
+    # itself), so a hook registered there is run exactly as registered too.
+    for name in sorted(os.listdir(DROP_IN_DIR)) if os.path.isdir(DROP_IN_DIR) else []:
+        with open(os.path.join(DROP_IN_DIR, name)) as f:
+            extra = json.load(f)
+        entries += [h for phase in extra.get("hooks", {}).values() for e in phase for h in e["hooks"]]
     seen = set()
     failures = []
     logs_existed = os.path.exists(os.path.dirname(LOG_PATH))

@@ -1,0 +1,1796 @@
+{
+ "a2a.py::a2a_well_known_card": {
+  "method": "GET",
+  "path": "/a2a/{agent_name}/.well-known/agent-card.json",
+  "reason": "unauthenticated A2A discovery card, uniform 404 unless the agent is A2A-exposed; per-IP rate limited",
+  "tier": "public"
+ },
+ "a2a.py::call_a2a_agent": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/a2a/call",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "a2a.py::get_a2a_task": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/a2a/task",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "a2a.py::get_agent_card": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/a2a/agent-card",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "aauth_person.py::request_person_token": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/aauth/person-token",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "aauth_resource.py::call_aauth_resource": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/aauth/resource-call",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "admin_recovery.py::recover_agent": {
+  "method": "POST",
+  "path": "/api/admin/soft-deleted/agents/{agent_name}/recover",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::get_brain_orb_actions": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/brain-orb/actions",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::get_brain_orb_data": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/brain-orb/data",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_brain_orb.py::get_brain_orb_postprocess": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/brain-orb/postprocess",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::get_brain_orb_scopes": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/brain-orb/scopes",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_brain_orb.py::post_brain_orb_action": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/brain-orb/action",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::post_brain_orb_refresh": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/brain-orb/refresh",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::post_brain_orb_scope": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/brain-orb/scope",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::post_brain_orb_tool": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/brain-orb/tool",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_brain_orb.py::post_brain_orb_voice_token": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/brain-orb/voice-token",
+  "tier": "owner"
+ },
+ "agent_brain_orb.py::put_brain_orb_postprocess": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/brain-orb/postprocess",
+  "tier": "owner"
+ },
+ "agent_config.py::get_agent_api_key_setting": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/api-key-setting",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_agent_api_key_setting_logic"
+ },
+ "agent_config.py::get_agent_autonomy_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/autonomy",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_autonomy_status_logic"
+ },
+ "agent_config.py::get_agent_capabilities": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/capabilities",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_config.py::get_agent_capacity": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/capacity",
+  "reason": "ent#875: own slots only below the owner tier (a slot carries the prompt preview)",
+  "tier": "accessor"
+ },
+ "agent_config.py::get_agent_guardrails": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/guardrails",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_config.py::get_agent_read_only_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/read-only",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_read_only_status_logic"
+ },
+ "agent_config.py::get_agent_resources": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/resources",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_config.py::get_agent_timeout": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/timeout",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_config.py::get_public_channel_model": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/public-channel-model",
+  "reason": "ent#875: which model public channels use, a setting with no conversation text",
+  "tier": "accessor"
+ },
+ "agent_config.py::list_agent_capability_grants": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/capability-grants",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_autonomy_status": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/autonomy",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "set_autonomy_status_logic"
+ },
+ "agent_config.py::set_agent_capabilities": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/capabilities",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_capability_grant": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/capability-grants/{capability}",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_capacity": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/capacity",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_guardrails": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/guardrails",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_read_only_status": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/read-only",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "set_read_only_status_logic"
+ },
+ "agent_config.py::set_agent_resources": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/resources",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_timeout": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/timeout",
+  "tier": "owner"
+ },
+ "agent_config.py::set_public_channel_model": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/public-channel-model",
+  "tier": "owner"
+ },
+ "agent_config.py::update_agent_api_key_setting": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/api-key-setting",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "update_agent_api_key_setting_logic"
+ },
+ "agent_dashboard.py::check_dashboard_exists": {
+  "method": "GET",
+  "path": "/api/agent-dashboard/{agent_name}/exists",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_dashboard.py::get_agent_dashboard": {
+  "method": "GET",
+  "path": "/api/agent-dashboard/{name}",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_agent_dashboard_logic"
+ },
+ "agent_data.py::export_agent_data": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/data/export",
+  "tier": "owner"
+ },
+ "agent_data.py::import_agent_data": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/data/import",
+  "tier": "owner"
+ },
+ "agent_files.py::add_agent_permission": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/permissions/{target_agent}",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "add_agent_permission_logic"
+ },
+ "agent_files.py::create_agent_folder_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/files/mkdir",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "create_agent_folder_logic"
+ },
+ "agent_files.py::delete_agent_file_endpoint": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/files",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "delete_agent_file_logic"
+ },
+ "agent_files.py::download_agent_file_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/files/download",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "download_agent_file_logic"
+ },
+ "agent_files.py::get_agent_canon_roles": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/canon/roles",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_file_sharing": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/file-sharing",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_file_sharing_status_logic"
+ },
+ "agent_files.py::get_agent_folders": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/folders",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_agent_folders_logic"
+ },
+ "agent_files.py::get_agent_info_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/info",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_metric_definitions": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/metrics/definitions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_metrics": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/metrics",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_objectives": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/objectives",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_peer_skills": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/peer-skills",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_permissions": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/permissions",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_agent_permissions_logic"
+ },
+ "agent_files.py::get_agent_playbooks_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/playbooks",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::get_agent_reach": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/reach/{target}",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "agent_reach_logic"
+ },
+ "agent_files.py::get_available_shared_folders": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/folders/available",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_available_shared_folders_logic"
+ },
+ "agent_files.py::get_folder_consumers": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/folders/consumers",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_folder_consumers_logic"
+ },
+ "agent_files.py::grant_agent_peer_skill": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/peer-skills/{target}/{skill}",
+  "tier": "owner"
+ },
+ "agent_files.py::list_agent_files_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/files",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "list_agent_files_logic"
+ },
+ "agent_files.py::list_agent_shared_files": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/shared-files",
+  "tier": "owner"
+ },
+ "agent_files.py::preview_agent_file_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/files/preview",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "preview_agent_file_logic"
+ },
+ "agent_files.py::refresh_agent_metric_definitions": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/metrics/definitions/refresh",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agent_files.py::remove_agent_permission": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/permissions/{target_agent}",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "remove_agent_permission_logic"
+ },
+ "agent_files.py::revoke_agent_peer_skill": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/peer-skills/{target}/{skill}",
+  "tier": "owner"
+ },
+ "agent_files.py::revoke_agent_shared_file": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/shared-files/{file_id}",
+  "tier": "owner"
+ },
+ "agent_files.py::set_agent_file_sharing": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/file-sharing",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "set_file_sharing_status_logic"
+ },
+ "agent_files.py::set_agent_permissions": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/permissions",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "set_agent_permissions_logic"
+ },
+ "agent_files.py::share_agent_file": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/shared-files",
+  "tier": "owner"
+ },
+ "agent_files.py::update_agent_file_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/files",
+  "reason": "ent#820: the tier is ruled per verb and path by file_path_policy.decide; a share holder is refused owner-tier paths",
+  "tier": "accessor",
+  "via": "update_agent_file_logic"
+ },
+ "agent_files.py::update_agent_folders": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/folders",
+  "reason": "owner/admin check in the logic",
+  "tier": "owner",
+  "via": "update_agent_folders_logic"
+ },
+ "agent_mcp_key.py::get_agent_mcp_key_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/mcp-key",
+  "tier": "owner"
+ },
+ "agent_mcp_key.py::regenerate_agent_mcp_key_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/mcp-key/regenerate",
+  "tier": "owner"
+ },
+ "agent_mcp_key.py::verify_agent_mcp_key_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/mcp-key/verify",
+  "tier": "owner"
+ },
+ "agent_rename.py::rename_agent_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/rename",
+  "reason": "can_user_rename_agent is owner/admin, in the handler",
+  "tier": "owner"
+ },
+ "agent_ssh.py::create_ssh_access": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/ssh-access",
+  "tier": "owner"
+ },
+ "agents.py::agent_execution_result": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/executions/{execution_id}/result",
+  "reason": "the agent's own MCP key only (authorize_heartbeat)",
+  "tier": "self"
+ },
+ "agents.py::agent_execution_turn_tier": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+  "reason": "the agent's own MCP key only (authorize_heartbeat); asked by the in-container guard hook",
+  "tier": "self"
+ },
+ "agents.py::agent_heartbeat": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/heartbeat",
+  "reason": "the agent's own MCP key only (authorize_heartbeat)",
+  "tier": "self"
+ },
+ "agents.py::agent_terminal": {
+  "method": "WEBSOCKET",
+  "path": "/api/agents/{agent_name}/terminal",
+  "reason": "terminal service checks can_user_share_agent",
+  "tier": "owner",
+  "via": "handle_terminal_session"
+ },
+ "agents.py::clear_agent_queue": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/queue/clear",
+  "tier": "owner"
+ },
+ "agents.py::delete_agent_endpoint": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}",
+  "reason": "can_user_delete_agent is owner/admin, in the handler",
+  "tier": "owner"
+ },
+ "agents.py::force_release_agent": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/queue/release",
+  "tier": "owner"
+ },
+ "agents.py::get_agent_endpoint": {
+  "mentions_owner": true,
+  "method": "GET",
+  "path": "/api/agents/{agent_name}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_agent_label_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/label",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_agent_logs_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/logs",
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
+ },
+ "agents.py::get_agent_queue_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/queue",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "agents.py::get_agent_stats_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/stats",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_agent_token_stats": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/token-stats",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_circuit_breaker_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/circuit-breaker",
+  "reason": "ent#875: the breaker state, no conversation text",
+  "tier": "accessor"
+ },
+ "agents.py::get_mcp_exposed_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/mcp-exposed",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_operator_resume_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/operator-resume",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::get_voice_replies_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/voice-replies",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::reset_circuit_breaker_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/circuit-breaker/reset",
+  "tier": "owner"
+ },
+ "agents.py::send_voice_reply_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/voice-reply",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "agents.py::set_agent_label_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/label",
+  "tier": "owner"
+ },
+ "agents.py::set_circuit_breaker_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/circuit-breaker",
+  "tier": "owner"
+ },
+ "agents.py::set_mcp_exposed_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/mcp-exposed",
+  "tier": "owner"
+ },
+ "agents.py::set_operator_resume_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/operator-resume",
+  "tier": "owner"
+ },
+ "agents.py::set_voice_replies_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/voice-replies",
+  "tier": "owner"
+ },
+ "agents.py::start_agent_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/start",
+  "reason": "ent#875 ruling: open to share holders, because chat does not auto-start a stopped agent",
+  "tier": "accessor"
+ },
+ "agents.py::stop_agent_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/stop",
+  "reason": "ent#875 ruling: stays open to share holders",
+  "tier": "accessor"
+ },
+ "analytics.py::get_agent_analytics": {
+  "method": "GET",
+  "path": "/api/agents/{name}/analytics",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "avatar.py::delete_avatar": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/avatar",
+  "tier": "owner"
+ },
+ "avatar.py::generate_avatar": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/avatar/generate",
+  "tier": "owner"
+ },
+ "avatar.py::get_avatar": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/avatar",
+  "reason": "avatars are public assets by design",
+  "tier": "public"
+ },
+ "avatar.py::get_avatar_emotion": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/avatar/emotion/{emotion}",
+  "reason": "avatars are public assets by design",
+  "tier": "public"
+ },
+ "avatar.py::get_avatar_emotions": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/avatar/emotions",
+  "reason": "avatars are public assets by design",
+  "tier": "public"
+ },
+ "avatar.py::get_avatar_identity": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/avatar/identity",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "avatar.py::get_avatar_reference": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/avatar/reference",
+  "reason": "avatars are public assets by design",
+  "tier": "public"
+ },
+ "avatar.py::regenerate_avatar": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/avatar/regenerate",
+  "tier": "owner"
+ },
+ "canvas.py::bulk_delete_canvases": {
+  "method": "POST",
+  "path": "/api/agents/{name}/canvas/bulk-delete",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::canvas_context": {
+  "method": "GET",
+  "path": "/api/agents/{name}/canvas/context",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::clear_canvas": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/canvas/{canvas_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::create_canvas_share": {
+  "method": "POST",
+  "path": "/api/agents/{name}/canvas/{canvas_id}/share",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::get_canvas": {
+  "method": "GET",
+  "path": "/api/agents/{name}/canvas/{canvas_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::list_canvas_shares": {
+  "method": "GET",
+  "path": "/api/agents/{name}/canvas/shares",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::list_canvases": {
+  "method": "GET",
+  "path": "/api/agents/{name}/canvas",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::patch_canvas": {
+  "method": "PATCH",
+  "path": "/api/agents/{name}/canvas/{canvas_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::pin_canvas": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/canvas/{canvas_id}/pin",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::revoke_canvas_share": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/canvas/shares/{share_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "canvas.py::write_canvas": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/canvas/{canvas_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "chat.py::arm_execution_report_back": {
+  "method": "POST",
+  "path": "/api/agents/{name}/executions/{execution_id}/report-back",
+  "reason": "the service 404s unless the caller dispatched the row (#3295), so a share holder cannot arm another person's execution",
+  "tier": "accessor"
+ },
+ "chat.py::chat_with_agent": {
+  "method": "POST",
+  "path": "/api/agents/{name}/chat",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "chat.py::clear_agent_activity": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/activity",
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
+ },
+ "chat.py::close_chat_session": {
+  "method": "POST",
+  "path": "/api/agents/{name}/chat/sessions/{session_id}/close",
+  "tier": "owner"
+ },
+ "chat.py::execute_parallel_task": {
+  "method": "POST",
+  "path": "/api/agents/{name}/task",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "chat.py::get_agent_activity": {
+  "method": "GET",
+  "path": "/api/agents/{name}/activity",
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
+ },
+ "chat.py::get_agent_activity_detail": {
+  "method": "GET",
+  "path": "/api/agents/{name}/activity/{tool_id}",
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
+ },
+ "chat.py::get_agent_chat_history": {
+  "method": "GET",
+  "path": "/api/agents/{name}/chat/history",
+  "reason": "ent#875: the container's shared state, which holds every user's turns; a share holder is refused (assert_not_share_viewer), keys pass",
+  "tier": "owner"
+ },
+ "chat.py::get_agent_chat_session": {
+  "method": "GET",
+  "path": "/api/agents/{name}/chat/session",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "chat.py::get_agent_chat_sessions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/chat/sessions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "chat.py::get_agent_model": {
+  "method": "GET",
+  "path": "/api/agents/{name}/model",
+  "reason": "ent#875: the model name is not a secret and the chat UI shows it",
+  "tier": "accessor"
+ },
+ "chat.py::get_agent_running_executions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/executions/running",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "chat.py::get_chat_session_detail": {
+  "method": "GET",
+  "path": "/api/agents/{name}/chat/sessions/{session_id}",
+  "tier": "owner"
+ },
+ "chat.py::get_persistent_chat_history": {
+  "method": "GET",
+  "path": "/api/agents/{name}/chat/history/persistent",
+  "reason": "ent#875: already the caller's own rows (user_id filtered before the limit, #629)",
+  "tier": "accessor"
+ },
+ "chat.py::reset_agent_chat_history": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/chat/history",
+  "tier": "owner"
+ },
+ "chat.py::set_agent_model": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/model",
+  "reason": "ent#875: changing the model changes every user's turns; owner tier",
+  "tier": "owner"
+ },
+ "chat.py::stream_execution_log": {
+  "method": "GET",
+  "path": "/api/agents/{name}/executions/{execution_id}/stream",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "chat.py::terminate_agent_execution": {
+  "method": "POST",
+  "path": "/api/agents/{name}/executions/{execution_id}/terminate",
+  "reason": "ent#875: a share holder ends only a turn they started (both ids resolved, uniform 404)",
+  "tier": "accessor"
+ },
+ "compatibility.py::fix_compatibility": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/compatibility/fix",
+  "tier": "owner"
+ },
+ "compatibility.py::get_compatibility": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/compatibility",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "connector.py::get_connector": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/connector",
+  "tier": "owner"
+ },
+ "connector.py::list_connector_playbooks": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/connector/playbooks",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "connector.py::regenerate_connector_key": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/connector/key",
+  "tier": "owner"
+ },
+ "connector.py::revoke_connector_key": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/connector/key",
+  "tier": "owner"
+ },
+ "connector.py::update_connector": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/connector",
+  "tier": "owner"
+ },
+ "credentials.py::export_credentials": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/credentials/export",
+  "tier": "owner"
+ },
+ "credentials.py::get_agent_credential_requirements": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/credential-requirements",
+  "tier": "owner"
+ },
+ "credentials.py::get_agent_credentials_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/credentials/status",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "credentials.py::get_agent_env_drift": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/credentials/env-drift",
+  "tier": "owner"
+ },
+ "credentials.py::import_credentials": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/credentials/import",
+  "tier": "owner"
+ },
+ "credentials.py::inject_credentials": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/credentials/inject",
+  "tier": "owner"
+ },
+ "evaluations.py::create_evaluation": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/evaluations",
+  "tier": "owner"
+ },
+ "evaluations.py::list_agent_evaluations": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/evaluations",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "event_subscriptions.py::create_event_subscription": {
+  "method": "POST",
+  "path": "/api/agents/{name}/event-subscriptions",
+  "standing_work": true,
+  "tier": "owner"
+ },
+ "event_subscriptions.py::emit_event_for_agent": {
+  "method": "POST",
+  "path": "/api/agents/{name}/emit-event",
+  "reason": "ent#926: owner tier for people (assert_agent_owner in the handler; deliveries run as the platform). Agent keys keep the #2973 sibling-emit path, fenced in restricted turns",
+  "standing_work": true,
+  "tier": "owner"
+ },
+ "event_subscriptions.py::list_agent_events": {
+  "method": "GET",
+  "path": "/api/agents/{name}/events",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "event_subscriptions.py::list_event_subscriptions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/event-subscriptions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "fan_out.py::fan_out": {
+  "method": "POST",
+  "path": "/api/agents/{name}/fan-out",
+  "reason": "ent#875: dispatch with the caller's own identity; the rows it creates carry their id",
+  "tier": "accessor"
+ },
+ "fan_out.py::get_fan_out_status": {
+  "method": "GET",
+  "path": "/api/agents/{name}/fan-out/{fan_out_id}",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "git.py::bind_agent_to_own_repo": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/git/bind-to-own-repo",
+  "tier": "owner"
+ },
+ "git.py::clear_agent_github_pat": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/github-pat",
+  "tier": "owner"
+ },
+ "git.py::get_agent_github_pat_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/github-pat",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_agent_sync_state": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/sync-state",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_auto_sync_config": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/auto-sync",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_bind_to_own_repo_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/bind-to-own-repo/status",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_freeze_schedules_config": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/freeze-schedules-if-failing",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_git_config": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/config",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_git_log": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/log",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_git_status": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/status",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "git.py::get_pull_sync_config": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/git/pull-sync",
+  "reason": "ent#875: a config flag, no repository content",
+  "tier": "accessor"
+ },
+ "git.py::initialize_github_sync": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/git/initialize",
+  "tier": "owner"
+ },
+ "git.py::pull_from_github": {
+  "mentions_owner": true,
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/git/pull",
+  "reason": "ent#875: a plain pull stays open to share holders; force_reset is owner tier inside the handler",
+  "tier": "accessor"
+ },
+ "git.py::reset_to_main_preserve_state": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/git/reset-to-main-preserve-state",
+  "tier": "owner"
+ },
+ "git.py::set_agent_github_pat": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/github-pat",
+  "tier": "owner"
+ },
+ "git.py::set_auto_sync_config": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/git/auto-sync",
+  "tier": "owner"
+ },
+ "git.py::set_freeze_schedules_config": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/git/freeze-schedules-if-failing",
+  "tier": "owner"
+ },
+ "git.py::set_pull_sync_config": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/git/pull-sync",
+  "tier": "owner"
+ },
+ "git.py::sync_to_github": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/git/sync",
+  "tier": "owner"
+ },
+ "internal.py::internal_agent_brief_readiness": {
+  "method": "GET",
+  "path": "/api/internal/agents/{agent_name}/brief-readiness",
+  "reason": "internal router, shared-secret authenticated (agent-to-backend)",
+  "tier": "internal"
+ },
+ "internal.py::internal_agent_pre_check": {
+  "method": "POST",
+  "path": "/api/internal/agents/{agent_name}/pre-check",
+  "reason": "internal router, shared-secret authenticated (agent-to-backend)",
+  "tier": "internal"
+ },
+ "loops.py::list_loops": {
+  "method": "GET",
+  "path": "/api/agents/{name}/loops",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "loops.py::start_loop": {
+  "method": "POST",
+  "path": "/api/agents/{name}/loops",
+  "reason": "legacy",
+  "standing_work": true,
+  "tier": "accessor"
+ },
+ "messages.py::get_proactive_shares": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/shares/proactive",
+  "tier": "owner"
+ },
+ "messages.py::send_proactive_message": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/messages",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "messages.py::update_proactive_setting": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/shares/proactive",
+  "reason": "owner or admin of the share row (db-level check)",
+  "tier": "resource"
+ },
+ "metric_points.py::record_metric_points": {
+  "method": "POST",
+  "path": "/api/agents/{name}/metrics/points",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "monitoring.py::get_agent_health": {
+  "method": "GET",
+  "path": "/api/monitoring/agents/{agent_name}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "monitoring.py::get_agent_health_history": {
+  "method": "GET",
+  "path": "/api/monitoring/agents/{agent_name}/history",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "monitoring.py::trigger_health_check": {
+  "method": "POST",
+  "path": "/api/monitoring/agents/{agent_name}/check",
+  "reason": "ent#293: a health probe on an agent the caller can already see is a use, not a grant (AuthorizedAgentByName); the owner gate was only named in the docstring",
+  "tier": "accessor"
+ },
+ "nevermined.py::configure_nevermined": {
+  "method": "POST",
+  "path": "/api/nevermined/agents/{name}/config",
+  "reason": "owner/admin helper",
+  "tier": "owner",
+  "via": "_require_write_access"
+ },
+ "nevermined.py::delete_nevermined_config": {
+  "method": "DELETE",
+  "path": "/api/nevermined/agents/{name}/config",
+  "reason": "owner/admin helper",
+  "tier": "owner",
+  "via": "_require_write_access"
+ },
+ "nevermined.py::get_nevermined_config": {
+  "method": "GET",
+  "path": "/api/nevermined/agents/{name}/config",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "_require_read_access"
+ },
+ "nevermined.py::get_payment_history": {
+  "method": "GET",
+  "path": "/api/nevermined/agents/{name}/payments",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "_require_read_access"
+ },
+ "nevermined.py::toggle_nevermined": {
+  "method": "PUT",
+  "path": "/api/nevermined/agents/{name}/config/toggle",
+  "reason": "owner/admin helper",
+  "tier": "owner",
+  "via": "_require_write_access"
+ },
+ "notifications.py::count_agent_notifications": {
+  "method": "GET",
+  "path": "/api/agents/{name}/notifications/count",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "notifications.py::get_agent_notifications": {
+  "method": "GET",
+  "path": "/api/agents/{name}/notifications",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "operator_queue.py::get_agent_queue_items": {
+  "method": "GET",
+  "path": "/api/operator-queue/agents/{agent_name}",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "_assert_agent_accessible"
+ },
+ "operator_queue.py::get_my_ask": {
+  "method": "GET",
+  "path": "/api/agents/{name}/operator-queue/{request_id}",
+  "reason": "get_self_acting_agent: the agent acting as itself",
+  "tier": "self"
+ },
+ "operator_queue.py::raise_my_ask": {
+  "method": "POST",
+  "path": "/api/agents/{name}/operator-queue",
+  "reason": "get_self_acting_agent: the agent acting as itself",
+  "tier": "self"
+ },
+ "operator_queue.py::withdraw_my_ask": {
+  "method": "POST",
+  "path": "/api/agents/{name}/operator-queue/{request_id}/withdraw",
+  "reason": "get_self_acting_agent: the agent acting as itself",
+  "tier": "self"
+ },
+ "paid.py::get_paid_agent_info": {
+  "method": "GET",
+  "path": "/api/paid/{agent_name}/info",
+  "reason": "payment-gated public surface (x402 / Nevermined)",
+  "tier": "public"
+ },
+ "paid.py::paid_chat": {
+  "method": "POST",
+  "path": "/api/paid/{agent_name}/chat",
+  "reason": "payment-gated public surface (x402 / Nevermined)",
+  "tier": "public"
+ },
+ "public_links.py::create_public_link": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/public-links",
+  "tier": "owner"
+ },
+ "public_links.py::delete_public_link": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/public-links/{link_id}",
+  "tier": "owner"
+ },
+ "public_links.py::get_public_link": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/public-links/{link_id}",
+  "tier": "owner"
+ },
+ "public_links.py::list_public_links": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/public-links",
+  "tier": "owner"
+ },
+ "public_links.py::update_public_link": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/public-links/{link_id}",
+  "tier": "owner"
+ },
+ "public_memory.py::write_user_memory": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/user-memory",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "reminders.py::cancel_reminder_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{name}/reminders/{reminder_id}/cancel",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "reminders.py::create_reminder_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{name}/reminders",
+  "reason": "legacy",
+  "standing_work": true,
+  "tier": "accessor"
+ },
+ "reminders.py::list_reminders_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{name}/reminders",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "reports.py::create_report": {
+  "method": "POST",
+  "path": "/api/agents/{name}/reports",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "reports.py::delete_report": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/reports/{report_id}",
+  "tier": "owner"
+ },
+ "reports.py::list_agent_reports": {
+  "method": "GET",
+  "path": "/api/agents/{name}/reports",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "schedules.py::create_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules",
+  "reason": "legacy",
+  "standing_work": true,
+  "tier": "accessor"
+ },
+ "schedules.py::delete_schedule": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/schedules/{schedule_id}",
+  "reason": "the schedule's creator or admin (db.delete_schedule)",
+  "tier": "resource"
+ },
+ "schedules.py::disable_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/disable",
+  "restricted_turn": "allow: disabling a schedule only lowers what runs later as the owner",
+  "tier": "owner"
+ },
+ "schedules.py::disable_webhook_secret": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/webhook/secret",
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
+ },
+ "schedules.py::enable_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/enable",
+  "standing_work": true,
+  "tier": "owner"
+ },
+ "schedules.py::generate_webhook": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "standing_work": true,
+  "tier": "resource"
+ },
+ "schedules.py::generate_webhook_secret": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/webhook/secret",
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "standing_work": true,
+  "tier": "resource"
+ },
+ "schedules.py::get_agent_executions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/executions",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "schedules.py::get_agent_schedules_summary": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules/analytics-summary",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "schedules.py::get_execution": {
+  "method": "GET",
+  "path": "/api/agents/{name}/executions/{execution_id}",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "schedules.py::get_execution_log": {
+  "method": "GET",
+  "path": "/api/agents/{name}/executions/{execution_id}/log",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "schedules.py::get_schedule": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules/{schedule_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "schedules.py::get_schedule_analytics": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/analytics",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "schedules.py::get_schedule_executions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/executions",
+  "reason": "ent#875: accessor gate, then the viewer tier narrows a share holder to the rows they started",
+  "tier": "accessor"
+ },
+ "schedules.py::get_webhook_status": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
+ },
+ "schedules.py::list_agent_schedules": {
+  "method": "GET",
+  "path": "/api/agents/{name}/schedules",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "schedules.py::revoke_webhook": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/webhook",
+  "reason": "ent#875: the schedule's creator or the agent's owner (can_manage_webhook)",
+  "tier": "resource"
+ },
+ "schedules.py::trigger_schedule": {
+  "method": "POST",
+  "path": "/api/agents/{name}/schedules/{schedule_id}/trigger",
+  "standing_work": true,
+  "tier": "owner"
+ },
+ "schedules.py::update_schedule": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/schedules/{schedule_id}",
+  "reason": "the schedule's creator or admin (db.update_schedule)",
+  "standing_work": true,
+  "tier": "resource"
+ },
+ "seat_decisions.py::list_seat_decisions": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/decisions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "seat_decisions.py::record_seat_decision": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/decisions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::create_session": {
+  "method": "POST",
+  "path": "/api/agents/{name}/session",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::delete_session": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/sessions/{session_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::get_session_with_messages": {
+  "method": "GET",
+  "path": "/api/agents/{name}/sessions/{session_id}",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::list_sessions": {
+  "method": "GET",
+  "path": "/api/agents/{name}/sessions",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::reset_session_memory": {
+  "method": "POST",
+  "path": "/api/agents/{name}/sessions/{session_id}/reset",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sessions.py::send_session_message": {
+  "method": "POST",
+  "path": "/api/agents/{name}/sessions/{session_id}/message",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "sharing.py::decide_access_request_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/access-requests/{request_id}/decide",
+  "tier": "owner"
+ },
+ "sharing.py::get_access_policy_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/access-policy",
+  "tier": "owner"
+ },
+ "sharing.py::get_agent_access_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/access",
+  "tier": "owner"
+ },
+ "sharing.py::get_agent_shares_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/shares",
+  "tier": "owner"
+ },
+ "sharing.py::get_client_roster_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/clients",
+  "tier": "owner"
+ },
+ "sharing.py::get_public_channel_prompt_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/public-prompt",
+  "tier": "owner"
+ },
+ "sharing.py::list_access_requests_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/access-requests",
+  "tier": "owner"
+ },
+ "sharing.py::set_public_channel_prompt_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/public-prompt",
+  "tier": "owner"
+ },
+ "sharing.py::share_agent_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/share",
+  "tier": "owner"
+ },
+ "sharing.py::unshare_agent_endpoint": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/share/{email}",
+  "tier": "owner"
+ },
+ "sharing.py::update_access_policy_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/access-policy",
+  "tier": "owner"
+ },
+ "skill_gate.py::clear_agent_skill_gate": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/skill-gates/{skill_name}",
+  "tier": "owner"
+ },
+ "skill_gate.py::list_agent_skill_gates": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/skill-gates",
+  "reason": "legacy",
+  "tier": "accessor",
+  "via": "get_skill_gate_readable_agent_by_name"
+ },
+ "skill_gate.py::set_agent_skill_gate": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/skill-gates/{skill_name}",
+  "tier": "owner"
+ },
+ "skills.py::assign_skill": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/skills/{skill_name}",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "skills.py::assign_skill_set": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/skill-sets/{set_name}",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "skills.py::get_agent_skill_sets": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/skill-sets",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "skills.py::get_agent_skills": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/skills",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "skills.py::inject_skills": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/skills/inject",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "skills.py::set_skill_manager": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/skill-manager",
+  "tier": "owner"
+ },
+ "skills.py::unassign_skill": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/skills/{skill_name}",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "skills.py::unassign_skill_set": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/skill-sets/{set_name}",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "skills.py::update_agent_skills": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/skills",
+  "reason": "dependency resolves through get_owned_agent_by_name",
+  "tier": "owner",
+  "via": "get_skill_managed_agent_by_name"
+ },
+ "slack.py::connect_slack": {
+  "method": "POST",
+  "path": "/api/agents/{name}/public-links/{link_id}/slack/connect",
+  "tier": "owner"
+ },
+ "slack.py::create_agent_slack_channel": {
+  "method": "POST",
+  "path": "/api/agents/{name}/slack/channel",
+  "tier": "owner"
+ },
+ "slack.py::delete_agent_slack_channel": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/slack/channel",
+  "tier": "owner"
+ },
+ "slack.py::disconnect_slack": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/public-links/{link_id}/slack",
+  "tier": "owner"
+ },
+ "slack.py::get_agent_slack_channel": {
+  "method": "GET",
+  "path": "/api/agents/{name}/slack/channel",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "slack.py::get_slack_connection_status": {
+  "method": "GET",
+  "path": "/api/agents/{name}/public-links/{link_id}/slack",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "slack.py::list_agent_slack_channels": {
+  "method": "GET",
+  "path": "/api/agents/{name}/slack/channels",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "slack.py::send_agent_slack_channel_message": {
+  "method": "POST",
+  "path": "/api/agents/{name}/slack/channels/{channel_id}/messages",
+  "tier": "owner"
+ },
+ "slack.py::set_agent_as_slack_dm_default": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/slack/channel/dm-default",
+  "tier": "owner"
+ },
+ "slack.py::set_slack_channel_proactive": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/slack/channels/{channel_id}/proactive",
+  "tier": "owner"
+ },
+ "slack.py::update_slack_connection": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/public-links/{link_id}/slack",
+  "tier": "owner"
+ },
+ "subscriptions.py::assign_subscription_to_agent": {
+  "method": "PUT",
+  "path": "/api/subscriptions/agents/{agent_name}",
+  "tier": "owner"
+ },
+ "subscriptions.py::clear_agent_subscription": {
+  "method": "DELETE",
+  "path": "/api/subscriptions/agents/{agent_name}",
+  "tier": "owner"
+ },
+ "subscriptions.py::get_agent_auth_status": {
+  "method": "GET",
+  "path": "/api/subscriptions/agents/{agent_name}/auth",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "tags.py::add_agent_tag": {
+  "method": "POST",
+  "path": "/api/agents/{name}/tags/{tag}",
+  "tier": "owner"
+ },
+ "tags.py::get_agent_tags": {
+  "method": "GET",
+  "path": "/api/agents/{name}/tags",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "tags.py::remove_agent_tag": {
+  "method": "DELETE",
+  "path": "/api/agents/{name}/tags/{tag}",
+  "tier": "owner"
+ },
+ "tags.py::set_agent_tags": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/tags",
+  "tier": "owner"
+ },
+ "telegram.py::configure_telegram_bot": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/telegram",
+  "tier": "owner"
+ },
+ "telegram.py::delete_telegram_binding": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/telegram",
+  "tier": "owner"
+ },
+ "telegram.py::delete_telegram_group": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/telegram/groups/{group_config_id}",
+  "tier": "owner"
+ },
+ "telegram.py::get_telegram_binding": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/telegram",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "telegram.py::list_telegram_groups": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/telegram/groups",
+  "reason": "ent#264: group ids and titles for owner, shared and admin (AuthorizedAgentByName); was declared owner, but the owner gate was only named in the docstring",
+  "tier": "accessor"
+ },
+ "telegram.py::send_telegram_group_message": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/telegram/groups/{chat_id}/messages",
+  "tier": "owner"
+ },
+ "telegram.py::set_telegram_progress_indicator": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/telegram/progress-indicator",
+  "tier": "owner"
+ },
+ "telegram.py::test_telegram_bot": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/telegram/test",
+  "tier": "owner"
+ },
+ "telegram.py::update_telegram_group": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/telegram/groups/{group_config_id}",
+  "tier": "owner"
+ },
+ "voice.py::get_voice_name": {
+  "method": "GET",
+  "path": "/api/agents/{name}/voice/name",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voice.py::get_voice_panel": {
+  "method": "GET",
+  "path": "/api/agents/{name}/voice/{session_id}/panel",
+  "tier": "owner"
+ },
+ "voice.py::get_voice_prompt": {
+  "method": "GET",
+  "path": "/api/agents/{name}/voice/prompt",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voice.py::set_voice_name": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/voice/name",
+  "tier": "owner"
+ },
+ "voice.py::set_voice_prompt": {
+  "method": "PUT",
+  "path": "/api/agents/{name}/voice/prompt",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voice.py::voice_start": {
+  "method": "POST",
+  "path": "/api/agents/{name}/voice/start",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voice.py::voice_status": {
+  "method": "GET",
+  "path": "/api/agents/{name}/voice/status",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voice.py::voice_stop": {
+  "method": "POST",
+  "path": "/api/agents/{name}/voice/stop",
+  "tier": "owner"
+ },
+ "voip.py::configure_voip_binding": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/voip",
+  "tier": "owner"
+ },
+ "voip.py::delete_voip_binding": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/voip",
+  "tier": "owner"
+ },
+ "voip.py::get_voip_binding": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/voip",
+  "tier": "owner"
+ },
+ "voip.py::place_voip_call": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/voip/call",
+  "reason": "legacy",
+  "tier": "accessor"
+ },
+ "voip.py::set_voip_enabled": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/voip/enabled",
+  "tier": "owner"
+ },
+ "whatsapp.py::configure_whatsapp_binding": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/whatsapp",
+  "tier": "owner"
+ },
+ "whatsapp.py::delete_whatsapp_binding_endpoint": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/whatsapp",
+  "tier": "owner"
+ },
+ "whatsapp.py::get_whatsapp_binding": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/whatsapp",
+  "tier": "owner"
+ },
+ "whatsapp.py::test_whatsapp_binding": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/whatsapp/test",
+  "tier": "owner"
+ }
+}

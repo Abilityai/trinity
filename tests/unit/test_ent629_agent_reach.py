@@ -390,6 +390,9 @@ def test_dispatch_routes_resolve_the_target_through_the_access_gate(module, rout
 #: the reason its principal is never an agent key, or its reach is decided
 #: otherwise.
 _EXEMPT = {
+    ("services/turn_tier_service.py", "_user_tier"):
+        "ent#926: rates the PERSON who started a turn (from the execution row), "
+        "never the requesting principal, so no agent-key reach is involved",
     ("dependencies.py", "can_manage_agent_skills"):
         "the skills.manage capability is the explicit grant to the owner's agents (ent#596)",
     ("routers/agent_files.py", "_can_view"):
@@ -402,6 +405,8 @@ _EXEMPT = {
         "the terminal websocket authenticates a person, never an agent key",
     ("client_portal/service.py", "*"):
         "portal principals are people; agent keys never reach the client portal",
+    ("services/turn_tier_service.py", "turn_tier"):
+        "judges the person who started a turn, never the calling key; the only caller is the route that accepts the agent's own key and a path self-match (ent#926)",
     ("services/skill_gate_service.py", "_openable_run"):
         "takes a person's username: the operator queue calls it for person principals only, the Workspace for a platform person (#3708)",
     ("services/skill_gate_service.py", "_can_open"):

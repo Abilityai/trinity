@@ -357,6 +357,7 @@ _GUARDRAIL_PATH_DENY: tuple[str, ...] = (
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*",
+    "/var/lib/trinity/*",
 )
 # The same file's `path_allow` (#3868): names the slash-free deny rules skip.
 # `.env.example` holds variable names only and the compatibility check needs it.
