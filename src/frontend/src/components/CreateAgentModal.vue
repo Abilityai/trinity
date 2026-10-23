@@ -568,7 +568,7 @@ const createAgent = async () => {
       }
       const typedPat = forkPat.value.trim()
       if (!typedPat && (!hasSavedGithubPat.value || forkPatOverriding.value)) {
-        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → GitHub token'
+        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → MCP Keys → Personal GitHub Token'
         loading.value = false
         return
       }
