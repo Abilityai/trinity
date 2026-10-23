@@ -67,8 +67,8 @@ async def set_autonomy_dial(
 
     No fan-out: the level is a read-time conjunct of every seat's verdict
     (`autonomy_dial_service.live_verdict`), so lowering it demotes every class
-    on the next read with zero writes, and raising it restores exactly what each
-    class had earned — never more.
+    on the next read with zero writes, and raising it applies what each class's
+    records earn, recomputed on that read — never more.
     """
     reject_non_interactive_principal(current_user)
     previous = autonomy_dial_service.get_level(db)

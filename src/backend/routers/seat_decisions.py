@@ -54,6 +54,25 @@ def _self_gate(current_user: User, agent_name: str) -> None:
         )
 
 
+def _require_running_turn(current_user: User, execution_id: str, turn_header: Optional[str]) -> None:
+    """#2984 review (option b): an agent records a decision only for the turn it
+    is running. The graduation rule counts distinct conversations, and the
+    `execution_id` in the body is the model's to type — so without this one turn
+    could cite three past executions of the seat and graduate a class nobody
+    asked about. The turn is the PLATFORM-stamped `X-Trinity-Execution-Id`
+    (#2392), which the model cannot set; the body must name that same turn, and
+    `record_seat_decision` checks it is still `running`. A person's own record
+    (a non-agent principal) is not an agent inventing evidence and keeps its path."""
+    if not current_user.agent_name:
+        return
+    turn = (turn_header or "").strip()
+    if not turn or turn == "manual" or turn != (execution_id or "").strip():
+        raise HTTPException(status_code=422, detail={
+            "code": "not_this_turn",
+            "message": ("Record a decision only for the turn you are running: pass your own "
+                        "execution_id from your Execution Context.")})
+
+
 def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     """The seat an execution serves, or a named HTTP error. Mirrors
     `public_memory.write_user_memory` — one rule for "which person"."""
@@ -88,12 +107,19 @@ async def record_seat_decision(
     body: RecordDecisionRequest,
     current_user: User = Depends(get_current_user),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    x_trinity_execution_id: Optional[str] = Header(default=None, alias="X-Trinity-Execution-Id"),
 ):
     """Record a decision for the seat this execution serves."""
     _self_gate(current_user, agent_name)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
+    _require_running_turn(current_user, body.execution_id, x_trinity_execution_id)
     seat_email, execution = _seat_for(agent_name, body.execution_id)
+    _status = getattr(execution, "status", "")
+    if current_user.agent_name and str(getattr(_status, "value", _status)).lower() != "running":
+        raise HTTPException(status_code=422, detail={
+            "code": "turn_not_running",
+            "message": "A decision is recorded during the turn it was made in; this execution is not running."})
 
     scope = f"seat_decision:{agent_name}:{seat_email}"
     idem = idempotency_service.begin(scope, idempotency_key)

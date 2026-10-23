@@ -17,13 +17,16 @@ scopes, and this module is where they meet:
   repeatedly with no reversals (`services/seat_decision_service.py`, ent#638).
   "Promotion is earned by a stable criterion, never by frequency."
 
-THE VERDICT IS A STORED EARNED-STATE × THREE LIVE CONJUNCTS
+THE VERDICT IS AN EARNED-STATE × THREE LIVE CONJUNCTS
 
-The row records only what was EARNED — the state, the evidence it rests on, and
-`evidence_expires_at`. Everything that can change underneath it is ANDed at read
-time instead of being written:
+The earned state is RECOMPUTED from the decision records on every evaluation
+(`evaluate_seat` → `class_evidence` → `evaluate_class`); the row is a record of
+the last computation — the state, the evidence it rests on, and
+`evidence_expires_at` — written on event paths so a reader can see why, not a
+verdict a read restores (#2984 review). Everything that can change underneath
+the earned state is ANDed at read time instead of being written:
 
-    graduated ⟺ stored state == "graduated"
+    graduated ⟺ earned state == "graduated"
               ∧ level ≥ L2                    (the instance ceiling)
               ∧ agent autonomy_enabled        (the hard off, AC 5)
               ∧ now <= evidence_expires_at    (the evidence still exists)
@@ -34,8 +37,10 @@ so a materialised `graduated` would outlive its own evidence with nobody
 watching; and re-evaluating the fleet inside a level change is an unbounded
 fan-out (there is no fleet-wide seat query) that a read-time conjunct removes
 entirely — a level drop now needs zero writes. The hard-off rule generalises
-the same way: flipping autonomy back restores the earned state rather than
-making the seat earn it again.
+the same way: flipping autonomy back re-applies the state the records earn,
+recomputed, rather than making the seat earn it again. (Because the earned state
+is recomputed from the records, `evidence_expired` names records that have
+lapsed — it is not a stored verdict outliving them.)
 
 THE EVIDENCE RULE, STATED
 
@@ -136,7 +141,15 @@ RATING_WINDOW_DAYS = 30
 RATING_PREFIXES = ("workspace:", "operator:")
 #: What the rule version stamps on the evidence, so a stored verdict can be read
 #: against the rule that produced it rather than against today's.
-RULE_VERSION = "2026-09-27"   # evidence counted per conversation, not per record
+RULE_VERSION = "2026-10-23"   # + agent-only evidence must span STABLE_MIN_DAYS days (#2984 review)
+#: #2984 review (option b): evidence written ONLY by the agent — every record
+#: carries a `source_execution_id`, so no person wrote one — must span this many
+#: distinct days. With `record_decision` held to the running turn, this is what
+#: stops one burst of turns (or of self-tasks) graduating a class nobody asked
+#: about. A person-written record in the window means a person is involved, and
+#: the rule is unchanged. Residual, stated: a seat's DAILY scheduled run is a
+#: running turn, so agent-only evidence can still graduate over this many days.
+STABLE_MIN_DAYS = 3
 
 # Named blockers — the vocabulary a person and a companion both read.
 BLOCK_LEVEL = "level_below_l2"
@@ -144,6 +157,7 @@ BLOCK_AUTONOMY_OFF = "agent_autonomy_off"
 BLOCK_EVIDENCE_EXPIRED = "evidence_expired"
 BLOCK_TOO_FEW = "too_few_records"
 BLOCK_TOO_FEW_SOURCES = "too_few_conversations"
+BLOCK_TOO_FEW_DAYS = "agent_only_evidence_too_recent"
 BLOCK_CRITERIA = "criterion_not_stable"
 BLOCK_REVERSAL = "reversal_in_window"
 BLOCK_RATING = "negative_rating_in_window"
@@ -156,6 +170,7 @@ BLOCKER_TEXT = {
     BLOCK_EVIDENCE_EXPIRED: "the decisions this was promoted on have passed their review date",
     BLOCK_TOO_FEW: "fewer than three decisions on record for this kind of ask",
     BLOCK_TOO_FEW_SOURCES: "the decisions for this kind of ask come from fewer than three separate conversations",
+    BLOCK_TOO_FEW_DAYS: "the decisions for this kind of ask were all recorded by the agent, on fewer than three separate days",
     BLOCK_CRITERIA: "the decisions did not apply one consistent criterion",
     BLOCK_REVERSAL: "a decision in this window was reversed",
     BLOCK_RATING: "this seat rated the agent down inside the rating window",
@@ -257,6 +272,7 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
 
     day = today or _today()
     window, reversals, criteria, ids, sources = [], 0, [], [], set()
+    agent_days, person_written = set(), 0
     for r in rows:
         if (r.get("ask_class") or "") != ask_class:
             continue
@@ -286,6 +302,10 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
         # person-written record (no execution) is its own source.
         sources.add(("execution", r["source_execution_id"]) if r.get("source_execution_id")
                     else ("record", r["id"]))
+        if r.get("source_execution_id"):
+            agent_days.add(str(r.get("created_at") or "")[:10])
+        else:
+            person_written += 1
         crit = sd.normalize_criterion(r.get("criterion") or "")
         if crit and crit not in criteria:
             criteria.append(crit)
@@ -298,6 +318,10 @@ def class_evidence(rows: List[dict], ask_class: str, *, today: Optional[date] = 
         "reversals": reversals,
         "decision_ids": ids[:20],
         "expires_at": review_dates[0] if review_dates else None,
+        # #2984 review: how many days the agent-written evidence spans, and
+        # whether any of it was written by a person (which lifts the day rule).
+        "agent_days": len(agent_days - {""}),
+        "person_written": person_written,
         "rule_version": RULE_VERSION,
     }
 
@@ -319,20 +343,26 @@ def evaluate_class(evidence: Dict[str, Any], *, guard_state: str,
     else:
         if evidence.get("sources", 0) < STABLE_MIN_COUNT:
             blocked.append(BLOCK_TOO_FEW_SOURCES)
+        if not evidence.get("person_written") and evidence.get("agent_days", 0) < STABLE_MIN_DAYS:
+            blocked.append(BLOCK_TOO_FEW_DAYS)
         if len(evidence["criteria"]) != 1:
             blocked.append(BLOCK_CRITERIA)
     if evidence["reversals"]:
         blocked.append(BLOCK_REVERSAL)
     if negative_rating:
         blocked.append(BLOCK_RATING)
-    full = {**evidence, "guard_metric": guard_state,
+    full = {**evidence, "guard_metric": guard_state, "held": bool(held),
             "negative_rating_at": negative_rating, "decided_at": _now_iso()}
     return {
         "state": STATE_ON_REQUEST if blocked else STATE_GRADUATED,
         "blocked_by": blocked,
         "evidence": full,
-        "evidence_hash": _evidence_hash({k: full[k] for k in
+        # #2984 review: `held` and the day-rule inputs are part of the evidence's
+        # identity — a hold or a new day must rewrite the row, not be skipped as
+        # "unchanged".
+        "evidence_hash": _evidence_hash({k: full.get(k) for k in
                                          ("count", "sources", "criteria", "reversals", "guard_metric",
+                                          "held", "agent_days", "person_written",
                                           "negative_rating_at", "expires_at", "rule_version")}),
         "expires_at": evidence["expires_at"],
     }

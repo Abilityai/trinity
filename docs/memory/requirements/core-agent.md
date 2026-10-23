@@ -4060,6 +4060,20 @@ to localStorage in the clear.
   carried as `evidence.sources`; short of it the class is blocked
   `too_few_conversations` ("the decisions for this kind of ask come from fewer than
   three separate conversations"). Every other conjunct is unchanged.
+- **Agent-written evidence is held to the running turn and to days (#2984 review,
+  option b).** `POST /api/agents/{name}/decisions` from an **agent** key records only
+  for the turn it is running: the body's `execution_id` must equal the
+  platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
+  forwards and the model cannot set; `manual` or absent is refused) — else 422
+  `not_this_turn` — and that execution must be `running`, else 422
+  `turn_not_running`. A person's own record keeps its path. And when **every** record
+  in a class's window is agent-written (no person-written record), the evidence must
+  span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
+  blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
+  cannot graduate a class nobody asked about. **Residual, accepted:** a seat's daily
+  scheduled run is a running turn, so agent-only evidence can still graduate over
+  three days with no person in the loop — slower, not closed; option (a), counting
+  only person-written or person-confirmed records, is what would close it.
 - **Reversals are counted over the WINDOW, not over all history** — `effective_status`
   returns `reversed` unconditionally, so a reversed record never expires; counted
   over history, one reversal ever would block a class forever and `on_request` would

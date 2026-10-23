@@ -85,7 +85,10 @@ def harness(monkeypatch):
     def call(user, method):
         principal["user"] = user
         if method == "POST":
-            return client.post(f"/api/agents/{VICTIM}/decisions", json=RECORD)
+            # As the MCP `record_decision` sends it: the platform turn header
+            # names the turn the record is for (#2984 review).
+            return client.post(f"/api/agents/{VICTIM}/decisions", json=RECORD,
+                               headers={"X-Trinity-Execution-Id": RECORD["execution_id"]})
         if method == "AUTONOMY":
             # trinity-enterprise#641: the seat-autonomy read is a third handler on
             # this router and must hold the same gate, or it reopens #839.

@@ -138,6 +138,81 @@ def _decide(db, *, ask_class="vendor-renewal", criterion=CRITERION, seat=SEAT,
     return row
 
 
+def _principal(who="admin_jwt"):
+    from models import User
+    base = dict(id=1, username="admin", email="admin@example.com", role="admin")
+    return {
+        "admin_jwt": User(**base),
+        "non_admin_jwt": User(**{**base, "role": "user"}),
+        "admin_user_key": User(**base, mcp_scope="user", mcp_key_id="k-user"),
+        "system_key": User(**base, mcp_scope="system", mcp_key_id="k-sys"),
+        "agent_key": User(**base, mcp_scope="agent", mcp_key_id="k-agent", agent_name=AGENT),
+    }[who]
+
+
+@pytest.fixture
+def settings_api(monkeypatch):
+    """The real settings router (level route + the generic catch-all) over an
+    in-memory settings store; only the principal and the audit sink are faked."""
+    from unittest.mock import AsyncMock
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import sys
+    import routers.settings as settings_pkg
+    from routers.settings import autonomy_dial as level_mod
+    # The `get_current_user` the router's `require_admin` actually closes over
+    # (the unit conftest re-imports modules, so a fresh import may be a copy).
+    get_current_user = level_mod.require_admin.__globals__["get_current_user"]
+    settings = {}
+    fake_db = SimpleNamespace(get_setting_value=lambda k, default=None: settings.get(k, default),
+                              set_setting=lambda k, v: settings.__setitem__(k, v))
+    monkeypatch.setattr(level_mod, "db", fake_db)
+    import services.autonomy_dial_service as dial_mod
+    monkeypatch.setattr(dial_mod, "db", fake_db, raising=False)
+    audit = AsyncMock()
+    monkeypatch.setattr(level_mod.platform_audit_service, "log", audit)
+    app = FastAPI()
+    app.include_router(settings_pkg.router)
+    principal = {"user": None}
+    app.dependency_overrides[get_current_user] = lambda: principal["user"]
+    client = TestClient(app)
+
+    def call(user, method, path, body):
+        principal["user"] = user
+        return client.request(method, path, json=body)
+    return call, audit
+
+
+@pytest.fixture
+def ratings_db(tmp_path, monkeypatch):
+    """`agent_evaluations` on a real SQLite, through the real EvaluationOperations."""
+    from sqlalchemy import create_engine, update
+    import db.engine as engine_module
+    import db.evaluations as ev
+    import db.tables as tables
+    engine = create_engine(f"sqlite:///{tmp_path / 'ratings.db'}")
+    tables.agent_evaluations.create(engine)
+    monkeypatch.setattr(engine_module, "get_engine", lambda: engine)
+    monkeypatch.setattr(ev, "get_engine", lambda: engine, raising=False)
+    ops = ev.EvaluationOperations()
+
+    def set_stamps(target_id, *, created_at, updated_at):
+        with engine.begin() as conn:
+            conn.execute(update(tables.agent_evaluations)
+                         .where(tables.agent_evaluations.c.target_id == target_id)
+                         .values(created_at=created_at, updated_at=updated_at))
+    return ops, set_stamps
+
+
+def _set_created(db, decision_id, created_at):
+    """Date a record (the day rule reads `created_at`)."""
+    from sqlalchemy import update
+    import db.seat_decisions as sd_mod
+    from db.tables import seat_decisions as t
+    with sd_mod.get_engine().begin() as conn:
+        conn.execute(update(t).where(t.c.id == decision_id).values(created_at=created_at))
+
+
 def _three(db, **kw):
     return [_decide(db, i=i, **kw) for i in range(3)]
 
@@ -229,16 +304,39 @@ class TestEvidenceIsCountedPerConversation:
         _three(store, execution_id="exec-1")
         c = _classes(dial, store)["vendor-renewal"]
         assert c["unprompted"] is False and c["earned_state"] == dial.STATE_ON_REQUEST
-        assert c["blocked_by"] == [dial.BLOCK_TOO_FEW_SOURCES]
+        assert dial.BLOCK_TOO_FEW_SOURCES in c["blocked_by"]
         assert c["evidence"]["count"] == 3 and c["evidence"]["sources"] == 1
 
-    def test_three_records_from_three_executions_graduate(self, dial, store):
+    def test_three_agent_records_from_three_executions_on_one_day_do_not_graduate(self, dial, store):
+        """#2984 review (b): agent-only evidence written in one burst — three
+        turns, or self-tasks, the same day — names no person and does not
+        graduate."""
         store.set_setting(dial.LEVEL_KEY, "L2")
         for i in range(3):
             _decide(store, i=i, execution_id=f"exec-{i}")
         c = _classes(dial, store)["vendor-renewal"]
+        assert c["unprompted"] is False
+        assert c["blocked_by"] == [dial.BLOCK_TOO_FEW_DAYS]
+        assert c["evidence"]["sources"] == 3 and c["evidence"]["agent_days"] == 1
+
+    def test_three_agent_records_from_three_executions_on_three_days_graduate(self, dial, store):
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        for i in range(3):
+            row = _decide(store, i=i, execution_id=f"exec-{i}")
+            _set_created(store, row["id"], f"2026-09-0{i + 1}T10:00:00Z")
+        c = _classes(dial, store)["vendor-renewal"]
         assert c["unprompted"] is True and c["blocked_by"] == []
-        assert c["evidence"]["sources"] == 3
+        assert c["evidence"]["sources"] == 3 and c["evidence"]["agent_days"] == 3
+
+    def test_a_person_written_record_lifts_the_day_rule(self, dial, store):
+        """A person in the window is a person involved: the day rule is only for
+        evidence the agent wrote alone."""
+        store.set_setting(dial.LEVEL_KEY, "L2")
+        _decide(store, i=0, execution_id="exec-0")
+        _decide(store, i=1, execution_id="exec-1")
+        _decide(store, i=2)   # the Workspace path: no execution
+        c = _classes(dial, store)["vendor-renewal"]
+        assert c["unprompted"] is True and c["evidence"]["person_written"] == 1
 
     def test_person_written_records_each_count_as_their_own_source(self, dial, store):
         store.set_setting(dial.LEVEL_KEY, "L2")
@@ -356,14 +454,35 @@ class TestRatingsWindow:
         _three(store)
         assert dial.BLOCK_RATING in _classes(dial, store)["vendor-renewal"]["blocked_by"]
 
-    def test_the_query_reads_the_flip_not_only_the_first_rating(self):
+    def test_the_query_reads_the_flip_not_only_the_first_rating(self, ratings_db):
         """`upsert_workspace_rating` updates `updated_at` and leaves
         `created_at`, so an up→down flip inside the window is invisible to a
-        `created_at` predicate — and that flip is exactly a demotion."""
-        from db.evaluations import EvaluationOperations
-        src = inspect.getsource(EvaluationOperations.latest_negative_seat_rating)
-        assert "coalesce" in src.lower() and "updated_at" in src and "created_at" in src
-        assert "quality < 0.5" in src
+        `created_at` predicate — and that flip is exactly a demotion. Seeded
+        rows through the real `EvaluationOperations` (#2984 review)."""
+        ops, set_stamps = ratings_db
+        since = "2026-10-01T00:00:00Z"
+        ops.upsert_workspace_rating(AGENT, evaluator=f"workspace:{SEAT}", target_kind="message",
+                                    target_id="m1", quality=1.0)
+        set_stamps("m1", created_at="2026-09-01T00:00:00Z", updated_at="2026-09-01T00:00:00Z")
+        assert ops.latest_negative_seat_rating(AGENT, [f"workspace:{SEAT}"], since) is None
+        # The same rating flips to down inside the window: only updated_at moves.
+        ops.upsert_workspace_rating(AGENT, evaluator=f"workspace:{SEAT}", target_kind="message",
+                                    target_id="m1", quality=0.0)
+        set_stamps("m1", created_at="2026-09-01T00:00:00Z", updated_at="2026-10-05T00:00:00Z")
+        assert ops.latest_negative_seat_rating(AGENT, [f"workspace:{SEAT}"], since) == "2026-10-05T00:00:00Z"
+
+    def test_the_query_matches_either_prefix_and_ignores_up_ratings(self, ratings_db):
+        ops, set_stamps = ratings_db
+        since = "2026-10-01T00:00:00Z"
+        ops.upsert_workspace_rating(AGENT, evaluator=f"operator:{SEAT}", target_kind="message",
+                                    target_id="m2", quality=0.0)
+        set_stamps("m2", created_at="2026-10-06T00:00:00Z", updated_at=None)
+        ops.upsert_workspace_rating(AGENT, evaluator=f"workspace:{SEAT}", target_kind="message",
+                                    target_id="m3", quality=1.0)
+        set_stamps("m3", created_at="2026-10-07T00:00:00Z", updated_at=None)
+        evaluators = [f"workspace:{SEAT}", f"operator:{SEAT}"]
+        assert ops.latest_negative_seat_rating(AGENT, evaluators, since) == "2026-10-06T00:00:00Z"
+        assert ops.latest_negative_seat_rating(AGENT, [f"workspace:{SEAT}"], since) is None
 
 
 # --------------------------------------------------------------------------- #
@@ -626,21 +745,32 @@ class TestTheLevel:
         with pytest.raises(ValueError):
             dial.set_level(store, "L9", changed_by="admin")
 
-    def test_the_generic_settings_catch_all_refuses_the_level_key(self):
-        src = (REPO / "src/backend/routers/settings/generic.py").read_text()
-        assert "autonomy_dial_service.LEVEL_KEY" in src
-        assert "PUT /api/settings/autonomy-dial" in src
+    def test_the_generic_settings_catch_all_refuses_the_level_key(self, settings_api):
+        call, _ = settings_api
+        res = call(_principal(), "PUT", "/api/settings/autonomy_dial_level:instance", {"value": "L3"})
+        assert res.status_code == 422, res.text
+        assert "PUT /api/settings/autonomy-dial" in res.json()["detail"]
 
     def test_the_level_route_is_registered_before_the_catch_all(self):
         src = (REPO / "src/backend/routers/settings/__init__.py").read_text()
         assert src.index("autonomy_dial.router") < src.index("generic.router")
 
-    def test_the_level_write_is_admin_and_interactive(self):
-        from routers.settings import autonomy_dial as r
-        src = inspect.getsource(r.set_autonomy_dial)
-        assert "reject_non_interactive_principal" in src
-        assert "require_admin" in inspect.getsource(r)
-        assert "autonomy_dial_change" in src        # audited
+    @pytest.mark.parametrize("who, expected", [
+        ("agent_key", 403),            # an agent's own key: never a grant
+        ("admin_user_key", 403),       # an admin's MCP key: admin, but not interactive
+        ("system_key", 403),           # trinity-system: admin-gate scope, not interactive
+        ("non_admin_jwt", 403),
+        ("admin_jwt", 200),            # a person, signed in, admin
+    ])
+    def test_the_level_write_is_admin_and_interactive(self, settings_api, who, expected):
+        call, audit = settings_api
+        res = call(_principal(who), "PUT", "/api/settings/autonomy-dial", {"level": "L2"})
+        assert res.status_code == expected, res.text
+        if expected == 200:
+            assert res.json()["level"] == "L2"
+            assert audit.call_args.kwargs["event_action"] == "autonomy_dial_change"   # audited
+        else:
+            audit.assert_not_called()
 
 
 # --------------------------------------------------------------------------- #
@@ -753,3 +883,81 @@ def test_a_thumbs_down_through_submit_rating_demotes_the_stored_verdict(dial, st
     after = store.get_seat_ask_class_state(AGENT, SEAT, "vendor-renewal")
     assert after["state"] == dial.STATE_ON_REQUEST
     assert dial.BLOCK_RATING in after["blocked_by"]
+
+
+# --------------------------------------------------------------------------- #
+# #2984 review (option b): an agent records a decision only for its running turn
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def record_api(monkeypatch):
+    """The real `POST /decisions` handler; past the running-turn check it stops
+    with 418, so a test proves where the request was let through or refused."""
+    from fastapi import FastAPI, HTTPException
+    from fastapi.testclient import TestClient
+    import routers.seat_decisions as route_mod
+    executions = {}
+
+    def seat_for(agent_name, execution_id):
+        return SEAT, executions[execution_id]
+
+    def past_the_check(*a, **k):
+        raise HTTPException(status_code=418, detail="past the running-turn check")
+
+    monkeypatch.setattr(route_mod, "assert_agent_access", lambda *a, **k: None)
+    monkeypatch.setattr(route_mod, "_seat_for", seat_for)
+    monkeypatch.setattr(route_mod.rate_limiter, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(route_mod, "resolve_served_seat", past_the_check)
+    app = FastAPI()
+    app.include_router(route_mod.router)
+    get_current_user = route_mod.record_seat_decision.__globals__["get_current_user"]
+    principal = {"user": None}
+    app.dependency_overrides[get_current_user] = lambda: principal["user"]
+    client = TestClient(app)
+    body = dict(execution_id="exec-now", outcome="approved", decided="Renew Acme",
+                alternatives=["let it lapse"], criterion=CRITERION, reversal="the price moves",
+                review_by=FUTURE, ask_class="vendor-renewal")
+
+    def post(user, *, execution_id="exec-now", turn="exec-now", status="running"):
+        principal["user"] = user
+        executions[execution_id] = SimpleNamespace(status=status, triggered_by="public")
+        headers = {"X-Trinity-Execution-Id": turn} if turn else {}
+        return client.post(f"/api/agents/{AGENT}/decisions",
+                           json={**body, "execution_id": execution_id}, headers=headers)
+    return post
+
+
+class TestADecisionIsRecordedInItsOwnTurn:
+    def test_the_running_turn_is_accepted(self, record_api):
+        assert record_api(_principal("agent_key")).status_code == 418
+
+    def test_an_earlier_execution_is_refused(self, record_api):
+        """The reported path: one turn citing a past execution of the seat."""
+        res = record_api(_principal("agent_key"), execution_id="exec-last-week", turn="exec-now")
+        assert res.status_code == 422 and res.json()["detail"]["code"] == "not_this_turn"
+
+    @pytest.mark.parametrize("turn", [None, "manual"])
+    def test_no_platform_turn_is_refused(self, record_api, turn):
+        res = record_api(_principal("agent_key"), turn=turn)
+        assert res.status_code == 422 and res.json()["detail"]["code"] == "not_this_turn"
+
+    def test_a_turn_that_is_no_longer_running_is_refused(self, record_api):
+        res = record_api(_principal("agent_key"), status="success")
+        assert res.status_code == 422 and res.json()["detail"]["code"] == "turn_not_running"
+
+    def test_a_person_keeps_their_path(self, record_api):
+        # Not an agent inventing evidence: no turn header, a finished execution.
+        assert record_api(_principal("admin_jwt"), turn=None, status="success").status_code == 418
+
+
+def test_a_hold_and_the_day_rule_inputs_are_part_of_the_evidence_identity(dial):
+    """#2984 review: an unchanged hash skips the write, so `held` and the
+    day-rule inputs must move it."""
+    ev = {"count": 3, "sources": 3, "criteria": ["c"], "reversals": 0,
+          "expires_at": FUTURE, "agent_days": 3, "person_written": 0, "rule_version": dial.RULE_VERSION}
+    base = dial.evaluate_class(ev, guard_state=dial.GUARD_CLEAR, negative_rating=None, held=False)
+    held = dial.evaluate_class(ev, guard_state=dial.GUARD_CLEAR, negative_rating=None, held=True)
+    later = dial.evaluate_class({**ev, "agent_days": 4}, guard_state=dial.GUARD_CLEAR,
+                                negative_rating=None, held=False)
+    assert base["evidence_hash"] != held["evidence_hash"]
+    assert base["evidence_hash"] != later["evidence_hash"]

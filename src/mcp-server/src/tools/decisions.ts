@@ -85,7 +85,9 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         "Works in a user-facing session (public link, Slack, Telegram, WhatsApp) or a scheduled run addressed to " +
         "one person. Supply your `execution_id` from the Execution Context block.",
       parameters: z.object({
-        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        execution_id: z.string().min(1).describe(
+          "Your current execution_id (Execution Context block). Only the turn you are running is accepted: " +
+          "a decision is recorded in the turn it was made, never for an earlier one."),
         outcome: z.enum(["approved", "deferred", "killed"]).describe("What happened to the thing decided."),
         decided: z.string().min(1).max(2000).describe("What was decided — one line."),
         alternatives: z
@@ -142,7 +144,11 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         ]);
         console.log(`[record_decision] ${resolvedAgent} execution=${args.execution_id} outcome=${args.outcome}`);
         try {
-          const result = await apiClient.recordSeatDecision(resolvedAgent, body, idempotencyKey);
+          // #2984 review: the turn as the PLATFORM saw it (#2392), never the
+          // model-typed execution_id; `manual` means no execution.
+          const turn = authContext?.executionId && authContext.executionId !== "manual"
+            ? authContext.executionId : undefined;
+          const result = await apiClient.recordSeatDecision(resolvedAgent, body, idempotencyKey, turn);
           return JSON.stringify(result, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
