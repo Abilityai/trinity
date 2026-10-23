@@ -65,6 +65,15 @@
             @dismiss="error = ''"
           />
 
+          <!-- A Nevermined redirect return this tab did not ask for: nothing was bound. -->
+          <InlineError
+            v-if="returnError"
+            :message="RETURN_MISMATCH"
+            :detail="returnError"
+            data-testid="nvm-spending-return-error"
+            @dismiss="returnError = ''"
+          />
+
           <!-- Not configured: the organization is an admin, instance-wide setting (FR-1). -->
           <div v-if="view.state === 'not_configured'" class="space-y-2 text-sm" data-testid="nvm-spending-not-configured">
             <p class="text-gray-900 dark:text-gray-100">{{ COPY.notConfigured }}</p>
@@ -104,8 +113,14 @@
                 <p class="font-medium text-gray-900 dark:text-gray-100">{{ COPY.pendingBanner }}</p>
                 <p class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ COPY.pendingDiscardNote }}</p>
                 <div class="flex flex-wrap gap-2">
-                  <BaseButton size="sm" variant="primary" data-testid="nvm-spending-pending-retry" @click="retryBind">
-                    {{ ACTIONS.retryBind }}
+                  <BaseButton
+                    size="sm"
+                    variant="primary"
+                    :disabled="retryHold > 0"
+                    data-testid="nvm-spending-pending-retry"
+                    @click="retryBind"
+                  >
+                    {{ retryHoldLabel(retryHold) }}
                   </BaseButton>
                   <BaseButton size="sm" variant="secondary" data-testid="nvm-spending-pending-discard" @click="discardPending">
                     {{ ACTIONS.discard }}
@@ -113,7 +128,7 @@
                 </div>
               </div>
               <BaseButton
-                v-if="!enrolling && !pending"
+                v-if="!enrolling && !pending && !fallback && !redirecting"
                 variant="primary"
                 :disabled="!view.canEnroll"
                 data-testid="nvm-spending-enroll"
@@ -142,16 +157,60 @@
               <p v-if="overlay && enrolling" class="text-gray-600 dark:text-gray-300" data-testid="nvm-spending-overlay-note">
                 {{ COPY.overlayOpen }}
               </p>
-              <InlineError
-                v-if="enrollError"
-                :message="enrollError.message"
-                :detail="enrollError.detail"
-                :retryable="Boolean(enrollError.retryLabel)"
-                :retry-label="enrollError.retryLabel || ACTIONS.tryAgain"
-                data-testid="nvm-spending-enroll-error"
-                @retry="onEnrollRetry"
-                @dismiss="enrollError = null"
-              />
+              <div v-if="enrollError" class="space-y-2" data-testid="nvm-spending-enroll-error">
+                <InlineError
+                  :message="enrollError.message"
+                  :detail="enrollError.detail"
+                  :retryable="Boolean(enrollError.retryLabel) && enrollError.action !== 'retry_bind'"
+                  :retry-label="enrollError.retryLabel || ACTIONS.tryAgain"
+                  @retry="onEnrollRetry"
+                  @dismiss="enrollError = null"
+                />
+                <!-- Retry bind honours Nevermined's / Trinity's Retry-After (addendum 03:10Z). -->
+                <BaseButton
+                  v-if="enrollError.action === 'retry_bind' && enrollError.retryLabel"
+                  size="sm"
+                  variant="secondary"
+                  :disabled="retryHold > 0"
+                  data-testid="nvm-spending-retry-bind"
+                  @click="retryBind"
+                >
+                  {{ retryHoldLabel(retryHold) }}
+                </BaseButton>
+              </div>
+              <!-- The embedded form never started: offer Nevermined's own page (TD-4, plan D31). -->
+              <div
+                v-if="fallback"
+                class="space-y-2 rounded-md border border-gray-200 dark:border-gray-750 p-3"
+                data-testid="nvm-spending-fallback"
+                :data-kind="fallback.kind"
+              >
+                <p class="font-medium text-gray-900 dark:text-gray-100">
+                  {{ fallback.kind === 'blocked' ? COPY.fallbackBlocked : COPY.fallbackNeverBooted }}
+                </p>
+                <details v-if="fallback.kind !== 'blocked'" class="text-[12.5px] text-gray-600 dark:text-gray-300">
+                  <summary class="cursor-pointer select-none">{{ COPY.fallbackCausesSummary }}</summary>
+                  <ul class="mt-1 list-disc pl-5 space-y-0.5">
+                    <li v-for="cause in FALLBACK_CAUSES" :key="cause">{{ cause }}</li>
+                  </ul>
+                </details>
+                <div class="flex flex-wrap gap-2">
+                  <BaseButton size="sm" variant="secondary" data-testid="nvm-spending-fallback-retry" @click="retryEmbedded">
+                    {{ ACTIONS.tryAgain }}
+                  </BaseButton>
+                  <BaseButton
+                    size="sm"
+                    variant="primary"
+                    :loading="redirecting"
+                    :loading-label="COPY.redirecting"
+                    data-testid="nvm-spending-fallback-continue"
+                    @click="continueOnNevermined"
+                  >
+                    {{ COPY.fallbackContinue }}
+                  </BaseButton>
+                </div>
+                <p class="text-[12.5px] text-gray-600 dark:text-gray-300">{{ COPY.fallbackReturnNote }}</p>
+              </div>
               <!--
                 The Nevermined card form's slot: ONE stable element, v-show, no Vue
                 children — the SDK appends its iframe here. A null ref would make the
@@ -289,6 +348,7 @@
 
 <script setup>
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import { useAuthStore } from '../stores/auth'
 import BaseBadge from './base/BaseBadge.vue'
@@ -303,21 +363,33 @@ import { formatLocalDateTime, formatRelativeTime } from '../utils/timestamps'
 import {
   ACTIONS,
   COPY,
+  FALLBACK_CAUSES,
   INLINE_HEIGHT,
   INLINE_MIN_WIDTH,
+  RETURN_MISMATCH,
   UNKNOWN,
+  buildRedirectUrl,
+  clearNonce,
   clearPending,
   embedErrorMessage,
   envNoteTone,
   expiryParts,
   formatCents,
   formatCount,
+  hasRedirectReturn,
   idTail,
   inlineWidth,
+  isFrameBlocked,
+  neverReadyMessage,
+  newNonce,
+  persistNonce,
   persistPending,
+  readNonce,
   readPending,
   recoveryFor,
+  redirectReturn,
   retryAfterSeconds,
+  retryHoldLabel,
   revokeMessage,
   spendingView,
   statusBadge,
@@ -341,7 +413,15 @@ const props = defineProps({
     default: (el) => el.getBoundingClientRect().width || Infinity,
   },
   now: { type: Function, default: () => Date.now() },
+  // Top-level navigation to Nevermined's hosted page (jsdom cannot spy location.assign).
+  navigate: { type: Function, default: (url) => window.location.assign(url) },
+  // Never booted → the fallback offer; booted but never ready → an error (plan D31).
+  bootTimeoutMs: { type: Number, default: 8000 },
+  readyTimeoutMs: { type: Number, default: 15000 },
 })
+
+const route = useRoute()
+const router = useRouter()
 
 const authStore = useAuthStore()
 // The `role` getter, not `userRole` (the ent#437 trap).
@@ -365,6 +445,13 @@ const envNote = ref(null)
 const confirmRevoke = ref(false)
 const revoking = ref(false)
 const revokeError = ref(null)
+// Fallback offer: null | { kind: 'never_booted' | 'blocked' }.
+const fallback = ref(null)
+const redirecting = ref(false)
+// A redirect return refused (the RETURN_MISMATCH detail), or ''.
+const returnError = ref('')
+// Seconds left before Retry bind is offered again (Retry-After hold).
+const retryHold = ref(0)
 
 const enrolling = computed(() => phase.value !== 'idle')
 const slotStyle = computed(() => (inlineMounted.value ? { minHeight: `${INLINE_HEIGHT}px` } : {}))
@@ -453,6 +540,9 @@ function reset() {
   envNote.value = null
   revokeError.value = null
   confirmRevoke.value = false
+  fallback.value = null
+  redirecting.value = false
+  returnError.value = ''
   pending.value = readPending(props.agentName)
 }
 
@@ -465,6 +555,10 @@ function toast(message, type = 'success') {
 let nvm = null
 let handle = null
 let bound = false
+let bootTimer = null
+let readyTimer = null
+let holdTimer = null
+let onCspViolation = null
 // A flow token: every await in the flow re-checks it, so a flow torn down
 // (agent change, deactivate, unmount, close) never writes into its successor.
 let flow = 0
@@ -485,9 +579,32 @@ function onSessionExpired() {
   teardown()
 }
 
+function clearHold() {
+  if (holdTimer) clearInterval(holdTimer)
+  holdTimer = null
+  retryHold.value = 0
+}
+
+/** Disable Retry bind for `seconds`, counting down once a second. */
+function startHold(seconds) {
+  clearHold()
+  retryHold.value = seconds
+  holdTimer = setInterval(() => {
+    retryHold.value -= 1
+    if (retryHold.value <= 0) clearHold()
+  }, 1000)
+}
+
 /** Timers, the SDK instance, listeners. Leaves `pending` and errors alone. */
 function teardown() {
   flow++
+  clearTimeout(bootTimer)
+  clearTimeout(readyTimer)
+  bootTimer = null
+  readyTimer = null
+  clearHold()
+  if (onCspViolation) document.removeEventListener('securitypolicyviolation', onCspViolation)
+  onCspViolation = null
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
   if (nvm) {
@@ -521,7 +638,96 @@ function startEnroll() {
   if (!view.value.canEnroll || enrolling.value) return
   enrollError.value = null
   envNote.value = null
+  fallback.value = null
   openForm(props.agentName, 0)
+}
+
+/** End the embedded attempt and offer Nevermined's hosted page instead. */
+function offerFallback(kind) {
+  teardown()
+  phase.value = 'idle'
+  enrollError.value = null
+  fallback.value = { kind }
+}
+
+function retryEmbedded() {
+  fallback.value = null
+  enrollError.value = null
+  openForm(props.agentName, 0)
+}
+
+/**
+ * Nevermined's hosted /cards/setup page: a FRESH session minted right before
+ * the navigation (plan D21), a nonce kept in this tab, and a query-less
+ * returnUrl (Nevermined appends the ids with `&`, plan P12).
+ */
+async function continueOnNevermined() {
+  const name = props.agentName
+  if (redirecting.value) return
+  redirecting.value = true
+  enrollError.value = null
+  try {
+    const { data: minted } = await api.post(`/api/nevermined/agents/${name}/widget-session`)
+    if (name !== props.agentName) return
+    const session = unwrapSession(minted?.session)
+    if (!session) {
+      enrollError.value = { message: COPY.invalidSession, detail: COPY.invalidSessionNote, retryLabel: '', action: 'none' }
+      return
+    }
+    const nonce = newNonce()
+    persistNonce(name, { nonce, at: props.now() })
+    props.navigate(buildRedirectUrl({
+      sessionToken: session.sessionToken,
+      returnUrl: `${window.location.origin}/agents/${encodeURIComponent(name)}`,
+      state: nonce,
+      provider: 'stripe',
+    }))
+  } catch (err) {
+    if (name !== props.agentName) return
+    const wait = retryAfterSeconds(err)
+    enrollError.value = {
+      message: apiErrorMessage(err, COPY.embedUnknown),
+      detail: wait ? `Nevermined asked Trinity to wait ${wait} s before trying again.` : '',
+      retryLabel: '',
+      action: 'none',
+    }
+  } finally {
+    if (name === props.agentName) redirecting.value = false
+  }
+}
+
+/**
+ * Back from Nevermined's hosted page with `paymentMethodId`, `delegationId`
+ * and `state` in the query (plan §4.4). Bind only when `state` is this tab's
+ * nonce; strip the three keys in every case, explicitly `undefined` so
+ * useTabRoute's query spread cannot carry them into a later tab write.
+ */
+function handleRedirectReturn() {
+  const query = route?.query || {}
+  if (!hasRedirectReturn(query)) return
+  const name = props.agentName
+  const stored = readNonce(name)
+  const result = redirectReturn(query, stored, props.now())
+  router?.replace({
+    query: { ...query, paymentMethodId: undefined, delegationId: undefined, state: undefined },
+  })
+  if (result.outcome !== 'ok') {
+    if (result.outcome === 'expired') clearNonce(name)
+    returnError.value = `${COPY.returnDetail} (${result.outcome})`
+    return
+  }
+  clearNonce(name)
+  returnError.value = ''
+  const record = {
+    agent: name,
+    delegationId: result.delegationId,
+    paymentMethodId: result.paymentMethodId,
+    provider: 'stripe',
+    at: props.now(),
+  }
+  persistPending(record)
+  pending.value = record
+  bind(name, record)
 }
 
 async function openForm(name, attempt) {
@@ -529,6 +735,7 @@ async function openForm(name, attempt) {
   const mine = flow
   const live = () => mine === flow && name === props.agentName
   phase.value = 'minting'
+  fallback.value = null
 
   let minted
   try {
@@ -594,14 +801,36 @@ async function openForm(name, attempt) {
   if (!inline) window.addEventListener('keydown', onKeydown)
   bound = false
 
+  // A frame the browser blocks never boots; the CSP report says so at once.
+  onCspViolation = (e) => { if (live() && isFrameBlocked(e)) offerFallback('blocked') }
+  document.addEventListener('securitypolicyviolation', onCspViolation)
+  bootTimer = setTimeout(() => { if (live()) offerFallback('never_booted') }, props.bootTimeoutMs)
+
   nvm.delegations.setupCard({
     // undefined ⇒ the SDK's fullscreen overlay (TD-4 / TD-10).
     container: inline ? slot : undefined,
     width: inline ? inlineWidth(width) : undefined,
     height: inline ? INLINE_HEIGHT : undefined,
     provider: 'stripe',
-    onBooted: () => {},
-    onReady: () => { if (live() && phase.value === 'widget-booting') phase.value = 'widget-ready' },
+    onBooted: () => {
+      if (!live()) return
+      clearTimeout(bootTimer)
+      bootTimer = null
+      // Booted but never ready: the handshake was refused — the hosted page
+      // would fail it the same way, so no redirect offer (plan D31).
+      readyTimer = setTimeout(() => {
+        if (!live() || phase.value !== 'widget-booting') return
+        failEnroll(neverReadyMessage(window.location.origin), { retryLabel: ACTIONS.tryAgain })
+      }, props.readyTimeoutMs)
+    },
+    onReady: () => {
+      if (!live()) return
+      clearTimeout(bootTimer)
+      clearTimeout(readyTimer)
+      bootTimer = null
+      readyTimer = null
+      if (phase.value === 'widget-booting') phase.value = 'widget-ready'
+    },
     onSuccess: ({ result, handle: h } = {}) => onFormSuccess(name, mine, result, h),
     onError: (e) => {
       if (!live() || phase.value === 'binding') return
@@ -686,13 +915,16 @@ async function bind(name, record) {
       retryLabel: action === 'retry_bind' ? ACTIONS.retryBind : '',
       action,
     }
+    // 429 / 503: Retry bind waits out Retry-After; 409s stay retryable at once.
+    if (action === 'retry_bind' && wait) startHold(wait)
+    else clearHold()
   }
 }
 
 /** Bind the SAME ids again — the Nevermined form is not mounted a second time. */
 function retryBind() {
   const record = pending.value || readPending(props.agentName)
-  if (!record || phase.value === 'binding') return
+  if (!record || phase.value === 'binding' || retryHold.value > 0) return
   pending.value = record
   bind(props.agentName, record)
 }
@@ -748,17 +980,18 @@ async function doRevoke() {
 // The panel lives inside the KeepAlive-cached AgentDetail: onMounted and
 // onActivated both fire on first entry, so the first activate is skipped.
 let skipActivate = false
-onMounted(() => { skipActivate = true; pending.value = readPending(props.agentName); load() })
+onMounted(() => { skipActivate = true; pending.value = readPending(props.agentName); load(); handleRedirectReturn() })
 onActivated(() => {
   if (skipActivate) { skipActivate = false; return }
   if (!pending.value) pending.value = readPending(props.agentName)
   load() // background re-read: data stays, no skeleton
+  handleRedirectReturn()
 })
 // Leaving the tab ends the form, but lets an in-flight bind land (§4.6).
 onDeactivated(() => { if (phase.value !== 'binding') closeForm() })
 onUnmounted(() => { generation++; teardown() })
 
-watch(() => props.agentName, () => { teardown(); phase.value = 'idle'; reset(); load() })
+watch(() => props.agentName, () => { teardown(); phase.value = 'idle'; reset(); load(); handleRedirectReturn() })
 </script>
 
 <style scoped>

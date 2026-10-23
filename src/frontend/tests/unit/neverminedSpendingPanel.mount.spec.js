@@ -13,6 +13,15 @@
  *  - KeepAlive re-entry re-reads in the background without a skeleton;
  *  - a response for a superseded agent or an unmounted panel is dropped.
  *
+ * Checkpoint C: the fallback and the redirect return.
+ *  - never booted → the offer → a fresh session → Nevermined's hosted page with
+ *    a query-less returnUrl and this tab's nonce as `state`;
+ *  - a frame-src CSP violation → the offer with the browser-blocked copy;
+ *  - booted but never ready → an error, no offer;
+ *  - a matching return binds and strips the three keys; a mismatched one binds
+ *    nothing and strips them too;
+ *  - Retry bind waits out Retry-After after a 429 / 503.
+ *
  * Checkpoint B: the verbs. The Nevermined SDK is mocked (`vi.mock`) with a
  * fake instance whose `delegations.setupCard` captures its options, so a test
  * fires `onBooted / onReady / onSuccess({result, handle}) / onError / onClose`
@@ -30,6 +39,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, RouterLinkStub } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { defineComponent, h, KeepAlive, ref, nextTick } from 'vue'
+import { createRouter, createMemoryHistory } from 'vue-router'
 
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }))
 vi.mock('@/api', () => ({ default: api }))
@@ -87,7 +97,16 @@ const FUNDED = (live = LIVE(), over = {}) => BODY({
 })
 
 const PROPS = (over = {}) => ({ agentName: 'a', canEdit: true, agentStatus: 'running', ...over })
-const GLOBAL = { stubs: { RouterLink: RouterLinkStub } }
+// A real router: the panel reads the redirect-return query and strips it (checkpoint C).
+const Blank = defineComponent({ render: () => null })
+function makeRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: Blank }, { path: '/agents/:name', component: Blank }, { path: '/settings', component: Blank }],
+  })
+}
+let router
+const GLOBAL = { stubs: { RouterLink: RouterLinkStub }, plugins: [] }
 
 let w
 async function render(body, props = {}) {
@@ -101,6 +120,8 @@ const $ = (id) => w.find(`[data-testid="${id}"]`)
 beforeEach(() => {
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  router = makeRouter()
+  GLOBAL.plugins = [router]
   Object.assign(sdk.state, { options: [], nvms: [], valid: [true], initError: null })
   sessionStorage.clear()
 })
@@ -726,4 +747,285 @@ describe('NeverminedSpendingPanel — revoke', () => {
     expect($('nvm-spending-revoke-error').text()).toContain('Nevermined is unreachable; the mandate is still active.')
     expect($('nvm-spending-kpis').text()).toContain('$6.00')
   })
+})
+
+// ---------------------------------------------------------------------------
+// Checkpoint C — fallback, redirect return, Retry-After hold
+// ---------------------------------------------------------------------------
+
+// Fake only the clocks the panel uses; flushPromises keeps its real setImmediate.
+const fakeClocks = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+
+describe('NeverminedSpendingPanel — fallback offer', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  it('#8 never booted after 8 s → the offer; Continue mints a FRESH session and navigates to the exact hosted URL', async () => {
+    fakeClocks()
+    const navigate = vi.fn()
+    routePost()
+    await render(BODY(), { measureWidth: () => 600, navigate, now: () => 1_700_000_000_000 })
+    await enroll()
+    expect(mintCalls()).toHaveLength(1)
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(7999)
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushPromises()
+
+    const offer = $('nvm-spending-fallback')
+    expect(offer.attributes('data-kind')).toBe('never_booted')
+    expect(offer.text()).toContain('The Nevermined card form did not start inside Trinity.')
+    expect(lastNvm().destroy).toHaveBeenCalled()
+    expect($('nvm-spending-enroll').exists()).toBe(false)
+
+    await $('nvm-spending-fallback-continue').trigger('click')
+    await flushPromises()
+
+    expect(mintCalls()).toHaveLength(2) // a fresh session, never the one the frame had
+    const stored = JSON.parse(sessionStorage.getItem('nvm-redirect:a'))
+    expect(stored).toEqual({ nonce: expect.any(String), at: 1_700_000_000_000 })
+    expect(navigate).toHaveBeenCalledTimes(1)
+    const expected = new URL('https://embed.nevermined.app/cards/setup')
+    expected.searchParams.set('sessionToken', SESSION.sessionToken)
+    expected.searchParams.set('returnUrl', `${window.location.origin}/agents/a`)
+    expected.searchParams.set('state', stored.nonce)
+    expected.searchParams.set('provider', 'stripe')
+    expect(navigate).toHaveBeenCalledWith(expected.toString())
+    const sent = new URL(navigate.mock.calls[0][0])
+    expect(sent.searchParams.get('returnUrl')).not.toContain('?')
+    expect(bindCalls()).toHaveLength(0)
+  })
+
+  it('#8 a booted form disarms the boot timer (no offer at 8 s)', async () => {
+    fakeClocks()
+    routePost()
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onBooted()
+    opts().onReady()
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+    expect($('nvm-spending-enroll-error').exists()).toBe(false)
+    expect(lastNvm().destroy).not.toHaveBeenCalled()
+  })
+
+  it('#9 a frame-src securitypolicyviolation → the offer with the browser-blocked copy; other directives are ignored', async () => {
+    routePost()
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+
+    document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { violatedDirective: 'connect-src' }))
+    await nextTick()
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+
+    document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), {
+      violatedDirective: 'frame-src https://embed.nevermined.app',
+    }))
+    await nextTick()
+    const offer = $('nvm-spending-fallback')
+    expect(offer.attributes('data-kind')).toBe('blocked')
+    expect(offer.text()).toContain('Your browser blocked the embedded Nevermined card form.')
+    expect(lastNvm().destroy).toHaveBeenCalled()
+  })
+
+  it('#9 Try again from the offer remounts the embedded form', async () => {
+    routePost()
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { violatedDirective: 'frame-src' }))
+    await nextTick()
+    await $('nvm-spending-fallback-retry').trigger('click')
+    await flushPromises()
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+    expect(sdk.state.options).toHaveLength(2)
+  })
+
+  it('#10 booted but never ready after 15 s → InlineError naming the allowed origins, no offer', async () => {
+    fakeClocks()
+    routePost()
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onBooted()
+    await vi.advanceTimersByTimeAsync(14_999)
+    expect($('nvm-spending-enroll-error').exists()).toBe(false)
+    await vi.advanceTimersByTimeAsync(1)
+    await flushPromises()
+
+    const err = $('nvm-spending-enroll-error')
+    expect(err.text()).toContain('The Nevermined card form did not finish starting.')
+    expect(err.text()).toContain(`allowed origins must include ${window.location.origin}.`)
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+    expect(lastNvm().destroy).toHaveBeenCalled()
+  })
+
+  it('teardown clears both timers and the CSP listener (closing the form leaves nothing armed)', async () => {
+    fakeClocks()
+    routePost()
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onClose()
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(30_000)
+    document.dispatchEvent(Object.assign(new Event('securitypolicyviolation'), { violatedDirective: 'frame-src' }))
+    await nextTick()
+    expect($('nvm-spending-fallback').exists()).toBe(false)
+    expect($('nvm-spending-enroll-error').exists()).toBe(false)
+    expect($('nvm-spending-enroll').exists()).toBe(true)
+  })
+})
+
+describe('NeverminedSpendingPanel — redirect return (#11)', () => {
+  const RET = { paymentMethodId: IDS.paymentMethodId, delegationId: IDS.delegationId }
+
+  async function arrive(query, props = {}) {
+    await router.push({ path: '/agents/a', query })
+    await router.isReady()
+    return render(BODY(), props)
+  }
+
+  it('matching nonce → bind POST with the returned ids → FUNDED; the three keys stripped, tab untouched', async () => {
+    sessionStorage.setItem('nvm-redirect:a', JSON.stringify({ nonce: 'n-123', at: 1000 }))
+    routePost()
+    const replace = vi.spyOn(router, 'replace')
+    await arrive({ tab: 'nevermined', ...RET, state: 'n-123' }, { now: () => 2000 })
+
+    expect(bindCalls()).toEqual([[BIND_URL, { ...IDS, provider: 'stripe' }]])
+    expect(mintCalls()).toHaveLength(0)
+    expect(replace).toHaveBeenCalledWith({
+      query: { tab: 'nevermined', paymentMethodId: undefined, delegationId: undefined, state: undefined },
+    })
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: 'nevermined' })
+    expect($('nvm-spending-kpis').text()).toContain('$6.00')
+    expect(sessionStorage.getItem('nvm-redirect:a')).toBeNull()
+    expect(pendingStored()).toBeNull()
+    expect($('nvm-spending-return-error').exists()).toBe(false)
+  })
+
+  it('a refused bind after a matching return keeps the ids as pending (Retry bind)', async () => {
+    sessionStorage.setItem('nvm-redirect:a', JSON.stringify({ nonce: 'n-123', at: 1000 }))
+    routePost({ bind: () => Promise.reject(REFUSAL(409, 'agent_not_running', 'Start the agent, then bind the Nevermined mandate again.')) })
+    await arrive({ ...RET, state: 'n-123' }, { now: () => 2000 })
+    expect(pendingStored()).toMatchObject(IDS)
+    expect($('nvm-spending-retry-bind').exists()).toBe(true)
+  })
+
+  it('mismatched state → InlineError, no POST, query stripped', async () => {
+    sessionStorage.setItem('nvm-redirect:a', JSON.stringify({ nonce: 'n-123', at: 1000 }))
+    routePost()
+    const replace = vi.spyOn(router, 'replace')
+    await arrive({ tab: 'nevermined', ...RET, state: 'forged' }, { now: () => 2000 })
+
+    expect(bindCalls()).toHaveLength(0)
+    expect($('nvm-spending-return-error').text()).toContain("The return did not match this browser's request. Nothing was bound.")
+    expect(replace).toHaveBeenCalledWith({
+      query: { tab: 'nevermined', paymentMethodId: undefined, delegationId: undefined, state: undefined },
+    })
+    await flushPromises()
+    expect(router.currentRoute.value.query).toEqual({ tab: 'nevermined' })
+    expect(pendingStored()).toBeNull()
+  })
+
+  it('no stored nonce, or one older than 30 minutes → refused, nothing bound', async () => {
+    routePost()
+    await arrive({ ...RET, state: 'n-123' })
+    expect(bindCalls()).toHaveLength(0)
+    expect($('nvm-spending-return-error').exists()).toBe(true)
+    w.unmount()
+
+    sessionStorage.setItem('nvm-redirect:a', JSON.stringify({ nonce: 'n-123', at: 0 }))
+    await arrive({ ...RET, state: 'n-123' }, { now: () => 31 * 60 * 1000 })
+    expect(bindCalls()).toHaveLength(0)
+    expect($('nvm-spending-return-error').exists()).toBe(true)
+  })
+
+  it('a page with no return query never strips or binds', async () => {
+    routePost()
+    const replace = vi.spyOn(router, 'replace')
+    await arrive({ tab: 'nevermined' })
+    expect(replace).not.toHaveBeenCalled()
+    expect(bindCalls()).toHaveLength(0)
+  })
+})
+
+describe('NeverminedSpendingPanel — Retry bind honours Retry-After (addendum 03:10Z)', () => {
+  afterEach(() => { vi.useRealTimers() })
+
+  const RATE = (seconds) => ({
+    response: { status: 429, data: { detail: `Too many requests. Try again in ${seconds} seconds.` }, headers: { 'retry-after': String(seconds) } },
+  })
+
+  it('429 Retry-After: 3 → Retry bind disabled with the seconds → enabled after 3 s → same ids POSTed', async () => {
+    fakeClocks()
+    let n = 0
+    routePost({ bind: () => (++n === 1 ? Promise.reject(RATE(3)) : Promise.resolve({ data: BOUND() })) })
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onSuccess({ result: IDS, handle: { close: vi.fn() } })
+    await flushPromises()
+
+    const btn = () => $('nvm-spending-retry-bind')
+    expect(btn().attributes('disabled')).toBeDefined()
+    expect(btn().text()).toContain('3 s')
+    await btn().trigger('click')
+    await flushPromises()
+    expect(bindCalls()).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(btn().text()).toContain('2 s')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(btn().attributes('disabled')).toBeUndefined()
+    expect(btn().text()).toBe('Retry bind')
+
+    await btn().trigger('click')
+    await flushPromises()
+    expect(bindCalls()).toHaveLength(2)
+    expect(bindCalls()[1]).toEqual(bindCalls()[0])
+    expect(sdk.state.options).toHaveLength(1)
+    expect($('nvm-spending-kpis').text()).toContain('$6.00')
+  })
+
+  it('503 nevermined_busy without a header holds for the default 5 s', async () => {
+    fakeClocks()
+    routePost({ bind: () => Promise.reject(REFUSAL(503, 'nevermined_busy', 'Nevermined is busy.')) })
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onSuccess({ result: IDS, handle: { close: vi.fn() } })
+    await flushPromises()
+    expect($('nvm-spending-retry-bind').text()).toContain('5 s')
+    await vi.advanceTimersByTimeAsync(5000)
+    expect($('nvm-spending-retry-bind').attributes('disabled')).toBeUndefined()
+  })
+
+  it('409 agent_not_running / agent_key_present: Retry bind enabled at once', async () => {
+    for (const code of ['agent_not_running', 'agent_key_present']) {
+      routePost({ bind: () => Promise.reject(REFUSAL(409, code, 'Nevermined mandate not bound.')) })
+      await render(BODY(), { measureWidth: () => 600 })
+      await enroll()
+      opts().onSuccess({ result: IDS, handle: { close: vi.fn() } })
+      await flushPromises()
+      expect($('nvm-spending-retry-bind').attributes('disabled'), code).toBeUndefined()
+      expect($('nvm-spending-retry-bind').text(), code).toBe('Retry bind')
+      w.unmount()
+      w = null
+      sessionStorage.clear()
+    }
+  })
+
+  it('teardown clears the hold timer (unmount leaves no timer of the panel running)', async () => {
+    fakeClocks()
+    routePost({ bind: () => Promise.reject(RATE(30)) })
+    await render(BODY(), { measureWidth: () => 600 })
+    await enroll()
+    opts().onSuccess({ result: IDS, handle: { close: vi.fn() } })
+    await flushPromises()
+    await vi.advanceTimersByTimeAsync(0) // jsdom's own storage-event tick
+    // The boot timer (never booted) and the hold interval.
+    expect(vi.getTimerCount()).toBe(2)
+    w.unmount()
+    w = null
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
 })

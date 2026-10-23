@@ -76,7 +76,41 @@ export const COPY = Object.freeze({
   revokeTitle: 'Revoke this mandate at Nevermined?',
   revoked: 'Mandate revoked at Nevermined.',
   revokeFailed: 'The Nevermined mandate is still active.',
+  // Fallback + redirect return (checkpoint C).
+  fallbackNeverBooted: 'The Nevermined card form did not start inside Trinity.',
+  fallbackBlocked: 'Your browser blocked the embedded Nevermined card form.',
+  fallbackCausesSummary: 'Why the Nevermined card form may not start',
+  fallbackContinue: 'Continue on Nevermined',
+  fallbackReturnNote: "Nevermined brings you back to this agent's page once the card and mandate are set up.",
+  redirecting: 'Opening the Nevermined card page…',
+  returnDetail: 'The Nevermined return carried ids this browser did not ask for, or asked for too long ago.',
 })
+
+/** Candidate causes behind the never-booted offer (plan D31) — none is asserted. */
+export const FALLBACK_CAUSES = Object.freeze([
+  'The browser or an extension blocks embedded frames from Nevermined.',
+  "The Nevermined widget key's allowed origins do not include this Trinity address.",
+  'Nevermined changed its card form and this version of Trinity does not recognise it yet.',
+])
+
+/**
+ * The redirect-return refusal, verbatim from the ruling (plan §4.4). The detail
+ * line beside it (`COPY.returnDetail`) names Nevermined.
+ */
+export const RETURN_MISMATCH = "The return did not match this browser's request. Nothing was bound."
+
+/** Booted but never ready: the handshake was refused (plan D31, no redirect offer). */
+export function neverReadyMessage(origin) {
+  return (
+    "The Nevermined card form did not finish starting. The widget key's allowed origins must include " +
+    `${origin}.`
+  )
+}
+
+/** Retry bind's label while a Retry-After hold runs (addendum 03:10Z). */
+export function retryHoldLabel(seconds) {
+  return seconds > 0 ? `Retry bind (${seconds} s)` : 'Retry bind'
+}
 
 /**
  * Action labels the rulings fix verbatim (plan §4.4 / addendum). They sit
@@ -355,6 +389,101 @@ export function retryAfterSeconds(err) {
   const raw = err.response.headers?.['retry-after']
   const n = Number.parseInt(raw, 10)
   return Number.isFinite(n) && n > 0 ? n : 5
+}
+
+// ---- redirect fallback: Nevermined's hosted /cards/setup page (plan §1.5, §4.4) ----
+
+/** Nevermined's embed host — the same for sandbox and live (plan D22). */
+export const EMBED_ORIGIN = 'https://embed.nevermined.app'
+export const NONCE_PREFIX = 'nvm-redirect:'
+/** A redirect return older than this is refused (plan D14). */
+export const REDIRECT_MAX_AGE_MS = 30 * 60 * 1000
+
+/** A random `state` for the redirect round-trip. */
+export function newNonce() {
+  try {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  } catch { /* fall through */ }
+  let out = ''
+  for (let i = 0; i < 4; i++) out += Math.random().toString(36).slice(2, 10)
+  return out
+}
+
+/** Store `{nonce, at}` for `agent` in this tab (sessionStorage). */
+export function persistNonce(agent, record, storage) {
+  const store = sessionStore(storage)
+  if (!store || !agent || !record?.nonce) return false
+  try {
+    store.setItem(NONCE_PREFIX + agent, JSON.stringify({ nonce: record.nonce, at: record.at }))
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** The stored `{nonce, at}` for `agent`, or null (malformed → null). */
+export function readNonce(agent, storage) {
+  const store = sessionStore(storage)
+  if (!store || !agent) return null
+  try {
+    const raw = store.getItem(NONCE_PREFIX + agent)
+    if (!raw) return null
+    const r = JSON.parse(raw)
+    if (!r || typeof r.nonce !== 'string' || !r.nonce || typeof r.at !== 'number') return null
+    return r
+  } catch {
+    return null
+  }
+}
+
+export function clearNonce(agent, storage) {
+  const store = sessionStore(storage)
+  if (!store || !agent) return
+  try { store.removeItem(NONCE_PREFIX + agent) } catch { /* storage blocked */ }
+}
+
+/**
+ * Nevermined's hosted card-setup page. `returnUrl` must carry no query:
+ * Nevermined appends `&paymentMethodId=…&delegationId=…&state=…` (plan P12).
+ */
+export function buildRedirectUrl({ sessionToken, returnUrl, state, provider = 'stripe' }) {
+  const url = new URL('/cards/setup', EMBED_ORIGIN)
+  url.searchParams.set('sessionToken', sessionToken)
+  url.searchParams.set('returnUrl', returnUrl)
+  url.searchParams.set('state', state)
+  if (provider) url.searchParams.set('provider', provider)
+  return url.toString()
+}
+
+const RETURN_KEYS = ['paymentMethodId', 'delegationId', 'state']
+
+/** Whether the route query carries any part of a Nevermined redirect return. */
+export function hasRedirectReturn(query) {
+  return Boolean(query) && RETURN_KEYS.some((k) => query[k] !== undefined && query[k] !== null)
+}
+
+/**
+ * Judge a redirect return against this tab's stored nonce.
+ * @returns {{outcome: 'ok'|'incomplete'|'no_pending'|'state_mismatch'|'expired', delegationId?, paymentMethodId?}}
+ */
+export function redirectReturn(query, stored, now = Date.now()) {
+  const q = query || {}
+  const one = (v) => (Array.isArray(v) ? v[0] : v)
+  const state = one(q.state)
+  const ids = unwrapSuccess({ delegationId: one(q.delegationId), paymentMethodId: one(q.paymentMethodId) })
+  if (typeof state !== 'string' || !state || !ids || !ids.paymentMethodId) return { outcome: 'incomplete' }
+  if (!stored || typeof stored.nonce !== 'string') return { outcome: 'no_pending' }
+  if (stored.nonce !== state) return { outcome: 'state_mismatch' }
+  if (typeof stored.at !== 'number' || now - stored.at > REDIRECT_MAX_AGE_MS || now < stored.at) {
+    return { outcome: 'expired' }
+  }
+  return { outcome: 'ok', ...ids }
+}
+
+/** A `securitypolicyviolation` that blocked a frame (the embedded form). */
+export function isFrameBlocked(event) {
+  const d = event?.violatedDirective
+  return typeof d === 'string' && d.startsWith('frame-src')
 }
 
 const BADGES = {
