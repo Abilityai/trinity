@@ -8,12 +8,12 @@
 # The per-boot repair does NOT use this file: it uses the floors in
 # agent-server-requirements.txt, so it never downgrades a newer version a
 # template installed for its own code.
-fastapi==0.141.1
-starlette==1.7.0
+fastapi==0.143.3
+starlette==1.8.0
 uvicorn==0.54.0
 httpx==0.28.1
-pydantic==2.13.5
+pydantic==2.14.1
 python-multipart==0.0.32
 pyyaml==6.0.3
 rich==15.0.0
-cryptography==50.0.1
+cryptography==50.0.2
