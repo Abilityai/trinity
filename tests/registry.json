@@ -6193,6 +6193,17 @@
       "description": "file_path_policy.py is byte-identical in the backend and the agent server, stdlib-only, and the copy the agent server loads; guardrails-baseline.json path_deny and the policy agree both ways; the agent server's platform floor is a subset of the backend route floor and leaves platform writers their paths."
     },
     {
+      "file": "unit/test_ent822_shared_folder_links.py",
+      "feature": "trinity-enterprise#822",
+      "added": "2026-10-22",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "A link planted in a shared folder never reaches the consumer's files: over a temp home with shared-in/A holding an ABSOLUTE link to .claude, PUT/DELETE/download/preview/list through it are 403 resolved_path_mismatch and the target is untouched, while an ordinary shared file reads 200 (reproduced live in two containers 2026-10-22). The agent server's own writers write through files.write_bytes_nofollow: credential injection refuses a link in a parent or as the file (403, target untouched, the link not replaced) and writes ordinary credentials 0600; snapshot restore skips a member under a linked directory or that is a link and restores the rest; the writer refuses empty/absolute/traversal paths. Mutations: each writer's pre-fix code turns its 2 tests red."
+    },
+    {
       "file": "unit/test_ent820_agent_server_no_follow_writes.py",
       "feature": "trinity-enterprise#820",
       "added": "2026-10-16",
@@ -6236,6 +6247,16 @@
         "unit"
       ],
       "description": "A failed channel turn sends the fixed member-facing line, never the execution's error (auth failure, exit code, timeout, capacity, rate limit), in a group and one-to-one, through the real ChannelMessageRouter._run_agent_task; the error stays in the router's log line; a cancelled turn always sends the fixed cancelled line (#679), never the row's error, including a pull-pilot terminated turn whose cancelled row carries the operator's error; a raised dispatch sends the same line; a successful turn is untouched. Mutation: restoring the error forwarding turns 14 red; restoring the cancel-reason forwarding turns 8 red."
+    },
+    {
+      "file": "unit/test_2891_randomly_guard.py",
+      "feature": "#2891",
+      "added": "2026-10-20",
+      "categories": [
+        "unit",
+        "devex"
+      ],
+      "description": "The pytest-randomly guard (tests/testing_utils/randomly_guard.py, via the tests/testkit symlink): opted_in reads the invocation (--randomly-seed, -p randomly, -prandomly, TRINITY_RANDOM_ORDER=1, PYTEST_ADDOPTS); enforce raises a UsageError naming both ways out when the plugin is active and the run did not opt in, is a no-op without the plugin, and passes an explicit seed or the env opt-in; the banner names the seed and how to reproduce/disable; both conftests (tests/ and the sealed unit/ island) wire it with tryfirst, and the four run-*.sh scripts pin -p no:randomly."
     },
     {
       "file": "unit/test_3584_public_link_clear_expiry.py",
