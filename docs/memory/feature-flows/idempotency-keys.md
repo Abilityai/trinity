@@ -17,13 +17,13 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 
 | Boundary | Scope | Key source | File |
 |----------|-------|-----------|------|
-| `POST /api/agents/{name}/chat` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:148` |
-| `POST /api/agents/{name}/task` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:1259` |
+| `POST /api/agents/{name}/chat` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/chat.py:148` |
+| `POST /api/agents/{name}/task` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/chat.py:1259` |
 | `POST /api/internal/execute-task` | `agent:{name}` | header (set by scheduler) | `routers/internal.py:251` |
 | `POST /api/webhooks/{token}` | `webhook:{token}` | header **or auto-derived** `(token, body_hash)` | `routers/webhooks.py:248` |
-| `POST /api/agents/{name}/fan-out` | `agent:{name}` | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
+| `POST /api/agents/{name}/fan-out` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
 | Scheduler dispatch | `agent:{name}` | `sched:{execution_id}` (deterministic) | `src/scheduler/service.py:1042` |
-| MCP `chat_with_agent` / `fan_out` | `agent:{name}` | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:284,746` |
+| MCP `chat_with_agent` / `fan_out` | `agent:{name}:caller:{principal}` (sent as the header) | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:284,746` |
 
 **Invariant #18 contract:** *Any new trigger type must accept an idempotency key before merge.* The dedup layer is fail-open, so the cost of wiring it is one `begin`/`complete`/`fail` triple.
 
@@ -49,6 +49,7 @@ Time math uses `iso_cutoff(hours)` and `utc_now_iso()` from `utils/helpers.py` (
 
 ### Service layer — `services/idempotency_service.py`
 - **Scope derivation**: `make_agent_scope(agent_name)` → `agent:{name}` (`idempotency_service.py:45`); `make_webhook_scope(token)` → `webhook:{token}` (`idempotency_service.py:50`).
+- **Caller scope (trinity-enterprise#830)**: a CLIENT-chosen `Idempotency-Key` is claimed under `make_caller_scope(agent, current_user)` → `agent:{name}:caller:{principal}`, where `caller_principal` is `agent:{name}` for an agent key, `user:{id}` for a person (browser JWT or user-scoped MCP key — one principal across both), and `key:{mcp_key_id}` for any other machine credential. A client-chosen key identifies a request only together with the client that chose it; `agent:{name}` alone did not carry the caller. Header-key boundaries: `/chat`, `/task`, `fan_out`, `voip`, `reminders` (header only), brain-orb actions, agent-data import, git bind. Platform-derived keys (operator resume, x402 `derive_payment_key`, portal effect keys, a reminder's input key, the scheduler's `sched:` keys) stay on `agent:{name}`, which a header key can no longer reach. `metric_points` already appended `:user:{username}`; `make_inline_auth_scope` (#848) folds the body-verified email. Migration: a retry spanning the deploy lands in the new scope, so within that one 24 h window it can run once more instead of replaying.
 - **Key derivation**:
   - `derive_webhook_key(token, body)` — `idempotency_service.py:55`. `auto:{sha256(token + b"\x00" + body)}`. Header-independent so a naive sender that retries the same POST resolves to the same key; distinct bodies get distinct keys.
   - Schedule key — `sched:{execution_id}`, built by the scheduler itself (`src/scheduler/service.py`, which cannot import the backend). The scheduler creates one execution_id per fire and reuses it across an HTTP-level resend of the same dispatch (the #525 network-blip case); intentional #271 retries create a fresh execution_id → fresh key → not suppressed.
@@ -95,7 +96,7 @@ DDL in `db/schema.py:1098` (fresh installs); migration `_migrate_idempotency_key
 
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,            -- "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,            -- "agent:{name}[:caller:{principal}]" | "webhook:{token}"
     idempotency_key TEXT NOT NULL,  -- caller-supplied or derived
     execution_id TEXT,              -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,           -- 'in_flight' | 'completed'
