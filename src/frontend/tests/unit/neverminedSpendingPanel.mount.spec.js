@@ -600,6 +600,19 @@ describe('NeverminedSpendingPanel — enroll and bind', () => {
     expect($('nvm-spending-enroll').exists()).toBe(true)
   })
 
+  it('R-I3 a funded read clears a stale pending record for the SAME delegation; a different id is kept', async () => {
+    sessionStorage.setItem('nvm-pending:a', JSON.stringify({ agent: 'a', delegationId: 'dlg_abcdef0123456789', provider: 'stripe', at: 1 }))
+    await render(FUNDED())
+    expect($('nvm-spending-funded').exists()).toBe(true)
+    expect($('nvm-spending-pending').exists()).toBe(false)
+    expect(sessionStorage.getItem('nvm-pending:a')).toBeNull()
+    w.unmount()
+
+    sessionStorage.setItem('nvm-pending:a', JSON.stringify({ agent: 'a', ...IDS, provider: 'stripe', at: 1 }))
+    await render(FUNDED())
+    expect(pendingStored()).toEqual({ agent: 'a', ...IDS, provider: 'stripe', at: 1 })
+  })
+
   it('#16 an already-expired session re-mints once; twice is "start again"; session-expired with a mounted form changes nothing', async () => {
     sdk.state.valid = [false, true]
     routePost()
