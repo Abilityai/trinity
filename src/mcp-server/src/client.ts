@@ -3004,15 +3004,33 @@ export class TrinityClient {
   async recordSeatDecision(
     agentName: string,
     data: Record<string, unknown>,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<{ success: boolean; decision: Record<string, unknown>; hint?: string | null; replayed?: boolean }> {
+    // #2984 review: the platform-stamped turn travels with the record — the
+    // backend accepts an agent's decision only for the turn it is running.
+    const headers: Record<string, string> = {};
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    if (turn) headers["X-Trinity-Execution-Id"] = turn;
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/decisions`,
       data,
       false,
       undefined,
-      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined
+      Object.keys(headers).length ? headers : undefined
+    );
+  }
+
+  /** The seat's autonomy dial: which ask classes are unprompted and why not (ent#641). */
+  async getSeatAutonomy(
+    agentName: string,
+    executionId: string
+  ): Promise<Record<string, unknown>> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/seat-autonomy?${q.toString()}`
     );
   }
 
