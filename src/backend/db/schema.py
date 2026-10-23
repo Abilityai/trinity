@@ -302,6 +302,9 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- #3380: the /chat thread this turn answers, so a watchdog-claimed
+            -- result can still write its reply there. NULL = not a /chat turn.
+            chat_session_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

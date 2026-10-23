@@ -6292,6 +6292,17 @@
         "reliability"
       ],
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
+    },
+    {
+      "file": "unit/test_3380_recovered_chat_reply.py",
+      "feature": "#3380",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "A watchdog-claimed /chat turn writes its reply into the chat thread, on real SQLite: schedule_executions.chat_session_id round-trips and the real prepare_chat_execution stamps the thread it logs the user message into; through the real cleanup_service._claim_retained_result (apply_result stood in by a CAS on the real row) a won SUCCESS writes exactly one assistant message equal to the persisted response (recovered notice included, cost carried); a lost CAS, a FAILED terminal, a row with no thread and a thread of another agent write nothing; a failing message write never unclaims the turn; the notice no longer says the thread may lack the reply. Mutation: dropping the reply write or the stamp turns one test red each."
     }
   ]
 }

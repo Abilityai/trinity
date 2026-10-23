@@ -936,6 +936,29 @@ class ScheduleExecutionsMixin:
             )
             return result.rowcount > 0
 
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """Name the /chat thread this turn answers (#3380).
+
+        Written once by `prepare_chat_execution`, right after the session is
+        resolved. The #2944 watchdog reads it back to write a claimed result's
+        reply into that thread. Returns whether a row was updated.
+        """
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(schedule_executions)
+                .where(schedule_executions.c.id == execution_id)
+                .values(chat_session_id=chat_session_id)
+            )
+            return result.rowcount > 0
+
+    def get_execution_chat_session_id(self, execution_id: str) -> Optional[str]:
+        """The /chat thread a turn answers, or None for any other turn (#3380)."""
+        with get_engine().connect() as conn:
+            return conn.execute(
+                select(schedule_executions.c.chat_session_id)
+                .where(schedule_executions.c.id == execution_id)
+            ).scalar()
+
     def stamp_execution_channel_context(
         self,
         execution_id: str,
