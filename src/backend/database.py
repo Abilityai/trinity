@@ -3111,12 +3111,8 @@ class DatabaseManager:
     def increment_public_user_memory_count(self, agent_name: str, user_email: str) -> int:
         return self._public_link_ops.increment_message_count(agent_name, user_email)
 
-    def update_public_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        return self._public_link_ops.update_user_memory_agent_notes(
-            agent_name, user_email, agent_notes
-        )
+    def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
     def update_public_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str
