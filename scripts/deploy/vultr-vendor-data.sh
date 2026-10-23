@@ -132,10 +132,11 @@ BANNER
 
 install_banner
 
-# 8 GB is a floor, not a recommendation (HOST-011) — but Vultr cannot enforce a
-# plan size at deploy time, so this warns and installs anyway: a running instance
-# with an honest banner beats one that refuses to come up on a plan the customer
-# has already paid for.
+# 8 GB is a floor, not a recommendation (HOST-011). The marketplace listing's
+# Minimum CPU/RAM settings keep smaller plans off the deploy page, but this file
+# also runs as plain User Data, where nothing enforces a minimum. So this warns
+# and installs anyway: a running instance with an honest banner beats one that
+# refuses to come up on a plan the customer has already paid for.
 _mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
 if [ "${_mem_kb:-0}" -lt 7340032 ]; then
     echo "⚠️  $(( _mem_kb / 1024 ))MB RAM — below Trinity's 8 GB floor. Installing anyway."
