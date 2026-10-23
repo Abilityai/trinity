@@ -148,7 +148,7 @@ Docker's published-port rules are evaluated ahead of ufw's chain, so `ufw deny 8
 
 Users reach Caddy on 80/443 — host ports, which never traverse this chain (Caddy proxies `127.0.0.1:8081`). Naming what is inside rather than the public interface also closes a private VPC interface. The chain is rebuilt only when its final DROP is missing and the jump is inserted only once the chain is populated, so no run leaves an empty chain live; the systemd unit reapplies it on every boot (it replaces `iptables-persistent`, which ufw `Breaks:`). IPv4 only: Docker maintains an IPv6 `DOCKER-USER` only with daemon IPv6 enabled, which no Trinity compose file sets.
 
-**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and the installer's user-data carries the admin password. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
+**The metadata block.** DigitalOcean serves a droplet's user-data verbatim from `169.254.169.254` for the life of the machine, and a 1-Click created with `write_files` carries the admin password in it. An agent container is precisely the untrusted-code case, so the whole RFC 3927 range is dropped, and the rule must sit **ahead of** the bridge RETURNs or container traffic leaves the chain before reaching it. `tests/unit/test_2380_provision_single_source.py` pins the ordering.
 
 ### The installer — `scripts/deploy/trinity-do-create.sh`
 
@@ -156,9 +156,9 @@ Runs on the **operator's** machine, fetched from a release tag, and ends with an
 
 ```
 checks (before any prompt): doctl installed + signed in; a snap doctl needs $HOME
-prompts: admin password (×2, ≥12 chars, guessable prefixes refused) · region · name
+prompts: region · name  (no admin password: ADMIN_PASSWORD_SOURCE=browser, admin created at /setup, #3799)
          · confirm the monthly cost  (no Claude credential: the onboarding overlay's Connect Claude step, ent#582)
-user-data (umask 077 temp file, removed on exit):
+user-data (temp file, removed on exit; no secret in it):
     clone the pinned tag → /opt/trinity
     start.sh --provision --cloud digitalocean --hosted --unattended
 doctl compute droplet create (ubuntu-24-04-x64, s-4vcpu-8gb, the account's SSH keys) --wait
@@ -167,8 +167,9 @@ poll https://<ip>/ with verification for 15 min → print the address, or the co
 
 | Concern | Resolution |
 |---|---|
-| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience and leaves the admin password on disk. `read -rs` keeps it off the terminal, out of shell history, and out of every file but the droplet's user-data |
-| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data — the password and the tag — is `'\''`-quoted, because a `'` in a valid password broke first boot after the droplet was already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
+| **Prompts, not a file to edit** | A guide that says "change four lines" fails its audience |
+| **No password in user-data (#3799)** | cloud-init rewrites `user-data.txt` every boot, pickles it into `obj.pkl`, and the metadata service serves it for the droplet's life, so nothing on the droplet can scrub it. The droplet boots admin-less (`ADMIN_PASSWORD_SOURCE=browser`) and the operator claims it at `/setup` |
+| **Portability (#2683)** | A full `mktemp` template (GNU rejects `-t NAME`). A snap `doctl` has a private `/tmp`, so the file goes under `$HOME` (non-hidden: snap's `home` interface denies dotfiles), and an unset `$HOME` is refused before the first prompt. Every value in the user-data (the tag) is `'\''`-quoted, because a `'` breaks first boot after the droplet is already billing. An empty SSH-key array under `set -u` on macOS's bash 3.2 |
 | **A shell to support it** | Every SSH key already on the account is attached; without one, DigitalOcean emails a root password and the browser console is the only way in |
 | **Release pin** | The default tag is tied to `VERSION` by `tests/unit/test_2380_installer_release_pin.py`, so a release cut cannot ship an installer that installs the previous RC |
 | **Provenance** | `do-script` — guide-eligible, not a marketplace install ([install-provenance.md](install-provenance.md)) |

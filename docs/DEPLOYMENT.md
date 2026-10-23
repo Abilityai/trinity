@@ -183,8 +183,8 @@ is gated on install provenance and never appears on an install like this one. A
 Marketplace droplet also boots with **no admin account**: the first person to
 open it in a browser creates one at `/setup` (ent#580) — see Security
 Recommendations below for what that means before you open it. A
-`trinity-do-create.sh` droplet does not: the installer asks for the admin
-password before it creates the droplet.
+`trinity-do-create.sh` droplet does the same: the installer asks for no
+password, so none reaches the droplet's user-data.
 
 Provenance is written by whatever provisions the box (in this repo,
 `start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in

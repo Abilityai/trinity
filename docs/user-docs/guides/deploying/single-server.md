@@ -326,7 +326,7 @@ The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trin
 
 Find it on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity), or search **Trinity** under **Marketplace** when you create a Droplet in the control panel. Pick a region and a size from the table below, then create the Droplet. Trinity is free; DigitalOcean bills you for the Droplet.
 
-Prefer to choose the admin password before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
+Prefer a terminal to the control panel? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, claiming the admin, sign-in, managing the Droplet) apply to both, with three differences: an installer Droplet takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
 
 ### Sizing
 
@@ -366,7 +366,7 @@ write_files:
     content: "your-password-here"
 ```
 
-It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The file is shredded once the password has been read, the admin is provisioned at boot, and the form never appears; sign in as `admin` with that password. (The [installer script](#digitalocean-installer-script) does the same from your terminal.)
+It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The file is shredded once the password has been read, the admin is provisioned at boot, and the form never appears; sign in as `admin` with that password.
 
 The login banner (Droplet → Console) prints the URL to open, whether HTTPS came up, and which of the two paths this Droplet took — never a password.
 
@@ -414,18 +414,15 @@ sudo ./scripts/deploy/start.sh --hosted
 
 ## DigitalOcean installer script
 
-`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
+`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal. Like the 1-Click, the Droplet boots with no admin account: you create it in the browser at the address the installer prints, with the same [claim window](#claim-the-admin-account). It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
 ```
 
-It asks three questions and writes nothing to your computer:
+It asks for a **region** and a **Droplet name** (defaults offered), then a confirmation that names the monthly cost, and writes nothing to your computer. It asks for no password.
 
-1. **Admin password** (twice; 12+ characters, guessable prefixes refused). Your username will be `admin`.
-2. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
-
-It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The password travels only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The user-data carries no password, because DigitalOcean keeps user-data on the Droplet and serves it from the metadata service for the Droplet's whole life. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers, with a prompt to open it now and create the admin. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
 
 The installer does not ask for a Claude credential. When you first sign in, the setup that opens includes **Connect Claude**, the one required step: paste a subscription token from `claude setup-token` or an Anthropic API key. It is checked with Anthropic before it is saved and handed to the seeded agents.
 

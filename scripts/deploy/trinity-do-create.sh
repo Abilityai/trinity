@@ -10,11 +10,16 @@
 # the site answers over HTTPS, and prints the address.
 #
 # Deliberately PROMPTS rather than shipping a file to edit. A guide that says
-# "download this and change four lines" fails the audience this exists for, and
-# it puts the admin password in a file on disk. `read -rs` keeps it off the
-# terminal, out of shell history, and out of every file but the droplet's own
-# user-data. Prompts also read fine from a pipe, so the flow stays testable:
-#     printf 'pw\npw\n\n\ny\n' | bash trinity-do-create.sh
+# "download this and change four lines" fails the audience this exists for.
+# Prompts also read fine from a pipe, so the flow stays testable:
+#     printf '\n\ny\n' | bash trinity-do-create.sh
+#
+# It does NOT ask for an admin password (#3799). Anything in user-data stays on
+# the droplet for its whole life: cloud-init rewrites user-data.txt on every
+# boot, pickles it into obj.pkl, and the metadata service serves it. So the
+# droplet boots with no admin (ADMIN_PASSWORD_SOURCE=browser, as on the 1-Click
+# and Vultr) and the operator creates one at /setup when the installer prints
+# the address.
 #
 # It does NOT ask for a Claude credential: the first sign-in opens the onboarding
 # overlay, whose blocking "Connect Claude" step takes a subscription token or an
@@ -32,8 +37,8 @@ fail() { printf '\n%s\n\n' "$1" >&2; exit 1; }
 ask()  { printf '%s' "$1" >&2; }
 
 # ---------------------------------------------------------------------------
-# Checks first, questions second: never collect a password and THEN discover
-# the tool is missing.
+# Checks first, questions second: never collect answers and THEN discover the
+# tool is missing.
 # ---------------------------------------------------------------------------
 command -v doctl >/dev/null 2>&1 || fail \
 "doctl is not installed. Install it, then run this again:
@@ -61,7 +66,7 @@ case "$_doctl_bin:$(readlink -f "$_doctl_bin" 2>/dev/null)" in
     *)                                             USER_DATA_DIR="${TMPDIR:-/tmp}" ;;
 esac
 # A snap doctl with no usable HOME has nowhere readable to put the file; /tmp is
-# invisible to it. Refuse now, before the operator has typed a password.
+# invisible to it. Refuse now, before the first question.
 [ -n "$USER_DATA_DIR" ] || fail \
 "doctl is installed as a snap but \$HOME is not set, so there is nowhere it can
 read the droplet's setup file from. Run this from a normal login shell, or
@@ -71,35 +76,12 @@ cat >&2 <<'INTRO'
 
   Trinity on DigitalOcean
   ───────────────────────────────────────────────────────────────────────
-  Three questions, then about six minutes of waiting. Nothing is written to
+  Two questions, then about six minutes of waiting. Nothing is written to
   this computer.
 
 INTRO
 
-# --- 1. The Trinity sign-in password ----------------------------------------
-# Asked twice: this is the credential for a server that does not exist yet, so
-# a typo is not recoverable by "try again" — it is a rebuild.
-while :; do
-    ask "  Choose a password to sign in to Trinity with (12+ characters): "
-    read -rs ADMIN_PASSWORD; printf '\n' >&2
-    if [ "${#ADMIN_PASSWORD}" -lt 12 ]; then
-        printf '  Too short — 12 characters or more.\n\n' >&2
-        continue
-    fi
-    case "$(printf '%s' "$ADMIN_PASSWORD" | tr '[:upper:]' '[:lower:]')" in
-        password*|admin*|trinity*|changeme*|letmein*)
-            printf '  Too guessable — Trinity rejects passwords starting like that.\n\n' >&2
-            continue ;;
-    esac
-    ask "  Type it again to confirm: "
-    read -rs _confirm; printf '\n' >&2
-    [ "$ADMIN_PASSWORD" = "$_confirm" ] && break
-    printf '  Those did not match.\n\n' >&2
-done
-unset _confirm
-printf '  Your username will be: admin\n\n' >&2
-
-# --- 2 + 3. Placement -------------------------------------------------------
+# --- Placement ----------------------------------------------------------------
 ask "  Which region? fra1 Frankfurt, nyc3 New York, sfo3 San Francisco, lon1 London, sgp1 Singapore [${DEFAULT_REGION}]: "
 read -r REGION; REGION="${REGION:-$DEFAULT_REGION}"
 ask "  What should it be called in your DigitalOcean account? [${DEFAULT_NAME}]: "
@@ -120,41 +102,27 @@ case "$_go" in y|Y|yes|YES) ;; *) fail "Nothing was created." ;; esac
 # ---------------------------------------------------------------------------
 # The script the droplet runs on its first boot.
 # ---------------------------------------------------------------------------
-# umask before the file exists, not after: mktemp would otherwise create it
-# group-readable for the instant between creation and chmod, and it carries
-# the admin password.
-umask 077
 # A full path template, not `mktemp -t NAME`: `-t` takes a bare prefix on
 # macOS/BSD but GNU coreutils requires the trailing X's and dies with
 # "too few X's in template" — which is every Linux operator running this.
-# USER_DATA_DIR was chosen in the pre-flight block (snap doctl → $HOME); umask
-# 077 above still makes the file 0600, and the EXIT trap still removes it.
+# USER_DATA_DIR was chosen in the pre-flight block (snap doctl → $HOME); the
+# EXIT trap removes the file.
 USER_DATA="$(mktemp "${USER_DATA_DIR%/}/trinity-user-data.XXXXXX")"
 
-# The password is interpolated into a single-quoted shell assignment below, so a
-# single quote INSIDE it closes the string early and the droplet's first
-# boot dies on a syntax error — after the droplet exists and is billing, with the
-# operator watching a 15-minute progress bar that ends in a timeout. Recovery is
-# a rebuild, and the cause is invisible without reading the install log.
-#
-# Not hypothetical: the password rules demand a special character and `'` is one,
-# so `Tr0ub4dor's!Horse` passes this script's own check AND the backend's, then
-# writes
-#     export ADMIN_PASSWORD='Tr0ub4dor's!Horse'
-# which is a syntax error.
-#
-# `'\''` is the portable idiom: close the string, an escaped quote, reopen.
-# The image tag comes from the operator's environment and gets the same
-# treatment, so the rule is simply: every '${…}' in the heredoc is a _Q value.
+# The image tag comes from the operator's environment and is interpolated into a
+# single-quoted shell assignment below, so a `'` inside it would close the
+# string early and the droplet's first boot dies on a syntax error, after the
+# droplet exists and is billing. `'\''` is the portable idiom: close the string,
+# an escaped quote, reopen. The rule: every '${…}' in the heredoc is a _Q value.
 _shquote() { printf '%s' "$1" | sed "s/'/'\\\\''/g"; }
-ADMIN_PASSWORD_Q="$(_shquote "$ADMIN_PASSWORD")"
 TRINITY_IMAGE_TAG_Q="$(_shquote "$TRINITY_IMAGE_TAG")"
 trap 'rm -f "$USER_DATA"' EXIT
 
 cat > "$USER_DATA" <<USERDATA
 #!/bin/bash
 set -euo pipefail
-export ADMIN_PASSWORD='${ADMIN_PASSWORD_Q}'
+# No admin is provisioned: the first visitor creates it at /setup (#3799).
+export ADMIN_PASSWORD_SOURCE=browser
 export TRINITY_IMAGE_TAG='${TRINITY_IMAGE_TAG_Q}'
 exec > >(tee -a /var/log/trinity-install.log) 2>&1
 echo "=== Trinity install: \$(date -u +%FT%TZ) tag=\${TRINITY_IMAGE_TAG} ==="
@@ -182,7 +150,7 @@ SSH_ARGS=()
 [ -n "$SSH_KEYS" ] && SSH_ARGS=(--ssh-keys "$SSH_KEYS")
 # Expanded below as ${SSH_ARGS[@]+"${SSH_ARGS[@]}"}: under `set -u`, bash < 4.4
 # (macOS's /bin/bash is 3.2) calls an EMPTY array unbound, so an account with no
-# SSH keys died here, after the password had been typed.
+# SSH keys died here, after every question had been answered.
 
 printf '\n  Creating the droplet...\n' >&2
 doctl compute droplet create "$DROPLET_NAME" \
@@ -209,8 +177,11 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   Trinity is ready.
 
       Open:     https://${IP}
-      Username: admin
-      Password: the one you chose above
+
+  Open it now and create your admin account (email and password).
+  Until you do, the first person to open that address can create it.
+  If you see a sign-in page instead of that form, someone got there
+  first: destroy the droplet and run this again.
 
   After you sign in, Trinity asks you to connect Claude.
 
