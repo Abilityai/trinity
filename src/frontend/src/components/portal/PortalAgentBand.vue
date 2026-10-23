@@ -82,13 +82,22 @@
         </div>
       </template>
 
-      <!-- The chart. #2540: the scanline beam is the CHART-loading motion and
-           this is the only place on this page entitled to it — every other
-           first load here and in the conversation is a skeleton. -->
+      <!-- The chart (trinity-enterprise#968): the agent's activity as a waveform
+           signature — `ActivityWave`, which owns its own loading face (resting
+           beats breathing under a glint) and its own reveal (beats growing out of
+           the centre line). That is a named exception to design-system §6's
+           "scanline on every chart" (operator ruling 2026-10-22, recorded in the
+           doc and in `portalLoadingTreatment.spec.js`'s importer list); the
+           PHASE rules are still the scanline's, so a cache-hit remount never
+           animates and a background refresh is invisible.
+           `loading` is the VERDICT (`!loaded`), never a request being open; it
+           also goes quiet on a failed first load (`InlineError` is the band's
+           first arm and this column sits outside that chain, so without `!error`
+           the wave would breathe forever beside the error). `reveal` is the
+           activity verdict: an empty week settles, it does not celebrate. -->
       <!-- Bounded, not flexed to fill. Stretched across the whole band a 7-day
-           window gives ~150px-wide columns, so a single execution renders as a
-           slab rather than a bar — board A3's chart is a compact block beside
-           the figures, not a full-width plot. -->
+           window gives ~150px-wide columns — board A3's chart is a compact block
+           beside the figures, not a full-width plot. -->
       <!-- ent#547 — THE HEIGHT RULE, and the thing to preserve if you edit this
            block. A stat block above is 39px (an 18px figure over an 11px
            caption), so with the band's 8px padding the floor is 55px + 1px
@@ -96,44 +105,37 @@
            exactly 39px — title 10 + `mb-1.5` 6 + a 23px row — which makes the
            chart free: it can never lengthen the band, and shrinking it further
            would buy nothing. Go over 39 and every pixel is one the band grows.
-           The `min-h` matches the bar height rather than the old 52px so the
-           chart, its scanline, "no activity" and "unavailable" all share ONE
-           footprint (contract principle 4) instead of the row resizing per
-           state.
-           What used to make this column tall was the LEGEND, not the bars: laid
-           out `flex-col` it grew ~13px per bucket, so a nine-bucket agent's band
-           ran to ~153px. `legend="none"` is most of the compaction; the tooltip
-           carries series identity, and it names every bucket with its swatch,
-           its count and the day's total. -->
+           The `min-h` matches the wave's height so the chart, its loading face,
+           its empty face and "unavailable" all share ONE footprint (contract
+           principle 4) instead of the row resizing per state. The wave renders
+           at 23px (`:height="23"`): its 24-unit viewBox scales uniformly, and
+           the root clips, so nothing — the reveal's overshoot included — can
+           grow the row. -->
       <div class="w-[26rem] max-w-[45%] shrink-0">
         <!-- Board A3 names the chart rather than leaving a bare plot beside a
-             row of numbers — without it the bars read as another statistic. -->
+             row of numbers — without it the beats read as another statistic. -->
         <div class="text-[10px] font-semibold uppercase tracking-wide text-gray-400 leading-none mb-1.5">
           Activity · last {{ WINDOW_LABEL }}
         </div>
-        <ScanlineReveal :loading="!loaded">
-          <div class="min-h-[23px] flex items-center">
-            <p v-if="stats.unavailable" class="text-xs text-gray-400">Stats are unavailable right now.</p>
-            <p v-else-if="!hasActivity" class="text-xs text-gray-400">No activity in the last {{ WINDOW_LABEL }}.</p>
-            <!-- `axis="false"`: at 7 columns the day labels are four truncated
-                 dates, and the tooltip gives each bar's full date. Dropping them
-                 is what buys the title its 16px inside the 39px budget — the
-                 chart can afford one of the two, and the title is the one board
-                 A3 argued for ("without it the bars read as another
-                 statistic"). -->
-            <StackedBarChart
-              v-else
-              class="w-full"
-              :data="stats.timeline || []"
-              :buckets="chartBuckets"
-              :colors="BUCKET_COLORS"
-              :labels="PORTAL_BUCKET_LABELS"
-              :height="23"
-              legend="none"
-              :axis="false"
-            />
-          </div>
-        </ScanlineReveal>
+        <div class="min-h-[23px] flex items-center">
+          <p v-if="stats.unavailable" class="text-xs text-gray-400">Stats are unavailable right now.</p>
+          <!-- An empty week is the wave's own resting face, not a sentence: the
+               band keeps one silhouette whatever the data (ent#968). "Unavailable"
+               stays a sentence — empty and unavailable are different claims and
+               must not look alike (contract principle 15). -->
+          <ActivityWave
+            v-else
+            class="w-full"
+            :data="stats.timeline || []"
+            :buckets="chartBuckets"
+            :colors="BUCKET_COLORS"
+            :labels="PORTAL_BUCKET_LABELS"
+            :loading="!loaded && !error"
+            :reveal="hasActivity"
+            :height="23"
+            :label="`Activity, last ${WINDOW_LABEL}`"
+          />
+        </div>
       </div>
 
       <!-- ent#547: the 7d/14d/30d selector is gone and the window is fixed at 7
@@ -159,8 +161,7 @@
  * times and each issuing its own would double every page load.
  */
 import { ref, computed, toRef } from 'vue'
-import StackedBarChart from '@/components/StackedBarChart.vue'
-import ScanlineReveal from '@/components/ScanlineReveal.vue'
+import ActivityWave from '@/components/portal/ActivityWave.vue'
 import InlineError from '@/components/InlineError.vue'
 import { BUCKET_COLORS, bucketsForChart, hasChartActivity } from '@/utils/executionBuckets'
 import { PORTAL_BUCKET_LABELS } from './portalUtils'
