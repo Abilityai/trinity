@@ -43,6 +43,11 @@ class IdempotencyDecision:
     key: Optional[str] = None
     execution_id: Optional[str] = None
     snapshot: Optional[dict] = None
+    # #3298: the claim's owner token — ours on a fresh claim (attach/complete/
+    # fail write only while we still own it), the holder's on an in-flight
+    # replay (what a reclaim compares on) — and when that claim last moved.
+    claim_token: Optional[str] = None
+    claimed_at: Optional[str] = None
 
 
 class EffectInProgressError(Exception):
@@ -686,11 +691,15 @@ def begin(scope: str, key: Optional[str]) -> IdempotencyDecision:
 
     state = res.get("state")
     if state == STATE_NEW:
-        return IdempotencyDecision(enabled=True, replay=False, in_flight=False, scope=scope, key=key)
+        return IdempotencyDecision(
+            enabled=True, replay=False, in_flight=False, scope=scope, key=key,
+            claim_token=res.get("claim_token"), claimed_at=res.get("updated_at"),
+        )
     if state == STATE_IN_FLIGHT:
         return IdempotencyDecision(
             enabled=True, replay=True, in_flight=True, scope=scope, key=key,
             execution_id=res.get("execution_id"),
+            claim_token=res.get("claim_token"), claimed_at=res.get("updated_at"),
         )
     if state == STATE_COMPLETED:
         return IdempotencyDecision(
@@ -707,7 +716,8 @@ def attach_execution(decision: IdempotencyDecision, execution_id: Optional[str])
     if not decision.enabled or decision.replay or not execution_id:
         return
     try:
-        db.idempotency_attach_execution(decision.scope, decision.key, execution_id)
+        db.idempotency_attach_execution(
+            decision.scope, decision.key, execution_id, claim_token=decision.claim_token)
     except Exception as e:
         logger.warning("Idempotency attach_execution failed: %s", e)
 
@@ -717,7 +727,8 @@ def complete(decision: IdempotencyDecision, execution_id: Optional[str], snapsho
     if not decision.enabled or decision.replay:
         return
     try:
-        db.idempotency_complete(decision.scope, decision.key, execution_id, snapshot)
+        db.idempotency_complete(
+            decision.scope, decision.key, execution_id, snapshot, claim_token=decision.claim_token)
     except Exception as e:
         logger.warning("Idempotency complete failed: %s", e)
 
@@ -894,11 +905,25 @@ def discard_replay_of(
         return None
 
 
+def reclaim_in_flight(decision: IdempotencyDecision) -> Optional[bool]:
+    """Compare-and-delete the in-flight claim ``decision`` saw, while the same
+    owner still holds it (#3298). True deleted, False no match (another retry
+    already reclaimed it, or its owner moved it on), None the delete raised
+    (logged, swallowed). Whether the claim is stale is the caller's call."""
+    if not decision.scope or not decision.key:
+        return False
+    try:
+        return bool(db.idempotency_reclaim_in_flight(decision.scope, decision.key, decision.claim_token))
+    except Exception as e:
+        logger.warning("Idempotency reclaim_in_flight failed (scope=%s): %s", decision.scope, e)
+        return None
+
+
 def fail(decision: IdempotencyDecision) -> None:
     """Release a fresh in-flight claim so a failed first attempt can be retried."""
     if not decision.enabled or decision.replay:
         return
     try:
-        db.idempotency_release(decision.scope, decision.key)
+        db.idempotency_release(decision.scope, decision.key, claim_token=decision.claim_token)
     except Exception as e:
         logger.warning("Idempotency release failed: %s", e)

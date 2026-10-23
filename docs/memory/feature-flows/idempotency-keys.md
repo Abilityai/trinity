@@ -33,7 +33,7 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 - **DB layer**: `db/idempotency.py` — `IdempotencyOperations` (no HTTP, no key-derivation logic).
 - **Service layer**: `services/idempotency_service.py` — key derivation + `begin`/`complete`/`fail` orchestration over the DB layer.
 - **Router layer**: each boundary calls `begin()` → dispatch → `complete()` or `fail()`.
-- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:4231-4257`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:1045`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check).
+- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:4231-4257`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:1045`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check). #3298 adds `idempotency_reclaim_in_flight` and an optional `claim_token=` on attach/complete/release.
 
 ### DB layer — `db/idempotency.py`
 The table's `PRIMARY KEY (scope, idempotency_key)` **is** the atomic claim. Atomicity relies on SQLite database-level write locking, which holds across processes (multiple uvicorn workers + the standalone scheduler share one DB file).
@@ -102,12 +102,15 @@ CREATE TABLE idempotency_keys (
     response_snapshot TEXT,         -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,               -- #3298: the in_flight claim's owner token (NULL on pre-#3298 rows)
     PRIMARY KEY (scope, idempotency_key)
 );
 ```
 
 ### Lifecycle of a row
 `claim` (INSERT `in_flight`) → optional `attach_execution` (set `execution_id`) → `complete` (status→`completed`, store `response_snapshot`) **or** `release` (DELETE the `in_flight` row so a failed first attempt can retry — never deletes a `completed` row). A row older than the 24h TTL is treated as expired and re-claimed as new.
+
+**Owner token and stale-claim reclaim (#3298).** `claim` writes a fresh `claim_token` and returns it (and, on a duplicate, the holder's token + `updated_at`); `IdempotencyDecision` carries both. `attach_execution` / `complete` / `fail` write only while the decision's token still owns the row (`claim_token =` or `IS NULL` for a pre-#3298 row), so a request whose claim was reclaimed cannot overwrite or delete the reclaimer's row. Intent keys (ent#665) and `upgrade_snapshot` pass no token and write by `(scope, key)` as before. `dispatch_admission_service._reclaim_stale_claim` runs at the `/chat` and `/task` seam before `_reclaim_ended_receipt`: an `in_flight` claim whose `updated_at` is older than the **lease** — the agent's execution timeout + `SLOT_TTL_BUFFER`, the horizon the slot reaper uses for a dispatch, which bounds the slowest legitimate `begin → complete` window (a sync turn) — is compare-and-deleted on the token it was seen with and claimed again once, **only** when its run has ended or is gone (#3245 liveness) or it never named one. A live run keeps its 409 until the watchdog ends it; a **succeeded** run keeps it too (re-dispatching finished work is the duplicate the key prevents). `sched:` keys are never reclaimed; any doubt holds. Logs `[#3298] claim_reclaim … cas=deleted|no_match|error` / `[#3298] claim_hold …`.
 
 ## Side Effects
 - **Audit log**: every replay hit writes a platform-audit `EXECUTION / idempotent_replay` event with `idempotency_key`, `execution_id`, and `in_flight` flag (chat/task/webhook/fan-out replay blocks). See [audit-trail.md](audit-trail.md).
@@ -122,6 +125,7 @@ CREATE TABLE idempotency_keys (
 | Duplicate, prior claim still running | `409` (`request_in_progress` for chat/task, `detail` string for webhook), with original `execution_id` where known |
 | Duplicate, prior claim completed | `200`/`202` replay of stored `response_snapshot` + `X-Idempotent-Replay: true` |
 | Duplicate on `/chat` or `/task`, stored receipt's run ended `failed`/`cancelled`/`skipped` or its row is gone (#3245) | Row compare-and-deleted, key re-claimed: a **new** run, no replay header |
+| Duplicate on `/chat` or `/task` hitting an `in_flight` claim left by a dead process, past the lease, run ended/gone or never created (#3298) | Claim compare-and-deleted on its token, key re-claimed: a **new** run. Inside the lease, or while the run is live or succeeded: 409 as before |
 | Same, but the `failed` error starts `lease_expired:` and the hold window (`completed_at` + timeout + 300 s) is still open | Replay of the original receipt (logged `receipt_hold`); fresh once the window ends |
 | Same, but the key is `sched:…` | Replay (the scheduler's own key is never reclaimed) |
 | Same, but the request names a gated skill with a gate record | The gate's answer (pending / `409 request_<state>`) — the receipt is not checked |
@@ -164,4 +168,5 @@ Unit coverage: `tests/unit/test_3245_async_replay_after_failure.py` (verdict mat
 | Date | ID | Change |
 |------|-----|--------|
 | 2026-06-02 | RELIABILITY-006 (#525), PR #1019 (commit 1bb8f271) | Initial implementation — `idempotency_keys` table + migration, `db/idempotency.py`, `services/idempotency_service.py`, wiring at `/chat`, `/task`, `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`, the scheduler, and MCP `chat_with_agent`/`fan_out`; 24h purge in the cleanup service. Established Architectural Invariant #18. |
+| 2026-10-23 | #3298 | An `in_flight` claim has an owner token (`claim_token`, both tracks); attach/complete/release are compare-and-set on it, and `/chat` + `/task` admission reclaims a claim left by a dead process once its lease (timeout + slot buffer) has passed and its run ended, vanished or never existed. |
 | 2026-10-06 | #3245 | A dispatch receipt replays only while its run can still succeed: `execution_liveness` + `discard_replay_of` (service), `discard_completed_if_execution` + `get_execution_failure_stamp` (DB), `_reclaim_ended_receipt` at the `/chat` and `/task` admission seams, a `lease_expired` hold window, and the MCP `idempotent_replay` marker. |
