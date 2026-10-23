@@ -272,7 +272,24 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     )
     if not row:
         return None
+    _record_starting_assignment(row)
     return _build_claim_response(row, cap=cap)
+
+
+def _record_starting_assignment(row: Dict[str, Any]) -> None:
+    """Point the claimed row's SUB-004 attribution at the assignment the turn
+    starts on (#3487 review). The row was stamped at ENQUEUE, which can be long
+    before the claim; the pulled-turn walk reads this as its baseline, the way
+    push snapshots the assignment at turn start. Written only when it moved;
+    never blocks the claim."""
+    try:
+        current = db.get_agent_subscription_id(row["agent_name"])
+        if current and current != row.get("subscription_id"):
+            db.set_execution_subscription(row["id"], current)
+            row["subscription_id"] = current
+    except Exception as e:  # noqa: BLE001 — a claim must never fail on attribution
+        logger.warning("[#3487] could not record the starting assignment for %s: %s",
+                       row.get("id"), type(e).__name__)
 
 
 def _turn_limit(requested: Any, cap: int) -> Tuple[int, Optional[int]]:
@@ -1085,8 +1102,12 @@ async def _walk_refused_attempt(
     if state.get("walk"):
         walk = subscription_auto_switch.walk_from_state(state["walk"])
     else:
+        # The baseline is the assignment this claim STARTED on (recorded at
+        # claim, `_record_starting_assignment`), as push records it at turn
+        # start — not the one in force now, which a concurrent walk may have moved.
         walk = subscription_auto_switch.start_subscription_walk(
-            execution.agent_name, getattr(execution, "triggered_by", None)
+            execution.agent_name, getattr(execution, "triggered_by", None),
+            baseline_subscription_id=getattr(execution, "subscription_id", None),
         )
     _reconcile_ran_on(walk, md)
     prior_cost = float(state.get("attempt_cost") or 0)

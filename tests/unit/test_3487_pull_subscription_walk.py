@@ -412,6 +412,65 @@ class TestReviewFindings:
         assert sink.switch_db.record_rate_limit_event.call_count == 0
 
 
+class TestSecondReview:
+    """PR #3883 second review: the walk's baseline is the assignment the turn
+    STARTED on (recorded at claim), as push records it at turn start — not the
+    one in force when the first refusal arrives."""
+
+    def test_a_refusal_after_a_concurrent_move_charges_the_start_and_runs_on_the_move(self, sink):
+        sink.db.row["subscription_id"] = "sub-a"         # the claim's snapshot
+        sink.switch_db._state["current"] = "sub-b"       # a concurrent turn's walk moved the agent
+        out = _post(sink, token="t0")                    # this attempt ran on sub-a
+        assert out.kind == "retry"
+        # Charged to where it ran, and the healthy sub-b is run on, not skipped.
+        assert sink.switch_db.record_rate_limit_event.call_args.kwargs["subscription_id"] == "sub-a"
+        walk = sink.db.walk_state()["walk"]
+        assert "sub-b" not in walk.get("tried_subscription_ids", [])
+        assert out.retry["auth_override"] is None        # re-run on the new assignment as-is
+        assert sink.switch_db._state["current"] == "sub-b"
+
+    def test_without_a_snapshot_the_walk_reads_the_assignment(self, sink):
+        # A row from before the claim-time stamp keeps the old behaviour.
+        sink.db.row["subscription_id"] = None
+        out = _post(sink, token="t0")
+        assert out.kind == "retry"
+        assert sink.switch_db.record_rate_limit_event.call_args.kwargs["subscription_id"] == "sub-a"
+
+
+class TestClaimRecordsTheStartingAssignment:
+    def _claim(self, monkeypatch, *, row_sub, now_sub):
+        from services import pull_coordination_service as pcs
+        fake = MagicMock()
+        fake.get_execution_timeout.return_value = 3600
+        fake.claim_next_queued.return_value = {"id": "exec-c", "agent_name": "worker-a",
+                                               "subscription_id": row_sub}
+        fake.get_agent_subscription_id.return_value = now_sub
+        monkeypatch.setattr(pcs, "db", fake)
+        monkeypatch.setattr(pcs, "record_worker_poll", lambda *a, **k: None)
+        monkeypatch.setattr(pcs, "_build_claim_response", lambda row, cap=None: row)
+        pcs.claim_next_task("worker-a", "w1")
+        return fake
+
+    def test_a_claim_re_points_the_row_to_the_assignment_it_starts_on(self, monkeypatch):
+        fake = self._claim(monkeypatch, row_sub="sub-at-enqueue", now_sub="sub-now")
+        fake.set_execution_subscription.assert_called_once_with("exec-c", "sub-now")
+
+    def test_an_unchanged_assignment_writes_nothing(self, monkeypatch):
+        fake = self._claim(monkeypatch, row_sub="sub-now", now_sub="sub-now")
+        fake.set_execution_subscription.assert_not_called()
+
+    def test_an_unreadable_assignment_never_blocks_the_claim(self, monkeypatch):
+        from services import pull_coordination_service as pcs
+        fake = MagicMock()
+        fake.get_execution_timeout.return_value = 3600
+        fake.claim_next_queued.return_value = {"id": "exec-c", "agent_name": "worker-a", "subscription_id": "s"}
+        fake.get_agent_subscription_id.side_effect = RuntimeError("db down")
+        monkeypatch.setattr(pcs, "db", fake)
+        monkeypatch.setattr(pcs, "record_worker_poll", lambda *a, **k: None)
+        monkeypatch.setattr(pcs, "_build_claim_response", lambda row, cap=None: row)
+        assert pcs.claim_next_task("worker-a", "w1")["id"] == "exec-c"
+
+
 class TestTheRouteReturnsTheRetry:
     """The route's `retry` branch is the only thing that hands the worker its
     instruction; without it the outcome falls through to a 409."""

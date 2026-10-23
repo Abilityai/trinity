@@ -1010,18 +1010,33 @@ def _subscription_count_cap() -> int:
         return _WALK_MAX_RUNGS_FALLBACK
 
 
-def start_subscription_walk(agent_name: str, triggered_by: Optional[str]) -> SubscriptionWalk:
+def start_subscription_walk(
+    agent_name: str,
+    triggered_by: Optional[str],
+    *,
+    baseline_subscription_id: Optional[str] = None,
+) -> SubscriptionWalk:
     """A fresh walk for one turn. Snapshots the assignment the turn starts on
     (the baseline the first attempt runs on) and whether a person is waiting.
     ONE read on the hot path — the subscription's name and the rung cap are
     resolved lazily, on the first refusal, so a turn that never fails pays
-    nothing more than it did before #3470."""
+    nothing more than it did before #3470.
+
+    ``baseline_subscription_id`` (#3487): the assignment recorded when the turn
+    STARTED, for a caller that starts the walk later than that. A pulled turn's
+    walk starts at its first refusal; reading the assignment then would take a
+    concurrent turn's move as this turn's baseline, charge the refusal to a
+    subscription it never ran on and skip the "moved by a concurrent turn"
+    re-run. Falsy → the live read, as push does at turn start."""
     try:
         from services.pull_pilot import INTERACTIVE_TRIGGERS
         interactive = (triggered_by or "") in INTERACTIVE_TRIGGERS
     except Exception:  # noqa: BLE001
         interactive = False
     walk = SubscriptionWalk(agent_name=agent_name, interactive=interactive)
+    if baseline_subscription_id:
+        walk.assigned_subscription_id = baseline_subscription_id
+        return walk
     try:
         walk.assigned_subscription_id = db.get_agent_subscription_id(agent_name)
     except Exception as e:  # noqa: BLE001
