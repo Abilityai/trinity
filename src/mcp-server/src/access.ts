@@ -211,7 +211,7 @@ const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
-const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
+const REMINDER_SELF_GATE = "backend self-gate: reminders.py assert_own_agent refuses an agent key naming another agent (abilityai/trinity-enterprise#840)";
 const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const SKILL_GATE_FENCE =

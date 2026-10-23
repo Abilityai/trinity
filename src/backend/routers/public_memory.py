@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from models import WriteUserMemoryRequest
 
 from database import db
-from dependencies import get_current_user, assert_agent_access
+from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
 from services import schedule_seat_memory, user_memory_guard
 
@@ -63,16 +63,14 @@ async def write_user_memory(
     The user email is never accepted from the caller — it is looked up from the
     execution record to prevent cross-user memory poisoning.
     """
-    assert_agent_access(current_user, agent_name, detail="Not authorized")
     # An agent-scoped key writes only for the agent it was minted for. The key
     # resolves to its owner carrying the owner's role, so `assert_agent_access`
-    # alone lets a sibling agent under the same owner name this agent's finished
-    # seat run and replace that person's notes (mirrors reminders._self_gate).
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only write its own agent's user memory",
-        )
+    # alone lets a sibling agent inside its reach name this agent's finished seat
+    # run and replace that person's notes. First, before the access check, so an
+    # agent key outside its reach gets this same refusal (trinity-enterprise#840).
+    assert_own_agent(current_user, agent_name,
+                     detail="Agent-scoped key may only write its own agent's user memory")
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
 
     execution = db.get_execution(body.execution_id)
     if not execution:

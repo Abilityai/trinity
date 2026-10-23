@@ -261,7 +261,9 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "timed out after the remote had already accepted the task. A `payment_required` result " +
         "here means the same as it does on a call: relay it to a person once and stop polling.",
       parameters: z.object({
-        agent_name: z.string().describe("The Trinity agent that placed the original call."),
+        agent_name: z.string().describe(
+          "The Trinity agent that placed the original call. An agent-scoped key may only pass its own name.",
+        ),
         endpoint: z.string().min(1).max(200).describe(
           "The same registered endpoint name the task was started on.",
         ),
