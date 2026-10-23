@@ -6314,7 +6314,7 @@
         "security",
         "mcp"
       ],
-      "description": "Anti-poisoning gates on agent-written user memory (MEM-001): the write-boundary screen through the real router (each of memory_prompt_marker / memory_instruction / memory_tool_directive / memory_link_in_instruction refused with its code and the line the agent sent, nothing stored, the log carries rule and line never the text; folded spellings \u2014 zero-width, full-width, Hangul filler, combining marks, split across a line break, case; a benign table of facts, preferences, open loops, plain links and the false positives an adversarial review found; the cheap misses it found), the exemption keyed on the hit (an old hit kept is not counted again; old lines reordered, re-contextualised or respelled into a new hit are refused; a split across old and new is refused), copy-back normalisation (the rendered block stored clean; a whole-block copy-back keeps only the agent-notes section), the non-creating previous-notes read over real SQLite, AC 4 (a channel write resolves ent#549's one-to-one speaker stamp; a group turn writes no one's memory), the trust envelope on the real format_user_memory_block (nonce'd open/close lines, every splitlines() line margined incl. \\r / NEL / U+2028, forged ends and platform structure only ever margined, control characters removed, summary inside, decisions after the reminder, render failure drops memory, fresh nonce, a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer (a tripping line is dropped and the rest kept, all lines dropped keeps the previous summary, each message clamped, the conversation margined inside its prompt), seat decisions (any line terminator refused, markers / instructions / an MCP tool id / a slotted URL refused with a sentence receipt, business-rule decisions accepted, legacy rows rendered on one line, the same one-to-one rule in _seat_for, the block's framing line pinned against the guard), the Telegram history defang, AST pins (the router stores only what prepare_write returned; the summarizer screens before it stores; one agent-notes writer across src/backend), the structural-heading list pinned against the composed prompt, totality (Hypothesis) and time budgets on adversarial and summarizer-sized input."
+      "description": "Anti-poisoning gates on agent-written user memory (MEM-001): the write-boundary screen through the real router (each of memory_prompt_marker / memory_instruction / memory_tool_directive / memory_link_in_instruction refused with its code and the line the agent sent, nothing stored, the log carries rule and line never the text; folded spellings — zero-width, full-width, Hangul filler, combining marks, split across a line break, case; a benign table of facts, preferences, open loops, plain links and the false positives an adversarial review found; the cheap misses it found), the exemption keyed on the hit (an old hit kept is not counted again; old lines reordered, re-contextualised or respelled into a new hit are refused; a split across old and new is refused), copy-back normalisation (the rendered block stored clean; a whole-block copy-back keeps only the agent-notes section), the non-creating previous-notes read over real SQLite, AC 4 (a channel write resolves ent#549's one-to-one speaker stamp; a group turn writes no one's memory), the trust envelope on the real format_user_memory_block (nonce'd open/close lines, every splitlines() line margined incl. \\r / NEL / U+2028, forged ends and platform structure only ever margined, control characters removed, summary inside, decisions after the reminder, render failure drops memory, fresh nonce, a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer (a tripping line is dropped and the rest kept, all lines dropped keeps the previous summary, each message clamped, the conversation margined inside its prompt), seat decisions (any line terminator refused, markers / instructions / an MCP tool id / a slotted URL refused with a sentence receipt, business-rule decisions accepted, legacy rows rendered on one line, the same one-to-one rule in _seat_for, the block's framing line pinned against the guard), the Telegram history defang, AST pins (the router stores only what prepare_write returned; the summarizer screens before it stores; one agent-notes writer across src/backend), the structural-heading list pinned against the composed prompt, totality (Hypothesis) and time budgets on adversarial and summarizer-sized input."
     },
     {
       "file": "../src/mcp-server/src/tools/memory.test.ts",
@@ -6325,6 +6325,27 @@
         "security"
       ],
       "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignDraft.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#539: the pure rules behind Select all / Deselect all in Assign shared skills (utils/skillAssignDraft.js) over every row type: Select all adds only unticked, non-deprecated, assignable rows that are not a set's; Deselect all removes every ticked listed row except a set's; both keep a name the dialog does not list. Every disabled reason and its precedence, the counted enabled titles, and what a save removes (set-held kept unless the sets are untrusted), which saves must confirm first (a removed skill with an approval requirement, case-insensitive; never a set-held or conflict name; any other removal with the approval map unread), plus the confirm's words and the refused-name title clause. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignSelectAll.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#539, MOUNTED through the real Teleport: Select all / Deselect all change only the draft (no write), Save then sends the expected body (the unlisted assignment kept, the set's row never sent), Reset restores the saved set, every disabled state carries its reason, the dialog never opens on Deselect all, focus is re-homed whenever a control it sat on is disabled or removed (bulk click, manual tick, Reset, Save, Confirm), and Save confirms (Cancel focused) before dropping an approval requirement, deciding on a gate map re-read at save time (failed read, unresolved set, double click and a dialog closed mid-read covered). Mutation-proven (27 mutants)."
     }
   ]
 }
