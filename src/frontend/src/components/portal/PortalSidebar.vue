@@ -20,6 +20,20 @@
            route watcher is what closes the drawer everywhere else. -->
       <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
 
+      <!-- ent#661: the person's Projects list — shown only when the roster
+           says this principal has the capability (internal-only).
+           #3695 (operator ruling 2026-10-13): it sits directly under Inbox —
+           the two navigation DESTINATIONS together at the top, then the two
+           ACTIONS on the chat list (New chat, Search). Between New chat and
+           Search it read as a chat-list control rather than a place to go.
+           #3672 (operator ruling): NO placeholder holds its slot while the
+           roster is out. Most installs (every OSS one) are not entitled to
+           Projects, so a held slot appeared and then vanished there — a layout
+           shift on every load to spare a late pop-in on the few entitled
+           installs. The link renders once the roster says `projectsAvailable`;
+           without it Inbox is followed by New chat with nothing between. -->
+      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
+
       <!-- New chat -->
       <!-- ent#357: disabled with an empty roster. `newChat()` only resets
            conversation state, so with no agent to chat with every branch of it
@@ -34,15 +48,6 @@
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
         New chat
       </button>
-
-      <!-- ent#661: the person's Projects list — shown only when the roster
-           says this principal has the capability (internal-only).
-           #3672 (operator ruling): NO placeholder holds its slot while the
-           roster is out. Most installs (every OSS one) are not entitled to
-           Projects, so a held slot appeared and then vanished there — a layout
-           shift on every load to spare a late pop-in on the few entitled
-           installs. The link renders once the roster says `projectsAvailable`. -->
-      <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
 
       <!-- Search -->
       <div class="relative">

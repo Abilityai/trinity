@@ -556,6 +556,7 @@ enterprise_portal_messages = Table(
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
     Column("attachments", Text),    # #3265: JSON list on a user turn
     Column("execution_id", Text),   # #3166: the turn that wrote the row
+    Column("gate_hold", Text),      # #3402: held/refused by the gate — never replayed
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -630,6 +631,18 @@ enterprise_room_messages = Table(
     Column("content", Text),
     Column("execution_id", Text),
     Column("created_at", Text),
+)
+
+# trinity#3402 — the room messages one agent's skill gate stopped (DDL comment
+# in db/schema.py). The primary key is the ON CONFLICT target of the write.
+room_gate_holds = Table(
+    "room_gate_holds",
+    metadata,
+    Column("room_id", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),
+    Column("gate_hold", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
 )
 
 
@@ -932,6 +945,9 @@ public_chat_messages = Table(
     # #903: per-message speaker attribution for thread-scoped channel sessions.
     Column("sender_email", Text),
     Column("sender_label", Text),
+    # #3402: held/refused by the skill gate (or written naming a gated skill) —
+    # never replayed to the agent. See the DDL comment in db/schema.py.
+    Column("gate_hold", Text),
 )
 
 public_user_memory = Table(
@@ -1110,6 +1126,19 @@ agent_capability_grants = Table(
     metadata,
     Column("agent_name", Text, primary_key=True),
     Column("capability", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    Column("granted_at", Text, nullable=False),
+)
+
+# abilityai/trinity-enterprise#662: caller X may run library-assigned skill Y on
+# target Z over their agent_permissions edge. Both agent columns are CASCADE
+# AgentRefs (db/agent_cleanup.py).
+agent_peer_skill_grants = Table(
+    "agent_peer_skill_grants",
+    metadata,
+    Column("caller_agent", Text, primary_key=True),
+    Column("target_agent", Text, primary_key=True),
+    Column("skill_name", Text, primary_key=True),
     Column("granted_by", Text, nullable=False),
     Column("granted_at", Text, nullable=False),
 )

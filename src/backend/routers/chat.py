@@ -12,13 +12,14 @@ import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
     capability_fence,
     get_current_user,
     get_authorized_agent,
     get_owned_agent,
     assert_owns_or_admin,
+    is_fleet_admin,
     resolve_source_agent,
 )
 from services.agent_auth import agent_httpx_client
@@ -424,7 +425,9 @@ async def execute_parallel_task(
                 status_code=400,
                 detail="This execution was never assigned a resumable session.",
             )
-        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+        # trinity-enterprise#872: the admin bypass is for an admin PERSON; an
+        # agent key carrying its owner's role is checked for ownership too.
+        if not _sees_every_user(current_user) and not db.resume_session_belongs_to_user(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -759,12 +762,7 @@ async def get_agent_model(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to get model info for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to get model info"
-        )
+        _raise_model_route_error(name, e, "Failed to get model info", "get model info")
 
 
 @router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
@@ -795,12 +793,34 @@ async def set_agent_model(
 
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to set model for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to set model"
+        _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+
+def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
+    """#3677: an agent's own 4xx is the caller's answer (an invalid model names
+    the valid ones), with its status and detail and no ERROR line; anything
+    else (unreachable, timed out, an agent 5xx) is still 503.
+
+    Not a 401: the agent's auth middleware answers 401 when the BACKEND's
+    per-agent token does not match (#1159; a rotated AGENT_AUTH_SECRET, an old
+    container). That is the platform's credential failing, not the caller's,
+    and a 401 reaching the browser signs the person out (platformSession's
+    `logout` verdict) on every load of the agent page. It stays a 503."""
+    import logging
+    response = getattr(e, "response", None) if isinstance(e, httpx.HTTPStatusError) else None
+    if response is not None and 400 <= response.status_code < 500 and response.status_code != 401:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        if detail in (None, ""):
+            detail = (response.text or "").strip()[:500] or f"The agent refused to {action}"
+        logging.getLogger("trinity.errors").info(
+            f"Agent {name} refused to {action}: {response.status_code}"
         )
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    logging.getLogger("trinity.errors").error(f"Failed to {action} for {name}: {e}")
+    raise HTTPException(status_code=503, detail=unavailable)
 
 
 # Persistent Chat History Routes
@@ -853,7 +873,7 @@ def _sees_every_user(current_user: User) -> bool:
     so with an `agent_permissions` edge to B it read every user's chats with B
     — "may call" is not "may read everyone's conversations with it"
     (trinity-enterprise#629, #3346 review)."""
-    return current_user.role == "admin" and not getattr(current_user, "agent_name", None)
+    return is_fleet_admin(current_user)
 
 
 @router.get("/{name}/chat/sessions")
@@ -993,6 +1013,36 @@ async def terminate_agent_execution(
             name=name,
             execution_id=execution_id,
             task_execution_id=task_execution_id,
+            current_user=current_user,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
+@router.post("/{name}/executions/{execution_id}/report-back")
+async def arm_execution_report_back(
+    execution_id: str,
+    request: ReportBackRequest,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation (Slack / Telegram / Workspace).
+
+    Called by the MCP server at the moment it hands the caller a receipt instead
+    of the reply — so a call that answered inline is never armed and cannot
+    post twice. The body names the CALLER's own turn; the execution inherits
+    that turn's channel context through the same provenance guard a ``/task``
+    child uses. Agent-callable by design: the arming agent is the one that
+    dispatched the row (the service checks that), and the capability it uses
+    — reporting into a conversation it is already serving — is the ent#224
+    consent-gated completion report, never a new send path.
+    """
+    try:
+        return await chat_execution_service.arm_chat_report_back(
+            name=name,
+            execution_id=execution_id,
+            request=request,
             current_user=current_user,
         )
     except ChatDispatchError as e:

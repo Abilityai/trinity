@@ -320,7 +320,7 @@ describe('property: the Inbox and the sidebar never disagree (AC 1, D13)', () =>
 import {
   isInboxPath, inboxBranchVisible, inboxSelectedAgent, stableRows, emptyVisit, isGhost, resolveItem,
   paneWindow, openInChatTarget, agentLabels, PANE_TAIL, listHeadLabel, inboxRowLabel, pageWindow, PAGE_SIZE,
-  inboxLayout, paneRuns, inboxCanvasCount,
+  inboxLayout, paneRuns, inboxCanvasCount, askOriginThread,
 } from '@/components/portal/portalInbox'
 
 describe('shell seams', () => {
@@ -596,6 +596,35 @@ describe('Open in chat (D11)', () => {
       .toBe('/workspace/c/s1?anchor=d%3Ar7')
     expect(openInChatTarget({ type: 'thread', id: 's1', latest: { kind: 'message', id: 'm1' } })).toBe('/workspace/c/s1')
     expect(openInChatTarget({ type: 'ask', id: 'a1' })).toBeNull()
+  })
+})
+
+describe('askOriginThread — an ask\'s Open in chat goes to the chat that raised it (#3714)', () => {
+  const askIt = (ask) => ({ type: 'ask', id: 'q1', agent_name: 'scout', ask })
+
+  it('a turn-raised ask → its chat, as the card\'s own `open-thread` payload', () => {
+    expect(askOriginThread(askIt({ id: 'q1', chat_id: 's1', raised_in_turn: true, agent_name: 'scout' })))
+      .toEqual({ id: 's1', agent_name: 'scout' })
+  })
+
+  it('a background ask has none — its chat_id is Main as the reply target, and it is drawn in no chat', () => {
+    expect(askOriginThread(askIt({ chat_id: 'main1', raised_in_turn: false }))).toBeNull()
+  })
+
+  it('no chat_id → none; the flag is strict (`=== true`)', () => {
+    expect(askOriginThread(askIt({ chat_id: null, raised_in_turn: true }))).toBeNull()
+    expect(askOriginThread(askIt({ chat_id: 's1', raised_in_turn: 'true' }))).toBeNull()
+  })
+
+  it('a discussion chat is not where the ask came from (T3)', () => {
+    expect(askOriginThread(askIt({ raised_in_turn: false, discussion_chat_id: 'd1' }))).toBeNull()
+  })
+
+  it('no ask snapshot, a thread, a mention → none', () => {
+    expect(askOriginThread({ type: 'ask', id: 'q1' })).toBeNull()
+    expect(askOriginThread({ type: 'thread', id: 's1', ask: { chat_id: 's1', raised_in_turn: true } })).toBeNull()
+    expect(askOriginThread({ type: 'mention', id: 'm1', ask: { chat_id: 's1', raised_in_turn: true } })).toBeNull()
+    expect(askOriginThread(null)).toBeNull()
   })
 })
 

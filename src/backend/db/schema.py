@@ -681,7 +681,10 @@ TABLES = {
             attachments TEXT,
             -- #3166: the execution (turn) that wrote the row. NULL on rows from
             -- before the column and on rows no turn wrote (completion reports).
-            execution_id TEXT
+            execution_id TEXT,
+            -- trinity#3402: as `public_chat_messages.gate_hold` — a turn the
+            -- gate held or refused, and its notice, never replayed to the agent.
+            gate_hold TEXT
         )
     """,
 
@@ -783,6 +786,23 @@ TABLES = {
             execution_id TEXT,                         -- schedule_executions.id (nullable)
             created_at TEXT NOT NULL,
             UNIQUE(room_id, seq)
+        )
+    """,
+
+    # trinity#3402 — the room messages one agent's skill gate stopped: a post
+    # it held (or refused for good) and the notice line, per agent. Every wake
+    # of that agent leaves them out of what it is shown and of what the gate
+    # scans; other agents still read them. `gate_hold` is the request id or
+    # `refused:<code>`. No `enterprise_` prefix: on the room tables that prefix
+    # is the three legacy names' history.
+    "room_gate_holds": """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
         )
     """,
 
@@ -1076,6 +1096,12 @@ TABLES = {
             cost REAL,
             sender_email TEXT,
             sender_label TEXT,
+            -- trinity#3402: NULL for an ordinary row. Otherwise the row is a
+            -- gated request that did not run as itself, or the platform's
+            -- answer to one, and is never replayed to the agent: the request
+            -- id the gate raised (`gate-…`), `refused:<code>`, or `named`
+            -- (written naming a gated skill, before its verdict).
+            gate_hold TEXT,
             FOREIGN KEY (session_id) REFERENCES public_chat_sessions(id) ON DELETE CASCADE
         )
     """,
@@ -1280,6 +1306,19 @@ TABLES = {
             granted_by TEXT NOT NULL,
             granted_at TEXT NOT NULL,
             PRIMARY KEY (agent_name, capability)
+        )
+    """,
+    # abilityai/trinity-enterprise#662 — the per-skill grant over an edge: caller
+    # X may run library-assigned skill Y on target Z. Without a row a peer may
+    # invoke only Z's DECLARED skills. Both agent columns are CASCADE AgentRefs.
+    "agent_peer_skill_grants": """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
         )
     """,
 
@@ -2253,6 +2292,7 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target ON agent_peer_skill_grants(target_agent)",
     # ent#596: "which agents hold capability X" is the grant list's one read.
     "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap ON agent_capability_grants(capability)",
     # ent#237: resolution order for the custom-wins precedence merge.

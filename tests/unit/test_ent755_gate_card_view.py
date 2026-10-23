@@ -33,6 +33,14 @@ from database import db  # noqa: E402
 pytestmark = pytest.mark.unit
 
 OTHER = "someone-else@example.com"
+ADMIN = "card-admin"   # can open every run page (trinity#3708)
+
+
+@pytest.fixture
+def admin(gate):
+    from db_models import UserCreate
+    db.create_user(UserCreate(username=ADMIN, role="admin", email="card-admin@example.com"))
+    return ADMIN
 
 
 @pytest.fixture
@@ -51,9 +59,9 @@ def _view(rid, viewer=OWNER_EMAIL, name_approvers=True, **kw):
     return _GATE.card_view(_ask_row(rid), viewer_email=viewer, name_approvers=name_approvers, **kw)
 
 
-def test_a_pending_card_names_the_skill_the_requester_and_who_decides(card):
+def test_a_pending_card_names_the_skill_the_requester_and_who_decides(card, admin):
     rid = _raise_request()
-    view = _view(rid, with_run_ids=True)
+    view = _view(rid, run_viewer=admin)
     assert view["skills"] == [{"name": "pay-invoice", "description": "Pays one supplier invoice."}]
     assert view["requester"] == {"kind": "agent", "label": f"Agent {REQ}", "agent": REQ,
                                  "execution_id": "exec-origin"}
@@ -74,12 +82,12 @@ def test_the_workspace_view_names_no_other_approver(card):
     assert view["waiting_on"] == [] and view["can_decide"] is True
 
 
-def test_run_ids_stay_off_unless_the_surface_asks_for_them(card):
+def test_run_ids_stay_off_unless_the_surface_asks_for_them(card, admin):
     rid = _raise_request()
     _answer(rid, _GATE.APPROVE)
     assert _resolve(rid) == "dispatched"
     eid = db.get_gate_request(rid)["dispatched_execution_id"]
-    assert _view(rid, with_run_ids=True)["execution_id"] == eid
+    assert _view(rid, run_viewer=admin)["execution_id"] == eid
     plain = _view(rid)
     assert plain["state"] == "dispatched"
     assert plain["execution_id"] is None and plain["requester"]["execution_id"] is None
@@ -152,7 +160,7 @@ def test_approvers_stored_as_json_text_are_named_by_account_name(card):
     assert view["waiting_on"] == [card_db_name.get("name") or "dana@example.com", "x@example.com"]
 
 
-def test_the_workspace_projection_withholds_run_ids_and_approvers_from_a_client(card):
+def test_the_workspace_projection_withholds_run_ids_and_approvers_from_a_client(card, admin):
     from client_portal.asks import service as asks
     rid = _raise_request()
     _answer(rid, _GATE.APPROVE)
@@ -161,19 +169,23 @@ def test_the_workspace_projection_withholds_run_ids_and_approvers_from_a_client(
     client = asks._project(_ask_row(rid), viewer_email=OWNER_EMAIL).gate
     assert client["execution_id"] is None and client["requester"]["execution_id"] is None
     assert client["waiting_on"] == [] and client["state"] == "dispatched"
-    assert asks._project(_ask_row(rid), viewer_email=OWNER_EMAIL, is_platform=True).gate["execution_id"] == eid
+    # trinity#3708: the owner here is a Workspace-only `user`, who cannot open a
+    # run page, so the platform path withholds it too; an admin gets the link.
+    assert asks._project(_ask_row(rid), viewer_email=OWNER_EMAIL, is_platform=True).gate["execution_id"] is None
+    assert asks._project(_ask_row(rid), viewer_email="card-admin@example.com",
+                         is_platform=True).gate["execution_id"] == eid
 
 
 def test_the_operator_row_carries_the_card_for_a_person_and_nothing_for_a_machine(card):
     from types import SimpleNamespace
     from routers import operator_queue as route
     rows = [dict(_ask_row(_raise_request()))]
-    person = SimpleNamespace(email=OTHER, role="admin", mcp_scope=None, agent_name=None,
-                             connector_agent=None)
+    person = SimpleNamespace(username="someone-else", email=OTHER, role="admin", mcp_scope=None,
+                             agent_name=None, connector_agent=None)
     (seen,) = route._for_principal(rows, person)
     assert seen["gate"]["can_decide"] is False and seen["gate"]["waiting_on"] == [OWNER_EMAIL]
-    machine = SimpleNamespace(email=OWNER_EMAIL, role="admin", mcp_scope="agent", agent_name=REQ,
-                              connector_agent=None)
+    machine = SimpleNamespace(username="disp-owner", email=OWNER_EMAIL, role="admin",
+                              mcp_scope="agent", agent_name=REQ, connector_agent=None)
     assert all("gate" not in r for r in route._for_principal(rows, machine))
 
 

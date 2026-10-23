@@ -13,6 +13,7 @@ import httpx
 from typing import List, Dict, Any
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, Request
+from utils.public_url import public_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,17 @@ MCP_URL_SETTING_KEY = "mcp_external_url"
 PUBLIC_CHAT_URL_SETTING_KEY = "public_chat_url"
 
 def _get_default_mcp_url(request: Request) -> str:
-    """Compute the auto-detected MCP URL from the request hostname."""
+    """Compute the auto-detected MCP URL from the request hostname.
+
+    Behind an HTTPS proxy (`X-Forwarded-Proto: https`, read by
+    `public_base_url`) the proxy serves `/mcp` on the same origin, so the URL is
+    `https://<host>/mcp` with no `:8080` (#2907). The hostname is the `Host`
+    header: the frontend nginx forwards the client's `$host`, and no other
+    route trusts `X-Forwarded-Host`.
+    """
+    origin = public_base_url(request)
+    if origin.startswith("https://"):
+        return f"{origin}/mcp"
     host = request.headers.get("host", "localhost:8080")
     hostname = host.split(":")[0]
     if hostname in ("localhost", "127.0.0.1"):

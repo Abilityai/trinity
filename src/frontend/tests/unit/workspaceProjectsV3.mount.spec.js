@@ -10,6 +10,7 @@
  *   - "I steward" lists what needs the steward and opens the project.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { defineComponent, h } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 import { createRouter, createMemoryHistory } from 'vue-router'
@@ -34,8 +35,27 @@ vi.mock('axios', () => {
 
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { useProjectsStore } from '@/stores/projects'
-import ProjectHub from '@/components/portal/projects/ProjectHub.vue'
+import ProjectHealthCard from '@/components/portal/projects/ProjectHealthCard.vue'
+import ProjectRollupCard from '@/components/portal/projects/ProjectRollupCard.vue'
+import ProjectMetricsCard from '@/components/portal/projects/ProjectMetricsCard.vue'
+import ProjectNeedsYouCard from '@/components/portal/projects/ProjectNeedsYouCard.vue'
 import ProjectsStewarding from '@/components/portal/projects/ProjectsStewarding.vue'
+
+// #3694 split the hub into four cards the page places itself; these tests are
+// about each card's behaviour, so a render-function wrapper mounts the four
+// together with the hub's old props and events.
+const ProjectHub = defineComponent({
+  props: { project: { type: Object, required: true }, myEmail: { type: String, default: '' } },
+  emits: ['open-tasks', 'open-thread'],
+  setup(props, { emit }) {
+    return () => h('div', { 'data-testid': 'project-hub' }, [
+      h(ProjectHealthCard, { project: props.project, myEmail: props.myEmail }),
+      h(ProjectRollupCard, { project: props.project, onOpenTasks: () => emit('open-tasks') }),
+      h(ProjectMetricsCard, { project: props.project }),
+      h(ProjectNeedsYouCard, { project: props.project, onOpenThread: (t) => emit('open-thread', t) }),
+    ])
+  },
+})
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class {
   observe() {}
@@ -188,7 +208,6 @@ describe('needs you', () => {
     // #3574: a list row, not the ask card — the body is behind Answer.
     expect(byTestId('project-ask-row-q1')).not.toBeNull()
     expect(byTestId('portal-ask-q1')).toBeNull()
-    expect(byTestId('project-hub').className).toContain('lg:items-start')
     expect(byTestId('project-asks-others').textContent).toContain('2 asks are waiting on other people')
   })
 

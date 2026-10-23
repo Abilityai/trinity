@@ -140,8 +140,10 @@ def _load_monitoring_router():
     path = _BACKEND / "routers" / "monitoring.py"
     spec = importlib.util.spec_from_file_location("routers.monitoring", str(path))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["routers.monitoring"] = mod
+    # Registered only while the module executes: a stub-loaded copy left in
+    # sys.modules would be what a later test's `import routers.monitoring` gets.
     with patch.dict(sys.modules, {
+        "routers.monitoring": mod,
         "dependencies": _deps,
         "services.agent_service": _agent_svc,
         "services.monitoring_service": _mon_svc,

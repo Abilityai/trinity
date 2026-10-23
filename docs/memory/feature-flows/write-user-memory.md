@@ -1,7 +1,7 @@
 # Feature: write_user_memory MCP Tool (MEM-001, #888, #895)
 
 ## Overview
-Agents can persist per-user memory blobs scoped to a single (agent, user_email) pair. This replaces the unsafe pattern of writing to `~/.claude/projects/memory/`, which is shared across all users of an agent and leaks PII between sessions.
+Agents can persist per-user memory blobs scoped to a single (agent, user_email) pair. This replaces the unsafe pattern of writing to Claude Code's auto-memory (under `~/.claude/projects/`) or the repo's `memory/` directory — both are shared across all users of an agent and leak PII between sessions.
 
 **#895 update**: storage was split into two named sections so the agent-deliberate writes from this tool don't clobber the every-5-message conversation summarizer (and vice versa). The MCP wire format is unchanged — the tool still accepts a single `memory_text` field — but the backend now routes that value to the `agent_notes` section of the JSON blob stored on disk. Channel sessions (Slack/Telegram/WhatsApp) now also inject this memory into the agent's system prompt, gated on `verified_email and not is_group`.
 
@@ -9,7 +9,7 @@ Agents can persist per-user memory blobs scoped to a single (agent, user_email) 
 As an agent serving multiple users via public link / Slack / Telegram / WhatsApp, I want to remember facts about each individual user (name, preferences, timezone) so that future sessions are personalized — without contaminating any other user's context.
 
 ## The PII Leak it Fixed
-Before #888, agents that needed to remember user-specific facts had no safe write surface. The only available path was writing to the agent filesystem (`~/.claude/projects/memory/` or similar), which is a single shared namespace across all users of that agent. Writing a user's email, name, or preferences there made it visible to every other user that same agent served.
+Before #888, agents that needed to remember user-specific facts had no safe write surface. The only available path was writing to the agent filesystem (Claude Code's auto-memory under `~/.claude/projects/`, or similar), which is a single shared namespace across all users of that agent. Writing a user's email, name, or preferences there made it visible to every other user that same agent served.
 
 The fix is a server-side gated write: the agent never supplies a user email. The backend resolves it from the execution record, preventing an agent from writing memory for an arbitrary user.
 
@@ -63,7 +63,7 @@ The fix is a server-side gated write: the agent never supplies a user email. The
   ```json
   { "agent_notes": "...", "conversation_summary": "..." }
   ```
-  `agent_notes` is written by this tool. `conversation_summary` is written by the background summarizer (`services/platform_prompt_service.summarize_user_memory_background`). Legacy plaintext rows (written before #895) are transparently surfaced as `conversation_summary` on read — see `db/public_links._parse_memory_blob`.
+  `agent_notes` is written by this tool. `conversation_summary` is written by the background summarizer (`services/platform_prompt_service.summarize_user_memory_background`), which never reads a gated request that did not run, nor its notice (trinity#3402 — rows with a `gate_hold` are left out of `get_recent_public_chat_messages` by default). Legacy plaintext rows (written before #895) are transparently surfaced as `conversation_summary` on read — see `db/public_links._parse_memory_blob`.
 - **Read** (`db.get_or_create_public_user_memory`): `SELECT` by `(agent_name, user_email)`; `INSERT` if not found. Returns the parsed dict `{id, agent_name, user_email, agent_notes, conversation_summary, message_count, created_at, updated_at}` — `src/backend/db/public_links.py:get_or_create_user_memory`
 - **Write — agent_notes only** (`db.update_public_user_memory_agent_notes`): read-modify-write that replaces only the `agent_notes` key — `src/backend/db/public_links.py:update_user_memory_agent_notes`
 - **Write — conversation_summary only** (`db.update_public_user_memory_conversation_summary`): used by the background summarizer; never invoked from this tool — `src/backend/db/public_links.py:update_user_memory_conversation_summary`

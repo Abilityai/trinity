@@ -5276,6 +5276,103 @@ def _migrate_proactive_consent_not_asked(cursor, conn):
     cursor.execute("UPDATE agent_sharing SET allow_proactive = NULL WHERE allow_proactive = 0")
     conn.commit()
 
+def _migrate_admin_email_not_username(cursor, conn):
+    """#3554 — the provisioned admin has no sign-in email.
+
+    The PostgreSQL admin seed wrote ``email = username`` ("admin"), which is
+    truthy, so the first-run "Sign-in email" step never appeared. Clears the
+    value where it still equals the username and is not an address (no ``@``);
+    a real email, even one equal to its username, is kept. Data only.
+
+    Idempotent. Mirrored by Alembic 0100_admin_email_not_username.
+    """
+    cursor.execute("PRAGMA table_info(users)")
+    cols = {row[1] for row in cursor.fetchall()}
+    if not {"username", "email"} <= cols:   # a pre-username schema has nothing to clear
+        return
+    cursor.execute(
+        "UPDATE users SET email = NULL WHERE email = username AND email NOT LIKE '%@%'"
+    )
+    conn.commit()
+
+
+def _migrate_held_gate_turns(cursor, conn):
+    """trinity#3402 — a turn the skill gate stopped is never replayed to the agent.
+
+    * ``gate_hold`` on ``public_chat_messages`` and ``enterprise_portal_messages``:
+      NULL for an ordinary row; otherwise the request id, ``refused:<code>`` or
+      ``named``, and every prompt read leaves the row out.
+    * ``room_gate_holds``: the room messages one agent's gate stopped, per agent.
+    * One backfill: a Workspace turn held before the column existed (since #3166
+      its rows carry the turn's id) is marked from the gate record that names
+      that turn as its origin — an exact match, never a guess from the text.
+      Public-link and channel rows held before the fix carry no turn id and stay
+      unmarked (a stated limit).
+
+    Additive. Idempotent: the backfill touches unmarked rows only.
+    Mirrored by Alembic 0101_held_gate_turns.
+    """
+    for table in ("public_chat_messages", "enterprise_portal_messages"):
+        _safe_add_column(cursor, table, "gate_hold",
+                         f"ALTER TABLE {table} ADD COLUMN gate_hold TEXT")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
+        )
+        """
+    )
+    cursor.execute(HELD_PORTAL_ROWS_BACKFILL)
+    conn.commit()
+
+
+# trinity#3402: shared by both tracks (`0101_held_gate_turns` imports it), so the
+# SQLite and PostgreSQL backfills cannot drift apart.
+HELD_PORTAL_ROWS_BACKFILL = (
+    "UPDATE enterprise_portal_messages "
+    "SET gate_hold = (SELECT MIN(g.request_id) FROM skill_gate_requests g "
+    "                 WHERE g.origin_execution_id = enterprise_portal_messages.execution_id) "
+    "WHERE gate_hold IS NULL AND execution_id IN ("
+    "    SELECT origin_execution_id FROM skill_gate_requests "
+    "    WHERE origin_execution_id IS NOT NULL)"
+)
+
+
+def _migrate_agent_peer_skill_grants(cursor, conn):
+    """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
+    what an admin assigned needs a grant.
+
+    ``agent_peer_skill_grants`` holds the per-skill grant over an edge: caller X
+    may run library-assigned skill Y on target Z. Additive only. Nobody holds a
+    grant on upgrade — the safe default — and the Permissions panel shows each
+    edge's library skills as "not granted" until an admin opens them.
+
+    Idempotent. Mirrored by Alembic 0099_agent_peer_skill_grants.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target "
+        "ON agent_peer_skill_grants(target_agent)"
+    )
+    conn.commit()
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -5543,7 +5640,7 @@ def _migrate_agent_skill_gates(cursor, conn):
 def _migrate_a2a_caller_identity(cursor, conn):
     """abilityai/trinity-enterprise#862 — store the AAuth peer identity that
     triggered an inbound A2A execution so it is visible on the execution row.
-    Additive: NULL for all existing rows. Mirrored by Alembic 0099_a2a_caller_identity."""
+    Additive: NULL for all existing rows. Mirrored by Alembic 0102_a2a_caller_identity."""
     _safe_add_column(
         cursor, "schedule_executions", "a2a_caller_identity",
         "ALTER TABLE schedule_executions ADD COLUMN a2a_caller_identity TEXT",
@@ -5719,5 +5816,8 @@ MIGRATIONS = [
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
     ("proactive_consent_not_asked", _migrate_proactive_consent_not_asked),
+    ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
+    ("admin_email_not_username", _migrate_admin_email_not_username),
+    ("held_gate_turns", _migrate_held_gate_turns),
     ("a2a_caller_identity", _migrate_a2a_caller_identity),
 ]

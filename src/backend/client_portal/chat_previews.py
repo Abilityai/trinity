@@ -45,6 +45,9 @@ EXCERPT_MAX_CHARS = 160
 _OUTCOME_BY_SOURCE = {
     "completion:done": "done",
     "completion:failed": "failed",
+    # trinity#3688: a gated request's ending notice — no outcome pill; its text
+    # says how the request ended.
+    "completion:notice": None,
 }
 
 _FENCE = re.compile(r"```.*?(```|$)", re.S)

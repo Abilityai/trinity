@@ -337,13 +337,18 @@ class TelegramAdapter(ChannelAdapter):
         reply_to = thread_id if response.metadata.get("is_group") else None
 
         for chunk in chunks:
-            await self._send_message(
+            sent = await self._send_message(
                 bot_token=bot_token,
                 chat_id=channel_id,
                 text=chunk,
                 reply_to_message_id=reply_to,
                 parse_mode="HTML",
             )
+            if sent is None:
+                # Never deliver the suffix after a missing chunk, or replay
+                # already accepted chunks while retrying a later one.
+                logger.error("Telegram reply stopped after a failed chunk")
+                return
 
     # =========================================================================
     # Unified access control (Issue #311)
@@ -1059,32 +1064,39 @@ class TelegramAdapter(ChannelAdapter):
 
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(url, json=payload)
-
-                if resp.status_code == 429:
-                    # Rate limited — respect retry_after
-                    retry_after = resp.json().get("parameters", {}).get("retry_after", 5)
-                    logger.warning(f"Telegram rate limited, retry_after={retry_after}s")
-                    import asyncio
-                    await asyncio.sleep(min(retry_after, 30))
+                rate_limit_retried = False
+                while True:
                     resp = await client.post(url, json=payload)
-
-                if resp.status_code != 200:
-                    error_body = resp.text
-                    logger.error(f"Telegram sendMessage failed ({resp.status_code}): {error_body}")
-
-                    # If HTML parsing failed, retry with plain text
-                    if "can't parse entities" in error_body.lower():
+                    body = resp.json()
+                    if resp.status_code == 429 and not rate_limit_retried:
+                        rate_limit_retried = True
+                        retry_after = body.get("parameters", {}).get("retry_after", 5)
+                        if (not isinstance(retry_after, int) or isinstance(retry_after, bool)
+                                or not 0 <= retry_after <= 30):
+                            logger.warning("Telegram flood wait exceeds bounded retry policy")
+                            return None
+                        await asyncio.sleep(retry_after)
+                        continue
+                    if (resp.status_code == 400 and payload["parse_mode"]
+                            and "can't parse entities" in str(body.get("description", "")).lower()):
                         payload["parse_mode"] = ""
                         payload["text"] = self._strip_html(text)
-                        resp = await client.post(url, json=payload)
-                        if resp.status_code != 200:
-                            logger.error(f"Telegram plain text fallback also failed: {resp.text}")
-                            return None
-
-                return resp.json().get("result")
-        except Exception as e:
-            logger.error(f"Telegram sendMessage error: {e}", exc_info=True)
+                        continue
+                    result = body.get("result")
+                    if (resp.status_code == 200 and body.get("ok") is True
+                            and isinstance(result, dict) and result.get("message_id")):
+                        return result
+                    # Keep the useful API reason, never its URLs or our token.
+                    description = str(body.get("description", "No error description"))
+                    description = description.replace(bot_token, "[REDACTED]")
+                    description = re.sub(r"https?://\S+", "[URL]", description)
+                    description = " ".join(description.splitlines())[:300]
+                    logger.error("Telegram sendMessage failed (status %s): %s", resp.status_code, description)
+                    return None
+        except Exception:
+            # A timeout has an unknown delivery outcome: don't replay it, and
+            # don't log exception URLs containing the bot token.
+            logger.error("Telegram sendMessage failed without confirmation")
             return None
 
     # _send_voice is retained (now driven by services/voice_reply_service.py, ent#117);
@@ -1410,22 +1422,27 @@ class TelegramAdapter(ChannelAdapter):
         a cut are closed there and reopened in the next chunk — otherwise the
         continuation fails HTML parse and falls back to unformatted text.
         """
-        if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+        def units(value):
+            return len(value.encode("utf-16-le")) // 2
+
+        if units(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
             return [text]
 
         # Reserve room for the closing tags a cut can append.
         limit = TELEGRAM_MAX_MESSAGE_LENGTH - 100
         chunks = []
         while text:
-            if len(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
+            if units(text) <= TELEGRAM_MAX_MESSAGE_LENGTH:
                 chunks.append(text)
                 break
 
             # Find a good split point — paragraph, then sentence, then hard cut
-            split_at = limit
+            # Count astral characters conservatively as two UTF-16 units.
+            # Decoding with ignore drops only a trailing half-surrogate.
+            split_at = len(text.encode("utf-16-le")[:limit * 2].decode("utf-16-le", errors="ignore"))
             for sep in ["\n\n", "\n", ". ", " "]:
-                idx = text.rfind(sep, 0, limit)
-                if idx > limit // 2:
+                idx = text.rfind(sep, 0, split_at)
+                if idx > split_at // 2:
                     split_at = idx + len(sep)
                     break
 
@@ -1437,6 +1454,12 @@ class TelegramAdapter(ChannelAdapter):
                     split_at = limit
                 head = text[:split_at]
 
+            # An HTML entity is indivisible too: '&am' + 'p;' changes the
+            # visible reply even when Telegram accepts both chunks.
+            if head.rfind("&") > head.rfind(";"):
+                split_at = head.rfind("&")
+                head = text[:split_at]
+
             open_tags = []
             for m in TelegramAdapter._HTML_TAG_RE.finditer(head):
                 if m.group(1):
@@ -1445,11 +1468,17 @@ class TelegramAdapter(ChannelAdapter):
                 else:
                     open_tags.append((m.group(2).lower(), m.group(3) or ""))
 
-            chunks.append(
-                head + "".join(f"</{name}>" for name, _ in reversed(open_tags))
-            )
+            chunk = head + "".join(f"</{name}>" for name, _ in reversed(open_tags))
+            prefix = "".join(f"<{name}{attrs}>" for name, attrs in open_tags)
+            if split_at <= len(prefix) or units(chunk) > TELEGRAM_MAX_MESSAGE_LENGTH:
+                # Pathologically nested/large markup cannot be reopened with
+                # room for content. Preserve the remaining text unformatted.
+                plain = html.escape(TelegramAdapter._strip_html(text), quote=False)
+                chunks.extend(TelegramAdapter._split_message(plain))
+                break
+            chunks.append(chunk)
             text = (
-                "".join(f"<{name}{attrs}>" for name, attrs in open_tags)
+                prefix
                 + text[split_at:]
             )
 

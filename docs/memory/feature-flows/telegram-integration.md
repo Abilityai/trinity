@@ -123,7 +123,7 @@ Two routers are registered in `main.py:523-524`:
 
 **Message processing**:
 - `parse_message(raw_event)` (line 66) — Extracts text + media context from Telegram Update. Skips bot messages. Returns `NormalizedMessage` with metadata including `bot_id`, `agent_name`, `username`, media flags.
-- `send_response(channel_id, response, thread_id)` (line 123) — Converts markdown to HTML, splits at 4096 chars, sends via `sendMessage`. Falls back to plain text if HTML parsing fails (line 247).
+- `send_response(channel_id, response, thread_id)` — Converts Markdown to HTML and sends ordered chunks via `sendMessage`. The shared router keeps Telegram code blocks inline rather than extracting attachment placeholders.
 - `indicate_processing(message)` (line 158) — Sends `typing` chat action.
 
 **Bot commands** (line 168):
@@ -133,7 +133,7 @@ Two routers are registered in `main.py:523-524`:
 
 **Message formatting**:
 - `_markdown_to_html()` (line 274) — Converts `**bold**`, `*italic*`, `` `code` ``, `~~strike~~` to Telegram HTML tags
-- `_split_message()` (line 298) — Splits at paragraph/sentence/word boundaries within 4096 char limit
+- `_split_message()` — Splits at paragraph/sentence/word boundaries with a conservative 4096 UTF-16-unit budget including markup. Tags and HTML entities remain whole; open tags are closed/reopened. Pathological markup that leaves no room for content falls back to escaped plain text.
 - `_extract_media_context()` (line 327) — Generates descriptive context for photos, documents, stickers, locations, voice, video
 
 ### Media Service: `src/backend/services/telegram_media.py`
@@ -274,8 +274,9 @@ The message router restricts public channel users to `WebSearch,WebFetch` by def
 | No binding found (test) | 404 | No Telegram binding found or token decryption failed | `telegram.py:220` |
 | Unknown webhook_secret | 200* | `{"ok": false}` | `telegram_webhook.py:43` |
 | Invalid header token | 200* | `{"ok": false}` | `telegram_webhook.py:49` |
-| Rate limited by Telegram | Retry | Waits `retry_after` seconds (max 30s) | `telegram_adapter.py:236` |
-| HTML parse failure | Retry | Falls back to plain text | `telegram_adapter.py:247` |
+| Reply rate limited by Telegram | Retry once | Honors integer `retry_after` from 0–30 seconds; longer or malformed waits stop delivery without an early retry | `TelegramAdapter._send_message` |
+| HTML parse failure | Retry | Falls back to plain text; the same chunk can still use its one rate-limit retry | `TelegramAdapter._send_message` |
+| Reply chunk unconfirmed | Stop | Reply and proactive loops stop before later chunks; proactive delivery reports failure. No replay within this Telegram channel attempt | `TelegramAdapter.send_response`, `ProactiveMessageService._deliver_telegram` |
 | Agent container not running | 200 | "I'm not available right now" | `message_router.py:143` |
 | Task execution timeout | 200 | "That took too long" | `message_router.py:201` |
 
@@ -477,7 +478,7 @@ The trigger rules above decide when the agent *speaks*; this decides what it *kn
 
 **Observe path** (`ChannelMessageRouter._record_observed_message`, step 0): for `metadata.observe_only` messages — resolve the agent (auto-creates the group config), `adapter.note_untagged_seen` (stamps `last_untagged_seen_at`), then record only if `adapter.group_context_enabled` and, under `group_auth_mode=any_verified`, the group is unlocked. Persists `role=user` with `sender_label` (#903), prunes the session to `STORE_CAP` (500) rows each time its count crosses a `PRUNE_EVERY` (50) boundary (`_prune_group_session_if_due`, shared with the tagged-turn path so `all`/`observe` groups are bounded too). Never raises. Bare `/commands` are skipped; the transport also refuses to *execute* them (`_process_update` gates the command branch on `observe_only`) — otherwise `/reset` from any member would have started firing un-tagged the moment parse_message stopped returning None.
 
-**Turn context** (router step 7, groups): `_format_group_sender` (identity + `reply_quote_line` — the zero-config slice that works with Privacy Mode on) + `_group_history_block` + the text. The block is rendered by `services/telegram_group_context.format_group_history`: newest `MAX_MESSAGES` (40, env `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`) within `MAX_AGE_HOURS` (24, env `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`), `[NO_REPLY]` assistant rows dropped (over-fetched 2× so they don't eat the window), each line collapsed to one line and clamped to 500 chars, labels clamped/de-bracketed, assistant lines prefixed `[agent]`, the two delimiters stripped from content. Observed history is untrusted third-party input — every member can put text in front of the agent without addressing it. The tagged user turn is persisted at step 7 (before execution) and step 11 skips it (`_user_turn_persisted`), so a message posted during a long run sorts after the one it answers, and a failed run keeps the tagged message in memory.
+**Turn context** (router step 7, groups): `_format_group_sender` (identity + `reply_quote_line` — the zero-config slice that works with Privacy Mode on) + `_group_history_block` + the text. The block is rendered by `services/telegram_group_context.format_group_history`: newest `MAX_MESSAGES` (40, env `TELEGRAM_GROUP_CONTEXT_MAX_MESSAGES`) within `MAX_AGE_HOURS` (24, env `TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS`), `[NO_REPLY]` assistant rows dropped (over-fetched 2× so they don't eat the window), each line collapsed to one line and clamped to 500 chars, labels clamped/de-bracketed, assistant lines prefixed `[agent]`, the two delimiters stripped from content. Observed history is untrusted third-party input — every member can put text in front of the agent without addressing it. The tagged user turn is persisted at step 7 (before execution) and step 11 skips it (`_user_turn_persisted`), so a message posted during a long run sorts after the one it answers, and a failed run keeps the tagged message in memory. The block never replays a gated request (trinity#3402): an observed or tagged message that invokes a skill gated on the agent is stored with `gate_hold = named` (a channel sender never self-approves), a turn the gate held or refused marks its step-7 row with the verdict (`_mark_gate_hold`, which also covers a hold the reply quote caused), and `get_recent_public_chat_messages` leaves marked rows out — see [skill-gate.md](skill-gate.md).
 
 **Status** (`group_context_status`, surfaced as `context_status`/`context_hint` on `GET …/telegram/groups` and in `TelegramChannelPanel.vue`): `off` (toggle) → `all_messages` (`last_untagged_seen_at` set — evidence wins; an admin bot receives everything regardless of Privacy Mode) → `tagged_only` (`getMe.can_read_all_group_messages` = 0; hint: `/setprivacy` → Disable, remove & re-add the bot, or make it admin) → `unconfirmed` (flag 1 or unknown, nothing seen yet; hint: re-add / press Verify). The flag is stored on `telegram_bindings.can_read_all_group_messages` at connect, at Verify (`POST …/telegram/test` without chat_id), and when the bot is added to a group (`_handle_bot_member_change` → `fetch_can_read_all_group_messages`, best-effort after the config write).
 
@@ -1133,3 +1134,5 @@ rendering). Telegram-side surface added here:
 | 2026-06-10 | #1130: Transcription model no longer hardcoded. Google retired `gemini-2.0-flash` (404 on every voice message); `_transcribe_audio_gemini` now uses `GEMINI_TRANSCRIPTION_MODEL` from config.py (default `gemini-3.5-flash`, env-overridable, #1076 empty-string-safe wiring in both compose files). Explicit retired-model log hint on 404. |
 | 2026-07-31 | ent#264: In-progress status indicator — 👀 reaction ack + 30s-threshold elapsed-time placeholder via the new channel-agnostic start/progress/resolve seam (router-owned driver, `indicate_progress` hook). Default-ON per-binding toggle (`progress_indicator_enabled`, dual migration, dedicated human-only PUT); GET /telegram access-hardened to `AuthorizedAgentByName`. 61 unit tests. |
 | 2026-07-31 | ent#265: Completion report-back — `telegram_group_configs.allow_proactive` (default allow), per-group "Completion reports" toggle, human-only PUT arm. Mechanism in [channel-completion-report.md](channel-completion-report.md). |
+
+Long-reply validation: `test_3746_telegram_long_replies.py` covers inline code, Unicode/entity boundaries, bounded flood waits, HTML fallback, partial proactive delivery and token-free failure diagnostics. Request exceptions are not logged because their URLs may contain the bot token. Proactive `auto` delivery retains its existing fallback policy: after an unsuccessful Telegram attempt (including a confirmed prefix), it may send the full message through Slack or web within the same call. Only the successful channel receives the persisted outbound turn. This does not add durable per-chunk deduplication: a separate attempt or crash recovery retains the existing effect-level behavior.

@@ -6,7 +6,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.9.5](whats-new/v0.9.5.md) latest; [v0.9.0](whats-new/v0.9.0.md) illustrated)
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v1.0.0](whats-new/v1.0.0.md) latest; [v0.9.0](whats-new/v0.9.0.md) illustrated)
 
 ## FAQ
 
@@ -53,7 +53,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Agent Terminal](agents/agent-terminal.md) — Ephemeral key-based SSH access; the WebSocket terminal for API clients
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
-- [Agent Configuration](agents/agent-configuration.md) — The Settings tab: guardrails, capacity, MCP exposure, access key, reliability (breaker, wake on answer), autonomy, resources, timeout
+- [Agent Configuration](agents/agent-configuration.md) — The Settings home: General, Guardrails, People, Channels, Integrations and Storage panes, the restart banner, capacity, resources, timeout
 - [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
 - [Recommended Trinity Prompt](agents/recommended-fleet-prompt.md) — Research-backed fleet rules for the instance-wide Trinity prompt, and what not to put there
 - [Self-Execute](agents/self-execute.md) — Background tasks during chat, result injection
@@ -96,10 +96,11 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 ## Sharing and Access
 
-- [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
+- [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Settings › People (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory, Connect Slack
 - [Workspace](sharing-and-access/workspace.md) — The chat app: the Inbox, chat tabs and the pinned Main chat, the composer (typeahead, model picker, files, voice, replies), the rail (Info, Files, Loops, Canvas, Work), keyboard shortcuts, agent pages
+- [Workspace Projects](sharing-and-access/workspace-projects.md) — Projects in the Workspace: creating one (list or chat), continuing work with an agent, what the agent records in the Log, tasks and the verification rule, the steward and its digest, visibility and guests
 - [Tags and Organization](sharing-and-access/tags-and-organization.md) — Tags, filtering, system views
 - [Mobile Admin](sharing-and-access/mobile-admin.md) — Mobile PWA at /m
 
@@ -110,7 +111,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 160 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 168 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
 - [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, outbound calls to external agents, x402 payments
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 

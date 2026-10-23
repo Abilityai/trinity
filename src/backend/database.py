@@ -137,6 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
+from db.peer_skill_grants import PeerSkillGrantOperations
 from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
@@ -1020,6 +1021,7 @@ class DatabaseManager:
         self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
+        self._peer_skill_grant_ops = PeerSkillGrantOperations()  # ent#662
         self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
@@ -2717,8 +2719,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)
@@ -2858,6 +2861,25 @@ class DatabaseManager:
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
     # =========================================================================
+    # Per-skill grants over an edge (delegated to db/peer_skill_grants.py) — ent#662
+    def granted_peer_skills(self, caller_agent: str, target_agent: str):
+        return self._peer_skill_grant_ops.granted_peer_skills(caller_agent, target_agent)
+
+    def list_peer_skill_grants(self, caller_agent: str):
+        return self._peer_skill_grant_ops.list_peer_skill_grants(caller_agent)
+
+    def grant_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str, granted_by: str):
+        return self._peer_skill_grant_ops.grant_peer_skill(caller_agent, target_agent, skill_name, granted_by)
+
+    def revoke_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str):
+        return self._peer_skill_grant_ops.revoke_peer_skill(caller_agent, target_agent, skill_name)
+
+    def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
+        return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def delete_agent_peer_skill_grants(self, agent_name: str):
+        return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
+
     # Agent capability grants (delegated to db/capability_grants.py) — ent#596
     def agent_has_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.agent_has_capability(agent_name, capability)
@@ -2999,21 +3021,30 @@ class DatabaseManager:
         cost: float = None,
         sender_email: str = None,
         sender_label: str = None,
+        gate_hold: str = None,
     ):
         return self._public_chat_ops.add_message(
             session_id, role, content, cost,
-            sender_email=sender_email, sender_label=sender_label,
+            sender_email=sender_email, sender_label=sender_label, gate_hold=gate_hold,
         )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None,
+                                 include_held: bool = False):
+        return self._public_chat_ops.get_session_messages(
+            session_id, limit, sender_email=sender_email, include_held=include_held)
 
     def get_recent_public_chat_messages(
         self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+        include_held: bool = False,
     ):
+        # trinity#3402: rows the skill gate stopped are left out unless asked for.
         return self._public_chat_ops.get_recent_messages(
-            session_id, limit, sender_email=sender_email, since=since,
+            session_id, limit, sender_email=sender_email, since=since, include_held=include_held,
         )
+
+    def mark_public_chat_messages_held(self, message_ids: list, gate_hold: str) -> int:
+        # trinity#3402: a held / refused turn and its notice are never replayed.
+        return self._public_chat_ops.mark_messages_held(message_ids, gate_hold)
 
     def prune_public_chat_session(self, session_id: str, keep: int) -> int:
         # ent#600: bound a Telegram group session that records every visible message.
@@ -3963,6 +3994,10 @@ class DatabaseManager:
             item_id, response, response_text, responded_by_id, responded_by_email,
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
+
+    def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
+        # trinity-enterprise#901: the agent ends its own pending ask, no successor.
+        return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
                                    disposition="cancelled"):

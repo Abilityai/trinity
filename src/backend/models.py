@@ -321,6 +321,10 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # #3872: a persisted git config exists (the repo is bound) — set by the
+    # detail endpoint only; the header reserves its GitHub row on it at first
+    # paint. None = not resolved (the list path never reads it).
+    git_configured: Optional[bool] = None
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
@@ -496,6 +500,9 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -535,6 +542,16 @@ class ChatMessageRequest(BaseModel):
     """Request model for chat messages."""
     message: str
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
+
+
+class ReportBackRequest(BaseModel):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation. Sent by the MCP server when a sequential call
+    ends in a receipt instead of the reply, naming the CALLER's own turn; the
+    row inherits that turn's channel context through the same provenance
+    guard a ``/task`` child uses (``_inherited_channel_context``)."""
+    model_config = ConfigDict(extra="forbid")
+    parent_execution_id: str = Field(min_length=1, max_length=128)
 
 
 class ModelChangeRequest(BaseModel):
@@ -1521,10 +1538,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)
@@ -3807,6 +3820,19 @@ class OperatorAskCreate(BaseModel):
     replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
+class OperatorAskWithdraw(BaseModel):
+    """Body for an agent withdrawing one of its own pending asks
+    (trinity-enterprise#901): `POST /api/agents/{name}/operator-queue/{request_id}/withdraw`.
+
+    TYPES ONLY, like `OperatorAskCreate`: the reason's bound (1..500 after
+    trimming) is the ask sink's, so the refusal is a NAMED `invalid_reason`.
+    Unknown fields are refused — the ending is the platform's to record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Any = None
+
+
 class SkillGateCheckRequest(BaseModel):
     """What the in-container skill-gate hook asks (trinity-enterprise#752):
     `POST /api/skill-gate/check`, with the agent's own key.
@@ -3866,6 +3892,8 @@ class SkillGateEntry(BaseModel):
     set_by_agent: Optional[str] = None
     set_at: Optional[str] = None
     approver_reachable: Optional[bool] = None
+    # trinity-enterprise#881: why nobody can approve — `unfilled` | `not_shared` — or null.
+    approver_unreachable: Optional[str] = None
 
 
 class SkillGateApproverStatus(BaseModel):
@@ -3882,6 +3910,9 @@ class SkillGateApproverStatus(BaseModel):
     viewer_fills: bool
     label: Optional[str] = None
     role_id: Optional[str] = None
+    # trinity-enterprise#881: why it reaches nobody — `unfilled` (nobody fills
+    # it) | `not_shared` (its people can't open the agent) — or null.
+    unreachable: Optional[str] = None
 
 
 class SkillGateMapResponse(BaseModel):
@@ -3907,7 +3938,9 @@ class SkillGateMapResponse(BaseModel):
 class SkillGateWriteResponse(BaseModel):
     """What `PUT .../skill-gates/{skill_name}` did. `warnings`:
     `approver_unassigned` (the approver kind reaches nobody now, so a gated
-    request would be refused) and `marker_not_written` (the running agent's
+    request would be refused), `approver_not_shared` (its people can't open
+    the agent, so they would never see the approval — trinity-enterprise#881)
+    and `marker_not_written` (the running agent's
     fail-closed marker could not be written; the check re-syncs it)."""
     agent_name: str
     skill_name: str
