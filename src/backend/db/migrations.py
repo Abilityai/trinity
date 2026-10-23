@@ -5637,6 +5637,17 @@ def _migrate_agent_skill_gates(cursor, conn):
     conn.commit()
 
 
+def _migrate_a2a_caller_identity(cursor, conn):
+    """abilityai/trinity-enterprise#862 — store the AAuth peer identity that
+    triggered an inbound A2A execution so it is visible on the execution row.
+    Additive: NULL for all existing rows. Mirrored by Alembic 0102_a2a_caller_identity."""
+    _safe_add_column(
+        cursor, "schedule_executions", "a2a_caller_identity",
+        "ALTER TABLE schedule_executions ADD COLUMN a2a_caller_identity TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5808,4 +5819,5 @@ MIGRATIONS = [
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
+    ("a2a_caller_identity", _migrate_a2a_caller_identity),
 ]

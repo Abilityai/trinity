@@ -146,9 +146,11 @@
       <div class="mt-5 pt-5 border-t border-gray-200 dark:border-gray-700">
         <h4 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-1">Inbound allow-list</h4>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-          Trinity accounts permitted to task this agent inbound — the caller's account
-          <strong>email</strong> (or username, when the account has no email). Empty =
-          any authenticated owner/shared caller. Non-empty = only these identities.
+          Callers permitted to task this agent inbound. Empty = any authenticated owner/shared caller.
+          Non-empty = only these identities. Two formats are accepted:
+          <strong>email or username</strong> for Trinity accounts on this instance, or
+          <strong><code class="font-mono">aauth:&lt;agent&gt;@&lt;peer-host&gt;</code></strong>
+          for an agent on a peer Trinity instance over AAuth.
         </p>
         <div v-if="config.inbound_allowlist.length" class="space-y-2 mb-3">
           <div
@@ -156,12 +158,19 @@
             :key="id"
             class="flex items-center justify-between gap-2 px-3 py-1.5 rounded-md bg-gray-50 dark:bg-gray-900/50 border border-gray-200 dark:border-gray-700"
           >
-            <code class="font-mono text-xs text-gray-800 dark:text-gray-200 overflow-x-auto">{{ id }}</code>
+            <div class="flex items-center gap-2 min-w-0">
+              <BaseBadge
+                :variant="isAAuthIdentity(id) ? 'info' : 'neutral'"
+                size="sm"
+                class="shrink-0"
+              >{{ isAAuthIdentity(id) ? 'AAuth' : 'Local' }}</BaseBadge>
+              <code class="font-mono text-xs text-gray-800 dark:text-gray-200 overflow-x-auto">{{ id }}</code>
+            </div>
             <button
               type="button"
               @click="removeIdentity(id)"
               :disabled="busy"
-              class="text-status-danger-600 hover:text-status-danger-700 text-xs font-medium disabled:opacity-50"
+              class="text-status-danger-600 hover:text-status-danger-700 text-xs font-medium disabled:opacity-50 shrink-0"
             >Remove</button>
           </div>
         </div>
@@ -169,16 +178,21 @@
           No restriction — any authenticated owner/shared caller may task the agent.
         </div>
         <form class="flex items-center gap-2" @submit.prevent="addIdentity">
-          <input
-            v-model.trim="newIdentity"
-            type="text"
-            placeholder="caller@example.com"
-            class="flex-1 px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
-          />
+          <div class="flex-1 flex flex-col gap-1">
+            <input
+              v-model.trim="newIdentity"
+              type="text"
+              placeholder="caller@example.com or aauth:agent@peer-host"
+              class="w-full px-3 py-1.5 text-sm rounded-md border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 focus:ring-2 focus:ring-action-primary-500 focus:outline-none"
+            />
+            <p v-if="aAuthIdentityFormatWarning" class="text-xs text-status-warning-600 dark:text-status-warning-400">
+              {{ aAuthIdentityFormatWarning }}
+            </p>
+          </div>
           <button
             type="submit"
             :disabled="busy || !newIdentity"
-            class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50"
+            class="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:opacity-50 self-start"
           >Add</button>
         </form>
       </div>
@@ -236,6 +250,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useRole } from '../composables/useRole'
 import { copyToClipboard } from '../utils/clipboard'
+import BaseBadge from './base/BaseBadge.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -268,6 +283,21 @@ const skillsEditing = ref(false)
 const skillDraft = ref([])
 
 const newIdentity = ref('')
+
+// aauth:<local>@<host> — the format AAuth peer identities must use
+const AAUTH_IDENTITY_RE = /^aauth:[^@]+@[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$/
+
+function isAAuthIdentity(id) {
+  return typeof id === 'string' && id.toLowerCase().startsWith('aauth:')
+}
+
+const aAuthIdentityFormatWarning = computed(() => {
+  const v = newIdentity.value
+  if (!v || !isAAuthIdentity(v)) return ''
+  return AAUTH_IDENTITY_RE.test(v)
+    ? ''
+    : 'Expected format: aauth:<agent-name>@<peer-host> — e.g. aauth:my-agent@peer.example.com'
+})
 
 // The canonical A2A discovery URL an external orchestrator fetches (the public,
 // unauthenticated well-known route served by the inbound server, ent#157).
