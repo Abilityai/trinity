@@ -25,9 +25,9 @@
  * with its numbers already in hand — a background refresh never re-enters
  * `loading`, an empty terminal snaps (`reveal=false`) rather than celebrates,
  * and `prefers-reduced-motion` skips both the breathing and the reveal. The
- * one difference is the fallback timer: the reveal is ~1.5s end to end, not
- * 550ms, so a lost `animationend` is forced closed by
- * `WAVE_REVEAL_FALLBACK_MS`, not the scanline's 700ms.
+ * one difference is the fallback timer: the reveal is ~1.5s end to end for a
+ * week, not 550ms, so a lost `animationend` is forced closed by
+ * `revealFallbackMs(beatCount)`, not the scanline's 700ms.
  *
  * HONESTY — the payload is one datum per UTC day. The four beats of a day are
  * texture on that datum, not sub-day samples: the DAY is the unit the person
@@ -42,7 +42,7 @@
  */
 import { ref, computed, watch, nextTick, onBeforeUnmount } from 'vue'
 import {
-  WAVE_W, WAVE_H, SOFT, FALLBACK_COLOR, IDLE_COLORS, WAVE_REVEAL_FALLBACK_MS,
+  WAVE_W, WAVE_H, SOFT, FALLBACK_COLOR, IDLE_COLORS, revealFallbackMs,
   layoutWave, idleBeats, nextWaveId,
 } from '@/utils/activityWave'
 import {
@@ -82,7 +82,7 @@ const prefersReducedMotion =
 
 // ---------------------------------------------------------------- geometry
 const wave = computed(() => layoutWave({ data: props.data, buckets: props.buckets, colors: props.colors }))
-const idle = computed(() => idleBeats({ n: Array.isArray(props.data) && props.data.length ? props.data.length : 7 }))
+const idle = computed(() => idleBeats(Array.isArray(props.data) && props.data.length ? { n: props.data.length } : {}))
 const total = computed(() => wave.value.days.reduce((a, d) => a + d.total, 0))
 const ariaLabel = computed(() => (
   phase.value === PHASE_LOADING
@@ -103,7 +103,7 @@ function endReveal() {
 watch(() => props.loading, (loading) => {
   phase.value = onLoadingChange(phase.value, loading, { reveal: props.reveal, reducedMotion: prefersReducedMotion })
   clearFallback()
-  if (phase.value === PHASE_REVEALING) fallbackTimer = setTimeout(endReveal, WAVE_REVEAL_FALLBACK_MS)
+  if (phase.value === PHASE_REVEALING) fallbackTimer = setTimeout(endReveal, revealFallbackMs(wave.value.beats.length))
 })
 const isRevealing = computed(() => phase.value === PHASE_REVEALING)
 const lastBeat = computed(() => wave.value.beats.length - 1)
@@ -275,7 +275,7 @@ const softDeviation = `0 ${SOFT}`
           ? { top: tipPos.top + 'px', left: tipPos.left + 'px' }
           : { top: '0px', left: '0px', visibility: 'hidden' }"
       >
-        <div class="font-semibold mb-1 whitespace-nowrap">{{ fmtDate(hoverDay.date) }}</div>
+        <div v-if="hoverDay.date" class="font-semibold mb-1 whitespace-nowrap">{{ fmtDate(hoverDay.date) }}</div>
         <template v-if="hoverDay.total">
           <div v-for="s in hoverDay.segments" :key="s.bucket" class="flex items-center justify-between gap-3 whitespace-nowrap">
             <span class="flex items-center">
@@ -325,8 +325,7 @@ const softDeviation = `0 ${SOFT}`
 .wave-beat { pointer-events: none; }
 .wave-empty { opacity: 0.45; }
 
-.wave-still,
-.wave-root :is(.wave-idle-beat, .wave-beat):where(.wave-still) { animation: none; }
+.wave-still { animation: none; }
 @media (prefers-reduced-motion: reduce) {
   .wave-idle-beat, .wave-reveal .wave-beat { animation: none; }
 }

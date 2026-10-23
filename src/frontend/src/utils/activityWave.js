@@ -54,12 +54,17 @@ export const IDLE_COLORS = Object.freeze({ base: '#64748b', core: '#818cf8' })
 
 // Reveal motion, mirrored by the component's CSS: each beat grows in over
 // REVEAL_MS, starting REVEAL_STAGGER_MS after the previous one. The phase
-// fallback (lost `animationend`, hidden tab) must outlive the LAST beat:
-// 750 + 24 × 31 ≈ 1.5s for an eight-day week, so 1.6s — not the scanline's
+// fallback (lost `animationend`, hidden tab) must outlive the LAST beat, so it
+// is derived from the beat count rather than fixed: 750 + 24 × 31 ≈ 1.5s for
+// an eight-day week, and longer for a longer window — never the scanline's
 // 700ms, which would cut the reveal mid-flight.
 export const REVEAL_MS = 750
 export const REVEAL_STAGGER_MS = 24
-export const WAVE_REVEAL_FALLBACK_MS = 1600
+export const WAVE_REVEAL_FALLBACK_MS = 1600 // the floor, for a week or less
+export function revealFallbackMs(beatCount) {
+  const last = Math.max(0, (beatCount || 0) - 1)
+  return Math.max(WAVE_REVEAL_FALLBACK_MS, REVEAL_MS + REVEAL_STAGGER_MS * last + 150)
+}
 
 const r2 = (v) => Math.round(v * 100) / 100
 const clamp01 = (v) => Math.min(1, Math.max(0, v))
@@ -136,7 +141,13 @@ function segmentsFor(d, buckets, colors) {
     accounted += n
   }
   const rest = dayTotal(d) - accounted
-  if (rest > 0) segs.push({ bucket: 'Other', n: rest, color: colors.Other || FALLBACK_COLOR })
+  if (rest > 0) {
+    // `Other` is a real bucket too: fold the remainder into it rather than
+    // pushing a second segment under the same name (a duplicate tooltip key).
+    const other = segs.find((s) => s.bucket === 'Other')
+    if (other) other.n += rest
+    else segs.push({ bucket: 'Other', n: rest, color: colors.Other || FALLBACK_COLOR })
+  }
   return segs
 }
 
@@ -223,10 +234,11 @@ export function layoutWave({
 /**
  * The loading face: resting dots at the positions the loaded beats will take,
  * so the reveal grows each beat in place rather than shuffling the row. `n` is
- * the day count when it is already known (a cached timeline for a sibling
- * window), else a week.
+ * the day count when it is already known, else EIGHT — the band's window is
+ * fixed at `7d`, and the backend's gap-filled timeline for it runs from the
+ * window's start date through today inclusive, which is eight points.
  */
-export function idleBeats({ n = 7, perDay = BEATS_PER_DAY, width = WAVE_W, height = WAVE_H, pad = WAVE_PAD } = {}) {
+export function idleBeats({ n = 8, perDay = BEATS_PER_DAY, width = WAVE_W, height = WAVE_H, pad = WAVE_PAD } = {}) {
   const dayW = (width - 2 * pad) / Math.max(1, n)
   const step = dayW / perDay
   const w = step * 0.5

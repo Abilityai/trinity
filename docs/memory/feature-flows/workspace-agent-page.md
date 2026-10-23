@@ -525,9 +525,9 @@ claims. The payload, the `labels` contract and the per-day tooltip are unchanged
 (the tooltip's placement rule moved to `utils/chartTooltip.js`, shared with
 `StackedBarChart`, which the operator Overview keeps). The chart owns its loading
 motion — breathing beats under a glint, then a left-to-right grow-in — as the one
-named exception to design-system §6, under the scanline's phase rules; the band
-passes `loading` as `!loaded && !error` so a failed first load does not breathe
-beside its `InlineError`. The day count comes from the payload: a `7d` window is
+named exception to design-system §6, under the scanline's phase rules; a failed
+first load takes the "unavailable" sentence arm rather than the wave, which would
+otherwise draw the fallback empty timeline as "no runs". The day count comes from the payload: a `7d` window is
 **eight** points (start date through today inclusive). The 39px column budget from
 ent#547 is untouched. Guards: `tests/unit/activityWave.spec.js`,
 `activityWave.mount.spec.js`, `portalAgentBandWave.mount.spec.js`.

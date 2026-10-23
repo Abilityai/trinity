@@ -8,7 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import ActivityWave from '@/components/portal/ActivityWave.vue'
-import { BEATS_PER_DAY, WAVE_REVEAL_FALLBACK_MS } from '@/utils/activityWave'
+import { BEATS_PER_DAY, revealFallbackMs } from '@/utils/activityWave'
 
 const COLORS = { 'Chat/Tasks': '#6366f1', 'MCP': '#a78bfa', 'Scheduled': '#22d3ee' }
 const BUCKETS = Object.keys(COLORS)
@@ -103,7 +103,7 @@ describe('loading face and the phase machine', () => {
     await w.setProps({ loading: false })
     expect(w.attributes('data-phase')).toBe('revealing')
     expect(w.find('[data-wave-data]').classes()).toContain('wave-reveal')
-    vi.advanceTimersByTime(WAVE_REVEAL_FALLBACK_MS + 1)
+    vi.advanceTimersByTime(revealFallbackMs(8 * BEATS_PER_DAY) + 1)
     await nextTick()
     expect(w.attributes('data-phase')).toBe('loaded')
     expect(w.find('[data-wave-data]').classes()).not.toContain('wave-reveal')
@@ -171,7 +171,7 @@ describe('hover tooltip', () => {
     expect(tooltip().textContent).toContain('No runs')
   })
 
-  it('beats take no pointer events — the day rect is the only target', () => {
+  it('the day hit rects paint above every beat (the pointer-events rule itself is CSS)', () => {
     const w = keep(mountWave())
     // the rule is CSS (`.wave-beat { pointer-events: none }`); what the DOM can
     // show is that the hit rects sit AFTER every beat in paint order, so they

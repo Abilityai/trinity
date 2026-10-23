@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   WAVE_W, WAVE_H, WAVE_PAD, BEATS_PER_DAY, SCALE_FLOOR, SEG_EXT, SOFT, FALLBACK_COLOR,
-  WAVE_REVEAL_FALLBACK_MS,
+  WAVE_REVEAL_FALLBACK_MS, REVEAL_MS, REVEAL_STAGGER_MS, revealFallbackMs,
   monotone, layoutWave, idleBeats,
 } from '@/utils/activityWave'
 
@@ -47,9 +47,12 @@ describe('constants', () => {
     expect(SCALE_FLOOR).toBe(10)
     expect(SEG_EXT).toBe(4)
     expect(SOFT).toBe(1.8)
-    // the reveal is ~1.4s end to end (750ms + 24ms × last beat); the fallback
-    // must outlive it, unlike the scanline's 700ms
+    // the reveal is ~1.5s end to end for a week (750ms + 24ms × last beat); the
+    // fallback must outlive it, unlike the scanline's 700ms — for ANY beat count
     expect(WAVE_REVEAL_FALLBACK_MS).toBeGreaterThan(1400)
+    expect(revealFallbackMs(32)).toBeGreaterThan(REVEAL_MS + REVEAL_STAGGER_MS * 31)
+    expect(revealFallbackMs(14 * 4)).toBeGreaterThan(REVEAL_MS + REVEAL_STAGGER_MS * 55)
+    expect(revealFallbackMs(0)).toBe(WAVE_REVEAL_FALLBACK_MS)
   })
 })
 
@@ -127,6 +130,12 @@ describe('layoutWave — days', () => {
     const w = layoutWave({ data: [d], buckets: ORDER, colors: COLORS })
     expect(w.days[0].segments.map((s) => [s.bucket, s.n])).toEqual([['Chat/Tasks', 6], ['Other', 4]])
     expect(w.days[0].segments[1].color).toBe(COLORS.Other)
+  })
+
+  it('folds the remainder into an existing Other bucket rather than listing Other twice', () => {
+    const d = { date: '2026-10-22', total: 10, by_type: { 'Chat/Tasks': 6, 'Other': 1 } }
+    const w = layoutWave({ data: [d], buckets: ORDER, colors: COLORS })
+    expect(w.days[0].segments.map((s) => [s.bucket, s.n])).toEqual([['Chat/Tasks', 6], ['Other', 4]])
   })
 
   it('renders a resting wave, never nothing, for an empty or missing payload', () => {
@@ -227,7 +236,7 @@ describe('idleBeats — the loading face', () => {
     }
   })
 
-  it('defaults to a week when the day count is not known yet', () => {
-    expect(idleBeats()).toHaveLength(7 * BEATS_PER_DAY)
+  it('defaults to the eight points a 7d window carries, so the reveal lands in place', () => {
+    expect(idleBeats()).toHaveLength(8 * BEATS_PER_DAY)
   })
 })

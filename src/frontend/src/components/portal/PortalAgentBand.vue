@@ -90,11 +90,10 @@
            doc and in `portalLoadingTreatment.spec.js`'s importer list); the
            PHASE rules are still the scanline's, so a cache-hit remount never
            animates and a background refresh is invisible.
-           `loading` is the VERDICT (`!loaded`), never a request being open; it
-           also goes quiet on a failed first load (`InlineError` is the band's
-           first arm and this column sits outside that chain, so without `!error`
-           the wave would breathe forever beside the error). `reveal` is the
-           activity verdict: an empty week settles, it does not celebrate. -->
+           `loading` is the VERDICT (`!loaded`), never a request being open; a
+           failed first load never reaches the wave at all (the sentence arm
+           below takes it). `reveal` is the activity verdict: an empty week
+           settles, it does not celebrate. -->
       <!-- Bounded, not flexed to fill. Stretched across the whole band a 7-day
            window gives ~150px-wide columns — board A3's chart is a compact block
            beside the figures, not a full-width plot. -->
@@ -118,11 +117,16 @@
           Activity · last {{ WINDOW_LABEL }}
         </div>
         <div class="min-h-[23px] flex items-center">
-          <p v-if="stats.unavailable" class="text-xs text-gray-400">Stats are unavailable right now.</p>
+          <!-- "Unavailable" is a sentence, and so is a FAILED first load: the
+               composable's fallback `stats` is zeros with an empty timeline, which
+               the wave would draw as its resting face and announce as "no runs" —
+               the request failed, which is a different claim from "this agent has
+               none" (contract principle 15). This column sits outside the
+               `InlineError` chain, so it answers the failure itself. -->
+          <p v-if="stats.unavailable || (error && !loaded)" class="text-xs text-gray-400">Stats are unavailable right now.</p>
           <!-- An empty week is the wave's own resting face, not a sentence: the
-               band keeps one silhouette whatever the data (ent#968). "Unavailable"
-               stays a sentence — empty and unavailable are different claims and
-               must not look alike (contract principle 15). -->
+               band keeps one silhouette whatever the data (ent#968). Empty and
+               unavailable are different claims and must not look alike. -->
           <ActivityWave
             v-else
             class="w-full"
@@ -130,7 +134,7 @@
             :buckets="chartBuckets"
             :colors="BUCKET_COLORS"
             :labels="PORTAL_BUCKET_LABELS"
-            :loading="!loaded && !error"
+            :loading="!loaded"
             :reveal="hasActivity"
             :height="23"
             :label="`Activity, last ${WINDOW_LABEL}`"

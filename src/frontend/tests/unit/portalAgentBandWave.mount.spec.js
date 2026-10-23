@@ -76,9 +76,10 @@ describe('ent#968 — the band wires the wave', () => {
     w.unmount()
   })
 
-  it('goes quiet on a failed first load instead of breathing beside the error', () => {
-    const w = band({ stats: {}, loaded: false, error: 'nope' })
-    expect(w.find('[data-stub-wave]').attributes('data-loading')).toBe('false')
+  it('a failed first load is "unavailable", never the resting wave claiming "no runs"', () => {
+    const w = band({ stats: { total_executions: 0, timeline: [] }, loaded: false, error: 'nope' })
+    expect(w.find('[data-stub-wave]').exists()).toBe(false)
+    expect(w.text()).toContain('Stats are unavailable right now.')
     expect(w.text()).toContain('nope')
     w.unmount()
   })
