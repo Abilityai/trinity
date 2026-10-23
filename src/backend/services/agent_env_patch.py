@@ -46,7 +46,9 @@ def _check_key(key: str) -> str:
 def format_env_line(key: str, value: str) -> str:
     """``KEY="value"`` exactly as the agent's own writer emits it (#2023)."""
     _check_key(key)
-    if "\n" in value or "\r" in value:
+    # The agent reader splits with str.splitlines(), which also breaks on
+    # \x0b \x0c \x1c-\x1e \x85 \u2028 \u2029 — refuse every one, anywhere.
+    if value.splitlines() not in ([], [value]):
         raise ValueError(
             f"value for {key!r} contains a newline or carriage return; "
             ".env is line-oriented and such a value would define an extra key"

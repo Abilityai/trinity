@@ -116,6 +116,17 @@ class TestSetKeys:
         with pytest.raises(ValueError, match="newline"):
             patch.set_keys("", {"NVM_API_KEY": bad})
 
+    @pytest.mark.parametrize("position", ["middle", "trailing"])
+    @pytest.mark.parametrize("boundary", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
+    def test_every_splitlines_boundary_is_rejected(self, patch, reader, boundary, position, tmp_path):
+        """The agent reader splits `.env` with `str.splitlines()`, so the writer
+        refuses every boundary that splitter honours, not only `\\n`/`\\r`."""
+        bad = "a" + boundary + "NVM_ENVIRONMENT=live" if position == "middle" else "abc" + boundary
+        line = 'NVM_API_KEY="' + bad + '"\n'
+        assert len(line.splitlines()) > 1  # what the reader would see if written
+        with pytest.raises(ValueError, match="newline"):
+            patch.set_keys("", {"NVM_API_KEY": bad})
+
     @pytest.mark.parametrize("bad", ["NVM\nKEY", "NVM KEY", "1NVM", "", "NVM=KEY"])
     def test_a_malformed_key_is_rejected(self, patch, bad):
         with pytest.raises(ValueError, match="key"):

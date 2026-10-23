@@ -5793,7 +5793,7 @@ class AAuthResourceCallResponse(BaseModel):
 def _nevermined_secret(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
-    if "\n" in value or "\r" in value:
+    if value.splitlines() not in ([], [value]):  # the agent .env splitter's boundary set
         raise ValueError("a Nevermined secret cannot contain a newline")
     value = value.strip()
     return value or None

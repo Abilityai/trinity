@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent966_agent_env_patch.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ],
+      "description": "#2023 quoting parity, byte-for-byte preservation, remove_keys"
+    },
+    {
       "file": "unit/test_ent966_delegation_gate.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-22",

@@ -222,6 +222,12 @@ class TestOrganization:
         r = _put(env, widget_secret="abc\nNVM_API_KEY=x")
         assert r.status_code == 422
 
+    def test_unicode_line_separator_in_secret_is_rejected(self, env):
+        """`str.splitlines()` — the agent's `.env` splitter — breaks on U+2028."""
+        r = _put(env, agent_api_key="sandbox:akey\u2028NVM_ENVIRONMENT=live")
+        assert r.status_code == 422
+        assert "newline" in r.text
+
 
 class TestProductionWiring:
     def test_main_registers_the_router(self):
