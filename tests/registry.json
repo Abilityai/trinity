@@ -6303,6 +6303,28 @@
         "reliability"
       ],
       "description": "Once an execution row is terminal, zero of its companion activities (caller agent_collaboration, self_task) stay `started`, whichever writer wrote it: watchdog and startup _recover_execution, lease-reaper park, stale-slot reclaim and the bulk stale sweep close a direct-dispatch companion that has no backlog_metadata; the bulk sweep leaves tool_call rows alone; a lease re-queue leaves the companion to the re-delivery; a bulk FAILED companion is still upgraded by a late SUCCESS; the AAuth inbound record (triggered_by='a2a') is never rewritten; the a2a queued-cancel CAS winner closes and emits the terminal event, a lost cancel does neither."
+    },
+    {
+      "file": "unit/test_ent419_memory_poisoning_gates.py",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "mcp"
+      ],
+      "description": "Anti-poisoning gates on agent-written user memory (MEM-001): the write-boundary screen through the real router (each of memory_prompt_marker / memory_instruction / memory_tool_directive / memory_link_in_instruction refused with its code and the line the agent sent, nothing stored, the log carries rule and line never the text; folded spellings \u2014 zero-width, full-width, Hangul filler, combining marks, split across a line break, case; a benign table of facts, preferences, open loops, plain links and the false positives an adversarial review found; the cheap misses it found), the exemption keyed on the hit (an old hit kept is not counted again; old lines reordered, re-contextualised or respelled into a new hit are refused; a split across old and new is refused), copy-back normalisation (the rendered block stored clean; a whole-block copy-back keeps only the agent-notes section), the non-creating previous-notes read over real SQLite, AC 4 (a channel write resolves ent#549's one-to-one speaker stamp; a group turn writes no one's memory), the trust envelope on the real format_user_memory_block (nonce'd open/close lines, every splitlines() line margined incl. \\r / NEL / U+2028, forged ends and platform structure only ever margined, control characters removed, summary inside, decisions after the reminder, render failure drops memory, fresh nonce, a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer (a tripping line is dropped and the rest kept, all lines dropped keeps the previous summary, each message clamped, the conversation margined inside its prompt), seat decisions (any line terminator refused, markers / instructions / an MCP tool id / a slotted URL refused with a sentence receipt, business-rule decisions accepted, legacy rows rendered on one line, the same one-to-one rule in _seat_for, the block's framing line pinned against the guard), the Telegram history defang, AST pins (the router stores only what prepare_write returned; the summarizer screens before it stores; one agent-notes writer across src/backend), the structural-heading list pinned against the composed prompt, totality (Hypothesis) and time budgets on adversarial and summarizer-sized input."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/memory.test.ts",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "mcp",
+        "security"
+      ],
+      "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
     }
   ]
 }
