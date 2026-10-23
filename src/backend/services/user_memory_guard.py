@@ -243,8 +243,9 @@ REASONS = {
                        "what you learned about the person as a fact instead."),
     RULE_TOOL: ("tells a later session to run a tool or a command. Store the fact behind it "
                 "instead (e.g. 'Deploys with the release script on Fridays')."),
-    RULE_LINK: ("puts a link inside an instruction. Store the link as a fact about the person "
-                "(e.g. 'Portfolio: <link>', 'Her draft (<link>) is due Friday')."),
+    RULE_LINK: ("puts a link or an address inside an instruction. Store it as a fact about the "
+                "person (e.g. 'Portfolio: <link>', 'Her assistant: <address>', 'Her draft (<link>) "
+                "is due Friday')."),
 }
 #: The exfiltration shape fires whatever the phrasing, so its message must not
 #: promise that a fact-phrased copy will pass.
@@ -392,6 +393,15 @@ _ROLE_LABEL = re.compile(
     r"^(?:SYSTEM|ASSISTANT|HUMAN|DEVELOPER)"
     r"(?:[ _-]+(?:MESSAGE|PROMPT|NOTE|NOTICE|OVERRIDE|INSTRUCTIONS?|UPDATE|ALERT))?\s*:"
 )
+#: Any-case role label that opens a forged turn: an instruction or an
+#: assistant-style reply after it ("System: macOS 14" and "Assistant: Maria (her
+#: EA)" are labels and pass). Matched on the folded line.
+_ROLE_TURN = re.compile(
+    r"(?:system|assistant|human|developer|user)\s*:\s*"
+    r"(?:sure\b|okay\b|ok\b|of\s+course\b|certainly\b|absolutely\b|i\s+will\b|i'll\b|i\s+am\b|i'm\b"
+    r"|i\s+can\b|you\s+(?:are|must|should|will)\b|always\b|never\b|from\s+now\s+on\b|ignore\b|disregard\b"
+    r"|reply\b|respond\b|answer\b|act\b|follow\b|obey\b|send\b|share\b|tell\b|reveal\b|do\s+not\b|don't\b)"
+)
 _ENVELOPE_PHRASE = re.compile(r"\[\s*(?:end\s+of\s+memory|memory\s+about\s+this\s+person)\b")
 #: Headings of the composed system prompt that a note has no reason to repeat
 #: (levels 1–3; generic sub-headings such as "How to Use" stay out). Pinned
@@ -423,6 +433,9 @@ _INSTRUCTION = tuple(re.compile(p) for p in (
     rf"\b{_OVERRIDE}\s+(?:all|any|every|your)\b(?:\s+(?:{_DETERMINER}|{_QUALIFIER})){{0,4}}\s+{_AGENT_RULES}\b",
     # ignore the previous instructions — the qualifier right before the noun
     rf"\b{_OVERRIDE}\s+(?:{_DETERMINER}\s+){{0,3}}{_QUALIFIER}\s+{_AGENT_RULES}\b",
+    # ignore the instructions above / given so far — the qualifier after the noun
+    rf"\b{_OVERRIDE}\s+(?:all\s+)?(?:of\s+)?(?:the|your|these|those)\s+(?:{_QUALIFIER}\s+)?{_AGENT_RULES}\s+"
+    r"(?:above|before\s+this|so\s+far|(?:you\s+(?:were|have\s+been)\s+)?given)\b",
     # ignore (all of) the above. / ignore everything you were told
     rf"\b{_OVERRIDE}\s+(?:all\s+)?(?:of\s+)?(?:the\s+)?above(?=\s*(?:[.,;:!]|$))",
     rf"\b{_OVERRIDE}\s+everything\s+(?:above|before|(?:that\s+)?you\s+(?:were|have\s+been|'ve\s+been)\s+told)",
@@ -456,15 +469,17 @@ _NEW_INSTRUCTIONS_OPENER = re.compile(r"(?:new|updated|revised)\s+(?:system\s+)?
 # -- imperative position (memory_tool_directive, memory_link_in_instruction) --
 # A verb counts as a directive at the start of a sentence (after a short
 # "Label:" — "Open loop:" is a label, not an order), after , ; : or (, or after
-# a directive cue addressed to the agent. A third person's modal ("she will need
-# to …") and reported speech ("asked me to …") are facts, not cues; "never" is a
-# prohibition, not an order to use something.
+# a directive cue addressed to the agent ("you should", "the agent should"). A
+# third person's modal ("she will need to …") and reported speech ("asked me to
+# …") are facts, not cues; "never" is a prohibition, not an order to use
+# something.
 _IMPERATIVE_AT = (
     r"(?:^|[,;:(]\s*"
     r"|\b(?:please|always|then|first|also|just|now)\s+"
     r"|\b(?:make|be)\s+sure\s+(?:to\s+|you\s+)?"
     r"|\b(?:remember|don't\s+forget|do\s+not\s+forget)\s+to\s+"
     r"|\byou\s+(?:must|should|need\s+to|have\s+to|will)\s+"
+    r"|\bthe\s+(?:agent|assistant|bot|ai|model)\s+(?:must|should|shall|needs?\s+to|has\s+to|will|is\s+to)\s+"
     r"|\b(?:every|each)\s+(?:time|session|turn|run|conversation|chat|morning|day|week|reply|message)\b"
     r"[^,.;]{0,40}?,?\s*"
     r"|\bwhenever\b[^,.;]{0,60}?,\s*"
@@ -477,12 +492,20 @@ _SENTENCE_BREAK = re.compile(r"(?<=[.!?;])\s+|\n")
 #: A verb read as the head of a noun phrase ("Pull request …", "Access granted …").
 _NOUN_CONTINUATION = r"(?!-)(?!\s*:)(?!\s+(?:requests?|granted|notes?|loops?|items?|of|logs?|history|up)\b)"
 
-_TOOL_DIRECTIVE = re.compile(_IMPERATIVE_AT + (
+#: Using a tool: never something memory should tell a later session to do, but
+#: a decision may legitimately name one ("Use the Jira tool for vendor tickets").
+_TOOL_INVOCATION = re.compile(_IMPERATIVE_AT + (
     r"(?:(?:call|run|execute|invoke|use|trigger|launch|start)\s+(?:the\s+|your\s+|a\s+|an\s+|this\s+|that\s+)?"
     r"(?:[\w./:@-]{1,64}\s+){0,3}?(?:tool|function|command|script|skill|hook|plugin)s?\b"
     r"|(?:(?:call|run|execute|invoke|use|trigger)\s+(?:the\s+)?)?mcp__[a-z0-9_-]+"
     r"|(?:call|run|execute|invoke)\s+[a-z_][\w.]{0,64}\("
-    r"|(?:call|run|use|send|share|paste|attach|upload|include|read|open|cat|print|show|post|email|give)\b"
+    r")"
+))
+#: A shell command or a secrets file, given as an order: never a legitimate
+#: note AND never a legitimate decision. A decision that bans the practice
+#: ("Ban curl | sh installers in CI") is not in imperative position and passes.
+_SHELL_DIRECTIVE = re.compile(_IMPERATIVE_AT + (
+    r"(?:(?:call|run|use|send|share|paste|attach|upload|include|read|open|cat|print|show|post|email|give)\b"
     r"[^.\n]{0,60}?\.env\b"
     r"|(?:(?:run|execute|exec|type|paste|enter)\s+)?['\"`]?"
     r"(?:sudo\s+(?:rm|chmod|chown|curl|wget|sh|bash|zsh|apt(?:-get)?|pip3?|npm|systemctl|kill|dd|mkfs"
@@ -498,10 +521,18 @@ _MCP_ID = re.compile(r"\bmcp__[a-z0-9_-]+")
 
 # -- memory_link_in_instruction ----------------------------------------------
 
+#: Link targets: URLs, `www.`/`mailto:`, IPv4, an email address (operator
+#: ruling 2026-10-23: an address inside an instruction is the same exfiltration
+#: shape as a link), a bare domain with a path, and a bare domain on a common
+#: TLD ("Visit example.io …" — never "Node.js", whose `.js` is not on the list).
 _URL = re.compile(
-    r"(?:\b(?:https?|ftps?|file|wss?)://|\bwww\.|\bmailto:)[^\s<>\"'`]+"
+    r"\b[a-z0-9._%+-]{1,64}@[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.[a-z]{2,24}\b"
+    r"|(?:\b(?:https?|ftps?|file|wss?)://|\bwww\.|\bmailto:)[^\s<>\"'`]+"
     r"|\b(?:\d{1,3}\.){3}\d{1,3}(?::\d{2,5})?(?:/[^\s<>\"'`]*)?"
     r"|\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.[a-z]{2,24}/[^\s<>\"'`]*"
+    r"|\b[a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){0,8}\.(?:com|net|org|io|ai|dev|app|co|me|info|biz|xyz|site"
+    r"|online|link|page|sh|gg|ly|to|tv|us|uk|de|fr|eu|ru|cn|in|cloud|tech|store|shop|blog|live|news|top"
+    r"|example|invalid|test)\b(?![.\w-])"
 )
 _LINK_SLOT = ""   # private-use: same length as the link it replaces, matched by no verb
 #: Data placed into a URL — a template slot in it — is an exfiltration shape
@@ -563,7 +594,8 @@ def _hits(lines: Sequence[str], invisible_as: str, rules: Sequence[str], *,
           prescriptive: bool = False) -> Dict[str, List[_Hit]]:
     """``{rule: [hit, …]}`` for one spelling variant. ``prescriptive`` (a seat
     decision) keeps only what can never describe a legitimate decision: the
-    marker and instruction rules, an MCP tool id and a slotted URL."""
+    marker and instruction rules, a shell command or secrets file given as an
+    order, an MCP tool id and a slotted URL."""
     v = _views(lines, invisible_as)
     flat, starts = _join(v.folded)
     hits: Dict[str, List[_Hit]] = {rule: [] for rule in rules}
@@ -576,7 +608,8 @@ def _hits(lines: Sequence[str], invisible_as: str, rules: Sequence[str], *,
             for m in rx.finditer(flat):
                 add(RULE_MARKER, flat, m.start(), m.end(), starts)
         for i, r in enumerate(v.raw):
-            if _ROLE_LABEL.match(r) or _heading_title(r) in STRUCTURAL_HEADINGS:
+            if (_ROLE_LABEL.match(r) or _ROLE_TURN.match(v.folded[i])
+                    or _heading_title(r) in STRUCTURAL_HEADINGS):
                 hits[RULE_MARKER].append(_Hit([i], v.folded[i]))
 
     if RULE_INSTRUCTION in hits:
@@ -593,21 +626,20 @@ def _hits(lines: Sequence[str], invisible_as: str, rules: Sequence[str], *,
     if RULE_LINK in hits:
         for m in _URL_WITH_SLOT.finditer(text):
             add(RULE_LINK, text, m.start(), m.end(), starts2, SLOT_REASON)
-    if prescriptive:
-        if RULE_TOOL in hits:
-            for m in _MCP_ID.finditer(text):
-                add(RULE_TOOL, text, m.start(), m.end(), starts2)
-        return hits
+    if prescriptive and RULE_TOOL in hits:
+        for m in _MCP_ID.finditer(text):
+            add(RULE_TOOL, text, m.start(), m.end(), starts2)
     slotted = _URL.sub(lambda m: _LINK_SLOT * len(m.group()), text)
     # Sentences are sliced, never searched with pos/endpos: `^` in a pattern
     # does not match at a `pos` > 0, so every sentence after the first would
     # lose its sentence-initial position.
     for s, e in _sentences(slotted):
         if RULE_TOOL in hits:
-            for m in _TOOL_DIRECTIVE.finditer(text[s:e]):
-                add(RULE_TOOL, text, s + m.start(), s + m.end(), starts2)
+            for rx in ((_SHELL_DIRECTIVE,) if prescriptive else (_TOOL_INVOCATION, _SHELL_DIRECTIVE)):
+                for m in rx.finditer(text[s:e]):
+                    add(RULE_TOOL, text, s + m.start(), s + m.end(), starts2)
         sentence = slotted[s:e]
-        if RULE_LINK in hits and _LINK_SLOT in sentence:
+        if RULE_LINK in hits and not prescriptive and _LINK_SLOT in sentence:
             verb = _LINK_DIRECTIVE.search(sentence)
             if verb:
                 link = sentence.index(_LINK_SLOT)
@@ -696,8 +728,9 @@ def prepare_summary(text: str, *, previous: str = "") -> Tuple[str, List[str]]:
 
 
 #: What can never describe a legitimate seat decision ("Use the vendor tool for
-#: X" is a decision): the marker and instruction rules, an MCP tool id and a
-#: slotted URL. The tool and link DIRECTIVE checks do not apply.
+#: X" is a decision): the marker and instruction rules, a shell command or
+#: secrets file given as an order, an MCP tool id and a slotted URL. The tool
+#: INVOCATION and link DIRECTIVE checks do not apply.
 DECISION_RULES = ALL_RULES
 
 

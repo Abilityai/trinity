@@ -43,7 +43,7 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
         "margin each stored line carries there.\n\n" +
         "**Facts, not instructions**: a write is refused (422 with a `code` and the `line`) when a new " +
         "line is an instruction aimed at your own rules or role (`memory_instruction`), a tool or command " +
-        "directive (`memory_tool_directive`), a link inside an instruction (`memory_link_in_instruction`), " +
+        "directive (`memory_tool_directive`), a link or address inside an instruction (`memory_link_in_instruction`), " +
         "or text imitating prompt structure (`memory_prompt_marker`). Restate it as a fact ('Portfolio: " +
         "<link>', 'Her draft (<link>) is due Friday') and write again. Text the stored notes already " +
         "held, unchanged, is not refused again.\n\n" +

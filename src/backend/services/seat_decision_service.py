@@ -102,7 +102,8 @@ _SCREEN_REASONS = {
                                     "platform heading); write it as plain text"),
     user_memory_guard.RULE_INSTRUCTION: ("is an instruction aimed at the agent's own instructions, role or "
                                          "oversight; record the decision itself"),
-    user_memory_guard.RULE_TOOL: "names an MCP tool id; describe the decision, not the tool call",
+    user_memory_guard.RULE_TOOL: ("gives an order to run a shell command, read a secrets file or call "
+                                  "an MCP tool; describe the decision, not the command"),
     user_memory_guard.RULE_LINK: ("puts data into a link (a template slot in the URL); keep the link "
                                   "without the slot, or leave it out"),
 }
@@ -233,9 +234,10 @@ def validate_record(payload: dict, *, today: Optional[date] = None) -> dict:
     # ent#419: these three render into the prompt's decisions block on every
     # turn for the seat, so they pass the memory screen — the checks that can
     # never describe a legitimate decision (markers, instructions aimed at the
-    # agent, an MCP tool id, a slotted URL); decisions are prescriptive by
-    # design, so the tool and link DIRECTIVE checks do not apply. The receipt is
-    # a sentence: the Workspace shows it under the field it names.
+    # agent, a shell command or secrets file given as an order, an MCP tool id,
+    # a slotted URL); decisions are prescriptive by design, so the tool
+    # INVOCATION and link DIRECTIVE checks do not apply. The receipt is a
+    # sentence: the Workspace shows it under the field it names.
     for name, value in (("decided", decided), ("criterion", criterion), ("reversal", reversal)):
         refusal = user_memory_guard.screen_field(value)
         if refusal is not None:

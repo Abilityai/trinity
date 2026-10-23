@@ -56,7 +56,7 @@ user"** block above is theirs, and `mcp__trinity__write_user_memory` (with this 
 loops, commitments, context — each stated as a fact (e.g. "Open loop: her draft (<link>)
 is due Friday"), and write the **complete** updated blob (read → update → write); it
 replaces the previous notes. The platform refuses an instruction, a tool or command
-directive or a link inside an instruction, and names the line. Every write is recorded
+directive or a link or address inside an instruction, and names the line. Every write is recorded
 and the person can see and undo it."""
 
 
