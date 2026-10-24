@@ -879,6 +879,24 @@ boundary for a grade. This surface inverts it.
   (`AuthorizedAgentByName` — owner/admin/agent-self), `GET /api/evaluations` (fleet,
   `accessible_agent_names`-filtered), `GET /api/evaluations/{id}`. An agent reading that
   it scored badly is the point; read ≠ write.
+  - **Grader visibility (ent#781) — the canonical rule for every evaluation read.** The
+    full `evaluator` is served only to a **human operator** of the row's agent: its
+    owner or an admin, by JWT or by their own `user`-scoped MCP key. Every machine
+    principal (an agent key, the system scope, a connector key, any scope not known to
+    be a person) and every human who is not an operator (a person the agent is merely
+    shared with) reads a projection instead. It is an **allowlist**, so a new
+    person-writing kind is anonymised on the day it appears: the exact non-person names
+    `platform:tier0` and `platform:tier0:pair` pass through unchanged;
+    `platform:tier1:<model>` reads `platform:tier1` (the model name is withheld); any
+    other `kind:rest` reads `kind` (`admin:<username>` → `admin`, `workspace:<email>` →
+    `workspace`, `operator:<email>` → `operator`), provided the kind is an identity-free
+    token (lowercase letters, digits, `_`, `-`); a value with no kind (a bare name, an
+    empty string, `:detail`, a non-string) or a kind that is not such a token (an address
+    or display name before the colon, uppercase, whitespace) reads `unknown`. Applied in one place — the
+    router's response projection — on all three reads and on the POST echo. Storage is
+    unchanged: rows keep the full evaluator, and an operator lookup that fails redacts
+    rather than discloses. This rule covers the `evaluator` field only; it does not
+    sanitise the free-form `judge` or `checks` dictionaries an admin may submit.
 - **FR-4 — Completion relabel**: Overview (§#1107), the schedules rollup (#1115) and
   fleet stats (EXEC-022) render **"Completion"** with a tooltip ("finished without
   erroring — not answer quality"). **Additive**: the `success_rate` API field is
