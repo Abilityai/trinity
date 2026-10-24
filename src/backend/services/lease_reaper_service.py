@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import config
 from utils.helpers import utc_now_iso
@@ -84,6 +84,11 @@ class LeaseReapReport:
     # not FAILED: a superseded attempt is not a failure, and #1332 exists so
     # activity-derived views don't collapse the two.
     requeued_execution_ids: List[str] = field(default_factory=list)
+    # #3932: the dead attempt's dispatch activity id, read BEFORE the re-queue
+    # commits. The caller closes it by id: a lookup run after the commit can
+    # hit the re-claimed attempt's fresh bar and cancel the live turn. An
+    # execution absent here (the read failed) falls back to the lookup.
+    requeued_activity_ids: Dict[str, Optional[str]] = field(default_factory=dict)
 
 
 def get_max_redelivery(agent_name: str) -> int:
@@ -165,9 +170,16 @@ def reap_expired_leases(
                 )
         else:
             # Under the cap → re-queue the SAME row (execution_id preserved).
+            try:
+                dead_activity_id = db.get_open_activity_id_for_execution(eid)
+                captured = True
+            except Exception:  # noqa: BLE001 — never block the re-queue
+                captured = False
             if db.requeue_expired_lease(eid, now_iso=now):
                 report.requeued += 1
                 report.requeued_execution_ids.append(eid)
+                if captured:
+                    report.requeued_activity_ids[eid] = dead_activity_id
                 logger.info(
                     "[#1081 reaper] re-queued execution %s (agent=%s), "
                     "redelivery_count %d→%d (cap=%d)",
