@@ -151,6 +151,7 @@ from db.dashboard_history import DashboardHistoryOperations
 from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
+from db.nevermined_delegation import NeverminedDelegationOperations
 from db.operator_queue import OperatorQueueOperations
 from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
@@ -1035,6 +1036,7 @@ class DatabaseManager:
         self._slack_ops = SlackOperations()
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
+        self._nevermined_delegation_ops = NeverminedDelegationOperations()  # ent#966
         self._operator_queue_ops = OperatorQueueOperations()
         self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
@@ -1592,6 +1594,16 @@ class DatabaseManager:
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
+
+    # SUB-003 walk on a pulled turn (#3487)
+    def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
+        return self._schedule_ops.rotate_claim_token(execution_id, old_token, new_token)
+
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        return self._schedule_ops.holds_claim_token(execution_id, claim_token)
+
+    def set_backlog_metadata_for_token(self, execution_id: str, claim_token: str, backlog_metadata: str) -> bool:
+        return self._schedule_ops.set_backlog_metadata_for_token(execution_id, claim_token, backlog_metadata)
 
     # Lease reaper (#1081 Phase 3 — #429 / #1402)
     def find_expired_leases(self, now_iso: str = None, limit: int = 500):
@@ -2719,8 +2731,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)
@@ -3020,21 +3033,30 @@ class DatabaseManager:
         cost: float = None,
         sender_email: str = None,
         sender_label: str = None,
+        gate_hold: str = None,
     ):
         return self._public_chat_ops.add_message(
             session_id, role, content, cost,
-            sender_email=sender_email, sender_label=sender_label,
+            sender_email=sender_email, sender_label=sender_label, gate_hold=gate_hold,
         )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None,
+                                 include_held: bool = False):
+        return self._public_chat_ops.get_session_messages(
+            session_id, limit, sender_email=sender_email, include_held=include_held)
 
     def get_recent_public_chat_messages(
         self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+        include_held: bool = False,
     ):
+        # trinity#3402: rows the skill gate stopped are left out unless asked for.
         return self._public_chat_ops.get_recent_messages(
-            session_id, limit, sender_email=sender_email, since=since,
+            session_id, limit, sender_email=sender_email, since=since, include_held=include_held,
         )
+
+    def mark_public_chat_messages_held(self, message_ids: list, gate_hold: str) -> int:
+        # trinity#3402: a held / refused turn and its notice are never replayed.
+        return self._public_chat_ops.mark_messages_held(message_ids, gate_hold)
 
     def prune_public_chat_session(self, session_id: str, keep: int) -> int:
         # ent#600: bound a Telegram group session that records every visible message.
@@ -3101,12 +3123,8 @@ class DatabaseManager:
     def increment_public_user_memory_count(self, agent_name: str, user_email: str) -> int:
         return self._public_link_ops.increment_message_count(agent_name, user_email)
 
-    def update_public_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        return self._public_link_ops.update_user_memory_agent_notes(
-            agent_name, user_email, agent_notes
-        )
+    def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
     def update_public_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str
@@ -3825,6 +3843,46 @@ class DatabaseManager:
 
     def count_voip_calls_since(self, agent_name, hours=24):
         return self._voip_ops.count_calls_since(agent_name, hours=hours)
+
+    # =========================================================================
+    # Nevermined card delegation (delegated to db/nevermined_delegation.py) - ent#966
+    # =========================================================================
+
+    def get_nevermined_organization(self):
+        return self._nevermined_delegation_ops.get_organization()
+
+    def get_nevermined_organization_secrets(self):
+        return self._nevermined_delegation_ops.get_organization_secrets()
+
+    def save_nevermined_organization(self, org_id, environment, secrets, updated_by):
+        return self._nevermined_delegation_ops.save_organization(
+            org_id, environment, secrets, updated_by
+        )
+
+    def delete_nevermined_organization(self):
+        return self._nevermined_delegation_ops.delete_organization()
+
+    def count_active_agent_delegations(self):
+        return self._nevermined_delegation_ops.count_active_delegations()
+
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
 
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001

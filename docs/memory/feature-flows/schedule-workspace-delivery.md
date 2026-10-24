@@ -178,6 +178,8 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
                  │  routers/public_memory: seat_for_execution(row)
                  │     triggered_by == 'schedule' AND source_channel == 'portal'
                  │     → source_channel_client is the seat
+                 │  user_memory_guard.prepare_write(memory_text, previous=…)   ← ent#419 screen
+                 │     a hit → 422 {code, message, line}, nothing stored
                  ▼
               db.write_public_user_memory_agent_notes(...)   ← ONE boundary, records history
                  │
@@ -193,8 +195,11 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
   see the current notes would erase them. So the memory block rides `system_prompt` on
   both dispatch branches, composed only after the stamp landed. The #1205 public persona
   prompt is not folded in: a brief is not a public surface.
-- **One boundary (AC 2).** The router keeps a single writer for every trigger; the ent#419
-  screen lands there once. ent#419's third layer — write history with rollback — is built
+- **One boundary (AC 2).** The router keeps a single writer for every trigger, and the
+  ent#419 screen runs there once, for every trigger (`user_memory_guard.prepare_write`; see
+  [write-user-memory.md](write-user-memory.md#anti-poisoning-gates-trinity-enterprise419)).
+  The seat note asks for open loops stated as facts ("Open loop: her draft (<link>) is due
+  Friday"), because a link or address inside an instruction is refused. ent#419's third layer — write history with rollback — is built
   here: `public_user_memory_writes` (previous + new notes, execution, trigger, schedule).
 - **Visible and undoable (AC 3).** The Workspace agent details show what the agent
   remembers about the viewer and the writes behind it (schedule name, when, what it

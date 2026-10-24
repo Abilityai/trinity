@@ -144,7 +144,7 @@ Read the code in the `403` response. `owner_tier_path` means the file is one onl
 
 ## How do I get a file into my agent's container, and can I send a ZIP?
 
-Attach it to a message. On the Agent Detail **Chat** tab, images reach the agent as vision content and everything else — plain text, CSV, JSON, and ZIP — is written to `/home/developer/uploads/` inside the container, readable by name; a ZIP is stored as-is, not extracted, and because the paperclip picker filters to images and text-like files you drop a ZIP onto the input instead (3 files per message, 5 MB each). In the Workspace, files you attach or drop on the conversation land in the agent's inbox and appear under **Files you sent** in the rail (up to 20 per drop, 25 MB each). For bulk runtime data, use the data import endpoint, which restores a tar archive into `data/`. See [Agent Chat](../agents/agent-chat.md#file-attachments) and [Agent Data & Portability](../agents/agent-data.md).
+Attach it to a message. On the Agent Detail **Chat** tab, images reach the agent as vision content and everything else — plain text, CSV, JSON, and ZIP — is written to `/home/developer/uploads/` inside the container, readable by name; a ZIP is stored as-is, not extracted (3 files per message, 5 MB each). In the Workspace, files you attach or drop on the conversation land in the agent's inbox and appear under **Files you sent** in the rail (up to 20 per drop, 25 MB each). For bulk runtime data, use the data import endpoint, which restores a tar archive into `data/`. See [Agent Chat](../agents/agent-chat.md#file-attachments) and [Agent Data & Portability](../agents/agent-data.md).
 
 ## Where can I see my agent's logs?
 

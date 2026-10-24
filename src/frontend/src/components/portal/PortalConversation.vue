@@ -634,17 +634,7 @@
             @remove="removeAttachment(f)"
           />
         </div>
-        <!-- #3460: the server bounds a message, so the composer says so FIRST —
-             a count for the last stretch, then a named refusal with Send held.
-             Before this the limit was first mentioned by a 422, after the words
-             had left the composer. One line, mutually exclusive ink arms. -->
-        <p
-          v-if="messageLimit.near"
-          class="mb-2 text-xs tabular-nums"
-          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
-          :role="messageLimit.over ? 'alert' : undefined"
-          data-testid="portal-message-limit"
-        >{{ messageLimit.message }}</p>
+        <PortalMessageLimit :limit="messageLimit" />
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -916,6 +906,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
+import PortalMessageLimit from './PortalMessageLimit.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'

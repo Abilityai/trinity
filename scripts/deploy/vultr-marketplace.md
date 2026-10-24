@@ -33,7 +33,7 @@ Ubuntu apt repository.
 > ## Before you deploy
 >
 > - **8 GB RAM minimum.** Below that, agents and the platform contend for memory and
->   turns start failing under load. Vultr cannot enforce a plan size, so please check.
+>   turns start failing under load. The deploy page does not offer smaller plans.
 > - **IPv4 is required.** Trinity's certificate is issued for the server's own IPv4
 >   address.
 >
@@ -56,6 +56,13 @@ Ubuntu apt repository.
 ---
 
 ## Runbook
+
+### Plan minimum
+
+The app's **Basics** set Minimum CPU to **4 vCPUs** and Minimum RAM to **8 GB**.
+Vultr enforces these: the deploy page does not offer smaller plans. The
+script's own RAM check stays, because the same file also runs as plain User Data
+(see below), where nothing enforces a minimum.
 
 ### Creating or updating the build
 
