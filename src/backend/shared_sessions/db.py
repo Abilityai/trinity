@@ -438,6 +438,33 @@ def get_recent_messages(room_id: str, limit: int) -> list[dict]:
     return rows
 
 
+# --- what one agent's skill gate stopped (trinity#3402) -----------------------
+
+def record_gate_holds(room_id: str, agent_name: str, seqs, gate_hold: str,
+                      now: str) -> None:
+    """Record the messages ``agent_name``'s skill gate stopped in this room: the
+    post a hold was raised for (or a refusal that stands) and its notice line.
+    One row per (room, agent, seq); the first verdict stands."""
+    rows = [{"room": room_id, "agent": agent_name, "seq": int(seq), "hold": gate_hold,
+             "now": now} for seq in sorted({s for s in seqs if s is not None})]
+    if not rows:
+        return
+    stmt = text(
+        "INSERT INTO room_gate_holds (room_id, agent_name, seq, gate_hold, created_at) "
+        "VALUES (:room, :agent, :seq, :hold, :now) "
+        "ON CONFLICT (room_id, agent_name, seq) DO NOTHING"
+    )
+    with get_engine().begin() as conn:
+        conn.execute(stmt, rows)
+
+
+def gate_held_seqs(room_id: str, agent_name: str) -> set[int]:
+    """The seqs of this room ``agent_name`` must never be shown again."""
+    stmt = text("SELECT seq FROM room_gate_holds WHERE room_id = :room AND agent_name = :agent")
+    with get_engine().connect() as conn:
+        return {int(r[0]) for r in conn.execute(stmt, {"room": room_id, "agent": agent_name})}
+
+
 def count_messages(room_id: str) -> int:
     with get_engine().connect() as conn:
         row = conn.execute(

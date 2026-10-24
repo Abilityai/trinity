@@ -457,7 +457,7 @@ class TestTaskOverridesReachTheRuntime:
 
         seen = {}
 
-        async def _capture_deadline(client, execution_id, body, url, key, deadline):
+        async def _capture_deadline(client, execution_id, body, url, key, deadline, **_kw):
             seen["deadline"] = deadline
             return True
 

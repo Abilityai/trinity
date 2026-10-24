@@ -15,7 +15,7 @@ import logging
 import secrets
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete, and_, func
+from sqlalchemy import select, insert, update, delete, and_, or_, func
 
 from .engine import get_engine, make_insert
 from .tables import (
@@ -228,10 +228,16 @@ class TelegramChannelOperations:
         return (result.rowcount or 0) > 0
 
     def update_last_update_id(self, agent_name: str, update_id: int) -> None:
-        """Update the last processed update_id for dedup."""
+        """Advance the last processed update_id (the Redis-down dedup fallback).
+
+        Forward only (ent#934): Telegram delivers updates in parallel and out of
+        order, so a slower request for an older update must not rewind the row.
+        """
         stmt = (
             update(telegram_bindings)
             .where(telegram_bindings.c.agent_name == agent_name)
+            .where(or_(telegram_bindings.c.last_update_id.is_(None),
+                       telegram_bindings.c.last_update_id < update_id))
             .values(last_update_id=update_id)
         )
         with get_engine().begin() as conn:

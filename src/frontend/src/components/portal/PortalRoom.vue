@@ -325,8 +325,8 @@
                 <button
                   type="submit"
                   class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-                  :disabled="!input.trim() || sending"
-                  title="Send"
+                  :disabled="!input.trim() || sending || messageLimit.over"
+                  :title="messageLimit.over ? messageLimit.message : 'Send'"
                 >
                   <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                 </button>
@@ -334,6 +334,7 @@
             </div>
           </div>
         </form>
+        <PortalMessageLimit :limit="messageLimit" />
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
         <!-- #2794: what came with the message that created this room. The room
              is otherwise silent about attachments, so without this the person
@@ -400,6 +401,8 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalMessageLimit from './PortalMessageLimit.vue'
+import { ROOM_MESSAGE_MAX_CHARS, messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalTagMarks from './PortalTagMarks.vue'
 import { usePeoplePicker } from '@/composables/usePeoplePicker'
 import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from './portalMentions'
@@ -467,6 +470,8 @@ const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
+// #3706: the server's limit, stated before sending (the 1:1's #3460 rule).
+const messageLimit = computed(() => messageLimitState(input.value.trim(), ROOM_MESSAGE_MAX_CHARS))
 // trinity-enterprise#657: the room's unsent text outlives this instance. The
 // room is keyed on its id (the shell remounts per room), so the key never
 // changes in-instance; `send()` giving the text back on failure makes it a
@@ -947,6 +952,8 @@ async function load({ full = false } = {}) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  // Enter reaches `send()` without the button, so the limit is checked here too.
+  if (messageLimit.value.over) return
   sending.value = true
   sendError.value = null
   input.value = ''
@@ -974,8 +981,8 @@ async function send() {
     await load()
   } catch (err) {
     const detail = err?.response?.data?.detail
-    sendError.value = detail?.message || (typeof detail === 'string' ? detail : null)
-      || 'That message was not delivered.'
+    sendError.value = messageRefusalReason(err) || detail?.message
+      || (typeof detail === 'string' ? detail : null) || 'That message was not delivered.'
     input.value = text        // give it back rather than losing what they typed
     resetTypeahead()
   } finally {

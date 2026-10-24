@@ -369,6 +369,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_nevermined_config: { kind: "enforce", param: "agent_name" },
   toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
+  get_agent_spending: { kind: "enforce", param: "agent_name" },
+  revoke_agent_delegation: { kind: "enforce", param: "agent_name" },
   // --- executions.ts ---
   list_recent_executions: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_execution_result: { kind: "in-tool", how: EXECUTIONS_GATE },
