@@ -508,9 +508,11 @@ def test_2973_scheduler_retry_keeps_the_originals_depth():
     svc.db = MagicMock()
     svc.db.get_schedule.return_value = SimpleNamespace(enabled=True)
     svc.db.get_execution.return_value = SimpleNamespace(
+        triggered_by="schedule",
         source_user_id=None, source_user_email=None, source_agent_name=A,
         source_mcp_key_id=None, source_mcp_key_name=None, chain_depth=4,
     )
+    svc.db.sync_freeze_reason.return_value = None  # #3363: the retry asks the fire's gates
     svc.db.create_execution.return_value = None  # stop right after the insert
     asyncio.run(
         svc._execute_retry(

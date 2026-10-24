@@ -105,6 +105,7 @@ from routers.telegram import public_router as telegram_public_router, auth_route
 from routers.whatsapp import public_router as whatsapp_public_router, auth_router as whatsapp_auth_router
 from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
+from routers.nevermined_delegation import router as nevermined_delegation_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
 from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
@@ -938,7 +939,7 @@ async def _start_telegram_transport(app: FastAPI) -> None:
 
         # Reconcile webhooks for all existing bindings on startup
         from services.settings_service import settings_service
-        public_url = settings_service.get_setting("public_chat_url", "")
+        public_url = settings_service.get_public_chat_url_setting()
         if public_url:
             bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
@@ -989,7 +990,7 @@ async def _start_whatsapp_transport(app: FastAPI) -> None:
 
         # Backfill webhook_url for existing bindings so UI displays the current URL
         from services.settings_service import settings_service as _settings_svc
-        public_url = _settings_svc.get_setting("public_chat_url", "")
+        public_url = _settings_svc.get_public_chat_url_setting()
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
             bindings = _db.get_all_whatsapp_bindings()
@@ -1413,6 +1414,7 @@ app.include_router(whatsapp_public_router)  # WhatsApp via Twilio Public (WHATSA
 app.include_router(whatsapp_auth_router)  # WhatsApp via Twilio Auth (WHATSAPP-001)
 app.include_router(paid_router)  # Nevermined Paid Chat (NVM-001)
 app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
+app.include_router(nevermined_delegation_router)  # Nevermined card delegation (ent#966)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)

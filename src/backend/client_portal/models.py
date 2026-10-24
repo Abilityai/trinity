@@ -367,7 +367,7 @@ class PortalChatRequest(BaseModel):
     """A client's chat turn to a rostered agent. ``session_id`` targets a specific
     thread; when omitted the turn lands in the client's most-recent session (or a
     new one if they've never chatted with this agent)."""
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(min_length=1, max_length=100_000)
     session_id: Optional[str] = None
     # ent#451: ask for a FRESH thread rather than the client's most recent one.
     # An absent `session_id` alone could not say this — it also means "I don't
