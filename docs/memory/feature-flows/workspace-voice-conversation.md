@@ -61,7 +61,8 @@ input/output aids, not a mode.
    is_platform? ── no ──► 404 "Conversation not found"
    _require_roster(include_owned=True) ── miss ──► 404
    rate_limiter.enforce("portal_voice_start:{email}:{agent}", 10, 60)
-   user = get_current_user(request, token)          (the WS ownership gate is by user id)
+   user = resolve_platform_user_unfloored(request, token)   (the WS ownership gate is by user id)
+   require_interactive(user) ── an MCP key ──► 403 (a credential minter takes a session)
           ▼
  client_portal/voice.py::start_workspace_voice
    agent_on_roster ∧ get_portal_session(thread, agent, email) ── evaluated BEFORE branching → one 404
@@ -71,11 +72,65 @@ input/output aids, not a mode.
                                 workspace_mode=True, canvas_audience="operator",
                                 max_duration=WORKSPACE_VOICE_MAX_DURATION)
           ▼
- WS /ws/voice/{sid}?token=JWT  (routers/voice.py — shared with Agent Detail)
-   JWT decoded BEFORE the session lookup (no 4004-vs-4001 oracle)
+ back in the router: voice_auth_service.issue_voice_ticket(user, sid, origin="workspace")
+   ticket store down ──► remove the new session, 503 "Voice is unavailable right now…"
+   200 {voice_session_id, websocket_url, portal_session_id, max_duration_seconds,
+        websocket_ticket, websocket_ticket_expires_in: 30}   Cache-Control: no-store
+          ▼
+ WS /ws/voice/{sid}   (routers/voice.py — no query string; trinity-enterprise#595)
+   accept → first frame {type:"auth", ticket} (5 s, ≤ 1 KiB)
+   consume_ticket(scope="voice:{sid}") → account re-read by id   ── fail ──► status{ended,words} + 4001
+   ONLY THEN get_session ── gone ──► 4004 · assert_owns_or_admin ── not owner ──► 4003
+   {type:"auth_ok"} → lease arm → provider task       (client starts the mic on auth_ok)
    on_turn → client_portal.voice.persist_voice_turn   (portal-bound sessions only)
    finally → persist_voice_call_end → {type:"saved"} → close
 ```
+
+## The socket credential (trinity-enterprise#595)
+
+The voice socket authenticates with a single-use, short-lived credential; no
+session token appears in any URL. The credential is the start response's
+`websocket_ticket`: minted in `portal_voice_start` after the session exists, for
+the platform user that request resolved, and bound to that one call
+(`scope="voice:{sid}"`, ≤ 30 s, consumed once by Redis `GETDEL`, so any worker
+can take it). The composable reads it from `requestFn()`'s response — the same
+`portalHttp` request whose credential the store decided (`authHeader` + the
+#2261 interceptor) — and never reads a session token for the socket. It checks
+that `websocket_url` is exactly `/ws/voice/{voice_session_id}` (same origin, no
+query, no fragment), opens it, sends `{type:"auth", ticket}` on open, and starts
+the player and mic only on `auth_ok`; `startWith` resolves `true` only when the
+mic is live. Who can get one: an interactive platform session, which includes a
+Workspace-only account (role `user`); an MCP key of any scope is refused (403)
+and a portal-token client keeps its uniform 404. Every failed or cancelled start
+— an unusable response, a refusal frame, a close with no words (1006 included),
+a transport error, the 10 s connect-and-authenticate bound, a denied mic, End
+pressed mid-start — resolves `false` with words on the error line and releases
+what it held — except that an `ended` status arriving after `auth_ok` but
+before the mic is live fails the start while keeping the socket open for the
+bridge's `saved` frame (or the 5 s wait), so the thread never reloads ahead of
+the close-out write; a late HTTP answer opens no socket, a late mic grant is stopped at
+once, and a stale socket's events cannot touch a later call. A tab from before
+this change that still puts a token in the URL is refused with "Voice was
+updated. Reload this page, then start a new call."
+
+### Testing (trinity-enterprise#595)
+
+- `tests/unit/test_595_voice_credentials.py` — both registered start routes:
+  the ticket, its expiry and `no-store`; interactive-only issuance; the
+  Workspace-only account; unchanged refusals; store failures as words.
+- `tests/unit/test_595_voice_transport.py` — first-frame admission on the real
+  route: URL credentials, bad frames, wrong-session/surface, expired and reused
+  tickets, the attach-time account re-read, the admission order, two workers.
+- `tests/unit/test_595_ws_rejects_voice_ticket.py` — the real `/ws` handler
+  refuses a voice or VoIP ticket before resolving anyone, and spends it.
+- `src/frontend/tests/unit/useVoiceSessionAuth.spec.js` — the composable: the
+  credential-free URL, the auth frame, media only after `auth_ok`, every failed
+  or cancelled start settled with words.
+- `src/frontend/tests/unit/workspaceVoiceCredential.spec.js` — the start
+  request's credential decision is the only one; the socket carries the ticket.
+- `src/frontend/e2e/workspace-voice-auth.spec.js` (`@smoke`, hermetic) — the
+  browser's socket URL and first frame. **Not run in this branch** (needs a
+  live stack).
 
 ## The start route lives under the portal principal
 
@@ -293,9 +348,9 @@ label row records it.
 - **Voice control (original placement note)**: rendered for platform
   sessions only (`voiceEntryState`); disabled with the reason as its title when
   the instance cannot (`realtime_voice.reason`: voice turned off / no provider
-  key). A portal-token client sees nothing — the socket needs a JWT they do not
-  hold, and a disabled control explaining a limitation that is not theirs would
-  be a dead affordance with a footnote.
+  key). A portal-token client sees nothing — the call is bound to a platform
+  user id they do not have, and a disabled control explaining a limitation that
+  is not theirs would be a dead affordance with a footnote.
 - **The Talk door** (`?voice=1`, #2559): `/workspace?agent=<name>&voice=1` starts
   the call on landing, but the param alone is **never** the authority. The intent
   is armed IN THE APP — `AgentHeader`'s Talk button called

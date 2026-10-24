@@ -9,8 +9,10 @@
  *
  * Manages the full lifecycle of a real-time voice call:
  * 1. A start request supplied by the caller (the Workspace's portal route)
- *    → voice_session_id + websocket_url
- * 2. Open WebSocket → stream audio bidirectionally
+ *    → voice_session_id + websocket_url + websocket_ticket
+ * 2. Open the credential-free WebSocket, send `{type:'auth', ticket}` as its
+ *    first frame, and start the mic only after the server's `auth_ok`
+ *    (trinity-enterprise#595: no session token in any URL) → stream audio
  * 3. Handle tool_call / tool_result events → update orb state (and bump `panelVersion`
  *    when a canvas verb finished, so a canvas column can refetch)
  * 4. End: send `end`, await the bridge's `saved` frame → the transcript is in the DB
@@ -34,6 +36,23 @@ import {
 // How long to wait for the bridge's `saved` frame after the call ended before
 // giving up on it — the caller then reloads the thread anyway.
 export const SAVED_FRAME_TIMEOUT_MS = 5000
+
+// trinity-enterprise#595: the socket must open AND authenticate within this,
+// or the start fails with words. The mic permission prompt is not counted.
+export const VOICE_CONNECT_TIMEOUT_MS = 10000
+
+// The words a failed or cancelled start leaves on `error` — never a silent orb.
+export const VOICE_NOT_VERIFIED_REASON = 'The voice connection expired or could not be verified. Start a new call.'
+export const VOICE_CONNECTION_LOST_REASON = 'The voice connection closed before the call started. Start a new call.'
+export const VOICE_TIMEOUT_REASON = 'The voice connection took too long to start. Start a new call.'
+export const VOICE_BAD_START_REASON = 'The voice call could not start. Start a new call.'
+export const VOICE_MIC_DENIED_REASON = 'Microphone access denied. Please allow microphone access and try again.'
+export const VOICE_CANCELLED_REASON = 'The call was cancelled before it connected.'
+
+// The start response's ticket is `secrets.token_urlsafe(32)`; the session id is
+// `vs_` + `token_urlsafe(16)`. Anything else is not a start this client made.
+const TICKET_SHAPE = /^[A-Za-z0-9_-]{43}$/
+const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/
 
 /**
  * @param {string} agentName - The agent to voice-chat with
@@ -72,6 +91,12 @@ export function useVoiceSession(agentName) {
   let savedPromise = null
   let savedTimer = null
   let restStopOnEnd = true
+  // trinity-enterprise#595: one identity per start attempt, so a late HTTP
+  // answer, a late mic grant or a stale socket event can never touch a later
+  // call; `pendingStart` is how `stop()` settles a start still in flight.
+  let attempt = 0
+  let pendingStart = null
+  let connectTimer = null
 
   const isActive = computed(() => active.value)
   const isConnecting = computed(() => status.value === 'connecting')
@@ -83,9 +108,10 @@ export function useVoiceSession(agentName) {
   /**
    * Start a voice session with a caller-supplied start request (ent#534: the
    * Workspace's portal-principal route). `requestFn` resolves to the start
-   * payload `{voice_session_id, websocket_url, chat_session_id?, portal_session_id?}`.
-   * Resolves `true` when the socket is open and the mic is live, `false` with
-   * `error` set otherwise — the caller always gets words, never a silent no-op.
+   * payload `{voice_session_id, websocket_url, websocket_ticket, chat_session_id?, portal_session_id?}`.
+   * Resolves `true` only once the server acknowledged the socket's credential
+   * (`auth_ok`) and the mic is live; `false` with `error` set otherwise — the
+   * caller always gets words, never a silent no-op (trinity-enterprise#595).
    * @param {() => Promise<object>} requestFn
    * @param {{ restStop?: boolean }} opts - `restStop: false` skips POST /stop on end
    *   (the Workspace bridge closes the call on the socket; a REST stop that lands
@@ -115,45 +141,106 @@ export function useVoiceSession(agentName) {
     restStopOnEnd = restStop
     _armSavedPromise()
 
-    try {
-      const data = await requestFn()
+    const my = ++attempt
+    let sock = null
+    let done = false
+    let settle
+    const settled = new Promise((resolve) => { settle = resolve })
 
-      voiceSessionId.value = data.voice_session_id
+    // The one settlement path for this attempt: every failure, timeout and
+    // cancellation comes through here exactly once.
+    // `keepSocket`: the call was already authorized and the server is closing
+    // it out — the start fails, but the socket stays open for the `saved`
+    // frame (or the `_onEnded` wait), which then cleans up as an ended call does.
+    const finish = (ok, reason = null, { keepSocket = false } = {}) => {
+      if (done) return
+      done = true
+      if (pendingStart && pendingStart.my === my) pendingStart = null
+      _clearConnectTimer()
+      if (!ok) {
+        if (reason && !error.value) error.value = reason
+        if (keepSocket) {
+          // nothing to release here: `_onEnded` stops the media and arms the wait
+        } else if (my === attempt) {
+          _resolveSaved(null)
+          _cleanup()
+        } else if (sock) {
+          try { sock.close() } catch (_) {}
+        }
+      }
+      settle(ok)
+    }
+    pendingStart = { my, fail: (reason) => finish(false, reason) }
+
+    // The request, the socket and the mic run on; the caller awaits `settled`,
+    // which a cancellation (`stop()`) can resolve while the request is still
+    // in flight.
+    const connect = async () => {
+      let data
+      try {
+        data = await requestFn()
+      } catch (err) {
+        // Fixed words only: the error object carries the request's headers.
+        console.warn('Voice start request failed', err?.response?.status ?? 'no response')
+        finish(false, startFailureReason({ status: err?.response?.status, detail: err?.response?.data?.detail }))
+        return
+      }
+      // Cancelled while the request was in flight: it never opens a socket.
+      if (done || my !== attempt) return
+
+      const sid = data?.voice_session_id
+      const ticket = data?.websocket_ticket
+      const wsPath = typeof sid === 'string' && SESSION_ID_SHAPE.test(sid) ? `/ws/voice/${sid}` : null
+      if (!wsPath || data.websocket_url !== wsPath || typeof ticket !== 'string' || !TICKET_SHAPE.test(ticket)) {
+        console.warn('Voice start response was not usable')
+        finish(false, VOICE_BAD_START_REASON)
+        return
+      }
+
+      voiceSessionId.value = sid
       chatSessionId.value = data.chat_session_id || null
       portalSessionId.value = data.portal_session_id || null
-      const wsPath = data.websocket_url
 
+      // Same origin, the exact session path, no query: the URL carries nothing.
       const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const wsUrl = `${wsProtocol}//${window.location.host}${wsPath}?token=${authStore.token}`
-      ws = new WebSocket(wsUrl)
+      sock = new WebSocket(`${wsProtocol}//${window.location.host}${wsPath}`)
+      ws = sock
+      let authed = false
+      connectTimer = setTimeout(() => finish(false, VOICE_TIMEOUT_REASON), VOICE_CONNECT_TIMEOUT_MS)
 
-      const opened = new Promise((resolve) => {
-        ws.onopen = async () => {
-          try {
-            audioPlayer = createAudioPlayer()
-            micCapture = await startMicCapture((base64Audio) => {
-              if (ws && ws.readyState === WebSocket.OPEN && !muted.value) {
-                ws.send(JSON.stringify({ type: 'audio', data: base64Audio }))
-              }
-            })
-            status.value = 'listening'
-            _startAmplitudePolling()
-            resolve(true)
-          } catch (micError) {
-            error.value = 'Microphone access denied. Please allow microphone access and try again.'
-            await stop()
-            resolve(false)
-          }
+      sock.onopen = () => {
+        if (ws !== sock || done) return
+        try {
+          sock.send(JSON.stringify({ type: 'auth', ticket }))
+        } catch (_) {
+          finish(false, VOICE_CONNECTION_LOST_REASON)
         }
-        ws.onerror = () => {
-          if (!error.value) error.value = 'Voice connection error'
-          resolve(false)
-        }
-      })
+      }
 
-      ws.onmessage = (event) => {
+      sock.onerror = () => {
+        if (ws !== sock) return
+        if (!done) finish(false, 'Voice connection error')
+        else if (!error.value) error.value = 'Voice connection error'
+      }
+
+      sock.onmessage = (event) => {
+        if (ws !== sock) return
         try {
           const msg = JSON.parse(event.data)
+
+          // Before admission only two frames mean anything: the acknowledgement,
+          // and a refusal with its words. A provider frame that arrives early is
+          // ignored — nothing plays before the mic is live.
+          if (!authed) {
+            if (msg.type === 'auth_ok') {
+              authed = true
+              _clearConnectTimer()
+              void _startMedia(my, sock, () => done, finish)
+            } else if (msg.type === 'status' && msg.state === 'ended') {
+              finish(false, msg.message || VOICE_NOT_VERIFIED_REASON)
+            }
+            return
+          }
 
           if (msg.type === 'audio' && msg.data) {
             if (audioPlayer) audioPlayer.play(msg.data)
@@ -163,8 +250,12 @@ export function useVoiceSession(agentName) {
 
           } else if (msg.type === 'status') {
             if (msg.state === 'ended') {
+              // Authorized but still setting up the mic: the start fails with
+              // words, and the call ends the way any call ends — media stopped,
+              // the socket kept for the bridge's `saved` frame.
+              if (!done) finish(false, msg.message || VOICE_CONNECTION_LOST_REASON, { keepSocket: true })
               _onEnded(msg)
-            } else {
+            } else if (done) {
               status.value = msg.state
             }
 
@@ -199,16 +290,54 @@ export function useVoiceSession(agentName) {
         }
       }
 
-      ws.onclose = () => { _resolveSaved(null); _cleanup() }
-
-      return await opened
-    } catch (err) {
-      console.error('Voice start error:', err)
-      error.value = startFailureReason({ status: err?.response?.status, detail: err?.response?.data?.detail })
-      _resolveSaved(null)
-      _cleanup()
-      return false
+      sock.onclose = () => {
+        if (ws !== sock) return
+        if (!done) { finish(false, authed ? VOICE_CONNECTION_LOST_REASON : VOICE_NOT_VERIFIED_REASON); return }
+        _resolveSaved(null)
+        _cleanup()
+      }
     }
+    connect().catch(() => finish(false, VOICE_BAD_START_REASON))
+
+    return settled
+  }
+
+  // After `auth_ok`: player and mic, then — only if this attempt is still the
+  // live one — listening. A mic grant that lands after the attempt was settled
+  // (cancelled, timed out, refused) is stopped at once.
+  async function _startMedia(my, sock, isDone, finish) {
+    let player = null
+    let mic = null
+    try {
+      player = createAudioPlayer()
+      mic = await startMicCapture((base64Audio) => {
+        if (ws === sock && sock.readyState === WebSocket.OPEN && !muted.value) {
+          sock.send(JSON.stringify({ type: 'audio', data: base64Audio }))
+        }
+      })
+    } catch (micError) {
+      if (player) { try { player.stop() } catch (_) {} }
+      if (my !== attempt || isDone()) return
+      if (sock.readyState === WebSocket.OPEN) {
+        try { sock.send(JSON.stringify({ type: 'end' })) } catch (_) {}
+      }
+      finish(false, VOICE_MIC_DENIED_REASON)
+      return
+    }
+    if (my !== attempt || isDone() || ws !== sock) {
+      try { mic.stop() } catch (_) {}
+      try { player.stop() } catch (_) {}
+      return
+    }
+    audioPlayer = player
+    micCapture = mic
+    status.value = 'listening'
+    _startAmplitudePolling()
+    finish(true)
+  }
+
+  function _clearConnectTimer() {
+    if (connectTimer) { clearTimeout(connectTimer); connectTimer = null }
   }
 
   /**
@@ -218,27 +347,40 @@ export function useVoiceSession(agentName) {
   async function stop() {
     if (!active.value) return saved.value
 
+    // A start still in flight (request, socket authentication or mic prompt)
+    // is settled — `false`, with words — rather than left to resolve later.
+    if (pendingStart) {
+      const pending = pendingStart
+      const sid = voiceSessionId.value
+      pending.fail(VOICE_CANCELLED_REASON)
+      if (restStopOnEnd && sid) await _restStop(sid)
+      return null
+    }
+
     if (ws && ws.readyState === WebSocket.OPEN) {
       try { ws.send(JSON.stringify({ type: 'end' })) } catch (_) {}
     }
     _stopMedia()
     status.value = 'ended'
 
-    if (restStopOnEnd && voiceSessionId.value) {
-      try {
-        await axios.post(
-          `/api/agents/${agentName}/voice/stop`,
-          { voice_session_id: voiceSessionId.value },
-          { headers: authStore.authHeader }
-        )
-      } catch (e) {
-        console.warn('Voice stop API error (transcript may already be saved):', e)
-      }
-    }
+    if (restStopOnEnd && voiceSessionId.value) await _restStop(voiceSessionId.value)
 
     const result = await awaitSaved()
     _cleanup()
     return result
+  }
+
+  async function _restStop(sid) {
+    try {
+      await axios.post(
+        `/api/agents/${agentName}/voice/stop`,
+        { voice_session_id: sid },
+        { headers: authStore.authHeader }
+      )
+    } catch (e) {
+      // Fixed words only: the error object carries the request's headers.
+      console.warn('Voice stop API error (transcript may already be saved):', e?.response?.status ?? 'no response')
+    }
   }
 
   /** Resolves with the `saved` frame, or null after SAVED_FRAME_TIMEOUT_MS / close. */
@@ -296,6 +438,7 @@ export function useVoiceSession(agentName) {
   }
 
   function _cleanup() {
+    _clearConnectTimer()
     active.value = false
     status.value = 'idle'
     toolName.value = null

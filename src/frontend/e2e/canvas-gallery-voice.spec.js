@@ -94,11 +94,19 @@ for (const theme of THEMES) {
         const body = await res.json()
         await route.fulfill({ response: res, json: { ...body, realtime_voice: { available: true, reason: null } } })
       })
+      // trinity-enterprise#595: the start carries the socket's single-use ticket
+      // and the client waits for `auth_ok` before it goes live.
       await page.route('**/api/enterprise/client-portal/agents/*/voice/start', (route) => route.fulfill({
-        json: { voice_session_id: VOICE_SID, websocket_url: `/ws/voice/${VOICE_SID}`, chat_session_id: threadId },
+        json: { voice_session_id: VOICE_SID, websocket_url: `/ws/voice/${VOICE_SID}`, chat_session_id: threadId,
+                websocket_ticket: 'g'.repeat(43), websocket_ticket_expires_in: 30 },
       }))
       await page.route(`**/api/agents/*/voice/${VOICE_SID}/panel`, (route) => route.fulfill({ json: current }))
-      await page.routeWebSocket((url) => url.pathname.endsWith(`/ws/voice/${VOICE_SID}`), (ws) => { socket = ws })
+      await page.routeWebSocket((url) => url.pathname.endsWith(`/ws/voice/${VOICE_SID}`), (ws) => {
+        socket = ws
+        ws.onMessage((m) => {
+          if (JSON.parse(String(m)).type === 'auth') ws.send(JSON.stringify({ type: 'auth_ok' }))
+        })
+      })
 
       await page.goto(`/workspace/c/${threadId}`)
       const call = page.getByTestId('portal-voice-call')

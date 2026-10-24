@@ -1572,7 +1572,10 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Authentication required: provide ?ticket=<opaque>")
         return
 
-    payload = consume_ticket(ticket)
+    # trinity-enterprise#595: `/ws` accepts only a `user` ticket. A voice or
+    # VoIP ticket is consumed and refused here by its scope, never by an
+    # accident of its subject's shape.
+    payload = consume_ticket(ticket, scope="user")
     if not payload or not payload.get("sub"):
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
@@ -1581,9 +1584,9 @@ async def websocket_endpoint(
     # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
     # subject is not a resolvable Trinity user is refused rather than
     # registered with an empty roster, so an identity we cannot establish
-    # never becomes a silently-degraded connection nobody notices. This also
-    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
-    # user id, not a username) on a surface it was never minted for.
+    # never becomes a silently-degraded connection nobody notices. (A ticket
+    # minted for another surface never reaches this point: the scope check in
+    # `consume_ticket` above refuses it.)
     try:
         identity = resolve_ws_identity(str(payload.get("sub")))
     except Exception:

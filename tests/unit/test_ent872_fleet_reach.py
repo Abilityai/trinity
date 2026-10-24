@@ -776,8 +776,6 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
-    ("routers/voice.py", "voice_websocket"):
-        "the voice socket is gated to its own session's user id; the compare is that owner check",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):

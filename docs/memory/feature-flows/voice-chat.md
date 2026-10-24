@@ -228,6 +228,7 @@ follow-up as the caller-less backend routes.
 | Backend → Gemini | Forward audio frames to Gemini Live API |
 | Gemini → Backend | Receive audio response frames + transcript text |
 | Backend → Browser | Forward audio frames for playback |
+| Authentication | First text frame `{"type":"auth","ticket"}` with the start response's single-use ticket; `auth_ok` before any media; no credential in the URL (trinity-enterprise#595) |
 | Playback engine | AudioWorklet-first (blob URL inlined) with ScriptProcessor fallback |
 | Amplitude | `createAudioPlayer()` exposes `getAmplitude()` (0–1 float) via `AnalyserNode` |
 
@@ -354,12 +355,23 @@ retired page; where they name an entry point or a route, read VOICE-010.
 
 **Client → Server:**
 ```json
+{ "type": "auth", "ticket": "<websocket_ticket>" }
 { "type": "audio", "data": "<base64 PCM audio>" }
 { "type": "end" }
 ```
 
+`auth` is the first frame and only the first (trinity-enterprise#595): the
+server reads it within 5 s, consumes the ticket under `voice:{voice_session_id}`,
+re-reads the account, then looks the session up and applies the owner gate.
+A second `auth` frame ends the call. A refusal is a `status` frame with
+`state: "ended"`, `reason: "error"` and the words, followed by the close: 4001
+for a missing, malformed, expired, reused or wrong-session/wrong-surface
+credential (decided before the session lookup), 4004 when the session is gone,
+4003 when the authenticated caller does not own it.
+
 **Server → Client:**
 ```json
+{ "type": "auth_ok" }
 { "type": "audio", "data": "<base64 PCM audio>" }
 { "type": "transcript", "role": "user|assistant", "text": "..." }
 { "type": "status", "state": "connecting|listening|speaking|ended", "reason": "cap|error|provider_closed|null", "message": "..." }
@@ -399,14 +411,25 @@ Panel tool calls (`show_markdown`, `update_panel`, etc.) appear as `tool_call` W
 }
 ```
 
-**Response:**
+**Response** (`Cache-Control: no-store`):
 ```json
 {
   "voice_session_id": "vs_abc123",
   "websocket_url": "/ws/voice/vs_abc123",
-  "chat_session_id": "cs_xyz789"
+  "chat_session_id": "cs_xyz789",
+  "websocket_ticket": "<opaque, single use>",
+  "websocket_ticket_expires_in": 30
 }
 ```
+
+Interactive sessions only (`Depends(require_interactive)`, resolved before the
+agent-access gate): an MCP key of any scope is refused with 403 whether or not
+the agent exists. The ticket is issued only for the session this request just
+created, for its caller; no route re-mints a ticket for an existing session, so
+administrative attachment to another account's call is not offered — the
+socket's owner-or-admin gate (#600) stays as defence in depth. A session or
+ticket that cannot be stored is a 503 with words, and a session created before
+a failed ticket write is removed (trinity-enterprise#595).
 
 ### POST /api/agents/{name}/voice/stop
 

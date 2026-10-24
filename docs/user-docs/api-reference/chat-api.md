@@ -42,11 +42,11 @@ Agents not in the pilot are unchanged.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); 409 while a reply is in flight |
-| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace) |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`); returns a single-use `websocket_ticket`; 409 while a reply is in flight |
+| `/api/agents/{name}/voice/start` | POST | Start a per-agent voice session (retained for API clients; the UI starts calls in the Workspace). Signed-in sessions only; returns a single-use `websocket_ticket` |
 | `/api/agents/{name}/voice/stop` | POST | Stop session |
 | `/api/agents/{name}/voice/status` | GET | Session status |
-| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`) |
+| `/ws/voice/{session_id}` | WS | Audio WebSocket bridge (URL returned by `voice/start`). Send `{"type":"auth","ticket":...}` as the first frame and wait for `auth_ok`; no credential goes in the URL — see [Connecting the voice socket](../advanced/voice-chat.md#connecting-the-voice-socket) |
 
 The per-agent voice prompt, voice name and canvas panel routes are listed in [Voice Chat](../advanced/voice-chat.md#api-endpoints).
 

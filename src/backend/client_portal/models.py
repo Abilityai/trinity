@@ -259,6 +259,10 @@ class PortalVoiceStartResponse(BaseModel):
     websocket_url: str
     portal_session_id: str
     max_duration_seconds: int
+    # trinity-enterprise#595: the voice socket's single-use credential, sent as
+    # its first frame; `websocket_url` never carries one.
+    websocket_ticket: str
+    websocket_ticket_expires_in: int
 
 
 class PortalRoster(BaseModel):

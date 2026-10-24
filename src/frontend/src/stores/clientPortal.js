@@ -1715,8 +1715,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // ent#534 — start a real-time voice call bound to a Workspace thread. The
-    // platform-principal route (uniform 404 for anyone else); the audio socket
-    // the response names is the OSS one and takes the platform JWT.
+    // platform-principal route (uniform 404 for anyone else). The response
+    // carries the audio socket's single-use ticket (trinity-enterprise#595),
+    // so the socket is authorized by THIS request's credential decision
+    // (`authHeader` + the `portalHttp` interceptor) — never by reading a
+    // session token for the socket.
     async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/voice/start`,

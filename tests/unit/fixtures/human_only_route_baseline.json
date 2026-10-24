@@ -327,7 +327,6 @@
   "routers/voice.py::get_voice_prompt": "GET /api/agents/{name}/voice/prompt",
   "routers/voice.py::set_voice_name": "PUT /api/agents/{name}/voice/name",
   "routers/voice.py::set_voice_prompt": "PUT /api/agents/{name}/voice/prompt",
-  "routers/voice.py::voice_start": "POST /api/agents/{name}/voice/start",
   "routers/voice.py::voice_status": "GET /api/agents/{name}/voice/status",
   "routers/voice.py::voice_stop": "POST /api/agents/{name}/voice/stop",
   "routers/voip.py::configure_voip_binding": "PUT /api/agents/{agent_name}/voip",
