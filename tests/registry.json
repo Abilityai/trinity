@@ -6204,6 +6204,19 @@
         "unit"
       ],
       "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
+      "file": "unit/test_ent717_whitelist_session_only.py",
+      "feature": "trinity-enterprise#717",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "settings",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "POST /api/settings/email-whitelist is session-only, through the real composed settings router: every key scope (user, system, agent, connector, ops, portal_delegate, unknown) and a principal with no mcp_scope get 403 at every role and before the body is read, and no row is written; a vouched loopback is refused by the route gate and a real unvouched loopback JWT by the entry fence; a signed-in admin is unchanged at every role, a signed-in non-admin is still refused, no credentials stays 401. Mutation-proven (gate removed → 23 red + 2 census; assert_admin removed → 2 red); needs no Docker."
     }
   ]
 }

@@ -259,7 +259,6 @@
   "routers/settings/retention.py::acknowledge_retention_prune": "POST /api/settings/retention/acknowledge",
   "routers/settings/templates.py::delete_template_registry": "DELETE /api/settings/template-registry",
   "routers/settings/templates.py::update_template_registry": "PUT /api/settings/template-registry",
-  "routers/settings/whitelist.py::add_email_to_whitelist": "POST /api/settings/email-whitelist",
   "routers/sharing.py::decide_access_request_endpoint": "POST /api/agents/{agent_name}/access-requests/{request_id}/decide",
   "routers/sharing.py::get_access_policy_endpoint": "GET /api/agents/{agent_name}/access-policy",
   "routers/sharing.py::get_agent_access_endpoint": "GET /api/agents/{agent_name}/access",
