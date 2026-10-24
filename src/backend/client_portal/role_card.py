@@ -575,7 +575,9 @@ def _walkthrough(agent_name: str, email: str, is_platform: bool) -> dict:
         main_id = portal_db.get_main_portal_session_id(agent_name, email)
         if not main_id:
             return out
-        messages = portal_db.get_portal_messages(agent_name, email, limit=200, session_id=main_id)
+        # trinity#3402: a held ask is still one the viewer made — count it.
+        messages = portal_db.get_portal_messages(agent_name, email, limit=200, session_id=main_id,
+                                                 include_held=True)
         asks = [m for m in messages if m.get("role") == "user"]
         replies = [m.get("id") for m in messages if m.get("role") == "assistant" and m.get("id")]
         out["asks"] = min(len(asks), WALKTHROUGH_ASKS)

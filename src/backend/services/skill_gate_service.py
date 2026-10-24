@@ -427,6 +427,51 @@ def read_gates(agent_name: str) -> Dict[str, SkillGate]:
             "nothing was run. Try again shortly.")
 
 
+# trinity#3402: refusals the SAME request gets again on every retry, until a
+# person changes the request or the agent's gate setup. A room records the posts
+# behind one (as it does a hold) so later wakes do not refuse them forever. Every
+# other refusal clears by itself — an unreadable map, a rate or queue cap, an
+# agent that is down, an ask that could not be raised — and the room delivers
+# the post again.
+STANDING_REFUSALS = frozenset({
+    "mixed_approvers",
+    "request_too_long",
+    "role_unassigned",
+    "approver_cannot_open_agent",
+    "gated_skill_not_installed",
+    "gated_skill_ambiguous",
+    "gated_skill_unreadable",
+})
+
+
+def gate_hold_on_write(agent_name: str, text: Optional[str]) -> Dict[str, str]:
+    """trinity#3402: the `gate_hold` a public-link or channel row is WRITTEN with
+    — `{"gate_hold": "named"}` when its text invokes a skill gated on
+    `agent_name`, else `{}` (the ordinary write is unchanged).
+
+    Only for senders who can never self-approve (a public visitor, a channel
+    user): for them such a message never runs as itself, so it is kept out of
+    every later prompt from the moment it is stored — a turn built while this
+    one is still inside the gate's check, and group chatter the gate never sees.
+    The verdict overwrites the mark (`mark_public_chat_messages_held`). An
+    unreadable gate map stores the row unmarked: nothing would ever clear a
+    `named` mark, so a turn that then ran would lose its message from every
+    later prompt. The verdict still marks each turn the gate holds or refuses
+    (the dispatch-time read refuses `gate_unavailable` while the map is still
+    unreadable). The gap is a message invoking a gated skill that is stored
+    during the blip and never dispatched: group chatter, or a turn that fails
+    before its dispatch."""
+    from db.public_chat import GATE_HOLD_NAMED
+
+    if not text:
+        return {}
+    try:
+        gates = read_gates(agent_name)
+    except SkillGateRefused:
+        return {}
+    return {"gate_hold": GATE_HOLD_NAMED} if find_gated_invocations(text, gates) else {}
+
+
 def _skill_list(names: List[str]) -> str:
     """Skill names WITHOUT a slash — this text is echoed into rows, events and
     channel replies, and must never read as a request to run a skill."""

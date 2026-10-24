@@ -144,11 +144,15 @@
                 </div>
               </div>
 
-              <div v-if="isAdmin && row.kind !== 'primary'" class="flex items-center gap-2 shrink-0 self-start">
+              <!-- #3663: below sm the strip spans the row and wraps. The select gives
+                   way from 9.5rem to a floor still wider than "Collaborator", and
+                   only then does Remove go under it, never off the card's edge.
+                   sm and up: today's row. -->
+              <div v-if="isAdmin && row.kind !== 'primary'" class="flex flex-wrap items-center gap-2 shrink-0 sm:flex-nowrap sm:self-start">
                 <BaseSelect
                   :model-value="row.kind"
                   size="sm"
-                  class="min-w-[9.5rem]"
+                  class="flex-1 min-w-[8.5rem] max-w-[9.5rem] sm:flex-none sm:min-w-[9.5rem] sm:max-w-none"
                   :aria-label="`Kind for ${row.display_name}`"
                   :disabled="busyId === row.id"
                   data-testid="assignment-kind"
@@ -245,7 +249,7 @@
                       :loading="savingAdd" loading-label="Adding…" data-testid="add-submit">Add</BaseButton>
         </form>
         <InlineError v-if="isAdmin && (addError || assignments.usersError)" :message="addError || assignments.usersError" @dismiss="addError = ''" />
-        <p v-if="isAdmin && shareNote" class="text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="assignments-share-note">{{ shareNote }}</p>
+        <p v-if="isAdmin && shareNote" class="text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="assignments-share-note">{{ shareNote.text }}</p>
         <p v-if="isAdmin" class="text-xs text-gray-600 dark:text-gray-300" data-testid="assignments-share-hint">
           Adding someone this agent isn't shared with also shares it with them, so they can use it in the
           Workspace (operators and above, in the operator UI too).
@@ -365,7 +369,7 @@ async function addPerson() {
   const agent = props.agentName
   const person = usersById.value.get(Number(addForm.value.userId))
   addError.value = ''
-  shareNote.value = ''
+  shareNote.value = null
   savingAdd.value = true
   try {
     await assignments.add(agent, withRole({
@@ -498,7 +502,7 @@ async function confirmReplace() {
   const agent = props.agentName
   const person = usersById.value.get(Number(replaceForm.value.userId))
   replaceError.value = ''
-  shareNote.value = ''
+  shareNote.value = null
   savingReplace.value = true
   try {
     await assignments.replacePrimary(agent, {
@@ -531,9 +535,14 @@ const usersById = computed(() => new Map(assignments.users.map((u) => [u.id, u])
 const lower = (v) => String(v || '').trim().toLowerCase()
 const peopleByEmail = computed(() => new Map((props.people || []).map((p) => [lower(p.email), p])))
 
-/** A person's platform role: the users list (admins), else the people list. */
+/**
+ * A person's platform role: the people list first — it is re-read on every
+ * visit and after every change, and it is the list shown right below — else
+ * the users list (admins). The other way round, a role changed in Settings
+ * showed below but not on the row (#3664).
+ */
 function roleOf(row) {
-  return usersById.value.get(row.user_id)?.role || peopleByEmail.value.get(lower(row.user_email))?.role || null
+  return peopleByEmail.value.get(lower(row.user_email))?.role || usersById.value.get(row.user_id)?.role || null
 }
 
 // The people the picker cannot offer: shared, but with no account yet.
@@ -543,9 +552,24 @@ const notOffered = computed(() => {
   return `${pending.slice(0, 3).join(', ')} and ${pending.length - 3} more`
 })
 
-const shareNote = ref('')
+// The last share this section made: { userId, email, text }, or null.
+const shareNote = ref(null)
 const shareFail = ref({})   // user_id -> why the share after an assignment failed
 const sharingId = ref(null)
+
+// The note confirms a fact, so it goes when the fact does (#3664): that
+// person's row is removed, or the people list, re-read after an unshare below,
+// no longer has them.
+watch(rows, (now) => {
+  if (shareNote.value && !now.some((r) => r.user_id === shareNote.value.userId)) shareNote.value = null
+})
+watch(() => props.people, (now) => {
+  if (shareNote.value && now && !now.some((p) => lower(p.email) === shareNote.value.email)) shareNote.value = null
+})
+
+function noteShare(userId, email, name) {
+  shareNote.value = { userId, email: lower(email), text: `Shared with ${name} so they can use it in the Workspace.` }
+}
 
 /** No share for the owner, for yourself (the route refuses a self-share), or for an account with no address. */
 function reachesWithoutShare(u) {
@@ -571,7 +595,7 @@ async function shareAfterAssign(agent, person) {
   try {
     const outcome = await shareWith(agent, person)
     if (outcome !== 'shared' || agent !== props.agentName) return
-    shareNote.value = `Shared with ${person.name || person.username || person.email} so they can use it in the Workspace.`
+    noteShare(person.id, person.email, person.name || person.username || person.email)
     if (props.reloadPeople) await props.reloadPeople()
   } catch (err) {
     if (agent !== props.agentName) return
@@ -601,7 +625,7 @@ async function shareRow(row) {
     const { [row.user_id]: _done, ...rest } = shareFail.value
     shareFail.value = rest
     if (outcome === 'shared' && agent === props.agentName) {
-      shareNote.value = `Shared with ${row.display_name} so they can use it in the Workspace.`
+      noteShare(row.user_id, person.email, row.display_name)
     }
     if (props.reloadPeople) await props.reloadPeople()
   } catch (err) {
@@ -615,14 +639,17 @@ async function shareRow(row) {
 function reload() { return assignments.load(props.agentName) }
 
 async function start() {
-  shareNote.value = ''
+  shareNote.value = null
   shareFail.value = {}
   await enterprise.loadFeatureFlags()
   if (!entitled.value) return
   // The canon read is a container read; it never blocks the roster.
   assignments.loadCanonRoles(props.agentName)
   await reload()
-  if (isAdmin.value && !assignments.usersLoaded) await assignments.loadUsers()
+  // Re-read on every visit, not once a session: a role changed in Settings
+  // since then would stay stale on the rows and in the pickers (#3664). The
+  // list on screen stays until the new one lands.
+  if (isAdmin.value) await assignments.loadUsers()
 }
 
 onMounted(start)

@@ -376,6 +376,10 @@
               </div>
             </div>
 
+            <!-- #3302: a pending read that could not finish says what it shows.
+                 Below the cards, so the list's top edge never moves for it. -->
+            <p v-if="queuePartialText" class="ops-card-type" data-testid="queue-partial">{{ queuePartialText }}</p>
+
             <!-- trinity-enterprise#611: how the latest asks ENDED — who and when,
                  from the endings ledger (utils/operatorQueue.js::queueEnding).
                  Shown whatever the pending list's state, including empty. -->
@@ -684,6 +688,7 @@ import {
   QUEUE_RESPONSE_NOT_ADDRESSEE, respondRefusedAsNotAddressee } from '../utils/operatorQueue'
 // trinity-enterprise#611: a second line so the #2370 import pin above stays byte-exact.
 import { queueEnding, queueEndingText, queueSeenLine, recentlyEnded } from '../utils/operatorQueue'
+import { readQueueSnapshot, pendingPartialLine } from '../utils/operatorQueueRead'
 import { formatLocalDateTime } from '../utils/timestamps'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
@@ -731,6 +736,11 @@ const chatInputEl = ref(null)
 
 // Ops
 const queueItems = ref([])
+// #3302: false when the pending read could not finish — then `queueItems` is
+// its first part and `queueTotal` (the route's count, null if unverified) is
+// how many there are.
+const queueComplete = ref(true)
+const queueTotal = ref(null)
 // trinity-enterprise#611: the asks that ended most recently. The same fetch
 // already returned them; the view used to drop them, so an ask cancelled or
 // expired elsewhere just vanished from the phone.
@@ -806,7 +816,14 @@ const filteredAgents = computed(() => {
   return list
 })
 
-const pendingQueueCount = computed(() => queueItems.value.filter(i => i.status === 'pending').length)
+const pendingQueueCount = computed(() => {
+  const loaded = queueItems.value.filter(i => i.status === 'pending').length
+  // #3302: a partial read's count is the route's total, not the rows it holds.
+  return queueComplete.value ? loaded : Math.max(loaded, queueTotal.value ?? loaded)
+})
+const queuePartialText = computed(() => (queueComplete.value
+  ? ''
+  : pendingPartialLine({ shown: queueItems.value.length, total: queueTotal.value })))
 const pendingNotifCount = computed(() => notifications.value.filter(n => n.status === 'pending').length)
 
 const opsTabs = computed(() => [
@@ -917,14 +934,21 @@ async function fetchQueue() {
   const seq = ++queueFetchSeq
   loading.queue = true
   try {
-    const res = await http.get('/api/operator-queue', { params: { limit: 100 } })
+    // #3302: every pending ask (walked past the first page) and the newest
+    // ended ones — one 100-row page used to cut both, and with 100 pending it
+    // held no ended row at all.
+    const snap = await readQueueSnapshot(
+      (params) => http.get('/api/operator-queue', { params }),
+      { pageLimit: 100, endedLimit: RECENTLY_ENDED_MAX },
+    )
     if (seq !== queueFetchSeq) return // a newer fetch owns the list now
-    // The endpoint returns {items, count}; `(res.data || []).filter` on that
-    // object threw on every poll, so this tab always read "No pending items".
-    const all = listFrom(res.data, 'items')
-    queueItems.value = all.filter(i => i.status === 'pending')
-    recentlyEndedItems.value = recentlyEnded(all, RECENTLY_ENDED_MAX)
-    pruneQueueItemState(queueItems.value)
+    queueItems.value = snap.pending
+    recentlyEndedItems.value = recentlyEnded(snap.ended, RECENTLY_ENDED_MAX)
+    queueComplete.value = snap.pendingComplete
+    queueTotal.value = snap.pendingTotal
+    // A partial read does not list every card, so it must not forget their
+    // half-typed answers; only a complete one reconciles the per-card state.
+    if (snap.pendingComplete) pruneQueueItemState(queueItems.value)
     hasLoaded.queue = true
     lastLoadedAt.queue = Date.now()
     fetchError.queue = ''
@@ -1578,7 +1602,10 @@ function startPolling() {
     // #3041: a 403 does not change on its own — the poll stops asking; a
     // manual refresh still re-checks (a role granted meanwhile shows up).
     if (activeTab.value === 'agents') { if (!fleetAdminOnly.value) fetchAgents() }
-    else if (activeTab.value === 'ops') { fetchQueue(); fetchNotifications() }
+    // #3302: a queue read is several requests now; a poll that superseded one
+    // still in flight could starve a slow phone of every read. Answers and pull
+    // to refresh still call fetchQueue directly (newest wins, #2370).
+    else if (activeTab.value === 'ops') { if (!loading.queue) fetchQueue(); fetchNotifications() }
     else if (activeTab.value === 'system') { if (!fleetAdminOnly.value) fetchFleetHealth() }
   }, 15000)
 }

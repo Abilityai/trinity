@@ -44,7 +44,7 @@ Load this before writing any code under `src/frontend/`. It is the condensed, bi
 
 ## Data loading & motion
 
-- Two loading treatments, decided by the surface (#2540). **Charts** — the scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only. **Use `ScanlineReveal.vue`** (ent#245) — one persistent instance, content swapped in its slot, `:reveal="false"` for error/empty terminals. **Everything else** — pages, panels, lists, message threads — a skeleton placeholder: pulse blocks in the chrome fills, `animate-pulse motion-reduce:animate-none`, `aria-busy` + one `sr-only` line, the loaded surface's own footprint (`SkeletonLoader.vue`, or content-shaped like `portal/PortalSkeleton.vue`), the first arm of the branch chain.
+- Two loading treatments, decided by the surface (#2540). **Charts** — the scanline beam (gradient halo + ~1.5px glowing core) sweeping a dimmed track at 1.5s ease-in-out alternate; on arrival, one 550ms linear pass wipes the content in behind it via `clip-path`; values flip from `—`. CSS-only. **Use `ScanlineReveal.vue`** (ent#245) — one persistent instance, content swapped in its slot, `:reveal="false"` for error/empty terminals. One named exception (trinity-enterprise#968): the Workspace agent band's activity wave (`portal/ActivityWave.vue`) owns its loading face under the same phase rules; no other chart does. **Everything else** — pages, panels, lists, message threads — a skeleton placeholder: pulse blocks in the chrome fills, `animate-pulse motion-reduce:animate-none`, `aria-busy` + one `sr-only` line, the loaded surface's own footprint (`SkeletonLoader.vue`, or content-shaped like `portal/PortalSkeleton.vue`), the first arm of the branch chain.
 - Key the animation off store state (`loading → loaded`), never a timer. Cache hits skip it entirely.
 - Loading means "no data yet", never "fetch in flight".
 - First load animates; **scheduled background refresh is invisible**: stale-while-revalidate, in-place value swap, no skeleton re-flash, no spinner, no layout shift, no scroll reset.
@@ -74,7 +74,7 @@ Density:
 11. One primary action per view; the rest demote to secondary/ghost/overflow.
 
 Data loading:
-12. Scanline on chart surfaces only; a skeleton placeholder keyed on "no data yet" everywhere else; no bespoke spinners (#2540).
+12. Scanline on chart surfaces only; a skeleton placeholder keyed on "no data yet" everywhere else; no bespoke spinners (#2540). The Workspace band's activity wave is the one named exception (trinity-enterprise#968).
 13. First load animates; background refresh is invisible.
 14. Loading = "no data yet"; cache hits skip animation; reduced motion honored.
 

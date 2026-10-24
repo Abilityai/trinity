@@ -154,7 +154,7 @@ sudo ./scripts/deploy/start.sh --provision --cloud digitalocean --caddy-only
 
 `--caddy-only` rewrites the web-server config and nothing else. A plain restart does not pick the variable up, and re-running the full provisioning would also rewrite this instance's recorded address and install provenance, so it is the wrong tool for a one-variable change. The generated configuration is checked before the web server is reloaded — an invalid one leaves the running config alone rather than taking the site down.
 
-Now `http://<tailnet-ip>` serves Trinity. Requests from anywhere else keep redirecting to HTTPS exactly as before.
+Now `http://<tailnet-ip>` serves Trinity, and so does the machine's MagicDNS name (`http://<machine-name>`). What decides it is the address the request comes from, so either name works from inside the tailnet. Requests from anywhere else keep redirecting to HTTPS exactly as before.
 
 The rule matches the **source address of the connection**, not a header, so a request from the public internet cannot claim to be local to get the login page in cleartext. Setting the value to `0.0.0.0/0` is refused for the same reason.
 

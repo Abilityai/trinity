@@ -145,11 +145,25 @@ class TestPathDeny:
             "in platform_prompt_service.py so the prompt names the same paths"
         )
 
+    def test_backend_allow_copy_matches_the_agent_image(self):
+        path_allow = json.loads(GUARDRAILS_JSON.read_text())["path_allow"]
+        assert list(getattr(platform_prompt_service, "_GUARDRAIL_PATH_ALLOW", ())) == path_allow, (
+            "guardrails-baseline.json path_allow changed: update _GUARDRAIL_PATH_ALLOW "
+            "in platform_prompt_service.py so the prompt names the same exceptions"
+        )
+
     @pytest.mark.parametrize("runtime", HOOKED_RUNTIMES + UNHOOKED_RUNTIMES)
     def test_every_entry_is_in_the_block(self, runtime):
         block = _section(_render(PromptTier.VERBOSE, runtime))
         for entry in _GUARDRAIL_PATH_DENY:
             assert f"`{entry}`" in block, entry
+
+    # #3868: `.env.*` must not read as covering `.env.example`, on any runtime.
+    @pytest.mark.parametrize("runtime", HOOKED_RUNTIMES + UNHOOKED_RUNTIMES)
+    def test_every_exception_is_named_as_writable(self, runtime):
+        block = _section(_render(PromptTier.VERBOSE, runtime))
+        for entry in json.loads(GUARDRAILS_JSON.read_text())["path_allow"]:
+            assert f"`.env.*` (except `{entry}`, which holds variable names only and is yours to write)" in block, entry
 
 
 # T4b — the reset's default keep-set is the agent server's own default, exactly.
