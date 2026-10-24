@@ -2998,7 +2998,7 @@ class CanaryStatusResponse(BaseModel):
 
     enabled: bool = Field(
         ...,
-        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        description="CANARY_ENABLED is 1/true/yes/on (any case). Answers the disabled case; "
         "default-OFF is the normal state for most installs.",
     )
     status: str = Field(
@@ -5782,3 +5782,73 @@ class AAuthResourceCallResponse(BaseModel):
     detail: Optional[str] = None
     do_not_retry: Optional[bool] = None
     next_step: str
+
+
+# ---------------------------------------------------------------------------
+# Nevermined card delegation (trinity-enterprise#966). Nevermined holds the
+# card and the mandate; these models carry the organization config and never
+# echo a secret back.
+# ---------------------------------------------------------------------------
+
+def _nevermined_secret(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.splitlines() not in ([], [value]):  # the agent .env splitter's boundary set
+        raise ValueError("a Nevermined secret cannot contain a newline")
+    value = value.strip()
+    return value or None
+
+
+class NeverminedOrganizationUpdate(BaseModel):
+    """PUT /api/nevermined/organization. Secrets are write-only: an absent one
+    keeps the stored value."""
+    org_id: str = Field(..., min_length=1, max_length=256)
+    environment: Literal["sandbox", "live"] = "sandbox"
+    widget_secret: Optional[str] = Field(default=None, max_length=4096)
+    agent_api_key: Optional[str] = Field(default=None, max_length=4096)
+
+    @field_validator("org_id")
+    @classmethod
+    def _org_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or any(c in v for c in "\r\n"):
+            raise ValueError("org_id must be a non-empty single line")
+        return v
+
+    @field_validator("widget_secret", "agent_api_key")
+    @classmethod
+    def _secret(cls, v: Optional[str]) -> Optional[str]:
+        return _nevermined_secret(v)
+
+
+class NeverminedOrganizationState(BaseModel):
+    """The organization as any route returns it — no secret field exists here."""
+    configured: bool
+    org_id: Optional[str] = None
+    environment: Optional[Literal["sandbox", "live"]] = None
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+    active_delegations: int = 0
+
+
+NEVERMINED_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+class NeverminedDelegationBind(BaseModel):
+    """POST /api/nevermined/agents/{agent_name}/delegation — the ids the
+    Nevermined widget handed the browser. Both spellings are accepted."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    delegation_id: str = Field(..., alias="delegationId", pattern=NEVERMINED_ID_PATTERN)
+    payment_method_id: Optional[str] = Field(default=None, alias="paymentMethodId", pattern=NEVERMINED_ID_PATTERN)
+    provider: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if any(c in v for c in "\r\n"):
+            raise ValueError("provider must be a single line")
+        return v or None

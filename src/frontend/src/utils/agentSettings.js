@@ -6,7 +6,8 @@
  * gate and the deep-link resolver are predicates that must be executed by their
  * spec, not matched out of an SFC's text.
  *
- * The decision on trinity#966 names six panes, each answering one question.
+ * The decision on trinity#966 names six panes, each answering one question;
+ * trinity-enterprise#951 split Credentials out of Storage as a seventh.
  * A pane that has not landed yet is simply not in this list (step-by-step
  * delivery), and a pane whose rows are all gated away for this viewer is
  * hidden rather than shown blank.
@@ -27,6 +28,19 @@ export const SETTINGS_SECTIONS = Object.freeze([
       'runtime', 'model', 'funding', 'subscription', 'api key', 'timeout', 'execution',
       'capacity', 'parallel', 'read-only', 'read only', 'memory', 'cpu', 'resources',
       'template', 'technical details', 'reset', 'delete', 'danger',
+    ],
+  },
+  // trinity-enterprise#951: its own pane, not a section of Storage — what an
+  // operator opens most often after creating an agent, and a different
+  // question from what the agent keeps on disk.
+  {
+    id: 'credentials',
+    label: 'Credentials',
+    question: 'What secrets it runs with',
+    keywords: [
+      'credentials', 'secrets', 'env', '.env', 'environment variables', 'mcp.json',
+      'quick inject', 'inject', 'upload', 'service account', 'certificate', 'ssh',
+      'export', 'import', 'encrypted', 'backup',
     ],
   },
   {
@@ -69,7 +83,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
     question: 'What it keeps and shares',
     keywords: [
       'storage', 'repository', 'repo', 'git', 'github', 'token', 'pat', 'auto-sync',
-      'sync', 'freeze', 'credentials', 'secrets', 'env', 'folders', 'shared folders',
+      'sync', 'freeze', 'folders', 'shared folders',
       'file sharing', 'files', 'download links',
     ],
   },
@@ -85,7 +99,7 @@ export const DEFAULT_SECTION = 'general'
 export const LEGACY_TAB_SECTIONS = Object.freeze({
   info: 'general',
   guardrails: 'guardrails',
-  credentials: 'storage',
+  credentials: 'credentials',
   folders: 'storage',
   access: 'people',
 })
@@ -95,10 +109,11 @@ export const LEGACY_TAB_SECTIONS = Object.freeze({
  *
  * The system agent has no people, channels or storage of its own to manage
  * (its tabs for those were never shown), so it gets General, Guardrails and
- * Integrations — the migration-map ruling on trinity#966.
+ * Integrations — the migration-map ruling on trinity#966 — plus Credentials,
+ * whose tab it always had (trinity-enterprise#951).
  */
 export function settingsSections({ isSystem = false } = {}) {
-  const systemPanes = ['general', 'guardrails', 'integrations']
+  const systemPanes = ['general', 'credentials', 'guardrails', 'integrations']
   return SETTINGS_SECTIONS.filter((s) => !isSystem || systemPanes.includes(s.id))
 }
 

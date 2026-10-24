@@ -228,9 +228,9 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 
 Loads config → compiles `bash_deny` (baseline regex) → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
 
-### File deny — `hooks/file-guardrail.py` (77 lines)
+### File deny — `hooks/file-guardrail.py` (89 lines)
 
-`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
+`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). A basename on `path_allow` (`.env.example`, #3868 — names only, required by compat check K-001) skips the slash-free `path_deny` patterns (`.env.*` and the other basename rules); absolute patterns, `extra_path_deny` and a symlinked `.env.example` still deny. `deny` with `tool`, `path`, `pattern`.
 
 ### Credential scanner — `hooks/output-scanner.py` (58 lines, PostToolUse)
 
@@ -267,7 +267,8 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 Immutable, root-owned `0444`. Contents:
 
 - **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
-- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row.
+- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row and a `.env.local` deny / `.env.example` allow pair.
+- **`path_allow`** (`[".env.example"]`, #3868): not overridable from `AGENT_GUARDRAILS`; mirrored into the platform prompt as `_GUARDRAIL_PATH_ALLOW`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
 - **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
 - **Override slots** (empty by default): `extra_bash_deny: []`, `extra_path_deny: []`, `disallowed_tools: []`.
@@ -336,7 +337,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |
-| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-77 |
+| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
 | Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-58 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |
 | CLI loader | `docker/base-image/agent_server/services/_runtime_config.py` | 1-33 |

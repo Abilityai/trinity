@@ -1,0 +1,8 @@
+{"version":"1.2.3","date":"2026-10-22","mode":"diff","scope":"all","issue":"abilityai/trinity#3868","base":"origin/dev@cd1548c1c",
+"phases_run":[0,1,2,5,7,8,9,12,13,14],
+"findings":[],
+"hypotheses":[{"category":"secret-in-tracked-template","asi":"ASI02","title":"An agent can type a real value into .env.example, and git sync commits it","note":"Bash and the template author already could; the change adds no new route. K-004 soft-checks placeholder values. No credential scan on git sync."}],
+"coverage_gaps":["docker pass not run (no Dockerfile, dependency or compose change; hook verified by running the shipped file under pytest)","independent verifier not spawned (no findings)"],
+"supply_chain_summary":{"scanner":"none — diff adds no dependencies"},
+"totals":{"critical":0,"high":0,"medium":0,"low":0},
+"trend":"n/a (diff run)"}

@@ -151,7 +151,7 @@
     },
     "src/frontend/src/components/CredentialsPanel.vue": {
       "raw_nongray": 7,
-      "raw_gray": 65,
+      "raw_gray": 69,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/CrossModelValidationPanel.vue": {
@@ -589,9 +589,14 @@
       "raw_gray": 17,
       "hardcoded_colors": 0
     },
+    "src/frontend/src/components/portal/ActivityWave.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 7,
+      "hardcoded_colors": 0
+    },
     "src/frontend/src/components/portal/PortalAgentBand.vue": {
       "raw_nongray": 0,
-      "raw_gray": 20,
+      "raw_gray": 19,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalAgentBubble.vue": {

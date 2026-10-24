@@ -3619,6 +3619,33 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * What an agent can still spend from its Nevermined card mandate (ent#966).
+   * Live from Nevermined; the body is returned as the backend sends it.
+   */
+  async getAgentSpending(agentName: string): Promise<Record<string, unknown>> {
+    return this.request(
+      "GET",
+      `/api/nevermined/agents/${encodeURIComponent(agentName)}/delegation`
+    );
+  }
+
+  /**
+   * Revoke an agent's Nevermined card mandate (ent#966). Owner or admin,
+   * human keys only — the backend refuses agent keys with 403.
+   */
+  async revokeAgentDelegation(agentName: string): Promise<{
+    revoked: boolean;
+    delegation_id: string;
+    env_removed: boolean;
+    env_note: string | null;
+  }> {
+    return this.request(
+      "DELETE",
+      `/api/nevermined/agents/${encodeURIComponent(agentName)}/delegation`
+    );
+  }
+
   // ============================================================================
   // Channel Groups (Issue #349 - Proactive Messaging)
   // ============================================================================
