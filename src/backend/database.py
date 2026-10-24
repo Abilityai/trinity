@@ -151,6 +151,7 @@ from db.dashboard_history import DashboardHistoryOperations
 from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
+from db.nevermined_delegation import NeverminedDelegationOperations
 from db.operator_queue import OperatorQueueOperations
 from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
@@ -1035,6 +1036,7 @@ class DatabaseManager:
         self._slack_ops = SlackOperations()
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
+        self._nevermined_delegation_ops = NeverminedDelegationOperations()  # ent#966
         self._operator_queue_ops = OperatorQueueOperations()
         self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
@@ -3841,6 +3843,46 @@ class DatabaseManager:
 
     def count_voip_calls_since(self, agent_name, hours=24):
         return self._voip_ops.count_calls_since(agent_name, hours=hours)
+
+    # =========================================================================
+    # Nevermined card delegation (delegated to db/nevermined_delegation.py) - ent#966
+    # =========================================================================
+
+    def get_nevermined_organization(self):
+        return self._nevermined_delegation_ops.get_organization()
+
+    def get_nevermined_organization_secrets(self):
+        return self._nevermined_delegation_ops.get_organization_secrets()
+
+    def save_nevermined_organization(self, org_id, environment, secrets, updated_by):
+        return self._nevermined_delegation_ops.save_organization(
+            org_id, environment, secrets, updated_by
+        )
+
+    def delete_nevermined_organization(self):
+        return self._nevermined_delegation_ops.delete_organization()
+
+    def count_active_agent_delegations(self):
+        return self._nevermined_delegation_ops.count_active_delegations()
+
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
 
     # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
