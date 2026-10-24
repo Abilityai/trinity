@@ -341,9 +341,14 @@ def test_get_chat_state_reports_stars_and_unread_together(chat_db):
     svc.mark_chat_read(ALICE, "thread", "t1")
     _msg(chat_db, session_id="t1", email=ALICE, role="assistant", at="2099-01-01T00:00:00Z")
 
-    by_ref = {(c["kind"], c["id"]): c for c in svc.get_chat_state(ALICE)["chats"]}
+    # trinity-enterprise#959: a room row now comes back only for a room the
+    # reader is in, or to a reader who lists every room (an admin). Nobody is
+    # seated in `r1` here, so the star is read through the admin door; its count
+    # is 0 because a count needs membership.
+    by_ref = {(c["kind"], c["id"]): c
+              for c in svc.get_chat_state(ALICE, sees_all_rooms=True)["chats"]}
 
     assert by_ref[("room", "r1")]["starred"] is True
-    assert by_ref[("room", "r1")]["unread"] == 0        # rooms carry their own cursor
+    assert by_ref[("room", "r1")]["unread"] == 0
     assert by_ref[("thread", "t1")]["unread"] == 1
     assert by_ref[("thread", "t1")]["starred"] is False

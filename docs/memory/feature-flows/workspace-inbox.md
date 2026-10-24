@@ -320,6 +320,9 @@ table, no migration. The report publish may mint the addressee's Main
 | Sessions or previews read fails after a good load | list kept, stale banner |
 | Roster unreadable during `?previews=true` | 5xx (fail loud), never a 200 with previews dropped |
 | Deliverables read fails in the pane | `LoadFailed` in the pane, never "no deliverables" |
+| A room's read fails in the pane (trinity-enterprise#959) | `inbox-pane-room-failed` (`LoadFailed`, retry); no `rendered`, so the room is not read and keeps its count |
+| A room the pane cannot read to its end (trinity-enterprise#959) | past ten pages, or a read that runs dry before the room's `message_count`: `inbox-pane-room-partial` ("too long to show here … open it"), no `rendered`, the room stays unread; the header's Mark read still clears it on purpose |
+| The open room fails to load, or has not loaded all of itself yet (trinity-enterprise#959) | `PortalRoom` emits no `read` until its transcript reaches the room's `message_count`; opening a room from the sidebar writes no read of its own |
 | Mark all read partly fails | `InlineError` naming the failed count; those rows keep "N new" |
 | A single read write fails (any of `Portal.vue::markRead`'s 7 callers) | the optimistic zero is rolled back — only while the entry is still the one that call wrote (`portalUtils.optimisticRead` / `rollbackRead`, compared via `toRaw`) — and the call resolves `false`; it never rejects (§3g S4) |
 | First unread message outside the 50-message window | "N earlier arrivals — Open in chat" |
@@ -342,6 +345,10 @@ table, no migration. The report publish may mint the addressee's Main
 - **URL params.** `?tab=` is allowlisted; `?item=` resolves only against the viewer's loaded
   items; `?anchor=` compares `dataset` values in JS, never builds a selector.
 - Asks keep the uniform 404 of `answer_ask` (Invariant #8); no new per-item endpoint.
+- **Rooms** (trinity-enterprise#959): membership is the grant on every surface — the count, the
+  preview, the stored row and the cursor write all go through the reader's own active participant
+  row in their credential's identity space, and a participant who left is not a member. See
+  *Rooms* → **Access** below for the rule and the tests that pin it.
 
 ## Known properties
 
@@ -401,8 +408,8 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent610_inbox.py` | D3 deliverable arm, D4 report stamp, completion `source` marker, previews (property n == count, latest iff n > 0, no `cost`, off-roster, excerpt redaction, outcome only from the marker), the router flag |
 | `tests/unit/test_ent557_unread_never_opened_chat.py`, `test_ent359_portal_chat_state.py`, `test_ent365_report_audience.py`, `test_ent457_portal_completion_report.py` | updated fixtures / retargets for the arm and the stamp |
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
-| `tests/unit/test_ent959_room_unread.py` | ent#959: agent messages after the room cursor count, own/system lines never; the baseline for a never-opened room; a non-member with a cursor row gets 0 and no preview; the two identity spaces; the route resolves the reader from the credential (fails closed); `member` on the rooms list |
-| `src/frontend/tests/unit/portalInboxRooms.spec.js`, `portalInboxRooms.mount.spec.js`, `portalInboxRoomsShell.mount.spec.js` | ent#959: member rooms in Unread / All, non-member rooms never drawn or fetched, the pane reads the room after render, Mark all read by kind, the footer note gone, the count-parity property with rooms, the open room's `read` through the shell |
+| `tests/unit/test_ent959_room_unread.py` | ent#959: agent messages after the room cursor count, own/system lines never; the baseline for a never-opened room; a non-member (cursor row, other identity space, departed, no reader) gets NO entry and no preview; an admin keeps their own starred non-member row at 0; the read write moves a room cursor only for an active member (unknown and unauthorized answer alike); a removed agent can no longer fetch, list or post into the room; the platform door carries its username to the room reader; `member` on the rooms list |
+| `src/frontend/tests/unit/portalInboxRooms.spec.js`, `portalInboxRooms.mount.spec.js`, `portalInboxRoomsShell.mount.spec.js` | ent#959: member rooms in Unread / All, non-member rooms never drawn or fetched, the pane reads the room after render, `roomTranscriptComplete`, a room past the page bound or short of its count stays partial and unread, the room view reads a multi-page room only once all of it is loaded and never on a failed open, opening a room from the sidebar writes no read, Mark all read by kind, the footer note gone, the count-parity property with rooms, the open room's `read` through the shell |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
 | `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read (Unread/All only, confirm for k>1 with Cancel focused, k=1 direct, success toast + new visit, partial failure), phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName`; ent#738: `reply` → the target, the `messageId` guard, cleared on leaving (and back), cleared on a New chat from a URL that does not name the chat, the Inbox path keeps its target |
@@ -488,19 +495,38 @@ portalInbox.js
   resolveItem('room:<id>') member rooms only — a deep link to another room resolves to nothing
   openInChatTarget(room)   /workspace/r/<id>
   roomPaneMessages / paneRuns   the room transcript in the pane's shape; a run is one SENDER
-PortalInboxRoomCard.vue    store.fetchRoom(id) (GET /api/rooms/{id}, uniform 404 for a non-member)
-                           → the new messages → `rendered` → the container's markRead('room', id)
-PortalRoom.vue             emits `read` on a full load and when an agent message arrives;
-                           Portal.vue → markRead('room', id), so the open room never badges
+PortalInboxRoomCard.vue    store.fetchRoom(id, since) (GET /api/rooms/{id}, uniform 404 for a non-member),
+                           paged until what is held reaches the response's `message_count`
+                           (roomTranscriptComplete), at most 10 pages
+                           → complete: the new messages → `rendered` → the container's markRead('room', id)
+                           → short of it: "too long to show here", no `rendered`, stays unread
+PortalRoom.vue             owes a `read` on a full load and when an agent message arrives, and
+                           emits it once its transcript reaches `message_count` (the 3 s poll
+                           brings the rest of a long room, a closed one included); Portal.vue → markRead('room', id), so
+                           the open room never badges. openRoom (the sidebar) writes no read itself.
+POST /client-portal/chat-state/room/{id}/read
+                           service.mark_chat_read(…, room_reader=room_reader_of(principal)):
+                           writes only for an active participant; otherwise the same 204, no write
 ```
 
 - **What is new**: an agent's message after the cursor. The viewer's own messages and the
   room's system lines never count (a room seats one person — its creator).
-- **Access**: a non-member who holds a cursor row for a room id (the write takes any id,
-  invariant #8) gets `unread: 0` and no preview; a cursorless room is emitted only through
-  the membership join. A platform account and a Workspace session with the same email are two
-  identity spaces (ent#362) and never read each other's rooms. Pinned by
-  `tests/unit/test_ent959_room_unread.py` and `portalInboxRooms.mount.spec.js`.
+- **Access**: a non-member gets NO entry for a room — no count, no zero, no id, no preview —
+  even holding a cursor row for its id: stored room rows pass through one batched
+  active-membership read (`db.active_room_ids`), and a cursorless room is emitted only through
+  the membership join. The read write (`mark_chat_read`) moves a room cursor only for an
+  active participant; an unknown or unauthorized id gets the same 204 and nothing is written.
+  A platform account and a Workspace session with the same email are two identity spaces
+  (ent#362) and never read or clear each other's rooms. A participant who left is not a member
+  (the rooms API 404s their fetch and drops the room from their list). The one exception: a
+  platform admin, who lists every room anyway, keeps their own starred rows for rooms they are
+  not in, at 0. Pinned by `tests/unit/test_ent959_room_unread.py` and
+  `portalInboxRooms.mount.spec.js`.
+- **Reading only what is on screen**: a room is read only once the transcript held reaches the
+  room's `message_count` (`roomTranscriptComplete`), in the pane and in the room view alike.
+- **Known gaps (follow-ups)**: a message landing between the last fetch and the read write is
+  cleared unseen (the write stamps server time, as a chat's does); and the cursor row has no
+  identity-space column, so one email in the SAME room under both identities shares one cursor.
 - **Counts**: the room's count rides `sidebarThreads`, so Σ "N new" == came holds
   (`portalInboxRooms.spec.js` property; `portalInboxRoomsShell.mount.spec.js` through the shell).
 - **Known limit**: between an agent message landing and the open room's next 3 s poll, a

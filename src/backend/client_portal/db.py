@@ -1368,10 +1368,12 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
 #
 # Membership is the grant, and it is a JOIN, not a filter applied afterwards:
 # a message is only ever read through the viewer's OWN active participant row,
-# in the identity space their credential acts in (`:pkind`/`:pid`). The cursor
-# write deliberately accepts any room id (invariant #8), so a non-member can
-# hold a cursor row for a room — this read then has no participant row to join
-# through and returns nothing for it, not even a zero.
+# in the identity space their credential acts in (`:pkind`/`:pid`). A cursor row
+# can still exist for a room the reader is not in — the row is keyed by EMAIL,
+# which two identity spaces share, and rows written before the write checked
+# membership remain — so this read then has no participant row to join through
+# and returns nothing for it, and `active_room_ids` keeps the row itself out of
+# the payload (fix round 1).
 _UNREAD_ROOM_ARRIVALS = (
     "SELECT msg.room_id AS room_id, msg.id AS id, msg.seq AS seq, "
     "       msg.created_at AS at "
@@ -1385,6 +1387,39 @@ _UNREAD_ROOM_ARRIVALS = (
     "WHERE msg.sender_kind = 'agent' "
     + _UNREAD_CURSOR.format(at="msg.created_at")
 )
+
+
+def active_room_ids(participant_kind: str, participant_identity: str) -> set[str]:
+    """Every room this participant is ACTIVELY in (`left_at IS NULL`), in one
+    statement — the batched membership read `/chat-state` filters its stored
+    room rows through (trinity-enterprise#959 fix round 1). An empty identity is
+    in no room: the caller could not say whose rooms these are."""
+    if not participant_kind or not participant_identity:
+        return set()
+    stmt = text(
+        "SELECT room_id FROM enterprise_room_participants "
+        "WHERE kind = :pkind AND identity = :pid AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return {r[0] for r in conn.execute(
+            stmt, {"pkind": participant_kind, "pid": participant_identity}) if r[0]}
+
+
+def is_active_room_participant(room_id: str, participant_kind: str,
+                               participant_identity: str) -> bool:
+    """Is this participant actively in this one room? The read-cursor write's
+    gate (trinity-enterprise#959 fix round 1). An unknown room and a room the
+    participant is not in (or left) are the same False."""
+    if not room_id or not participant_kind or not participant_identity:
+        return False
+    stmt = text(
+        "SELECT 1 FROM enterprise_room_participants "
+        "WHERE room_id = :room AND kind = :pkind AND identity = :pid "
+        "AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"room": room_id, "pkind": participant_kind,
+                                   "pid": participant_identity}).first() is not None
 
 
 def unread_room_arrivals(client_email: str, participant_kind: str,

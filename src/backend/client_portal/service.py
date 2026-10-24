@@ -5777,7 +5777,8 @@ def _chat_state_room_left(email: str) -> bool:
 
 def get_chat_state(email: str, unread: dict[str, int] | None = None,
                    room_reader: tuple[str, str] | None = None,
-                   room_unread: dict[str, int] | None = None) -> dict:
+                   room_unread: dict[str, int] | None = None,
+                   sees_all_rooms: bool = False) -> dict:
     """Star + unread state for every chat the caller has state for.
 
     `unread` lets a caller pass counts it already read in the same statement as
@@ -5787,21 +5788,32 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
     trinity-enterprise#959: a room's unread is counted only when the caller
     names the room participant it reads as (`room_reader`, from
     `room_reader_of(principal)`), and only for rooms that participant is in
-    (`db.unread_room_arrivals` joins through the membership row). With no
-    reader every room reports `unread = 0`, exactly as before — the count never
-    guesses an identity.
+    (`db.unread_room_arrivals` joins through the membership row).
+
+    Fix round 1 (security review #1): the stored room ROWS are filtered the same
+    way. A cursor/star row is keyed by EMAIL, which a Workspace identity and a
+    platform account can share, so without the filter a credential was handed
+    the ids of rooms only the OTHER identity is in. A room row is returned only
+    for a room the reader is actively in — one batched read, `db.active_room_ids`
+    — and with no reader, for none. `sees_all_rooms` (`room_sees_all`: a
+    platform admin, who lists every room through `GET /api/rooms` anyway) keeps
+    the admin's OWN starred rows for rooms they are not in; those still count 0.
     """
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
     if room_unread is None:
         room_unread = ({rid: a["n"] for rid, a in db.unread_room_arrivals(email, *room_reader).items()}
                        if room_reader else {})
+    my_rooms: set[str] | None = None if sees_all_rooms else (
+        db.active_room_ids(*room_reader) if room_reader else set())
     chats = []
     seen_threads: set[str] = set()
     seen_rooms: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
+            continue
+        if kind == "room" and my_rooms is not None and cid not in my_rooms:
             continue
         if kind == "thread":
             seen_threads.add(cid)
@@ -5880,6 +5892,19 @@ def room_reader_of(principal) -> tuple[str, str] | None:
     return (WORKSPACE_KIND, email) if email else None
 
 
+def room_sees_all(principal) -> bool:
+    """Does this Workspace credential list EVERY room (ent#959 fix round 1)?
+
+    Only a platform admin: the rooms API lists every room to an admin platform
+    account (`shared_sessions.service.list_rooms`), so the admin's own starred
+    rows for rooms they are not in disclose nothing they cannot already list.
+    `is_admin` is the portal's stricter reading (`_is_admin_principal`: role AND
+    an admin-gate scope) and is always False for a Workspace session token.
+    """
+    return bool(getattr(principal, "is_platform", False)
+                and getattr(principal, "is_admin", False))
+
+
 def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> None:
     """Star / unstar one chat for the calling viewer.
 
@@ -5901,10 +5926,22 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 
-def mark_chat_read(email: str, chat_kind: str, chat_id: str) -> None:
+def mark_chat_read(email: str, chat_kind: str, chat_id: str,
+                   room_reader: tuple[str, str] | None = None) -> None:
     """Advance the caller's read cursor on one chat. Same non-validation and
-    same cap as `set_chat_star`."""
+    same cap as `set_chat_star` — for a thread.
+
+    A ROOM's cursor moves only for a reader actively in that room
+    (trinity-enterprise#959 fix round 1, security review #3): the cursor row is
+    keyed by email, so an unchecked write let a non-member create one and let a
+    platform account clear the same email's Workspace-identity room. An unknown
+    room, a room the reader is not in or left, and a call with no reader all
+    return exactly as a successful write does, writing nothing — the write
+    stays no existence oracle (invariant #8).
+    """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
+    if kind == "room" and not (room_reader and db.is_active_room_participant(cid, *room_reader)):
+        return
     if _would_create_row_past_cap(email, kind, cid):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because

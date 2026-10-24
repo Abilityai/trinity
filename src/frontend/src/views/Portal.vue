@@ -1863,7 +1863,10 @@ function openRoom(roomId) {
   if (!roomId) return
   if (guardLeaveCall(() => openRoom(roomId))) return   // ent#551: ask, then leave
   unreachableAgent.value = null
-  markRead('room', roomId)
+  // trinity-enterprise#959 fix round 1: no read here. The room reads itself
+  // (`PortalRoom` → `read`) once its whole transcript is on screen; a write at
+  // the click cleared it before anything was fetched, and kept it cleared when
+  // the open failed.
   activeRoomId.value = roomId
   pendingSession.value = null
   // ent#451 review: every site that nulls `pendingSession` also settles the

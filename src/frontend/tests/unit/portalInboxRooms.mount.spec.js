@@ -54,7 +54,10 @@ const room = (id, over = {}) => ({
   id, is_room: true, member: true, name: `Room ${id}`, title: `Room ${id}`,
   agent_names: ['ada', 'bo'], last_message_at: iso(5), unread: 0, ...over,
 })
-const roomDetail = (id, messages) => ({ id, name: `Room ${id}`, status: 'open', participants: [], messages, own_tags: {}, working: [] })
+// `message_count` is the room's WHOLE count (every row), beside a page of it.
+const roomDetail = (id, messages, total = messages.length) => ({
+  id, name: `Room ${id}`, status: 'open', participants: [], messages, own_tags: {}, working: [], message_count: total,
+})
 const msg = (id, seq, over = {}) => ({
   id, seq, kind: 'message', sender_kind: 'agent', sender_identity: 'ada', content: `say ${id}`,
   created_at: iso(10 - seq), ...over,
@@ -142,7 +145,7 @@ describe('Unread: a room with new messages (AC 1)', () => {
     // room past that ended the pane on m500 while the new messages sat beyond
     // it, and the read then cleared what the pane never showed.
     const all = Array.from({ length: 502 }, (_, i) => msg(`m${i + 1}`, i + 1))
-    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500)))
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500), all.length))
     const previews = { 'room:r1': { latest: { kind: 'message', id: 'm502', at: iso(1), excerpt: 'x' }, first_unread_message_id: 'm501' } }
     const markRead = vi.fn(async () => true)
     const w = await mountInbox({ threads: [room('r1', { unread: 2 })], previews, markRead }, { tab: 'unread' })
@@ -150,10 +153,40 @@ describe('Unread: a room with new messages (AC 1)', () => {
     await flushPromises()
     const shown = w.findAll('[data-testid^="inbox-pane-message-"]').map((x) => x.attributes('data-testid'))
     expect(shown).toEqual(['inbox-pane-message-m501', 'inbox-pane-message-m502'])
-    // Paged from `since`, to the first empty batch (the desktop preview read it
-    // once already; the explicit open reloads it).
-    expect(store.fetchRoom.mock.calls.slice(-3).map((c) => c[1])).toEqual([0, 500, 502])
+    // Paged from `since` until what is held reaches the room's count (the
+    // desktop preview read it once already; the explicit open reloads it).
+    expect(store.fetchRoom.mock.calls.slice(-2).map((c) => c[1])).toEqual([0, 500])
     expect(markRead.mock.calls).toEqual([['room', 'r1']])
+  })
+
+  it('a room past the page bound stays partial and UNREAD (Codex code review #1)', async () => {
+    // A room reporting more messages than ten pages hold: every page is full
+    // and new, so the loop ends on its bound, not on the room's end. Clearing
+    // the room then would clear the newest messages, which were never fetched.
+    const TOTAL = 6000
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(
+      id, Array.from({ length: 500 }, (_, i) => msg(`m${since + i + 1}`, since + i + 1)), TOTAL))
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [room('r1', { unread: 2 })], markRead }, { tab: 'unread', item: 'room:r1' })
+    await flushPromises()
+    expect(store.fetchRoom).toHaveBeenCalledTimes(10)
+    expect(has(w, 'inbox-pane-room-partial')).toBe(true)
+    expect(w.findAll('[data-testid^="inbox-pane-message-"]')).toHaveLength(0)
+    expect(markRead).not.toHaveBeenCalled()
+    // The header's Mark read stays — the person can still clear it on purpose.
+    expect(has(w, 'inbox-pane-mark-read')).toBe(true)
+  })
+
+  it('a room whose read runs dry before its count is not read either', async () => {
+    // The room says 9 messages and serves 4, then nothing: the transcript is
+    // not the room, whatever the reason.
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(
+      id, [msg('m1', 1), msg('m2', 2), msg('m3', 3), msg('m4', 4)].filter((m) => m.seq > since), 9))
+    const markRead = vi.fn(async () => true)
+    const w = await mountInbox({ threads: [room('r1', { unread: 2 })], markRead }, { tab: 'unread', item: 'room:r1' })
+    await flushPromises()
+    expect(has(w, 'inbox-pane-room-partial')).toBe(true)
+    expect(markRead).not.toHaveBeenCalled()
   })
 
   it('a room that fails to load is not read', async () => {
@@ -207,6 +240,74 @@ describe('All (AC 2, AC 5)', () => {
 })
 
 describe('the open room reads what arrives in it', () => {
+  function mountRoom() {
+    wrapper = mount(PortalRoom, {
+      props: { roomId: 'r1', roster: [{ name: 'ada' }] },
+      global: { plugins: [router] },
+      attachTo: document.body,
+    })
+    return wrapper
+  }
+
+  it('a room longer than one page is read only once ALL of it is on screen (Codex code review #2)', async () => {
+    // The full load is one oldest-first page (500 here); the 3 s poll brings the
+    // rest from the last seq. Reading on the first page cleared m501/m502, which
+    // were not on screen yet.
+    vi.useFakeTimers()
+    const all = Array.from({ length: 502 }, (_, i) => msg(`m${i + 1}`, i + 1))
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500), all.length))
+    mountRoom()
+    await flushPromises()
+    expect(wrapper.emitted('read')).toBeUndefined()
+
+    vi.advanceTimersByTime(3100)                              // the poll brings m501, m502
+    await flushPromises()
+    expect(wrapper.emitted('read')).toEqual([['r1']])
+  })
+
+  it('the read owed for an open survives a poll that brings no agent message', async () => {
+    vi.useFakeTimers()
+    // The page the poll brings holds no AGENT message — only the person's own
+    // and a system line — and the open still owes its read.
+    const all = Array.from({ length: 500 }, (_, i) => msg(`m${i + 1}`, i + 1))
+    all.push(msg('m501', 501, { sender_kind: 'workspace_user', sender_identity: 'me@example.com', content: 'thanks' }))
+    all.push(msg('m502', 502, { kind: 'system', sender_kind: 'system', sender_identity: null, content: 'bo joined the room.' }))
+    store.fetchRoom = vi.fn(async (id, since = 0) => roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500), all.length))
+    mountRoom()
+    await flushPromises()
+    expect(wrapper.emitted('read')).toBeUndefined()
+    vi.advanceTimersByTime(3100)
+    await flushPromises()
+    expect(wrapper.emitted('read')).toEqual([['r1']])
+  })
+
+  it('a CLOSED room longer than one page still catches up to its read', async () => {
+    // The poll skips a closed room (nothing new can arrive), which left the
+    // read owed by the open unpaid for ever once the first page fell short.
+    vi.useFakeTimers()
+    const all = Array.from({ length: 502 }, (_, i) => msg(`m${i + 1}`, i + 1))
+    store.fetchRoom = vi.fn(async (id, since = 0) => ({
+      ...roomDetail(id, all.filter((m) => m.seq > since).slice(0, 500), all.length), status: 'closed',
+    }))
+    mountRoom()
+    await flushPromises()
+    expect(wrapper.emitted('read')).toBeUndefined()
+    vi.advanceTimersByTime(3100)
+    await flushPromises()
+    expect(wrapper.emitted('read')).toEqual([['r1']])
+    const calls = store.fetchRoom.mock.calls.length
+    vi.advanceTimersByTime(3100)                              // paid: a closed room stops loading
+    await flushPromises()
+    expect(store.fetchRoom.mock.calls.length).toBe(calls)
+  })
+
+  it('a room that fails to open is not read', async () => {
+    store.fetchRoom = vi.fn(async () => { throw new Error('404') })
+    mountRoom()
+    await flushPromises()
+    expect(wrapper.emitted('read')).toBeUndefined()
+  })
+
   it('emits read on open and when an agent message lands, never for nothing new', async () => {
     vi.useFakeTimers()
     let messages = [msg('m3', 3)]

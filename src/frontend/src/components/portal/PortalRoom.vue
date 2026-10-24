@@ -406,6 +406,7 @@ import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from 
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
+import { roomTranscriptComplete } from './portalInbox'
 import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
 import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import { useComposerDraft } from '@/composables/useComposerDraft'
@@ -902,6 +903,12 @@ function isMine(m) {
 // messages, and both concat them — duplicate bubbles and duplicate Vue keys on
 // one seq, self-correcting only on a full reload.
 let loading_ = false
+// trinity-enterprise#959 fix round 1 (Codex code review #2): a read the room
+// OWES — set by an open or an agent's message landing — and paid only once the
+// transcript on screen is the whole room (`roomTranscriptComplete`). The full
+// load is one oldest-first page, so a room longer than that is read when the
+// poll has brought the rest, not on the first page; a failed load owes nothing.
+let readOwed = false
 
 async function load({ full = false } = {}) {
   if (loading_ && !full) return
@@ -923,7 +930,12 @@ async function load({ full = false } = {}) {
     // the sidebar, the Inbox, a link) and whenever an agent's message lands in
     // it, the rule a chat follows for a reply that arrives while you watch.
     // Without it the room would badge in the sidebar while the person reads it.
-    if (full || incoming.some((m) => m && m.sender_kind === 'agent')) emit('read', props.roomId)
+    // Only once ALL of it is on screen (fix round 1): see `readOwed`.
+    if (full || incoming.some((m) => m && m.sender_kind === 'agent')) readOwed = true
+    if (readOwed && roomTranscriptComplete(messages.value.length, data)) {
+      readOwed = false
+      emit('read', props.roomId)
+    }
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
@@ -994,8 +1006,9 @@ async function addAgent(name) {
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
-    // Nothing to wait for once the room is closed.
-    if (!isClosed.value && !document.hidden) load()
+    // Nothing to wait for once the room is closed — except the rest of a long
+    // closed room the open still owes its read on (trinity-enterprise#959).
+    if ((!isClosed.value || readOwed) && !document.hidden) load()
   }, POLL_MS)
 }
 function stopPolling() {
@@ -1005,6 +1018,7 @@ function stopPolling() {
 
 watch(() => props.roomId, async () => {
   messages.value = []
+  readOwed = false
   loading.value = true
   resetTypeahead()
   // #2624: the outgoing room's element is about to be replaced, so re-arm

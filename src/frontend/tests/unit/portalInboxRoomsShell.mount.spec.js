@@ -125,3 +125,20 @@ describe('the room on stage reads itself', () => {
     expect(store.markChatReadStrict).toHaveBeenCalledWith('room', 'room_1')
   })
 })
+
+describe('opening a room from the sidebar does not read it ahead of the room (Codex code review #2)', () => {
+  it('no room read is written by the open itself — only PortalRoom\'s complete load reads it', async () => {
+    arm()
+    const { w, router } = await boot('/workspace')
+    store.markChatRead.mockClear()
+    store.markChatReadStrict.mockClear()
+    const sidebar = w.findAllComponents({ name: 'PortalSidebar' }).at(0)
+    sidebar.vm.$emit('open-thread', LIST[1])               // the room row
+    await flushPromises()
+    expect(router.currentRoute.value.path).toBe('/workspace/r/room_1')
+    // PortalRoom is stubbed here, so it never loads: nothing may have read it.
+    const roomReads = [...store.markChatRead.mock.calls, ...store.markChatReadStrict.mock.calls]
+      .filter(([kind]) => kind === 'room')
+    expect(roomReads).toEqual([])
+  })
+})

@@ -16,7 +16,7 @@ import { describe, it, expect } from 'vitest'
 import {
   unreadItems, allItems, allFooterNotes, inboxCounts, parseItemKey, resolveItem, stableRows,
   emptyVisit, listHeadLabel, listHeadExact, openInChatTarget, inboxSelectedAgent, isChatItem,
-  roomAgentsLabel, roomPaneMessages, paneRuns, markAllConfirm,
+  roomAgentsLabel, roomPaneMessages, paneRuns, markAllConfirm, roomTranscriptComplete,
 } from '@/components/portal/portalInbox'
 import { totalUnread } from '@/components/portal/portalUtils'
 
@@ -51,13 +51,22 @@ describe('Unread lists a room with new messages (AC 1)', () => {
     })
   })
 
-  it('a read room is not in Unread', () => {
-    expect(unreadItems([room('r1', { unread: 0 })], {})).toEqual([])
+  // Fix round 1: both of these asserted `[]` on a list with no room that
+  // SHOULD show, which held before rooms reached the Inbox at all. Each now
+  // carries the room that must show beside the one that must not.
+  it('a read room is not in Unread; its unread sibling is', () => {
+    const rows = unreadItems([room('r1', { unread: 0 }), room('r2', { unread: 1 })], {})
+    expect(rows.map((r) => r.key)).toEqual(['room:r2'])
   })
 
   it('a room the viewer is not a member of never becomes a row, whatever it carries', () => {
-    const threads = [room('r-admin', { member: false, unread: 2 }), room('r-unknown', { member: undefined, unread: 1 })]
-    expect(unreadItems(threads, {})).toEqual([])
+    const threads = [
+      room('r-admin', { member: false, unread: 2 }),
+      room('r-unknown', { member: undefined, unread: 1 }),
+      room('r-mine', { unread: 1 }),
+    ]
+    expect(unreadItems(threads, {}).map((r) => r.key)).toEqual(['room:r-mine'])
+    expect(allItems(threads, [], {}, NOW).map((r) => r.key)).toEqual(['room:r-mine'])
   })
 })
 
@@ -209,6 +218,24 @@ describe('property: Unread == came and ⊆ All, with rooms (AC 4)', () => {
       for (const t of threads.filter((x) => x.is_room && !x.member)) {
         expect(all.has(`room:${t.id}`), `${ctx} ${t.id}`).toBe(false)
       }
+    }
+  })
+})
+
+// Fix round 1 (Codex code review #1, #2): a room is read only when the transcript
+// on screen is the WHOLE room — the messages held reach the `message_count` the
+// same response reports. Anything short of that, or a response that does not
+// say, is not complete.
+describe('roomTranscriptComplete', () => {
+  it('is complete only when what is held reaches the room\'s own count', () => {
+    expect(roomTranscriptComplete(502, { message_count: 502 })).toBe(true)
+    expect(roomTranscriptComplete(500, { message_count: 502 })).toBe(false)
+    expect(roomTranscriptComplete(0, { message_count: 0 })).toBe(true)
+  })
+
+  it('fails closed on a response with no usable count', () => {
+    for (const data of [null, undefined, {}, { message_count: null }, { message_count: 'x' }, { message_count: -1 }]) {
+      expect(roomTranscriptComplete(10, data), JSON.stringify(data)).toBe(false)
     }
   })
 })

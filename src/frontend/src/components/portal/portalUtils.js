@@ -67,8 +67,9 @@ export function partitionStarred(threads) {
 //
 // A room contributes to every agent in it, because there is no single agent the
 // conversation is "with" — if three agents are in a room you are behind on, all
-// three rows should say so. Rooms report `unread: 0` today (the backend counts
-// threads only), so this is the shape being right ahead of the data.
+// three rows should say so. Since trinity-enterprise#959 the backend counts a
+// room's unread for its members (an agent's messages after the reader's room
+// cursor), so a room's count arrives here like a chat's.
 export function unreadByAgent(threads) {
   const out = {}
   for (const t of Array.isArray(threads) ? threads : []) {

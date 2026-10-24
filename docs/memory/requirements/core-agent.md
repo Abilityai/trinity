@@ -3907,15 +3907,20 @@ to localStorage in the clear.
     only for a room where the viewer has an active participant row in the identity space
     their credential acts in — `workspace_user` + email for a Workspace session, `user` +
     username for a platform session (ent#362) — so a non-member never gets a room's row, id,
-    name or count, even holding a cursor row for its id (the cursor write takes any id,
-    invariant #8). The rooms list marks each room `member` (an admin lists every room); the
-    Inbox draws a room only when `member` is true, and a deep link to another room resolves
-    to nothing.
+    name or count, even holding a cursor row for its id: stored room rows are filtered through
+    the reader's active memberships. The read write moves a room cursor only for an active
+    participant (an unknown or unauthorized id gets the same 204 and nothing is written). A
+    participant who left is not a member: the rooms API no longer lists or serves the room to
+    them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
+    a room only when `member` is true, and a deep link to another room resolves to nothing. A
+    platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
   - *Reading it*: opening a room row shows its new messages in the pane (the room's own
     membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
     opens the room. The room on screen reads itself on open and whenever an agent message
-    lands in it, so the sidebar never badges the room being read. Mark all read reads a room
-    as a room.
+    lands in it, so the sidebar never badges the room being read. Either way a room is read
+    only once the transcript on screen reaches the room's whole message count; a room too long
+    for the pane stays unread and says so, and a failed open reads nothing. Mark all read reads
+    a room as a room.
   - *Counts*: the room's count rides the same `sidebarThreads` projection, so the sidebar,
     the agent rows (a room credits every agent in it), the tab title and the Inbox still read
     one number (Σ "N new" == came).

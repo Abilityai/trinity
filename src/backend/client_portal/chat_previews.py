@@ -113,7 +113,8 @@ def _project(latest: dict) -> dict:
 
 
 def get_chat_state_with_previews(email: str, is_platform: bool,
-                                 room_reader: tuple[str, str] | None = None) -> dict:
+                                 room_reader: tuple[str, str] | None = None,
+                                 sees_all_rooms: bool = False) -> dict:
     """`service.get_chat_state` with previews attached (see module docstring).
 
     trinity-enterprise#959: rooms too. A room's preview comes from
@@ -125,7 +126,8 @@ def get_chat_state_with_previews(email: str, is_platform: bool,
     state = service.get_chat_state(
         email, unread={sid: a["n"] for sid, a in arrivals.items()},
         room_reader=room_reader,
-        room_unread={rid: a["n"] for rid, a in room_arrivals.items()})
+        room_unread={rid: a["n"] for rid, a in room_arrivals.items()},
+        sees_all_rooms=sees_all_rooms)
 
     roster = service.roster_agent_names(email, include_owned=is_platform)
     eligible = sorted(

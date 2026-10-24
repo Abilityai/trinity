@@ -98,13 +98,18 @@ def get_room(room_id: str) -> Optional[dict]:
 
 
 def list_rooms_for_participant(kind: str, identity: str) -> list[dict]:
-    """Rooms this participant is (or was) in — membership IS the visibility rule."""
+    """Rooms this participant is ACTIVELY in — membership IS the visibility rule.
+
+    A participant who left (`left_at` set — today only a removed agent) is not a
+    member: it no longer lists the room (trinity-enterprise#959 fix round 1).
+    Their row stays (`remove_participant` is soft) so the transcript's sender
+    label still resolves; `get_participant` reads it unfiltered for that."""
     stmt = text(
         "SELECT r.id, r.name, r.topic, r.status, r.stop_reason, r.created_at, "
         "       r.expires_at, r.max_messages, r.max_cost_usd "
         "FROM enterprise_rooms r "
         "JOIN enterprise_room_participants p ON p.room_id = r.id "
-        "WHERE p.kind = :kind AND p.identity = :identity "
+        "WHERE p.kind = :kind AND p.identity = :identity AND p.left_at IS NULL "
         "ORDER BY r.created_at DESC"
     )
     with get_engine().connect() as conn:

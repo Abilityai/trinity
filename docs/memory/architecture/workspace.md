@@ -894,12 +894,41 @@ yields the latest arrival and the first unread id. It reaches a message only by 
 viewer's own **active participant row** in the identity space their credential acts in —
 `service.room_reader_of(principal)`: a platform session is `user` + `PortalPrincipal.username`,
 a Workspace session `workspace_user` + email, anything else no rooms at all (fail closed) —
-because the cursor write accepts any room id (invariant #8) and a count read any other way
-would be an oracle over rooms the viewer is not in. `get_chat_state(room_reader=…)` fills the
-room entries' `unread` and emits cursorless member rooms under the same cap rule; the rooms
-list marks each row `member` (an admin lists every room), and the Inbox draws a room only when
-it is true. The rooms' own `last_read_seq` stays the agents' delta cursor. No table, no
+because the cursor row is keyed by EMAIL, which the two identity spaces share, and a count read
+any other way would be an oracle over rooms the viewer is not in. `get_chat_state(room_reader=…)`
+fills the room entries' `unread` and emits cursorless member rooms under the same cap rule; the
+rooms list marks each row `member` (an admin lists every room), and the Inbox draws a room only
+when it is true. The rooms' own `last_read_seq` stays the agents' delta cursor. No table, no
 migration, no `/ws` change (ent#531 is untouched: nothing new rides a broadcast).
+
+*Fix round 1 (security review).* Three more places hold the same rule. (1) The stored room
+**rows** are filtered through one batched read, `db.active_room_ids(kind, identity)`: a room row
+comes back only for a room the reader is actively in, and with no reader for none — so a
+platform account no longer receives the id of a room only its same-email Workspace identity is
+in. A platform admin (`service.room_sees_all`: `is_platform and is_admin`), who lists every
+room through `GET /api/rooms` anyway, keeps their own starred rows for rooms they are not in,
+at a count of 0. (2) The **write** — `mark_chat_read(…, room_reader=…)` moves a room cursor only
+when `db.is_active_room_participant` holds; an unknown room, a room the reader is not in or
+left, and a call with no reader all return the same 204 and write nothing. (3) **Departed
+participants** are not members: `shared_sessions.service._require_membership` 404s a
+participant with `left_at` set (uniformly, like a room that does not exist), and
+`db.list_rooms_for_participant` lists active membership only — so a removed agent's own key no
+longer reads, lists or posts into the room. `get_participant` stays unfiltered for the sender
+label. One exception, by caller rather than by principal (round 2): the engine re-entering
+`post_message` with an already-dispatched reply (`_sender_override`, never set by a route)
+passes `allow_departed=True`, because a wake runs under the WAKER's principal — possibly an agent
+that posted `@B` with its own key — and B's paid-for reply must land even if that agent was
+removed mid-turn. The participant row must still exist; only `left_at` is relaxed. The cursor row itself still has no identity-space column, so if one email is a member of
+the SAME room in both spaces, either credential's read clears both — a follow-up, not fixed here.
+
+*Reading a room only when all of it is on screen (fix round 1, code review).*
+`portalInbox.roomTranscriptComplete(held, data)` is the one rule the Inbox pane
+(`PortalInboxRoomCard`) and the room view (`PortalRoom`) read by: a room may be marked read only
+when the messages held reach the `message_count` that `GET /api/rooms/{id}` returns beside its
+bounded, oldest-first page; a response without a usable count is never complete. The pane pages
+up to ten times and, short of the count, shows "too long to show here" and stays unread; the
+room view owes its read from the open (or an agent's message) and pays it once its poll has
+brought the rest (the poll keeps loading a closed room only while that read is owed). `Portal.vue::openRoom` no longer writes the read at the click.
 
 **The frontend.** Route `/workspace/inbox` (`WorkspaceInbox`) renders in the same
 `Portal.vue` shell, as a stage branch `isInboxRoute && stage.state === 'ready'`

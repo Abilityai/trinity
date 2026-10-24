@@ -11,7 +11,9 @@
   opens. Honest state (principle 15): a skeleton until it answers, `LoadFailed`
   with retry when it fails, then the messages. It says `rendered` once they are
   on screen; the container reads the room only then, so a failed load leaves it
-  unread.
+  unread. A room the pane could not read to its end (past the page bound, or a
+  read that ran dry before the room's own count) is PARTIAL: it says so, offers
+  the room, and never says `rendered` — so it stays unread (fix round 1).
 -->
 <template>
   <div data-testid="inbox-pane-room">
@@ -28,6 +30,14 @@
       data-testid="inbox-pane-room-failed"
       @retry="load"
     />
+    <p
+      v-else-if="partial"
+      class="text-sm text-gray-600 dark:text-gray-300"
+      data-testid="inbox-pane-room-partial"
+    >
+      This chat is too long to show here, so it stays unread —
+      <button type="button" class="text-action-primary-600 dark:text-action-primary-400 hover:underline" @click="$emit('open-chat')">open it to read the new messages</button>.
+    </p>
     <template v-else>
       <p
         v-if="windowed.earlier > 0"
@@ -88,7 +98,7 @@ import PortalAgentBubble from './PortalAgentBubble.vue'
 import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
-import { paneWindow, paneRuns, roomPaneMessages } from './portalInbox'
+import { paneWindow, paneRuns, roomPaneMessages, roomTranscriptComplete } from './portalInbox'
 import { viewState } from '@/utils/loadingState'
 import { formatLocalDateTime } from '@/utils/timestamps'
 
@@ -103,6 +113,7 @@ const emit = defineEmits(['rendered', 'open-chat'])
 const store = useClientPortalStore()
 const messages = ref(null)
 const failed = ref(false)
+const partial = ref(false)
 const busy = ref(false)
 let gen = 0
 
@@ -114,8 +125,10 @@ const labelFor = (name) => (name && props.labels && props.labels[name]) || name 
 // The room read pages from `since` (oldest first, a bounded batch), so a long
 // room is read to its END before the pane says `rendered`: the new messages
 // are the newest, and reading the room on a transcript that stopped short of
-// them would clear what the pane never showed (Codex review). It stops on the
-// first empty batch, bounded so a misbehaving server cannot spin it.
+// them would clear what the pane never showed (Codex review). The end is the
+// room's own count (`roomTranscriptComplete`); reaching the page bound, or a
+// batch that runs dry first, is NOT the end — it comes back `complete: false`
+// and the room stays unread (fix round 1, Codex code review #1).
 const MAX_ROOM_PAGES = 10
 async function fetchToEnd(id) {
   const out = []
@@ -124,13 +137,14 @@ async function fetchToEnd(id) {
     const data = await store.fetchRoom(id, since)
     const batch = (Array.isArray(data?.messages) ? data.messages : [])
       .filter((m) => m && !(Number(m.seq) <= since))
-    if (!batch.length) return out
     out.push(...batch)
+    if (roomTranscriptComplete(out.length, data)) return { messages: out, complete: true }
+    if (!batch.length) return { messages: out, complete: false }
     const last = Number(batch[batch.length - 1]?.seq)
-    if (!Number.isFinite(last) || last <= since) return out
+    if (!Number.isFinite(last) || last <= since) return { messages: out, complete: false }
     since = last
   }
-  return out
+  return { messages: out, complete: false }
 }
 
 async function load() {
@@ -138,9 +152,11 @@ async function load() {
   busy.value = true
   failed.value = false
   try {
-    const all = await fetchToEnd(props.item.id)
+    const { messages: all, complete } = await fetchToEnd(props.item.id)
     if (mine !== gen) return
+    partial.value = !complete
     messages.value = roomPaneMessages(all)
+    if (!complete) return
     await nextTick()
     emit('rendered', props.item.key)
   } catch {

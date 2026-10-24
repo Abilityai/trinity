@@ -719,10 +719,13 @@ def portal_chat_state(previews: bool = Query(False),
     # trinity-enterprise#959: the room participant this credential reads as —
     # membership in THAT identity space is what a room's count is scoped to.
     room_reader = service.room_reader_of(principal)
+    sees_all_rooms = service.room_sees_all(principal)
     if previews:
         return chat_previews.get_chat_state_with_previews(
-            principal.email, principal.is_platform, room_reader=room_reader)
-    return service.get_chat_state(principal.email, room_reader=room_reader)
+            principal.email, principal.is_platform, room_reader=room_reader,
+            sees_all_rooms=sees_all_rooms)
+    return service.get_chat_state(principal.email, room_reader=room_reader,
+                                  sees_all_rooms=sees_all_rooms)
 
 
 @router.put("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
@@ -751,9 +754,12 @@ def portal_unstar_chat(chat_kind: str, chat_id: str,
 def portal_mark_chat_read(chat_kind: str, chat_id: str,
                           principal: PortalPrincipal = Depends(get_portal_principal)):
     """Advance this viewer's read cursor — clears the chat's unread count and
-    its share of the agent row's badge."""
+    its share of the agent row's badge. A room's cursor moves only for a
+    credential actively in the room (trinity-enterprise#959); otherwise the
+    same 204, with nothing written."""
     try:
-        service.mark_chat_read(principal.email, chat_kind, chat_id)
+        service.mark_chat_read(principal.email, chat_kind, chat_id,
+                               room_reader=service.room_reader_of(principal))
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)

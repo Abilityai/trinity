@@ -770,6 +770,22 @@ export function paneRuns(messages) {
   return runs
 }
 
+// trinity-enterprise#959 fix round 1 (Codex code review #1, #2): is the
+// transcript a reader holds the WHOLE room? `GET /api/rooms/{id}` returns one
+// bounded, oldest-first page from `since` and, beside it, `message_count` — every
+// row the room has. A room may be marked read only when the messages held reach
+// that count: anything less means the newest messages, the very ones a read
+// clears, are not on screen. A response with no usable count is never complete
+// (fail closed — a read that cannot be shown to cover the room is not made).
+// The Inbox pane and the room view both read by this one rule.
+export function roomTranscriptComplete(held, data) {
+  const count = data?.message_count
+  // `Number(null)` is 0, which would call any transcript complete.
+  if (count === null || count === undefined || count === '') return false
+  const n = Number(count)
+  return Number.isFinite(n) && n >= 0 && Number(held) >= n
+}
+
 // trinity-enterprise#959: a room's transcript (`GET /api/rooms/{id}` — the
 // membership-scoped read) in the pane's message shape. An agent's message is
 // the `assistant` role with its agent as `sender`; the room's own lines are
