@@ -56,6 +56,7 @@ def room_db(tmp_path, monkeypatch):
         enterprise_room_messages,
         enterprise_room_participants,
         enterprise_rooms,
+        room_gate_holds,
         schedule_executions,
     )
     from db.tables import (
@@ -73,6 +74,7 @@ def room_db(tmp_path, monkeypatch):
             enterprise_room_participants,
             enterprise_room_messages,
             schedule_executions,  # `get_room`'s cost read joins it
+            room_gate_holds,  # trinity#3402: an agent's room read leaves out its holds
         ],
     )
     yield get_engine()
