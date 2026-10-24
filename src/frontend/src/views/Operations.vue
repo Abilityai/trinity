@@ -238,6 +238,7 @@ import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
+import { pendingResponsesPhrase, resolvedPhrase } from '../utils/operatorQueueRead'
 
 const route = useRoute()
 const router = useRouter()
@@ -287,6 +288,15 @@ const subtitle = computed(() => {
   if (activeTab.value === 'executions') {
     return 'All task runs across your fleet'
   }
+  // #3302: the Resolved list is a window; its subtitle states the total
+  // (design-system principle 28).
+  if (activeTab.value === 'resolved') {
+    const line = resolvedPhrase({
+      total: operatorQueueStore.resolvedTotal,
+      shown: operatorQueueStore.resolvedItems.length,
+    })
+    if (line) return line
+  }
 
   const queueCount = operatorQueueStore.pendingCount
   const notifCount = notificationsStore.pendingCount
@@ -297,7 +307,14 @@ const subtitle = computed(() => {
   }
 
   const parts = []
-  if (queueCount > 0) parts.push(`${queueCount} pending ${queueCount === 1 ? 'response' : 'responses'}`)
+  if (queueCount > 0) {
+    parts.push(pendingResponsesPhrase({
+      count: queueCount,
+      shown: operatorQueueStore.openItems.length,
+      complete: operatorQueueStore.pendingComplete,
+      exact: operatorQueueStore.pendingCountExact,
+    }))
+  }
   if (notifCount > 0) parts.push(`${notifCount} ${notifCount === 1 ? 'notification' : 'notifications'}`)
   return parts.join(', ')
 })

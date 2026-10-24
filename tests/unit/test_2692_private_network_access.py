@@ -152,7 +152,7 @@ def test_the_private_block_renders_as_valid_looking_config() -> None:
     assert "@private remote_ip 100.64.0.0/10 fd7a:115c:a1e0::/48" in rendered
     assert "handle @private {" in rendered
     # The fallback still redirects everyone else, inside the same site block.
-    assert "redir https://{host}{uri} permanent" in rendered
+    assert "redir https://{host}{uri} 308" in rendered
     # Braces balance — the nested heredoc is where that would break.
     assert rendered.count("{") == rendered.count("}"), rendered
 
@@ -185,6 +185,29 @@ def test_an_unset_variable_renders_the_original_redirect_only() -> None:
     assert "remote_ip" not in rendered
     assert "http:// {\n    redir https://{host}{uri} permanent\n}" in rendered
     assert rendered.count("{") == rendered.count("}"), rendered
+
+
+def test_a_private_ip_host_reaches_the_private_handler_not_the_auto_redirect() -> None:
+    """#3821. Caddy adds its own HTTP->HTTPS redirect for every `https://` site,
+    and files the on-demand wildcard's redirects under its host patterns. A
+    dotted IPv4 address is a 4-label host, so `https://*.*.*.*` matches
+    `http://<tailnet-ip>` and its 308 runs ahead of the `@private` handler.
+    Turning the automatic redirects off leaves the `http://` block as the only
+    route on :80. Its fallback must stay 308, the code those redirects used,
+    so a POST from outside the network is not turned into a GET."""
+    rendered = _render("100.64.0.0/10")
+    globals_ = rendered[: rendered.index("\n}\n")]
+    assert "auto_https disable_redirects" in globals_, rendered
+    assert "redir https://{host}{uri} 308" in rendered
+    assert "permanent" not in rendered
+
+
+def test_an_unset_variable_keeps_caddys_automatic_redirects() -> None:
+    """Unset must render byte-for-byte as before: the refresh timer restarts
+    Caddy whenever the file changes, dropping every live SSE stream."""
+    rendered = _render("")
+    assert "auto_https" not in rendered
+    assert "tls-allowed\n    }\n}\n" in rendered, "the global block gained a line"
 
 
 def test_the_marketplace_header_is_keyed_on_provenance_not_the_cloud() -> None:

@@ -382,7 +382,7 @@ provision_private_cidrs() {
 # to pick up one variable would silently re-stamp a marketplace droplet's
 # provenance as a doc-driven install.
 provision_caddyfile() {
-    local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block="" _auto_https=""
     local _target _t_port _t_proxy=0 _rp_site _rp_private
 
     # Which web listener Caddy proxies to (trinity-enterprise#873). Chosen by a
@@ -420,10 +420,18 @@ provision_caddyfile() {
         ${_rp_private}
     }
     handle {
-        redir https://{host}{uri} permanent
+        redir https://{host}{uri} 308
     }
 PRIVATE
 )"
+        # Caddy's automatic redirects for the on-demand wildcard are routed by
+        # host pattern and run ahead of this block, and `*.*.*.*` matches a
+        # dotted IP, so they would redirect `http://<private-ip>` before
+        # @private sees it. With them off this block is the only route on :80;
+        # its fallback keeps their 308. Caddy answers ACME HTTP challenges
+        # ahead of every route regardless. The leading newline keeps the unset
+        # render byte-identical, so the unchanged-file check below still holds.
+        _auto_https=$'\n    auto_https disable_redirects'
         echo "→ Caddy: serving plain HTTP to ${_private} (private network)."
     else
         _private_block="    redir https://{host}{uri} permanent"
@@ -449,7 +457,7 @@ PRIVATE
     default_sni ${ip}
     on_demand_tls {
         ask http://127.0.0.1:8000/api/public/tls-allowed
-    }
+    }${_auto_https}
 }
 
 https://${ip} {
