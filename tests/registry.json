@@ -6357,6 +6357,17 @@
         "mount"
       ],
       "description": "trinity-enterprise#539, MOUNTED through the real Teleport: Select all / Deselect all change only the draft (no write), Save then sends the expected body (the unlisted assignment kept, the set's row never sent), Reset restores the saved set, every disabled state carries its reason, the dialog never opens on Deselect all, focus is re-homed whenever a control it sat on is disabled or removed (bulk click, manual tick, Reset, Save, Confirm), and Save confirms (Cancel focused) before dropping an approval requirement, deciding on a gate map re-read at save time (failed read, unresolved set, double click and a dialog closed mid-read covered). Mutation-proven (27 mutants)."
+    },
+    {
+      "file": "unit/test_3363_retry_cron_parity.py",
+      "feature": "#3363",
+      "added": "2026-10-23",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
     }
   ]
 }
