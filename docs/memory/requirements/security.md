@@ -34,6 +34,7 @@
   - `settings.py` — settings_change
   - `agent_rename.py` — rename
   - Request-ID correlation middleware (`X-Request-ID` header, UUID, passthrough)
+  - **Request-derived address (trinity-enterprise#873)**: every backend audit row that records `actor_ip` from an HTTP or WebSocket request records the canonical client address (`utils/client_ip.py`, see `requirements/auth.md` §2.1), not the bundled proxy's container address. Provenance is kept internally (`peer`, `xff`, `cf`, `proxy_fallback`); a request that reached a trusted proxy without forwarded identity is attributed to that proxy, never to a guessed client. Out of scope: historical rows (not rewritten), system and scheduled events (no request), and audit payloads the MCP server relays (`/api/internal/audit`) — those keep the address the relay supplies.
 - **Phase 3 Delivery (MCP tool call audit)**:
   - `src/mcp-server/src/audit.ts` — `withAudit` transparent wrapper
   - All 71 tools auto-wrapped at registration time in `server.ts`

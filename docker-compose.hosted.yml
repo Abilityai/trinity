@@ -67,7 +67,8 @@
 # services contend and turns start failing under load.
 #
 # Ports, volumes, networks, and the security posture (non-root, cap_drop,
-# no-new-privileges, two-network isolation) are inherited verbatim from
+# no-new-privileges, the #589 network isolation plus the ingress network of
+# trinity-enterprise#873) are inherited verbatim from
 # docker-compose.prod.yml — see that file's comments for the reasoning.
 #
 # THIS IS A COMPLETE, STANDALONE FILE — NOT an overlay on docker-compose.yml (#2528).
@@ -138,6 +139,16 @@ services:
       # and `routers/setup.py` hardcoded the same literal, so the mismatch was
       # invisible until it wasn't.
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      # trinity-enterprise#873: which proxies may tell the backend who the client
+      # is. The bundled nginx and cloudflared hold reserved addresses on the
+      # ingress network below (<prefix>.2 / <prefix>.3) and are the only ones
+      # trusted by default; agents, the bridge gateway and direct callers to the
+      # published :8000 never are. TRUSTED_PROXIES adds your OWN proxy's
+      # address or CIDR (empty by default; wildcards, default routes, loopback
+      # and the platform networks are refused at startup). See .env.example.
+      - TRINITY_BUNDLED_PROXY_TRUST=1
+      - TRINITY_PROXY_PREFIX=${TRINITY_PROXY_PREFIX:-172.30.0}
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
       # REDIS_URL embeds the `backend` ACL user — see docker-compose redis service.
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
@@ -564,8 +575,13 @@ services:
       logs-init:
         condition: service_completed_successfully  # #1478: dir owned by UID 1000 before retention runs
     networks:
-      - trinity-platform   # Redis, scheduler, vector, OTel
-      - trinity-agent      # Frontend, mcp-server, agent containers, cloudflared
+      trinity-platform:    # Redis, scheduler, vector, OTel
+      trinity-agent:       # mcp-server, agent containers, cloudflared
+      # trinity-enterprise#873: the ingress bridge the bundled nginx and
+      # cloudflared reach the backend over. A fixed address so cloudflared's
+      # `backend` host mapping (below) lands here.
+      trinity-proxy:
+        ipv4_address: ${TRINITY_PROXY_PREFIX:-172.30.0}.4
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -585,7 +601,9 @@ services:
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
     # Production: no --reload flag
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-worker-healthcheck 120
+    # --no-proxy-headers (trinity-enterprise#873): uvicorn never rewrites the
+    # client address itself; utils/client_ip.py does, from trusted proxies only.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --workers 2 --timeout-worker-healthcheck 120 --no-proxy-headers
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -614,13 +632,30 @@ services:
     # summary, so an operator who set it got a working suggestion that changed
     # nothing and an access URL pointing at a port nothing listened on. The
     # container side stays 8080 (unprivileged nginx, #874).
+    #
+    # trinity-enterprise#873: two listeners. 8080 is the ordinary one; with
+    # FRONTEND_BIND_ADDRESS unset it publishes on every interface exactly as
+    # before (a provisioned install sets 127.0.0.1, so only the host's Caddy
+    # reaches it). 8082 accepts ONLY PROXY-protocol connections and is published
+    # on loopback alone: a Caddy on the host uses it to hand nginx the client
+    # address, which Docker's port publishing otherwise replaces with the
+    # bridge gateway. CADDY_PROXY_PORT moves it off an uncommon default.
     ports:
-      - "${FRONTEND_PORT:-80}:8080"
+      - "${FRONTEND_BIND_ADDRESS:+${FRONTEND_BIND_ADDRESS}:}${FRONTEND_PORT:-80}:8080"
+      - "127.0.0.1:${CADDY_PROXY_PORT:-18082}:8082"
+    environment:
+      # The only address nginx accepts a PROXY header's client from on 8082.
+      - TRINITY_PROXY_GATEWAY=${TRINITY_PROXY_PREFIX:-172.30.0}.1
     depends_on:
       backend:
         condition: service_healthy
     networks:
-      - trinity-agent      # Frontend talks to backend on agent network
+      # trinity-enterprise#873: ONLY the ingress network, at a reserved address
+      # the backend trusts as a forwarder. nginx needs nothing but the backend
+      # and the MCP server, both of which join this network; off the agent
+      # network, no agent can ever be handed this address.
+      trinity-proxy:
+        ipv4_address: ${TRINITY_PROXY_PREFIX:-172.30.0}.2
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -923,6 +958,9 @@ services:
       # via Docker DNS on the agent network; backend reaches it on platform network.
       - trinity-platform
       - trinity-agent
+      # trinity-enterprise#873: nginx proxies /mcp here over the ingress network
+      # (dynamic address from its pool; never a trusted forwarder).
+      - trinity-proxy
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -949,8 +987,17 @@ services:
       - TUNNEL_TOKEN=${TUNNEL_TOKEN}
     networks:
       # Cloudflared proxies to backend (platform side) and public agents (agent side).
-      - trinity-platform
-      - trinity-agent
+      trinity-platform:
+      trinity-agent:
+      # trinity-enterprise#873: its reserved forwarder address. Tunnel rules
+      # pointing at the frontend reach nginx here; rules pointing at the backend
+      # reach it here too, through the host mappings below — so the backend can
+      # tell the tunnel's hop from an agent's and read its CF-Connecting-IP.
+      trinity-proxy:
+        ipv4_address: ${TRINITY_PROXY_PREFIX:-172.30.0}.3
+    extra_hosts:
+      - "backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
+      - "trinity-backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
     depends_on:
       frontend:
         condition: service_healthy
@@ -1016,3 +1063,17 @@ networks:
     ipam:
       config:
         - subnet: 172.28.0.0/16
+  # Ingress network (trinity-enterprise#873): the bundled nginx (.2) and
+  # cloudflared (.3) at reserved addresses OUTSIDE the dynamic pool (.128/25),
+  # the backend at .4, the MCP server from the pool. Agents, Redis, the
+  # scheduler, Vector, Postgres and the OTel collector never join it. The
+  # gateway (.1) is never trusted. TRINITY_PROXY_PREFIX moves the whole /24
+  # (start.sh refuses one that overlaps an existing Docker network).
+  trinity-proxy:
+    driver: bridge
+    name: trinity-proxy-network
+    ipam:
+      config:
+        - subnet: ${TRINITY_PROXY_PREFIX:-172.30.0}.0/24
+          ip_range: ${TRINITY_PROXY_PREFIX:-172.30.0}.128/25
+          gateway: ${TRINITY_PROXY_PREFIX:-172.30.0}.1

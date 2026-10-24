@@ -383,6 +383,17 @@ provision_private_cidrs() {
 # provenance as a doc-driven install.
 provision_caddyfile() {
     local ip="$1" provenance="$2" _do_header="" _private="" _private_block=""
+    local _target _t_port _t_proxy=0 _rp_site _rp_private
+
+    # Which web listener Caddy proxies to (trinity-enterprise#873). Chosen by a
+    # LIVE probe on every render — first boot, --caddy-only, the IP refresh and
+    # the post-upgrade re-render alike — so a checkout ahead of the running web
+    # image can never point Caddy at a listener that is not there.
+    _target="$(provision_caddy_target)"
+    _t_port="${_target% *}"
+    [ "${_target#* }" = "proxy" ] && _t_proxy=1
+    _rp_site="$(provision_reverse_proxy_block '    ' "$_t_port" "$_t_proxy")"
+    _rp_private="$(provision_reverse_proxy_block '        ' "$_t_port" "$_t_proxy")"
 
     # Rule 10 of DigitalOcean's 1-Click build standard specifies this header on
     # the reverse-proxy block, and their own catalog apps ship it (openclaw's
@@ -406,9 +417,7 @@ provision_caddyfile() {
     @private remote_ip ${_private}
     handle @private {
         encode gzip
-        reverse_proxy 127.0.0.1:8081 {
-            flush_interval -1
-        }
+        ${_rp_private}
     }
     handle {
         redir https://{host}{uri} permanent
@@ -453,9 +462,7 @@ https://${ip} {
 
     # Streaming endpoints must not be buffered: the Workspace reads execution
     # logs over SSE (GET /api/executions/{id}/stream).
-    reverse_proxy 127.0.0.1:8081 {
-        flush_interval -1
-    }
+    ${_rp_site}
     ${_do_header}
 }
 
@@ -464,9 +471,7 @@ https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.
         on_demand
     }
     encode gzip
-    reverse_proxy 127.0.0.1:8081 {
-        flush_interval -1
-    }
+    ${_rp_site}
 }
 
 http:// {
@@ -500,6 +505,64 @@ CADDY
     systemctl restart caddy
 }
 
+# The protected web listener's loopback port (trinity-enterprise#873): shell
+# over .env, as compose resolves it; 18082 by default. Empty when invalid.
+provision_proxy_port() {
+    local port="${CADDY_PROXY_PORT:-$(env_value CADDY_PROXY_PORT)}"
+    port="${port:-18082}"
+    case "$port" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] && printf '%s' "$port"
+    return 0
+}
+
+# Does the RUNNING web container publish its PROXY-protocol listener on this
+# loopback port, and does that listener answer? Both, live: an older web image
+# has no such listener, and pointing Caddy at it would take the site down.
+provision_proxy_listener_ready() {
+    local port="$1"
+    docker port trinity-frontend 8082/tcp 2>/dev/null | grep -qx "127.0.0.1:${port}" || return 1
+    ./scripts/deploy/probe-proxy-listener.sh "$port" >/dev/null 2>&1
+}
+
+# Prints "<port> proxy" when Caddy should pass client addresses over PROXY
+# protocol to the protected listener, else "8081 plain" — the ordinary listener,
+# exactly as every install before trinity-enterprise#873 rendered it.
+provision_caddy_target() {
+    local port
+    port="$(provision_proxy_port)"
+    if [ -n "$port" ] && provision_proxy_listener_ready "$port"; then
+        printf '%s proxy' "$port"
+        return 0
+    fi
+    {
+        echo "⚠️  Caddy: the web container's PROXY-protocol listener (127.0.0.1:${port:-<invalid CADDY_PROXY_PORT>}) is not"
+        echo "    answering, so Caddy uses the ordinary listener (127.0.0.1:8081). Trinity is served"
+        echo "    normally, but visitors' addresses are NOT yet passed through: audit entries and"
+        echo "    per-client limits record the proxy's address instead. On first boot this is"
+        echo "    expected — start.sh switches over once the stack is up. Otherwise the web image is"
+        echo "    older than this checkout: set TRINITY_IMAGE_TAG to this release and re-run"
+        echo "    ./scripts/deploy/start.sh --hosted, which switches automatically when it answers."
+    } >&2
+    printf '8081 plain'
+}
+
+# One `reverse_proxy` block. `pad` is the indentation of the block's own line;
+# the PROXY transport is added only for the protected listener. keepalive off:
+# a PROXY header describes a CONNECTION, so a reused upstream connection would
+# attribute one client's requests to another.
+provision_reverse_proxy_block() {
+    local pad="$1" port="$2" proxy="$3"
+    printf 'reverse_proxy 127.0.0.1:%s {\n%s    flush_interval -1\n' "$port" "$pad"
+    if [ "$proxy" = "1" ]; then
+        printf '%s    transport http {\n' "$pad"
+        printf '%s        proxy_protocol v2\n' "$pad"
+        printf '%s        keepalive off\n' "$pad"
+        printf '%s        versions 1.1\n' "$pad"
+        printf '%s    }\n' "$pad"
+    fi
+    printf '%s}' "$pad"
+}
+
 provision_site() {
     local ip provenance
     mkdir -p /etc/trinity
@@ -511,6 +574,8 @@ provision_site() {
     provenance="${PROVISION_PROVENANCE:-$(provision_default_provenance)}"
     # FRONTEND_PORT moves the SPA off :80 so Caddy can own 80/443 in front of it.
     set_env_key FRONTEND_PORT 8081
+    # ...and only Caddy, on this host, needs to reach it (trinity-enterprise#873).
+    set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
@@ -714,6 +779,33 @@ UNIT
         || echo "⚠️  trinity-ip-refresh.timer not enabled — a changed public IP will need: $0 --provision --cloud ${PROVISION_CLOUD} --refresh-ip" >&2
 }
 
+# One provisioning run at a time, shared by every writer of the host's web
+# configuration: --provision (and its refresh timer) and, on a host Trinity
+# provisioned, an ordinary `start.sh --hosted` upgrade (trinity-enterprise#873).
+# Held until this script exits. Idempotent within one run. With `nonblocking`
+# it fails instead of waiting — the refresh timer never queues behind a run.
+_PROVISION_LOCK_HELD=0
+provision_lock() {
+    [ "$_PROVISION_LOCK_HELD" = "1" ] && return 0
+    exec 9>/run/trinity-provision.lock
+    if [ "${1:-}" = "nonblocking" ]; then
+        flock -n 9 || return 1
+    elif ! flock -n 9; then
+        echo "Waiting for another provisioning run to finish (/run/trinity-provision.lock)..."
+        flock 9
+    fi
+    _PROVISION_LOCK_HELD=1
+}
+
+# Is this a host whose Caddy Trinity provisioned? The site phase records the
+# public address and the machine phase installs the caddy unit; both together,
+# and nothing that needs the metadata service or a re-run of --provision.
+provision_managed_caddy() {
+    [ "$(id -u)" = "0" ] || return 1
+    [ -s /etc/trinity/public-ip ] || return 1
+    command -v systemctl >/dev/null 2>&1 && systemctl cat caddy.service >/dev/null 2>&1
+}
+
 if [ "$PROVISION" = "1" ]; then
     [ "$(uname -s)" = "Linux" ] || provision_die "only runs on Linux — it installs system packages, resets the firewall and claims :80/:443."
     [ "$(id -u)" = "0" ] || provision_die "must run as root."
@@ -731,13 +823,11 @@ if [ "$PROVISION" = "1" ]; then
     # One provisioning run at a time: the refresh timer (provision_refresh_units)
     # fires during first boot, and two runs would each restart Caddy and bring
     # the stack up. The lock is held until this script exits, install included.
-    exec 9>/run/trinity-provision.lock
     if [ "$PROVISION_PHASE" = "refresh" ]; then
         # Never queue behind another run: the next tick checks again.
-        flock -n 9 || exit 0
-    elif ! flock -n 9; then
-        echo "Waiting for another provisioning run to finish (/run/trinity-provision.lock)..."
-        flock 9
+        provision_lock nonblocking || exit 0
+    else
+        provision_lock
     fi
 
     if [ "$PROVISION_PHASE" = "refresh" ]; then
@@ -780,6 +870,26 @@ if [ "$PROVISION" = "1" ]; then
 fi
 # -----------------------------------------------------------------------------
 
+# --- Upgrading a host Trinity provisioned (trinity-enterprise#873) ------------
+# A re-run of `start.sh --hosted` is the documented upgrade, and on a host whose
+# Caddy Trinity provisioned it now also re-renders Caddy once the new stack is
+# healthy (see the end of this script). From here to exit it holds the same lock
+# the IP-refresh timer takes, so a refresh cannot rewrite the Caddyfile or
+# recreate a service in the middle of the upgrade. The ordinary web listener
+# moves to loopback first, as a fresh provision would publish it: only Caddy,
+# on this host, needs it. A non-empty FRONTEND_BIND_ADDRESS (shell or .env) is
+# the operator's choice and is kept.
+MANAGED_CADDY=0
+if [ "$HOSTED" = "1" ] && provision_managed_caddy; then
+    MANAGED_CADDY=1
+    provision_lock
+    if [ -z "${FRONTEND_BIND_ADDRESS:-}" ] && [ -z "$(env_value FRONTEND_BIND_ADDRESS)" ]; then
+        set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
+        echo "→ .env: FRONTEND_BIND_ADDRESS=127.0.0.1 (the web listener is reached only through Caddy)."
+    fi
+fi
+# -----------------------------------------------------------------------------
+
 # Fail fast with ONE consolidated, actionable message rather than crashing
 # mid-run. Docker daemon + Compose v2 are hard requirements. `docker info` also
 # doubles as the "daemon actually reachable" check the DOCKER_GID probe and
@@ -811,7 +921,14 @@ _busy_ports=()
 # read yet, so the default is 80, which is what will be bound.
 _preflight_frontend_port="${FRONTEND_PORT:-$(env_value FRONTEND_PORT)}"
 _preflight_frontend_port="${_preflight_frontend_port:-80}"
-for _pp in "$_preflight_frontend_port" 8000 8080 6379; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
+_preflight_ports=("$_preflight_frontend_port" 8000 8080 6379)
+# trinity-enterprise#873: hosted also publishes the PROXY-protocol listener on
+# 127.0.0.1:${CADDY_PROXY_PORT:-18082}.
+if [ "$HOSTED" = "1" ]; then
+    _preflight_caddy_port="$(provision_proxy_port)"
+    _preflight_ports+=("${_preflight_caddy_port:-18082}")
+fi
+for _pp in "${_preflight_ports[@]}"; do _port_busy "$_pp" && _busy_ports+=("$_pp"); done
 if [ ${#_busy_ports[@]} -gt 0 ]; then
     echo "ℹ️  Ports already in use: ${_busy_ports[*]}."
     echo "    If this is a re-run, that's expected — they're Trinity's own containers."
@@ -1403,6 +1520,72 @@ ensure_hosted_database() {
 
 ensure_hosted_database
 
+# --- The ingress network's subnet is free (trinity-enterprise#873) ------------
+# Hosted adds a third Docker network, trinity-proxy-network, on
+# ${TRINITY_PROXY_PREFIX:-172.30.0}.0/24. On a host where another network
+# already holds that range, `compose up` fails half-way with a bare "Pool
+# overlaps" — after the old containers are already gone. Check first and say
+# which network is in the way. The network this install already owns, with the
+# same address plan, is fine (a re-run). Existing agent/platform networks are
+# never touched, and no other prefix is picked silently: the reserved addresses
+# the backend trusts are derived from it.
+_ip4_int() {
+    local a b c d
+    IFS=. read -r a b c d <<<"$1"
+    printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+_cidr_range() {
+    local addr="${1%/*}" len="${1#*/}" base size
+    case "$1" in */*) ;; *) len=32 ;; esac
+    base=$(_ip4_int "$addr")
+    size=$(( 1 << (32 - len) ))
+    base=$(( base & ~(size - 1) & 0xFFFFFFFF ))
+    printf '%s %s' "$base" "$(( base + size - 1 ))"
+}
+preflight_proxy_network() {
+    [ "$HOSTED" = "1" ] || return 0
+    local prefix want lo hi line name subnet gw range s_lo s_hi problems=()
+    prefix="${TRINITY_PROXY_PREFIX:-$(env_value TRINITY_PROXY_PREFIX)}"
+    prefix="${prefix:-172.30.0}"
+    if ! [[ "$prefix" =~ ^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])(\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])){2}$ ]]; then
+        echo "ERROR: TRINITY_PROXY_PREFIX='${prefix}' must be three decimal octets, e.g. 172.30.0." >&2
+        return 1
+    fi
+    want="${prefix}.0/24"
+    read -r lo hi <<<"$(_cidr_range "$want")"
+    while IFS='|' read -r name subnet gw range; do
+        case "$subnet" in *.*/*) ;; *) continue ;; esac
+        # Newer engines print an unset gateway/range as "invalid IP/Prefix".
+        case "$gw" in invalid*) gw="" ;; esac
+        case "$range" in invalid*) range="" ;; esac
+        read -r s_lo s_hi <<<"$(_cidr_range "$subnet")"
+        [ "$s_lo" -le "$hi" ] && [ "$lo" -le "$s_hi" ] || continue
+        if [ "$name" = "trinity-proxy-network" ]; then
+            [ "$subnet" = "$want" ] && [ "$gw" = "${prefix}.1" ] && [ "$range" = "${prefix}.128/25" ] && continue
+            problems+=("trinity-proxy-network exists with subnet ${subnet}, gateway ${gw:-none}, range ${range:-none}; this install expects ${want}, gateway ${prefix}.1, range ${prefix}.128/25")
+        else
+            problems+=("Docker network '${name}' already uses ${subnet}, which overlaps ${want}")
+        fi
+    done < <(docker network ls -q | xargs -r docker network inspect \
+                -f '{{.Name}}{{range .IPAM.Config}}|{{.Subnet}}|{{.Gateway}}|{{.IPRange}}{{end}}' 2>/dev/null \
+             | awk -F'|' '{ for (i = 2; i + 2 <= NF; i += 3) print $1 "|" $i "|" $(i+1) "|" $(i+2) }')
+    # Same name, but no IPv4 range overlapping ours at all: a stale network
+    # from another address plan.
+    if [ ${#problems[@]} -eq 0 ] && docker network inspect trinity-proxy-network >/dev/null 2>&1 \
+        && ! docker network inspect -f '{{range .IPAM.Config}}{{.Subnet}} {{end}}' trinity-proxy-network 2>/dev/null \
+             | tr ' ' '\n' | grep -qx "$want"; then
+        problems+=("trinity-proxy-network exists with a different subnet; this install expects ${want}")
+    fi
+    if [ ${#problems[@]} -gt 0 ]; then
+        echo "ERROR: the ingress network (trinity-enterprise#873) cannot be created:" >&2
+        for _p in "${problems[@]}"; do echo "   • ${_p}" >&2; done
+        echo "   Choose a free /24 with TRINITY_PROXY_PREFIX in .env (e.g. TRINITY_PROXY_PREFIX=172.31.250)," >&2
+        echo "   or remove the conflicting network if nothing uses it, then re-run. Nothing was changed." >&2
+        return 1
+    fi
+}
+preflight_proxy_network || exit 1
+
 if [ "$HOSTED" = "1" ]; then
     echo "Pulling platform images (tag: ${TRINITY_IMAGE_TAG})..."
     # Tailored fatal, matching the agent-base pull one screen above. Bare, this
@@ -1453,6 +1636,44 @@ while [ "$(date +%s)" -lt "$_deadline" ]; do
     printf '.'
 done
 echo ""
+
+# --- Re-render Caddy after a healthy upgrade (trinity-enterprise#873) ---------
+# On a host whose Caddy Trinity provisioned, the new web image's PROXY-protocol
+# listener is what lets Caddy hand nginx each visitor's own address. Switch to
+# it here, automatically — no `--caddy-only` step — once the backend is healthy
+# and the web listener answers, using the address and provenance the site phase
+# recorded. provision_caddyfile probes the listener itself: an older web image
+# keeps the ordinary listener with a warning, and an unchanged config never
+# restarts Caddy. Still under the provisioning lock taken above.
+if [ "$MANAGED_CADDY" = "1" ]; then
+    if [ "$SERVING_OK" = "1" ]; then
+        _web_ready=0
+        _deadline=$(( $(date +%s) + 90 ))
+        while [ "$(date +%s)" -lt "$_deadline" ]; do
+            if curl -fsS -m 3 -o /dev/null "http://127.0.0.1:${FRONTEND_PORT}/" 2>/dev/null; then
+                _web_ready=1
+                break
+            fi
+            sleep 3
+        done
+        if [ "$_web_ready" = "1" ]; then
+            # Give the protected listener the same grace the ordinary one had.
+            _p_port="$(provision_proxy_port)"
+            for _try in 1 2 3 4 5; do
+                [ -n "$_p_port" ] && provision_proxy_listener_ready "$_p_port" && break
+                sleep 2
+            done
+            echo "Reconfiguring Caddy for this release..."
+            provision_caddyfile "$(cat /etc/trinity/public-ip)" "$(env_value TRINITY_INSTALL_SOURCE)" \
+                || echo "⚠️  Caddy was not reconfigured (see above); the previous configuration is still serving." >&2
+        else
+            echo "⚠️  The web container did not answer on 127.0.0.1:${FRONTEND_PORT} — Caddy left as it was." >&2
+            echo "    Re-run ./scripts/deploy/start.sh --hosted once it is up." >&2
+        fi
+    else
+        echo "⚠️  The stack is not healthy yet — Caddy left as it was. Re-run start.sh --hosted once it is." >&2
+    fi
+fi
 
 echo ""
 echo "====================================="

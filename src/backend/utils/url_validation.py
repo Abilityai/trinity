@@ -812,7 +812,7 @@ def _validate_trusted_a2a_url(
         except ValueError:
             return None
         plain = ip.ipv4_mapped if getattr(ip, "ipv4_mapped", None) else ip
-        if any(plain.version == bad.version and plain in bad for bad in tn._FORBIDDEN):
+        if any(plain.version == bad.version and plain in bad for bad in tn._forbidden()):
             return None
         inside = tn.address_is_trusted(str(plain), cidrs)
         in_a_cidr = in_a_cidr or inside

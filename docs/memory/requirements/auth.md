@@ -10,7 +10,14 @@
 - **Status**: ✅ Implemented (2025-12-26, security-hardened 2026-03-26)
 - **Description**: Passwordless email login with 6-digit verification codes
 - **Key Features**: 2-step verification, admin-managed whitelist, auto-whitelist on agent sharing, rate limiting (IP-based + per-email OTP lockout after 5 failures)
-- **Security**: OTP brute-force prevented by dual rate limits — `login_attempts:{ip}` (shared with admin login) and `otp_attempts:{email}` (max 5 failures → 10-min lockout). Both `POST /api/auth/email/verify` and `POST /api/public/verify/confirm` are protected. (pentest 3.1.5 / #176)
+- **Security**: OTP brute-force prevented by dual rate limits — the per-IP bucket `login_attempts_ip:{ip}` (shared with admin login) and `otp_attempts:{email}` (max 5 failures → 10-min lockout). Both `POST /api/auth/email/verify` and `POST /api/public/verify/confirm` are protected. (pentest 3.1.5 / #176)
+- **Client address (trinity-enterprise#873, #3047)**: every per-IP bucket and every request-derived audit address is keyed on ONE canonical client address, resolved once per HTTP/WebSocket request by `utils/client_ip.py` before any route runs. Forwarding headers count only when the TCP peer is an explicitly trusted proxy — the bundled nginx and cloudflared at their reserved addresses on the prod/hosted ingress network, or an operator's `TRUSTED_PROXIES` entry — and only their authenticated right-hand suffix is read; a direct caller to the published backend port, an agent and the development Vite proxy are keyed on their own socket address whatever they send. Requirements:
+  - Two clients behind the bundled proxy (Caddy, Cloudflare Tunnel, nginx on :80, an operator proxy) get separate per-IP buckets; each bucket counts only its own client's attempts.
+  - Thresholds, windows, key names (`login_attempts_ip:{ip}`, `login_attempts_acct:{account}`), success resets and the Redis-outage fail-open behaviour are unchanged (#591).
+  - A trusted proxy that forwards no identity leaves the request keyed on that proxy's own address (shared bucket, logged once per interval); identity that is present but malformed, empty, duplicated or unresolvable is refused (HTTP 400 / WebSocket close 1008).
+  - IPv6 clients are keyed by their full canonical address, as before; a client rotating addresses inside one prefix is bounded by the per-account bucket only. Prefix aggregation is a separate decision.
+  - Covered consumers: `POST /api/token`, email request/verify, access request, the Workspace portal's sign-in requests, public-link lookups and verification, the `/setup` instance-ID claim, webhook/A2A/AAuth per-IP limits and audit `actor_ip`.
+  - MCP inline sign-in (#848) keeps its account-only limits: requests the MCP server relays arrive from the MCP container and carry no end-user address.
 - **Enumeration-safety (#186)**: `POST /api/auth/email/request` returns an **identical body + status** regardless of whitelist membership (`{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` — no distinct message, no `expires_in_seconds`). The rate-limit path returns the **same generic 200** (never a 429 differential; suppression is WARN-logged server-side), and the verification email is dispatched **fire-and-forget** so the whitelisted path's latency matches the non-whitelisted/rate-limited paths — closing the body, status, and timing membership oracles (pentest 3.3.3).
 - **Flow**: `docs/memory/feature-flows/email-authentication.md`
 
@@ -18,6 +25,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Password-based fallback for admin user
 - **Key Features**: Bcrypt hashing, first-time setup wizard
+- **Rate limiting (#591, client address per §2.1)**: per-account `login_attempts_acct:{account}` 5 fails / 15 min and per-IP `login_attempts_ip:{ip}` 30 fails / 5 min, the IP being the canonical client address described in §2.1. On an install with the bundled proxy that is the client the proxy saw; only when the proxy forwards no client identity (the `proxy_fallback` case, including a request that arrived on the legacy listener) does the bucket fall back to the proxy's own address.
 
 ### 2.3 Session Persistence
 - **Status**: ✅ Implemented

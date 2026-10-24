@@ -219,5 +219,9 @@ USER trinity
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips=*"]
+# --no-proxy-headers (trinity-enterprise#873): uvicorn must never rewrite the
+# client address. The former `--forwarded-allow-ips=*` let ANY caller choose its
+# own address on a bare `docker run`; utils/client_ip.py now resolves it from
+# explicitly configured proxies only, and trusts none by default.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--no-proxy-headers"]
 

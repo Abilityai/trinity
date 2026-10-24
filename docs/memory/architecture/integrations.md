@@ -20,6 +20,8 @@
 
 **WebSocket auth** (C-002, #550): `/ws` uses single-use opaque tickets, not a JWT in the URL: `POST /api/ws/ticket` mints a 32-byte urlsafe ticket (Redis, 30s TTL); client connects `/ws?ticket=...`; backend atomically `GETDEL`s then accepts. Closes the JWT-leak surface (nginx logs, history, proxies); CSWSH mitigated because minting needs the JWT in an `Authorization` header (CORS-blocked cross-origin). `/ws/events` still accepts `?token=trinity_mcp_*` for external scripts (scoped, revocable). `mint_ticket` optional `ttl_seconds` (default 30s, ceiling 600s); VoIP mints call-bound tickets (`scope="voip:{call_id}"`, 180s) since PSTN dial+ring exceeds 30s. Impl: `services/ws_ticket_service.py` + `routers/ws_tickets.py`.
 
+**WebSocket client address (trinity-enterprise#873).** The handshake goes through the same `utils/client_ip.ClientAddressMiddleware` as HTTP, so `websocket.client` is the canonical client address; nginx's `/ws` location now forwards `X-Forwarded-For`/`X-Real-IP`/`X-Forwarded-Proto` like every other location (before, a WS handshake reached the backend carrying no client identity and was attributed to the proxy). Unusable forwarded identity from a trusted proxy closes the handshake with 1008 before accept. Rules: `security.md` §1a.
+
 ### Telegram group conversation context (ent#600)
 
 A tagged group turn is answered with the group's recent conversation. Policy lives in `services/telegram_group_context.py` (bounds, `format_group_history`, `reply_quote_line`, `group_context_status`); the pipeline is `adapters/message_router.py`.
