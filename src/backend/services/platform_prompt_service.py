@@ -224,6 +224,14 @@ Both default to yourself; pass `agent_name` only to drive another agent you have
 
 The same is true of the whole family of harness tools that promise a future event or a peer session — `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`, `CronList`, `CronDelete`, `SendMessage`, `ListAgents`, `PushNotification` and `RemoteTrigger`. None of them can deliver here: a wakeup, cron job, workflow, monitor stream, peer message or desktop notification dies with this process. The platform removes them where it can, so if one of those tools seems to be missing, that is this rule and not a permissions problem — reach for the Trinity tools above instead.
 
+### Stay inside Trinity's execution ledger
+
+Your credentials are turn-scoped by design: they authorize the coding-agent turns Trinity runs, not ones you start. Do not run `claude`, `codex`, `gemini` or any other coding-agent CLI as a subprocess, directly or through scripts or wrappers, even if a credential is visible or authentication succeeds. Trinity's execution ledger is the audit trail; a nested CLI escapes it, bypassing cost attribution, autonomy gates and permission enforcement.
+
+__CLI_IN_TURN_ALTERNATIVE__
+
+For delegated, batch or second-model work, call `mcp__trinity__chat_with_agent` with `parallel=true` to target yourself or choose a `model` (add `async=true` for long work), or use `mcp__trinity__fan_out`, which also takes `model` and can target you. The delegation contract applies: a receipt is not completion; never re-send on silence.
+
 ### Nothing survives the end of your turn
 
 Your turn is a process. When you stop writing it exits, and **anything still running is killed a few seconds later** — a backgrounded command, a `sleep`, a build, a download. No completion notification will ever reach you, and even where a conversation resumes later, that later turn is a fresh process in which your background work is already dead.
@@ -376,6 +384,31 @@ PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__PATH_DENY_SENTENCE__", _PATH_DENY_SENTENCE_HOOKED
 )
 
+# ent#643: always-tier coding-agent subprocess boundary. Register this entry
+# with the prompt-injection registry when ent#140 lands; composed preview and
+# disabled-entry visibility belong there.
+#
+# The in-turn alternative is runtime-conditional, the same honesty rule as the
+# protected-paths sentence above: only Claude Code has a subagent launcher. Its
+# model-visible name is `Agent` and `Task` is an alias (hooks/_skill_gate.py
+# `_AGENT_TOOLS`; agent_server/services/_runtime_config.py keeps `Task`), and a
+# per-agent deny list or a task's `allowed_tools` can remove it for a turn, so
+# the offer is qualified. Every other runtime is offered its own tools.
+# "Turn-scoped" is stated as authorization, never as storage: credentials can
+# be readable in the container and a nested CLI can authenticate, and a claim
+# an agent can disprove with one command invites it to hunt for the exception.
+_CLI_IN_TURN_ALTERNATIVE_SUBAGENT = (
+    "For work inside this turn, use your `Agent` subagent tool (also named "
+    "`Task`) where you have it, or your other tools directly."
+)
+_CLI_IN_TURN_ALTERNATIVE_DIRECT = (
+    "For work inside this turn, use your available tools directly; delegate "
+    "through the Trinity tools below."
+)
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__CLI_IN_TURN_ALTERNATIVE__", _CLI_IN_TURN_ALTERNATIVE_SUBAGENT
+)
+
 
 # ---------------------------------------------------------------------------
 # Model-conditional prompt tiers (ent#243)
@@ -416,6 +449,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Your Canvas",
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
+    "Stay inside Trinity's execution ledger",
     "Nothing survives the end of your turn",
     "Your environment",
     "Package Persistence",
@@ -446,6 +480,13 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     stop. #2468 widened the rule to the whole denied family, phrased as a
 #     capability fact ("dies with this process") rather than a policy fact, so
 #     the sentence stays true on fleet images the deny has not reached yet.
+#   * Stay inside Trinity's execution ledger — trinity-enterprise#643. A
+#     security boundary, not tool-usage guidance: do not run a coding-agent
+#     CLI (`claude`, `codex`, `gemini`) as a subprocess, because a nested
+#     run escapes the execution ledger. It corrects what no tool description
+#     can (the shell is not our tool), so dropping it at MINIMAL would
+#     remove the boundary itself. Advisory; registers with the
+#     prompt-injection registry once ent#140 exists.
 #   * Nothing survives the end of your turn — #2468. The counterweight to a
 #     tool result the platform cannot edit: backgrounding a Bash command
 #     answers "You will be notified when it completes", which is true
@@ -512,6 +553,14 @@ _CODEX_RUNTIMES = frozenset({"codex"})
 # Gemini, anything new — is told nothing blocks the protected paths.
 _GUARDRAIL_HOOK_RUNTIMES = frozenset({"claude-code", "claude", ""})
 
+# Runtimes with the `Agent`/`Task` subagent launcher (trinity-enterprise#643).
+# Claude Code only: agent_service/helpers.py `CLAUDE_RUNTIME_NAMES` plus the
+# empty default. A separate set from the hook runtimes above, though equal
+# today: subagents and the file hook have different owners. Not imported from
+# agent_service, whose package import is heavy; the equality is pinned by
+# tests/unit/test_ent643_platform_cli_boundary.py.
+_CLAUDE_SUBAGENT_RUNTIMES = frozenset({"claude-code", "claude", ""})
+
 # Prepended to the Codex variant. Intentionally avoids the literal
 # ``mcp__trinity__`` token so the stripped prompt contains it nowhere.
 _CODEX_MCP_ORIENTATION = (
@@ -536,12 +585,18 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     orientation note. Claude/Gemini/unknown keep the canonical naming (the
     plan's ``default claude-code`` behavior). Any runtime without the file
     guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
+    Any runtime without the Claude Code subagent launcher is offered its own
+    tools instead of `Agent`/`Task` (trinity-enterprise#643).
     Pure — never mutates the input.
     """
     runtime_key = (runtime or "").lower()
     if runtime_key not in _GUARDRAIL_HOOK_RUNTIMES:
         instructions = instructions.replace(
             _PATH_DENY_SENTENCE_HOOKED, _PATH_DENY_SENTENCE_UNHOOKED
+        )
+    if runtime_key not in _CLAUDE_SUBAGENT_RUNTIMES:
+        instructions = instructions.replace(
+            _CLI_IN_TURN_ALTERNATIVE_SUBAGENT, _CLI_IN_TURN_ALTERNATIVE_DIRECT
         )
     if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")

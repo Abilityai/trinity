@@ -915,4 +915,20 @@
 3. **Phase 3 — Observability** (GUARD-005): Dashboard and logging for guardrail events. Requires Vector pipeline integration + frontend work.
 4. **Phase 4 — Network Controls** (GUARD-006): Per-agent network policies. Requires Docker network configuration changes.
 
+### 28.8 Coding-agent subprocess boundary (GUARD-007, advisory, trinity-enterprise#643)
+- **Requirement ID**: GUARD-007
+- **Status**: ✅ Implemented (advisory instruction only, trinity-enterprise#643)
+- **Priority**: MEDIUM
+- **Description**: Every agent's platform prompt states that it must not run `claude`, `codex`, `gemini` or any other coding-agent CLI as a subprocess, directly or through a script or wrapper. The rule exists because a nested CLI runs outside the execution ledger, which is the audit trail of every turn: it escapes cost attribution, autonomy gates and permission enforcement, and it spends quota nobody sees.
+- **What "turn-scoped by design" means**: authorization, not storage. Agent credentials authorize the coding-agent turns Trinity runs. A credential that is readable in the container (GUARD-004 below is ⏳ Not Started, and agents need their env vars to work), or a nested CLI that would authenticate, does not make the nested run allowed. The instruction must never claim that credentials are absent, unreadable or never on disk, or that a nested CLI always fails to authenticate; none of those is true for every runtime and auth mode.
+- **Alternatives the instruction names**, runtime-honest in the ent#945 sense (a runtime is never offered a mechanism it lacks):
+  - Claude Code (`claude-code`, `claude`, or the default empty runtime): the `Agent` subagent tool, also named `Task`, "where you have it" (a per-agent deny list or a task's `allowed_tools` can remove it), or the agent's other tools directly.
+  - Every other runtime: its own tools directly, and Trinity delegation.
+  - All runtimes: `chat_with_agent` with `parallel=true` to target the agent itself or choose a `model` (`async=true` for long work), or `fan_out`, which also takes `model` and can target the agent itself. The ent#568 delegation contract applies unchanged.
+- **Coverage**: an always-tier section, `### Stay inside Trinity's execution ledger`, in `services/platform_prompt_service.py`. It renders at every prompt tier (ent#243) and on every runtime, so an operator who changes nothing gets it. It reaches chat and push-task turns through the composer and its context-error fallback, and pull-claimed turns when composition succeeds. A pull turn whose composition raises runs with the caller prompt alone; that pre-existing fallback is unchanged by this requirement.
+- **Advisory scope**: no enforcement. No Bash pattern, denied tool, credential removal or new admission failure is added, and an agent that never shells out sees no new failure path. A deterministic deny would sit beside the bash-guardrail hardening (trinity-enterprise#167) and is not part of this requirement. The skill gate already names "a nested `claude` it starts" as outside its own boundary (`docker/base-image/hooks/_skill_gate.py`), which is one concrete case of the permission enforcement a nested CLI escapes.
+- **Not covered**: an agent's own scripts calling a provider API with a key from its `.env` (`execution_env.py` allows that). Whether a later platform entry should govern that path is an open product question.
+- **Deferred to trinity-enterprise#140**: registering the entry in the prompt-injection registry, showing it in the composed-prompt preview, and showing an operator's disabled entry. Until then the section is hard-coded and always on, the same shape trinity-enterprise#945 shipped.
+- **Tests**: `tests/unit/test_ent643_platform_cli_boundary.py`.
+
 ---
