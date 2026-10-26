@@ -848,7 +848,7 @@
   - `--disallowedTools` for globally banned tools (e.g., block `WebFetch` for agents that shouldn't access the internet)
   - Execution timeout enforced by agent-server.py (kill process after configurable limit, default: 30 minutes)
   - Per-agent configuration via backend API and agent-config.yaml
-  - A per-task `max_turns` (`POST /task`) may only tighten the agent's turn guardrail: the task runs under the lower of the two, and a larger or non-positive value is ignored; when the per-task value stopped the turn, the 422 names it (#2328)
+  - A per-task `max_turns` (`POST /task`) may only tighten the agent's turn guardrail: the task runs under the lower of the two, and a larger, non-positive or non-integer value is ignored; when the per-task value stopped the turn, the 422 says so (#2328)
 - **Architecture**:
   - `claude_code.py` reads guardrail config from agent state/config
   - CLI flags injected into every `subprocess.Popen` command array

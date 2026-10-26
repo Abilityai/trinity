@@ -6,8 +6,13 @@ to let that value win outright, so a caller could run an agent past the
 owner-set ``max_turns_task`` guardrail with any number at all. The rule now
 lives where the guardrail is known — the agent's ``_setup_headless_command`` —
 and resolves the cap as the lower of a valid per-task value and the guardrail;
-a non-positive value is ignored. The turn-limit 422 then names the cap that
-actually stopped the turn.
+a non-positive or non-integer value is ignored. The turn-limit 422 then names
+the cap that actually stopped the turn.
+
+What this slice does NOT deliver: a turn-limit 422 at a cap of 401 or 403 is
+still read as an auth failure by the backend's push classifier, because the
+CLI's own error text carries the turn count. The tests below pin that as the
+current behaviour, by name, rather than claim the opposite.
 
 Driven through the REAL ``_setup_headless_command`` (argv after ``--max-turns``)
 and the REAL ``_finalize_headless_result`` (the 422). The "other shape" is the
@@ -20,8 +25,10 @@ Module under test: docker/base-image/agent_server/services/headless_executor.py
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
@@ -97,6 +104,22 @@ def test_a_tighter_per_task_value_is_recorded_as_the_binding_cap(monkeypatch):
     assert (ctx.max_turns_effective, ctx.max_turns_source) == (20, "per_task")
 
 
+@pytest.mark.parametrize("per_task", ["7", 3.5, True], ids=["str", "float", "bool"])
+def test_a_non_integer_per_task_value_falls_back_to_the_guardrail(monkeypatch, caplog, per_task):
+    """The pull worker hands over the claimed envelope's JSON value raw — no
+    pydantic coercion as on ``/api/task`` — so the resolver itself must fail
+    toward the guardrail: "7" used to raise a TypeError, and 3.5 / True reached
+    argv as ``--max-turns 3.5`` / ``--max-turns True`` recorded as per-task."""
+    _with_guardrail(monkeypatch, 50)
+    with caplog.at_level(logging.WARNING, logger=he.logger.name):
+        ctx = _setup(per_task)
+
+    cmd = ctx.cmd
+    assert cmd[cmd.index("--max-turns") + 1] == "50"
+    assert (ctx.max_turns_effective, ctx.max_turns_source) == (50, "guardrail")
+    assert any("non-integer per-task max_turns" in r.getMessage() for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Other shape: fresh install — no override, baseline only or nothing readable
 # ---------------------------------------------------------------------------
@@ -137,9 +160,13 @@ def test_fresh_install_a_huge_per_task_value_resolves_to_the_default(monkeypatch
 # ---------------------------------------------------------------------------
 
 
-def _turn_limit_422(ctx, *, reader_may_be_live: bool = False) -> str:
+def _turn_limit_422(ctx, *, reader_may_be_live: bool = False, error_message: str | None = None) -> str:
     ctx.metadata.error_type = "max_turns"
-    ctx.metadata.error_message = f"Reached maximum number of turns ({ctx.max_turns_effective})"
+    ctx.metadata.error_message = (
+        error_message
+        if error_message is not None
+        else f"Reached maximum number of turns ({ctx.max_turns_effective})"
+    )
     ctx.return_code = 1
     ctx.reader_may_be_live = reader_may_be_live
     with pytest.raises(HTTPException) as exc:
@@ -154,7 +181,7 @@ def test_a_turn_stopped_by_the_per_task_cap_says_so(monkeypatch, reader_may_be_l
     _with_guardrail(monkeypatch, 50)
     detail = _turn_limit_422(_setup(20), reader_may_be_live=reader_may_be_live)
 
-    assert "per-task max_turns (20)" in detail
+    assert "The caller's per-task max_turns" in detail
     # Raising the guardrail is not the remedy when the caller's own cap bound.
     assert "increasing max_turns_task" not in detail
 
@@ -168,17 +195,53 @@ def test_a_turn_stopped_by_the_guardrail_keeps_the_guardrail_advice(monkeypatch,
     assert "per-task" not in detail
 
 
-@pytest.mark.parametrize("guardrail", [50, 401, 403])
-def test_the_per_task_422_is_not_read_as_an_auth_failure(monkeypatch, guardrail):
-    """The 422 detail is substring-matched by the backend's SUB-003 classifier
-    (#1849), whose indicators include bare "401" and "403". A wording that
-    tripped it would rotate subscriptions on a turn that simply hit the
-    caller's cap — so the guardrail's own value (1-500, owner-set) must not
-    appear in the per-task wording."""
+@pytest.mark.parametrize(
+    "guardrail, per_task",
+    [(50, 20), (401, 20), (403, 20), (500, 401), (500, 403)],
+    ids=["g50-p20", "g401-p20", "g403-p20", "g500-p401", "g500-p403"],
+)
+def test_the_per_task_422_wording_adds_no_number_the_auth_classifier_reads(
+    monkeypatch, guardrail, per_task
+):
+    """Only this slice's OWN text is under test here: the CLI's error text is
+    number-free, so any "401"/"403" in the detail would have come from the
+    remedy wording. Neither the guardrail nor the per-task value is in it."""
     from services.failure_classifier import is_auth_failure
 
     _with_guardrail(monkeypatch, guardrail)
-    detail = _turn_limit_422(_setup(20))
+    detail = _turn_limit_422(_setup(per_task), error_message="Reached maximum number of turns")
 
+    assert "The caller's per-task max_turns" in detail
     assert not is_auth_failure(detail)
     assert not he._is_auth_failure_message(detail)
+
+
+@pytest.mark.parametrize(
+    "guardrail, per_task",
+    [(500, 401), (500, 403), (401, None), (403, None)],
+    ids=["per-task-401", "per-task-403", "guardrail-401", "guardrail-403"],
+)
+def test_known_exposure_a_turn_limit_422_at_401_or_403_reads_as_auth_on_push(
+    monkeypatch, guardrail, per_task
+):
+    """CURRENT behaviour, not a guarantee: when the cap that stopped the turn
+    is 401 or 403, the CLI's own error text carries that number, and the
+    backend's push classifier reads the 422 as a credential failure (a SUB-003
+    switch plus a retry). True on the guardrail-bound path before #2328 too;
+    the per-task rows become reachable on push once the backend forwards a
+    per-task value. The fix is a backend follow-up — a turn-limit 422 is never
+    a credential failure — and when it lands this test goes red and is
+    replaced by its inverse."""
+    from services.execution_classification import classify_switch_failure
+    from services.failure_classifier import is_auth_failure
+
+    _with_guardrail(monkeypatch, guardrail)
+    detail = _turn_limit_422(_setup(per_task))
+    response = httpx.Response(
+        422,
+        json={"detail": detail},
+        request=httpx.Request("POST", "http://localhost/api/task"),
+    )
+
+    assert is_auth_failure(detail)
+    assert classify_switch_failure(response) == "auth"

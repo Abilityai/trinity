@@ -706,12 +706,20 @@ def _resolve_task_max_turns(per_task: Optional[int], guardrail: int) -> Tuple[in
 
     ``POST /task`` lets any caller who can reach the agent send a per-task cap,
     while ``max_turns_task`` is the owner's guardrail. So the effective cap is
-    the lower of a valid per-task value and the guardrail; a missing or
-    non-positive per-task value leaves the guardrail in force. Returns
+    the lower of a valid per-task value and the guardrail; a missing,
+    non-integer (bool included) or non-positive per-task value leaves the
+    guardrail in force. The type check matters on the pull path, which hands
+    over the claimed envelope's JSON value without pydantic coercion. Returns
     ``(cap, source)`` where source is ``"per_task"`` only when the caller's
     value is strictly tighter (on a tie the guardrail is what binds).
     """
     if per_task is None:
+        return guardrail, "guardrail"
+    if isinstance(per_task, bool) or not isinstance(per_task, int):
+        logger.warning(
+            f"[Headless Task] Ignoring non-integer per-task max_turns={per_task!r}; "
+            f"using the guardrail ({guardrail})"
+        )
         return guardrail, "guardrail"
     if per_task < 1:
         logger.warning(
@@ -1389,15 +1397,17 @@ def _finalize_headless_result(
         logger.warning(f"[Headless Task] Max turns reached: {error_msg}")
         if ctx.max_turns_source == "per_task":
             # #2328: the caller's own tighter cap stopped the turn — raising the
-            # guardrail would not have helped, so do not advise it. The guardrail's
-            # value is deliberately NOT in the text: the backend substring-matches
-            # this detail for "401"/"403" (failure_classifier.AUTH_INDICATORS), so
-            # a guardrail of 401 or 403 would read as an auth failure and rotate
-            # subscriptions. The per-task value is already in error_msg.
+            # guardrail would not have helped, so do not advise it. This wording
+            # adds no number: the backend substring-matches the detail for
+            # "401"/"403" (failure_classifier.AUTH_INDICATORS). That does NOT make
+            # the 422 classifier-safe — error_msg is the CLI's own text and carries
+            # the turn count, so a cap of 401 or 403 (per-task or guardrail) still
+            # reads as an auth failure on push. The fix belongs in the backend
+            # classifier, which should never read a turn-limit 422 as auth.
             remedy = (
-                f"The caller's per-task max_turns ({ctx.max_turns_effective}) stopped this task, "
-                f"below the agent's max_turns_task guardrail. Send a larger per-task max_turns "
-                f"(it may not exceed the guardrail) or break the work into smaller subtasks."
+                "The caller's per-task max_turns stopped this task, "
+                "below the agent's max_turns_task guardrail. Send a larger per-task max_turns "
+                "(it may not exceed the guardrail) or break the work into smaller subtasks."
             )
         else:
             remedy = "Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
@@ -1730,7 +1740,8 @@ async def execute_headless_task(
         system_prompt: Optional additional system prompt
         timeout_seconds: Execution timeout (default 5 minutes)
         max_turns: Per-task turn cap; may only tighten the agent's
-            ``max_turns_task`` guardrail (#2328). None, 0 or negative = the guardrail.
+            ``max_turns_task`` guardrail (#2328). None, a non-integer, 0 or negative
+            = the guardrail.
         execution_id: Optional execution ID to use for process registry (enables termination tracking)
         resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
         persist_session: If True, omit ``--no-session-persistence`` so the

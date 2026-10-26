@@ -13,9 +13,9 @@
   "findings": [],
   "hypotheses": [],
   "coverage_gaps": [],
-  "verification": "The change narrows authority: a per-task max_turns can only lower the owner's max_turns_task guardrail (min for values >= 1; absent/0/negative -> guardrail), driven through the real _setup_headless_command including fresh-install shapes. A10: resolver fails toward the guardrail, stated in its docstring. The per-task 422 wording omits the guardrail value so the backend's bare 401/403 auth indicators cannot match it; pinned with the real is_auth_failure at guardrails 50/401/403. gitleaks over branch commits: no leaks. Secrets-prefix, invisible-Unicode and enterprise-disclosure greps over added lines: no hits.",
+  "verification": "The change narrows authority: a per-task max_turns can only lower the owner's max_turns_task guardrail (min for integer values >= 1; absent/0/negative/non-integer/bool -> guardrail), driven through the real _setup_headless_command including fresh-install shapes. A10: resolver fails toward the guardrail, stated in its docstring, including for non-integer/bool values (pinned for \"7\", 3.5, True). The per-task 422 wording carries neither cap's value (pinned with the real is_auth_failure on a number-free CLI message), but the CLI's own error text carries the turn count, so a turn-limit 422 at a cap of 401/403 still reads as auth on push via classify_switch_failure; pre-existing on the guardrail path, pinned as current behaviour, backend follow-up (residual, not a finding of this diff). gitleaks over branch commits: no leaks. Secrets-prefix, invisible-Unicode and enterprise-disclosure greps over added lines: no hits.",
   "supply_chain_summary": {"scanner": "n/a (no dependency change in diff)"},
-  "filter_stats": {"candidates": 1, "reported": 0, "note": "the auth-classifier wording candidate was fixed in-slice at /review before this scan"},
+  "filter_stats": {"candidates": 1, "reported": 0, "note": "the auth-classifier wording candidate was fixed in-slice at /review before this scan; the residual 401/403 classifier exposure through the CLI turn count is pre-existing and tracked as a backend follow-up"},
   "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
   "trend": "n/a for diff run"
 }
