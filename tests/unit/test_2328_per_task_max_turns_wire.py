@@ -38,8 +38,10 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from services.pull_coordination_service import _TASK_OVERRIDE_KEYS  # noqa: E402
-from unit.test_2789_subswitch_retry_budget import (  # noqa: E402
+from models import ParallelTaskRequest
+from services.pull_coordination_service import _TASK_OVERRIDE_KEYS
+
+from unit.test_2789_subswitch_retry_budget import (
     _SWITCHED,
     _resp_200,
     _resp_429,
@@ -336,3 +338,91 @@ def test_no_per_task_value_sends_none(shape, chat_layer, monkeypatch):
             }, monkeypatch)
     assert len(payloads) == 1
     assert payloads[0].get("max_turns") is None
+
+
+# ---------------------------------------------------------------------------
+# T6: the backend bounds and clamps the value, whatever image the agent runs
+# ---------------------------------------------------------------------------
+# The wire above reaches every agent as soon as the backend is upgraded, but
+# the agent-side min() against the owner's guardrail reaches an agent only on
+# its next cold start on a newer image. An older image lets the caller's value
+# win. So the bound lives on the backend: the model refuses what no owner could
+# configure, and the /task route clamps to what this owner did configure.
+
+def test_the_request_bound_is_the_owner_guardrails_own_range():
+    """Pinned to the owner-side validator, so the two ranges cannot drift."""
+    from models import ParallelTaskRequest
+    from routers.agent_config import _GUARDRAILS_NUMBER_BOUNDS
+
+    lo, hi = _GUARDRAILS_NUMBER_BOUNDS["max_turns_task"]
+    assert ParallelTaskRequest(message="x", max_turns=lo).max_turns == lo
+    assert ParallelTaskRequest(message="x", max_turns=hi).max_turns == hi
+    assert ParallelTaskRequest(message="x").max_turns is None
+
+
+@pytest.mark.parametrize("value", [0, -1, 501, 10**9])
+def test_an_out_of_range_max_turns_is_a_422(value):
+    """0 and negatives used to reach `claude --max-turns` on an older image, and
+    a large value used to override the owner's cap there. Both are refused at
+    the HTTP boundary now, through the real model as FastAPI validates it. (The
+    model is imported at module level: FastAPI resolves this file's string
+    annotations against the module globals.)"""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    app = FastAPI()
+    seen: list[ParallelTaskRequest] = []
+
+    @app.post("/task")
+    def _task(request: ParallelTaskRequest):
+        seen.append(request)
+        return {}
+
+    client = TestClient(app)
+    assert client.post("/task", json={"message": "x", "max_turns": 7}).status_code == 200
+    response = client.post("/task", json={"message": "x", "max_turns": value})
+    assert response.status_code == 422
+    assert [r.max_turns for r in seen] == [7], "an out-of-range value reached the handler"
+
+
+def _route_dispatches(max_turns, guardrails):
+    """Call the REAL `POST /{name}/task` handler and return the `max_turns` it
+    hands to the dispatch service (the seam every push and pull path reads)."""
+    import routers.chat as chat_router
+
+    route_db = MagicMock()
+    route_db.get_guardrails_config.return_value = guardrails
+    route_db.get_execution_timeout.return_value = 900
+    seen: list = []
+
+    async def _dispatch(**kw):
+        seen.append(kw["request"].max_turns)
+        return {"status": "queued"}
+
+    request = _request(max_turns=max_turns)
+    with patch.object(chat_router, "get_agent_container", return_value=MagicMock(status="running")), \
+         patch.object(chat_router, "db", route_db), \
+         patch.object(chat_router.chat_execution_service, "dispatch_parallel_task", _dispatch):
+        asyncio.run(chat_router.execute_parallel_task(
+            request=request, name=AGENT,
+            current_user=SimpleNamespace(id=1, email="u@example.com", username="u",
+                                         agent_name=None, mcp_scope=None, role="user"),
+            x_source_agent=None, x_via_mcp=None, idempotency_key=None,
+            x_event_trigger=None, x_internal_secret=None, x_trinity_execution_id=None,
+        ))
+    assert len(seen) == 1, "the handler never reached the dispatch service"
+    return seen[0]
+
+
+@pytest.mark.parametrize(
+    "requested, guardrails, dispatched",
+    [
+        pytest.param(400, {"max_turns_task": 20}, 20, id="above-owner-cap-clamped"),
+        pytest.param(20, {"max_turns_task": 20}, 20, id="at-owner-cap-kept"),
+        pytest.param(7, {"max_turns_task": 20}, 7, id="below-owner-cap-kept"),
+        pytest.param(400, {}, 400, id="no-owner-cap-passes-within-bound"),
+        pytest.param(None, {"max_turns_task": 20}, None, id="no-value-stays-none"),
+    ],
+)
+def test_the_task_route_clamps_max_turns_to_the_owners_cap(requested, guardrails, dispatched):
+    assert _route_dispatches(requested, guardrails) == dispatched
