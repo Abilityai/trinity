@@ -599,7 +599,8 @@ def _task_from_row(exec_id: str, row: Any) -> Dict[str, Any]:
 
 
 def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User],
-                        *, model: Optional[str] = None) -> str:
+                        *, model: Optional[str] = None,
+                        aauth_identity: Optional[str] = None) -> str:
     """Create the execution row BEFORE dispatch, so the router holds the id while
     the turn runs (#3749). `execute_task(execution_id=...)` then skips its own row
     creation — the pre-created-row contract `/chat` has used since #96.
@@ -630,6 +631,8 @@ def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User]
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             model_used=model,
             subscription_id=subscription_id,
+            # ent#862: the AAuth peer identity that triggered this execution.
+            a2a_caller_identity=aauth_identity,
         ),
     )
     if execution is None or not getattr(execution, "id", None):
@@ -1690,7 +1693,10 @@ async def _dispatch_jsonrpc(
         # runs; the claim names it at once (a concurrent duplicate inside the
         # budget then gets a pollable `working` instead of "retry").
         try:
-            exec_id = _mint_a2a_execution(agent_name, text, current_user)
+            exec_id = _mint_a2a_execution(
+                agent_name, text, current_user,
+                aauth_identity=getattr(aauth, "identity", None),
+            )
         except Exception as exc:  # noqa: BLE001
             idempotency_service.fail(decision)
             logger.warning("a2a message/send could not mint a row for %s: %s", agent_name, exc)
