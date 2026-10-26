@@ -10,7 +10,8 @@ column that `schema.py` declares but no registered migration adds is present on
 every fresh install and absent on every EXISTING one, and no fresh-install
 comparison can see it. That holds for every table `init_schema` creates and no
 migration does (`schedule_executions`, `users`, `chat_messages`, ...): 213 of
-the 306 `ADD COLUMN` sites in `db/migrations.py` target one of them.
+the 306 `ALTER TABLE <t> ADD COLUMN` / `_safe_add_column(cursor, "<t>", ...)`
+sites in `db/migrations.py` target one of them (counted on dev at 40b329593).
 
 This guard models the existing install instead:
 
@@ -25,7 +26,10 @@ This guard models the existing install instead:
      (built on an empty in-memory database by the checkout's code) exists in
      the upgraded database, and that `migration_health` reports `(n, n, None)`:
      every registered migration recorded, no ledger name the registry no longer
-     knows.
+     knows. The second half is stricter than `/health` (which checks only
+     `applied < expected`) on purpose: a renamed migration re-runs on every
+     existing install, and a removed one leaves `/health` counting a name that
+     is no longer registered, so either is reported rather than passed.
 
 Each tree runs in its own interpreter, so the two copies of `db.migrations`
 never meet in one `sys.modules`. Both load `db/schema.py` and `db/migrations.py`
@@ -40,10 +44,17 @@ upgrade, exactly as on a real install, so a new table is never a false red.
 Stated limits:
   * Names only. Column types, defaults, NOT NULL, keys and the SQL of indexes
     and triggers are not compared.
+  * Missing objects only. An object the checkout stops declaring survives on
+    existing installs and is not reported.
+  * No rows. The install it builds is empty: `init_database`'s seeding steps
+    (retention rows, admin user, setup and install-source markers) are not run,
+    so a backfill, a rebuild's row copy, or a constraint an existing row would
+    violate is never exercised.
   * Incremental: merge-base -> checkout. It does not prove an upgrade from
     every historical release.
-  * The lifecycle order (migrations, `init_schema`, migrations) is the one
-    `database.py::init_database` runs today and is restated here, not imported.
+  * The schema part of `database.py::init_database` (migrations, `init_schema`,
+    migrations, on a `sqlite3.Row` connection as `get_db_connection` opens it)
+    is restated here, not imported.
   * The merge-base's code runs under the checkout's installed dependencies. If
     it no longer imports, the guard fails closed (exit 2) and says so.
 
@@ -55,8 +66,9 @@ Usage:
 Exit codes: 0 = pass, 1 = an upgraded install misses something schema.py
 declares (each object is named) or the checkout's lifecycle fails on it,
 2 = the check could not run (no base/head, merge-base unresolvable, the
-merge-base's tree missing or failing to build its install). Exit 2 never means
-"no drift". Pure stdlib; no third-party deps of its own.
+merge-base's tree missing or failing to build its install, the checkout's
+db modules not importing). Exit 2 never means "no drift". Pure stdlib; no
+third-party deps of its own.
 """
 from __future__ import annotations
 
@@ -79,6 +91,9 @@ EXIT_PASS = 0
 EXIT_GAP = 1
 EXIT_CANNOT_RUN = 2
 
+# The runner's exit code when db/schema.py or db/migrations.py does not import.
+RUNNER_LOAD_FAILED = 3
+
 # Runs inside each subprocess: argv = backend_dir db_path out_path role.
 # The `head` role also reports migration health and the declared snapshot.
 _RUNNER = r"""
@@ -89,6 +104,7 @@ import sys
 
 backend, db_path, out_path, role = sys.argv[1:5]
 sys.path.insert(0, backend)
+LOAD_FAILED = 3
 
 
 def _load(rel, name):
@@ -127,10 +143,17 @@ def _snapshot(cur):
     return {"tables": tables, "columns": columns, "indexes": indexes, "triggers": triggers}
 
 
-schema = _load("db/schema.py", "_upgrade_parity_schema")
-migrations = _load("db/migrations.py", "_upgrade_parity_migrations")
+try:
+    schema = _load("db/schema.py", "_upgrade_parity_schema")
+    migrations = _load("db/migrations.py", "_upgrade_parity_migrations")
+except Exception:
+    import traceback
+
+    traceback.print_exc()
+    sys.exit(LOAD_FAILED)
 
 conn = sqlite3.connect(db_path)
+conn.row_factory = sqlite3.Row  # as db/connection.py::get_db_connection opens it
 cur = conn.cursor()
 migrations.run_all_migrations(cur, conn)
 schema.init_schema(cur, conn)
@@ -233,8 +256,9 @@ def health_gaps(health: list[Any], unknown_ledger_names: list[str]) -> list[str]
     if unknown_ledger_names:
         gaps.append(
             "schema_migrations records names MIGRATIONS no longer registers: "
-            f"{', '.join(unknown_ledger_names)} (a registered migration was renamed or removed; "
-            "a rename re-runs it on every existing install)."
+            f"{', '.join(unknown_ledger_names)}. A registered migration was renamed (it "
+            "re-runs on every existing install) or removed (/health keeps counting its "
+            "name). Keep the registered name."
         )
     if not gaps and applied != expected:
         gaps.append(f"migration_health is ({applied}, {expected}, None); expected ({expected}, {expected}, None).")
@@ -247,6 +271,7 @@ def check_trees(base_backend: Path, head_backend: Path, workdir: Path, *, base_l
     The comparison core, free of git so the self-test can drive it over
     synthetic two-file backends.
     """
+    base_backend, head_backend, workdir = base_backend.resolve(), head_backend.resolve(), workdir.resolve()
     try:
         _require_backend(base_backend, f"{base_label}")
         _require_backend(head_backend, "head")
@@ -268,7 +293,9 @@ def check_trees(base_backend: Path, head_backend: Path, workdir: Path, *, base_l
             f"sqlite-upgrade-parity: CANNOT RUN — the {base_label} tree failed to build its "
             "install, so there is nothing to upgrade. This is infrastructure (for example a "
             "dependency the old code imports is gone), not schema drift; it fails closed "
-            f"rather than pass.\n--- {base_label} lifecycle output (tail) ---\n{output}",
+            "rather than pass. If this PR removes or major-bumps a dependency that code "
+            "imports, land the bump on its own first; if the branch is old, update it from "
+            f"its base.\n--- {base_label} lifecycle output (tail) ---\n{output}",
             file=sys.stderr,
         )
         return EXIT_CANNOT_RUN
@@ -277,6 +304,14 @@ def check_trees(base_backend: Path, head_backend: Path, workdir: Path, *, base_l
         rc, output = _run_lifecycle(head_backend, db_path, head_out, "head")
     except CannotRun as exc:
         print(f"sqlite-upgrade-parity: CANNOT RUN — {exc}", file=sys.stderr)
+        return EXIT_CANNOT_RUN
+    if rc == RUNNER_LOAD_FAILED:
+        print(
+            "sqlite-upgrade-parity: CANNOT RUN — the checkout's db/schema.py or "
+            "db/migrations.py does not import in this environment (a missing dependency or "
+            f"env var?), so no upgrade was attempted.\n--- head output (tail) ---\n{output}",
+            file=sys.stderr,
+        )
         return EXIT_CANNOT_RUN
     if rc != 0 or not head_out.is_file():
         print(
@@ -324,8 +359,11 @@ def _git_bytes(args: list[str]) -> bytes:
 
 
 def main(argv: list[str]) -> int:
-    base = argv[1] if len(argv) > 2 else os.environ.get("PR_BASE_SHA", "")
-    head = argv[2] if len(argv) > 2 else os.environ.get("PR_HEAD_SHA", "")
+    if len(argv) not in (1, 3):
+        print("usage: check_sqlite_upgrade_parity.py [<base> <head>]", file=sys.stderr)
+        return EXIT_CANNOT_RUN
+    base = argv[1] if len(argv) == 3 else os.environ.get("PR_BASE_SHA", "")
+    head = argv[2] if len(argv) == 3 else os.environ.get("PR_HEAD_SHA", "")
     if not base or not head or base == NULL_SHA:
         print(
             "sqlite-upgrade-parity: CANNOT RUN — no PR base/head (pass <base> <head> or set "
@@ -361,8 +399,16 @@ def main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return EXIT_CANNOT_RUN
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
-            tar.extractall(base_root, filter="data")
+        try:
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
+                tar.extractall(base_root, filter="data")
+        except (tarfile.TarError, OSError) as exc:
+            print(
+                f"sqlite-upgrade-parity: CANNOT RUN — extracting {merge_base}:{BACKEND_REL} "
+                f"failed: {exc}",
+                file=sys.stderr,
+            )
+            return EXIT_CANNOT_RUN
         workdir = tmp_path / "work"
         workdir.mkdir()
         print(f"sqlite-upgrade-parity: merge-base {merge_base} (base {base}, head {head}).", flush=True)

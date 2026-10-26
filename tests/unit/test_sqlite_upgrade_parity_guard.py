@@ -17,10 +17,13 @@ The five cases the guard exists for:
   * a base tree that cannot build its install -> exit 2, never a pass.
 
 Plus the failure modes around them: a head lifecycle that raises on the
-upgraded install is a gap (exit 1), a registered migration left unrecorded is
-a gap, and every git-side failure (no base/head, no repository, an
-unresolvable merge-base) fails closed with exit 2. One test runs `main()`
-end to end over a throwaway git repository.
+upgraded install is a gap (exit 1); an index, trigger or table a migration
+drops after `init_schema` is a gap; a registered migration left unrecorded, a
+renamed migration and a duplicate registration are gaps; the restated
+lifecycle is pinned (migrations before `init_schema`, the second pass, and a
+`sqlite3.Row` connection as production opens it); a head that does not import, and every git-side failure (usage, no
+base/head, no repository, an unresolvable merge-base), fail closed with exit 2.
+One test runs `main()` end to end over a throwaway git repository.
 """
 from __future__ import annotations
 
@@ -196,6 +199,147 @@ def test_outside_a_repository_fails_closed(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
     assert guard.main(["x", "a" * 40, "b" * 40]) == guard.EXIT_CANNOT_RUN
+
+
+# --- objects a migration drops after init_schema ---------------------------------
+#
+# A migration that targets a table only the head's init_schema creates is skipped
+# on the first pass (`no such table`) and runs on the second, AFTER init_schema.
+# If it rebuilds or drops something there, the install never gets it back.
+
+_U = "CREATE TABLE IF NOT EXISTS u (x TEXT)"
+
+
+def _second_pass(body: str) -> str:
+    return (
+        "def _migrate_touch_u(cursor, conn):\n"
+        "    cursor.execute('SELECT 1 FROM u')\n"
+        f"    cursor.execute({body!r})\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("extra_ddl", "drop", "named"),
+    [
+        ("CREATE INDEX IF NOT EXISTS idx_u_x ON u(x)", "DROP INDEX idx_u_x", "index idx_u_x:"),
+        (
+            "CREATE TRIGGER IF NOT EXISTS trg_u AFTER INSERT ON u BEGIN SELECT 1; END",
+            "DROP TRIGGER trg_u",
+            "trigger trg_u:",
+        ),
+        (None, "DROP TABLE u", "table u:"),
+    ],
+    ids=["index", "trigger", "table"],
+)
+def test_object_dropped_after_init_schema_is_a_gap(tmp_path, base_t_a, capsys, extra_ddl, drop, named):
+    tables = [T_A, _U] + ([extra_ddl] if extra_ddl else [])
+    head = _backend(
+        tmp_path / "head",
+        tables=tables,
+        migrations=_second_pass(drop),
+        registry='("touch_u", _migrate_touch_u)',
+    )
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_GAP
+    assert named in capsys.readouterr().err
+
+
+# --- the ledger -------------------------------------------------------------------
+
+_NOOP = "def _migrate_noop(cursor, conn):\n    pass\n"
+
+
+def test_renamed_migration_is_a_gap(tmp_path, capsys):
+    base = _backend(tmp_path / "base", tables=[T_A], migrations=_NOOP, registry='("old_name", _migrate_noop)')
+    head = _backend(tmp_path / "head", tables=[T_A], migrations=_NOOP, registry='("new_name", _migrate_noop)')
+    assert _check(tmp_path, base, head) == guard.EXIT_GAP
+    err = capsys.readouterr().err
+    assert "no longer registers: old_name" in err
+
+
+def test_duplicate_registration_is_a_gap(tmp_path, base_t_a, capsys):
+    # One ledger row for two entries: (1, 2, None), which /health answers with 503.
+    head = _backend(
+        tmp_path / "head",
+        tables=[T_A],
+        migrations=_NOOP,
+        registry='("noop", _migrate_noop), ("noop", _migrate_noop)',
+    )
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_GAP
+    assert "migration_health is (1, 2, None)" in capsys.readouterr().err
+
+
+# --- the lifecycle order the guard restates -----------------------------------------
+
+
+def test_migrations_run_before_init_schema(tmp_path, base_t_a):
+    # init_schema indexes a column only the migration adds: running init_schema
+    # first would raise `no such column` on the existing table.
+    head = _backend(
+        tmp_path / "head",
+        tables=[T_AB, "CREATE INDEX IF NOT EXISTS idx_t_b ON t(b)"],
+        migrations=_ADD_B,
+        registry='("t_add_b", _migrate_t_add_b)',
+    )
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_PASS
+
+
+def test_second_migration_pass_records_a_migration_on_a_new_table(tmp_path, base_t_a, capsys):
+    # The migration needs `u`, which only the head's init_schema creates: it is
+    # skipped on the first pass and recorded only by the second.
+    head = _backend(
+        tmp_path / "head",
+        tables=[T_A, "CREATE TABLE IF NOT EXISTS u (x TEXT, y TEXT)"],
+        migrations=(
+            "def _migrate_u_y(cursor, conn):\n"
+            "    cols = {r[1] for r in cursor.execute('PRAGMA table_info(u)').fetchall()}\n"
+            "    if 'y' not in cols:\n"
+            "        cursor.execute('ALTER TABLE u ADD COLUMN y TEXT')\n"
+        ),
+        registry='("u_y", _migrate_u_y)',
+    )
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_PASS
+    assert "migration_health = (1, 1, None)" in capsys.readouterr().out
+
+
+def test_connection_yields_rows_by_name_as_in_production(tmp_path, base_t_a):
+    # db/connection.py::get_db_connection sets row_factory = sqlite3.Row, and a
+    # migration may index a row by column name. On a plain tuple connection the
+    # guard would report that migration as a boot failure.
+    head = _backend(
+        tmp_path / "head",
+        tables=[T_AB],
+        migrations=(
+            "def _migrate_t_add_b(cursor, conn):\n"
+            "    cols = {r['name'] for r in cursor.execute('PRAGMA table_info(t)').fetchall()}\n"
+            "    if 'b' not in cols:\n"
+            "        cursor.execute('ALTER TABLE t ADD COLUMN b TEXT')\n"
+        ),
+        registry='("t_add_b", _migrate_t_add_b)',
+    )
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_PASS
+
+
+# --- environment ------------------------------------------------------------------
+
+
+def test_head_that_does_not_import_cannot_run(tmp_path, base_t_a, capsys):
+    head = _backend(tmp_path / "head", tables=[T_A])
+    (head / "db" / "migrations.py").write_text("import a_module_that_is_gone\n")
+    assert _check(tmp_path, base_t_a, head) == guard.EXIT_CANNOT_RUN
+    assert "does not import" in capsys.readouterr().err
+
+
+def test_relative_paths(tmp_path, monkeypatch):
+    _backend(tmp_path / "base", tables=[T_A])
+    _backend(tmp_path / "head", tables=[T_AB], migrations=_ADD_B, registry='("t_add_b", _migrate_t_add_b)')
+    (tmp_path / "work").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert guard.check_trees(Path("base"), Path("head"), Path("work")) == guard.EXIT_PASS
+
+
+def test_one_positional_argument_is_a_usage_error(capsys):
+    assert guard.main(["x", "a" * 40]) == guard.EXIT_CANNOT_RUN
+    assert "usage" in capsys.readouterr().err
 
 
 # --- main() over real git -------------------------------------------------------
