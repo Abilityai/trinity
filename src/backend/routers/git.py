@@ -999,8 +999,8 @@ async def bind_agent_to_own_repo(
         fork_pat_required, saved_token_message, saved_token_not_for_others,
     )
 
-    # #3164: no form token → the CALLER's own saved personal token (Settings →
-    # GitHub token), read by user id. Never the agent's per-agent token (that
+    # #3164: no form token → the CALLER's own saved personal token (Settings → MCP Keys
+    # → Personal GitHub Token), read by user id. Never the agent's per-agent token (that
     # is the agent's current identity, not the binding person's) and never the
     # platform token, which must not become a user-owned repo's identity.
     if body.github_pat is not None:

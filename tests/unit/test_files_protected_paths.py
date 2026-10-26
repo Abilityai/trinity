@@ -507,6 +507,10 @@ _EXPECTED_READ_ONLY = (
     ".gemini/oauth_creds.json",
     # ent#926: on-disk conversation history is owner-tier read
     ".claude/projects/*.jsonl", ".claude/history.jsonl", ".codex/sessions/*", ".gemini/tmp/*/chats/*",
+    # ent#949: registry/upload/sync/Terraform tokens and shell history — owner
+    # tier to read, still owner-writable.
+    ".npmrc", ".pypirc", ".config/rclone/rclone.conf",
+    ".terraform.d/credentials.tfrc.json", ".bash_history", ".zsh_history",
     "*.key", "*.pem", "*.p12", "*.pfx",
 )
 

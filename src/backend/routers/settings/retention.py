@@ -271,12 +271,10 @@ async def get_retention_status(
         # falls back to the default, because `0` here means UNLIMITED — reporting
         # garbage as 0 would advertise a cap nobody is applying. Pinned to that
         # reader by tests/unit/test_ent671_retention_metric_rows.py.
-        raw, source = _settings.resolve_ops_setting(key)
-        try:
-            value = max(int(raw), 0)
-        except (TypeError, ValueError):
-            value = int(OPS_SETTINGS_DEFAULTS[key])
-        return {"value": value, "source": "code-default" if source == "default" else source}
+        # #3089: call that reader itself, so a negative row cannot drift apart.
+        from routers import metric_points as _metric_points
+        value = _metric_points._ops_int(key, int(OPS_SETTINGS_DEFAULTS[key]))
+        return {"value": value, "source": _ops_source(key)}
 
     entitled = entitlement_service.is_entitled("retention")
     audit_days = max(int(os.getenv("AUDIT_LOG_RETENTION_DAYS", "365") or 365), 365)

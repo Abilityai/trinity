@@ -68,6 +68,9 @@
     "/etc/claude-code/*",
     "/var/lib/trinity/*"
   ],
+  "path_allow": [
+    ".env.example"
+  ],
   "credential_patterns": [
     {"name": "anthropic_api_key", "pattern": "sk-ant-[a-zA-Z0-9_-]{20,}"},
     {"name": "anthropic_oauth_token", "pattern": "sk-ant-oat01-[a-zA-Z0-9_-]{20,}"},

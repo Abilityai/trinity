@@ -83,7 +83,8 @@ def work_kind(row: dict) -> WorkKind:
         return "loop"
     if trigger == "room":
         return "room"
-    if trigger in ("schedule", "scheduled"):
+    # #3363: a retry of a scheduled run is the same scheduled work, attempt N.
+    if trigger in ("schedule", "scheduled", "retry"):
         return "schedule"
     if channel == PORTAL_SOURCE_CHANNEL and trigger == "public":
         return "turn"

@@ -331,12 +331,17 @@ async def _deliver_result(
     backend_url: str,
     mcp_key: str,
     deadline_monotonic: float,
+    reply_sink: Optional[list] = None,
 ) -> bool:
     """POST the §3.3 terminal, retrying with capped decorrelated-jitter backoff
     until the lease deadline. Returns True on a 2xx (delivered) OR a permanent
     4xx (no point retrying); False only when the deadline passed — the backend
     lease reaper then re-queues (same ``execution_id``), so no work is lost.
-    Mirrors ``result_callback._deliver``."""
+    Mirrors ``result_callback._deliver``.
+
+    #3487: ``reply_sink`` receives the 2xx reply body — where a ``retry``
+    instruction comes back. One delivery function, so a caller (or a test) that
+    replaces it still replaces every delivery."""
     url = f"{backend_url}/api/internal/tasks/{execution_id}/result"
     headers = {"Authorization": f"Bearer {mcp_key}"}
     prev_sleep = _BACKOFF_BASE
@@ -346,6 +351,13 @@ async def _deliver_result(
             resp = await client.post(url, json=body, headers=headers)
             if resp.status_code < 300:
                 logger.info("[#1081] result for %s delivered (%s)", execution_id, resp.status_code)
+                if reply_sink is not None:
+                    try:
+                        reply = resp.json()
+                    except Exception:  # noqa: BLE001 — a 2xx with no JSON is still delivered
+                        reply = None
+                    if isinstance(reply, dict):
+                        reply_sink.append(reply)
                 return True
             if resp.status_code in _PERMANENT_STATUSES:
                 logger.warning(
@@ -407,84 +419,171 @@ async def _run_and_report(
     if persist_session is None:
         persist_session = bool(session_id)
 
-    # #3114: a claimed turn is ACCEPTED-not-spawned until the runtime starts it.
-    # Registered as pending, `/api/executions/{id}/terminate` reaches it in that
-    # window (#2433): the cancel is recorded, the turn is skipped (or killed at
-    # spawn) and reported `cancelled` below.
-    registry = get_process_registry()
-    registry.register_pending(
-        execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
-    )
-    agent_state.record_task_start()
-    try:
-        if execution_id and registry.was_terminated(execution_id):
-            raise HTTPException(status_code=409, detail="Execution cancelled before it started")
-        response_text, raw_messages, metadata, ran_session_id = await get_runtime().execute_headless(
-            prompt=message,
-            model=overrides.get("model"),
-            allowed_tools=overrides.get("allowed_tools"),
-            system_prompt=overrides.get("system_prompt"),
-            timeout_seconds=turn_timeout,
-            max_turns=overrides.get("max_turns"),
-            execution_id=execution_id,
-            resume_session_id=session_id,
-            persist_session=bool(persist_session),
-            images=payload.get("images") or None,
-        )
-        body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
-        finish_success: Optional[bool] = True
-    except asyncio.CancelledError:
-        # Shutdown mid-turn — record the finish, let cancellation propagate.
-        agent_state.record_task_finish(success=False)
-        raise
-    except HTTPException as exc:
-        finish_success = False
-        body = _failed_result_body_from_http(claim_token, exc)
-    except Exception as exc:  # noqa: BLE001 — any failure must still report a terminal
-        finish_success = False
-        body = _failed_result_body(claim_token, str(exc) or type(exc).__name__)
-    finally:
-        # #2433: promoted at spawn; dropped here if it never spawned.
-        registry.discard_pending(execution_id)
-
-    # #679 / #3114: a terminated turn reports `cancelled` (result_callback
-    # parity). Auth and rate-limit terminals keep their class so the breaker
-    # and SUB-003 still see them.
-    if (
-        execution_id
-        and registry.was_terminated(execution_id)
-        and body.get("error_code") not in ("auth", "billing")
-    ):
-        body = {
-            **body,
-            "status": "cancelled",
-            "error_code": None,
-            "error": "Execution terminated by user",
-        }
-        finish_success = None
-
-    agent_state.record_task_finish(success=finish_success)
-
-    # B6 fix (#1081): persist the completed terminal to disk BEFORE attempting
-    # delivery, so a shutdown/deploy mid-POST doesn't drop already-spent work
-    # (the row would stay `running` → the lease reaper re-runs the turn from
-    # scratch). If a CancelledError arrives inside _deliver_result below, it
-    # propagates before _delete_pull_result is reached, so the file survives and
-    # the startup resend delivers it. Gated on a safe execution_id so a hostile
-    # value can't escape _PENDING_PULL_DIR; an unsafe/absent id skips persistence
-    # (unchanged pre-B6 behaviour — never a path build from untrusted input).
-    persisted = _is_safe_execution_id(execution_id)
-    if persisted:
-        _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
-
-    # Deadline = now + (turn timeout + buffer) = the slot-lease TTL window.
+    runtime = get_runtime()
+    # #3487: this worker can run a refused turn again on another credential —
+    # said on every result, so the backend walks the pool only for workers
+    # that will follow its retry instruction.
+    capable = _auth_override_capable(runtime)
+    # Delivery window = the slot-lease TTL, fixed at the claim: a retry runs
+    # under the SAME claim and lease, so it never extends it.
     # #2317: keyed to the POOL's budget, not the row's — honouring a short
     # per-task timeout must not also shrink the result-delivery retry window
     # (the backend lease derives from the agent's execution_timeout, not the row's).
     deadline = time.monotonic() + max(turn_timeout, _turn_timeout()) + _SLOT_TTL_BUFFER_SECONDS
-    delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
-    if delivered and persisted:
-        _delete_pull_result(execution_id)
+    override = None
+
+    registry = get_process_registry()
+    while True:
+        # #3114: a claimed turn is ACCEPTED-not-spawned until the runtime starts it.
+        # Registered as pending, `/api/executions/{id}/terminate` reaches it in that
+        # window (#2433): the cancel is recorded, the turn is skipped (or killed at
+        # spawn) and reported `cancelled` below.
+        registry.register_pending(
+            execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+        )
+        agent_state.record_task_start()
+        spawn_kwargs: Dict[str, Any] = {}
+        if override is not None:
+            spawn_kwargs["auth_override"] = override
+        try:
+            if execution_id and registry.was_terminated(execution_id):
+                raise HTTPException(status_code=409, detail="Execution cancelled before it started")
+            response_text, raw_messages, metadata, ran_session_id = await runtime.execute_headless(
+                prompt=message,
+                model=overrides.get("model"),
+                allowed_tools=overrides.get("allowed_tools"),
+                system_prompt=overrides.get("system_prompt"),
+                timeout_seconds=turn_timeout,
+                max_turns=overrides.get("max_turns"),
+                execution_id=execution_id,
+                resume_session_id=session_id,
+                persist_session=bool(persist_session),
+                images=payload.get("images") or None,
+                **spawn_kwargs,
+            )
+            body = _success_result_body(claim_token, response_text, raw_messages, metadata, ran_session_id)
+            finish_success: Optional[bool] = True
+        except asyncio.CancelledError:
+            # Shutdown mid-turn — record the finish, let cancellation propagate.
+            agent_state.record_task_finish(success=False)
+            raise
+        except HTTPException as exc:
+            finish_success = False
+            body = _failed_result_body_from_http(claim_token, exc)
+        except Exception as exc:  # noqa: BLE001 — any failure must still report a terminal
+            finish_success = False
+            body = _failed_result_body(claim_token, str(exc) or type(exc).__name__)
+        finally:
+            # #2433: promoted at spawn; dropped here if it never spawned.
+            registry.discard_pending(execution_id)
+
+        terminated = bool(execution_id and registry.was_terminated(execution_id))
+        # #679 / #3114: a terminated turn reports `cancelled` (result_callback
+        # parity). Auth and rate-limit terminals keep their class so the breaker
+        # and SUB-003 still see them.
+        if terminated and body.get("error_code") not in ("auth", "billing"):
+            body = {
+                **body,
+                "status": "cancelled",
+                "error_code": None,
+                "error": "Execution terminated by user",
+            }
+            finish_success = None
+        body = _with_walk_metadata(body, capable=capable, override=override, terminated=terminated)
+
+        agent_state.record_task_finish(success=finish_success)
+
+        # B6 fix (#1081): persist the completed terminal to disk BEFORE attempting
+        # delivery, so a shutdown/deploy mid-POST doesn't drop already-spent work
+        # (the row would stay `running` → the lease reaper re-runs the turn from
+        # scratch). If a CancelledError arrives inside the delivery below, it
+        # propagates before _delete_pull_result is reached, so the file survives and
+        # the startup resend delivers it. Gated on a safe execution_id so a hostile
+        # value can't escape _PENDING_PULL_DIR; an unsafe/absent id skips persistence
+        # (unchanged pre-B6 behaviour — never a path build from untrusted input).
+        persisted = _is_safe_execution_id(execution_id)
+        if persisted:
+            _persist_pull_result(execution_id, {"execution_id": execution_id, "body": body})
+
+        # #3487: a refused attempt may be answered "run it again". While it is
+        # being reported there is no process and no pending entry, so a
+        # terminate would find nothing and the next attempt would spawn anyway.
+        # Hold the turn as pending across the report: a cancel landing here is
+        # recorded and the next attempt is skipped and reported `cancelled`.
+        hold = capable and not terminated and body.get("status") != "success"
+        if hold:
+            registry.register_pending(
+                execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
+            )
+        replies: list = []
+        try:
+            delivered = await _deliver_result(
+                client, execution_id, body, backend_url, mcp_key, deadline, reply_sink=replies
+            )
+        except BaseException:
+            if hold:
+                registry.discard_pending(execution_id)
+            raise
+        if delivered and persisted:
+            _delete_pull_result(execution_id)
+
+        # #3487: the backend may answer a refused attempt with "run it again on
+        # this credential". Only a capable, un-terminated worker follows it.
+        retry = (replies[-1] if replies else {}).get("retry") if delivered else None
+        if not (capable and not terminated and isinstance(retry, dict) and retry.get("claim_token")):
+            if hold:
+                registry.discard_pending(execution_id)
+            return
+        claim_token = retry["claim_token"]
+        override = _build_auth_override(retry.get("auth_override"), runtime)
+        timeout = retry.get("timeout_seconds")
+        if isinstance(timeout, (int, float)) and timeout > 0:
+            # Never longer than the limit this claim was given.
+            turn_timeout = min(turn_timeout, int(timeout))
+        logger.warning(
+            "[#3487] %s: re-running pulled turn %s (attempt %s) on %s",
+            agent_name, execution_id, retry.get("attempt"),
+            override.kind() if override is not None else "the baseline credential",
+        )
+
+
+def _auth_override_capable(runtime) -> bool:
+    """True when this runtime can run one spawn on a per-spawn credential (#3487)."""
+    return bool(getattr(runtime, "supports_auth_override", False))
+
+
+def _build_auth_override(raw, runtime):
+    """The retry's credential as the runtime's `AuthOverride`, staged for log
+    redaction before anything can print it — exactly as `/api/task` does
+    (`routers.chat._accept_auth_override`). None for the baseline. Never logs it."""
+    if not isinstance(raw, dict) or not _auth_override_capable(runtime):
+        return None
+    from ..models import AuthOverride
+    from ..utils.credential_sanitizer import add_credential_value
+
+    try:
+        override = AuthOverride(**raw)
+    except Exception:  # noqa: BLE001 — a malformed instruction runs on the baseline
+        logger.warning("[#3487] malformed auth_override in a retry — running on the baseline")
+        return None
+    if override.kind() is None:
+        return None
+    add_credential_value(override.secret())
+    return override
+
+
+def _with_walk_metadata(body: Dict[str, Any], *, capable: bool, override, terminated: bool) -> Dict[str, Any]:
+    """Tell the backend what this attempt can do and what it ran on (#3487):
+    `auth_override_capable`, the credential kind it applied (the pull analogue
+    of the `X-Trinity-Auth-Override` header), and whether the user terminated
+    it. Failure bodies carry this too — a refusal is exactly where it matters."""
+    md = dict(body.get("metadata") or {})
+    md["auth_override_capable"] = capable
+    if override is not None:
+        md["auth_override"] = override.kind()
+    if terminated:
+        md["terminated"] = True
+    return {**body, "metadata": md}
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +708,9 @@ async def resend_pending_pull_results() -> None:
                 _delete_pull_result(execution_id)
                 continue
             deadline = time.monotonic() + _SWEEP_DEADLINE_SECONDS
+            # #3487: a restarted worker no longer holds the claim it would need
+            # to follow a retry instruction, so it must not ask for one.
+            body = {**body, "metadata": {**(body.get("metadata") or {}), "auth_override_capable": False}}
             delivered = await _deliver_result(client, execution_id, body, backend_url, mcp_key, deadline)
             if delivered:
                 _delete_pull_result(execution_id)

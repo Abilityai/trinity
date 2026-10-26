@@ -169,6 +169,13 @@ PATTERN_INSTANCES = {
     ".codex/sessions/*": ".codex/sessions/2026/10/16/rollout.jsonl",
     ".gemini/tmp/*/chats/*": ".gemini/tmp/h4sh/chats/session-1.json",
     ".config/gcloud/*": ".config/gcloud/application_default_credentials.json",
+    # ent#949: tokens and shell history
+    ".npmrc": ".npmrc",
+    ".pypirc": ".pypirc",
+    ".config/rclone/rclone.conf": ".config/rclone/rclone.conf",
+    ".terraform.d/credentials.tfrc.json": ".terraform.d/credentials.tfrc.json",
+    ".bash_history": ".bash_history",
+    ".zsh_history": ".zsh_history",
     "*.key": "certs/tls.key",
     "*.pem": "server.pem",
     "*.p12": "keystore.p12",

@@ -1147,6 +1147,30 @@
   "tier": "owner",
   "via": "_require_write_access"
  },
+ "nevermined_delegation.py::bind_agent_delegation": {
+  "method": "POST",
+  "path": "/api/nevermined/agents/{agent_name}/delegation",
+  "reason": "binds the agent's Nevermined card mandate: spending authority over the owner's card (OwnedAgentByName)",
+  "tier": "owner"
+ },
+ "nevermined_delegation.py::create_widget_session": {
+  "method": "POST",
+  "path": "/api/nevermined/agents/{agent_name}/widget-session",
+  "reason": "opens the card-binding widget for the owner (OwnedAgentByName)",
+  "tier": "owner"
+ },
+ "nevermined_delegation.py::get_agent_delegation": {
+  "method": "GET",
+  "path": "/api/nevermined/agents/{agent_name}/delegation",
+  "reason": "a read of what the agent may spend, live from Nevermined; anyone the agent is shared with may see it (AuthorizedAgentByName), and an agent key reads only its own budget",
+  "tier": "accessor"
+ },
+ "nevermined_delegation.py::revoke_agent_delegation": {
+  "method": "DELETE",
+  "path": "/api/nevermined/agents/{agent_name}/delegation",
+  "reason": "revokes the agent's card mandate (OwnedAgentByName)",
+  "tier": "owner"
+ },
  "notifications.py::count_agent_notifications": {
   "method": "GET",
   "path": "/api/agents/{name}/notifications/count",

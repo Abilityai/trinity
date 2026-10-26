@@ -153,6 +153,19 @@ def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str])
         return None
 
 
+def _default_model_for(agent_name: str) -> Optional[str]:
+    """The model a turn with no explicit model runs on.
+
+    The platform default is a Claude model id, so only a Claude Code agent gets
+    it. A Codex or Gemini agent gets ``None`` and runs on its own model
+    (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
+    ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+    """
+    if _resolve_agent_runtime(agent_name) != "claude-code":
+        return None
+    return settings_service.get_platform_default_model()
+
+
 def _resolve_agent_runtime(agent_name: str) -> str:
     """Best-effort resolve an agent's runtime for the platform prompt (#1187).
 
@@ -946,7 +959,8 @@ async def dispatch_and_await_terminal(
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
-    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    terminal writer does. Also the a2a queued-cancel close (#3651). Fire-and-
+    forget; every caller runs inside a request or task, so a loop is running."""
     activity_service.spawn_close_execution_activity(execution_id, status, error=error)
     event_dispatch_service.spawn_task_terminal_event(
         agent_name, execution_id, terminal_status=status, summary_or_error=error,
@@ -1006,9 +1020,21 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
     )
     error_code, error = _split_error_code(error)
+    # #3487: a pulled turn that walked the subscription pool carries the same
+    # summary a pushed one returns (`subscription_switch`, #3470 shape).
+    subscription_switch = None
+    try:
+        walk_state = json.loads(getattr(execution, "backlog_metadata", None) or "{}").get(
+            "subscription_walk"
+        )
+        if isinstance(walk_state, dict) and isinstance(walk_state.get("summary"), dict):
+            subscription_switch = walk_state["summary"]
+    except (TypeError, ValueError, AttributeError):
+        subscription_switch = None
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
+        subscription_switch=subscription_switch,
         response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
@@ -1598,10 +1624,11 @@ class TaskExecutionService:
         if timeout_seconds is None:
             timeout_seconds = db.get_execution_timeout(agent_name)
 
-        # #831: Resolve null model → platform default so the agent always receives
-        # a concrete model string. Avoids the stale "sonnet" hardcode in base-image.
+        # #831: Resolve null model → platform default so a Claude Code agent
+        # always receives a concrete model string. Avoids the stale "sonnet"
+        # hardcode in base-image.
         if model is None:
-            model = settings_service.get_platform_default_model()
+            model = _default_model_for(agent_name)
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the

@@ -90,6 +90,14 @@ SECRET_FILE_CLASS_PATTERNS = (
     ".claude/history.jsonl",
     ".codex/sessions/*",
     ".gemini/tmp/*/chats/*",
+    # Tokens and shell history (ent#949): a registry `_authToken`, an upload
+    # credential, a cloud-sync remote, a Terraform Cloud token, typed commands.
+    ".npmrc",
+    ".pypirc",
+    ".config/rclone/rclone.conf",
+    ".terraform.d/credentials.tfrc.json",
+    ".bash_history",
+    ".zsh_history",
     "*.key",
     "*.pem",
     "*.p12",
@@ -123,10 +131,17 @@ PUBLISHED_LIST_DIRS = (".trinity/pipelines", ".trinity/pipeline-state")
 RUNS_CODE_FILES = (
     ".gitconfig", ".bashrc", ".bash_profile", ".bash_login", ".bash_logout", ".profile",
     ".zshrc", ".zshenv", ".zprofile", ".zlogin", ".zlogout",
+    # ent#949: `.bashrc` sources it (Debian skel), the reason `.bashrc` is here.
+    ".bash_aliases",
+    # ent#949: the package indexes `pip install --user` and npm read at boot as
+    # the agent — a written `index-url` reaches `.local/lib` one hop earlier.
+    ".config/pip/pip.conf", ".pip/pip.conf", ".npmrc",
 )
 # `.local/lib` is the Python user-site (`pip install --user` in the base image):
 # a `.pth` or `usercustomize.py` there runs at the next `python3` the agent starts.
-RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib")
+# ent#949: Gemini CLI loads extensions (which declare MCP server commands) and
+# custom commands from the home, and Trinity runs it with `--yolo`.
+RUNS_CODE_DIRS = (".config/git", ".local/bin", ".local/lib", ".gemini/extensions", ".gemini/commands")
 # The agent server's own code, agent-owned outside the home (ent#926): `/app` is
 # on PYTHONPATH, so a `sitecustomize.py` there runs in every python process, and
 # `startup.sh` runs at boot.

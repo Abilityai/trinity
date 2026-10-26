@@ -54,6 +54,19 @@ _COMPANION_ACTIVITY_TYPES = (
     ActivityType.SELF_TASK.value,
 )
 
+
+def _is_companion():
+    """A companion row, minus the AAuth inbound record (#3651):
+    ``aauth_inbound.record_activity`` writes an ``agent_collaboration`` row on
+    the callee's execution, already closed — FAILED while an async task is
+    still ``working``. It records the inbound call, not a producer's turn, and
+    an authoritative close would otherwise upgrade it."""
+    return and_(
+        agent_activities.c.activity_type.in_(_COMPANION_ACTIVITY_TYPES),
+        agent_activities.c.triggered_by != "a2a",  # NOT NULL column
+    )
+
+
 def queued_activity_ids(backlog_metadata: Optional[str]) -> List[str]:
     """Activity ids a queued `/task` row names in its ``backlog_metadata``:
     the collaboration activity and, for a self-task, the self-task activity.
@@ -333,8 +346,9 @@ class ActivityOperations:
         status: str = ActivityState.FAILED,
         error: Optional[str] = None,
     ) -> int:
-        """Close every open dispatch activity belonging to an execution-id set,
-        in ONE transaction with no per-row WebSocket broadcast (#1804).
+        """Close every open dispatch and companion activity belonging to an
+        execution-id set, in ONE transaction with no per-row WebSocket broadcast
+        (#1804; companions #3651).
 
         The bulk watchdog sweeps fail N execution rows at once; routing them
         through the per-row helper would be N transactions AND N WebSocket
@@ -362,7 +376,12 @@ class ActivityOperations:
                     .where(
                         and_(
                             agent_activities.c.related_execution_id.in_(chunk),
-                            agent_activities.c.activity_type.in_(_DISPATCH_ACTIVITY_TYPES),
+                            # #3651: companions too — a direct-dispatch row has
+                            # no metadata naming them.
+                            or_(
+                                agent_activities.c.activity_type.in_(_DISPATCH_ACTIVITY_TYPES),
+                                _is_companion(),
+                            ),
                             _close_predicate(status),
                         )
                     )
@@ -521,7 +540,7 @@ class ActivityOperations:
                     key,
                     # The type filter bounds BOTH arms: even a metadata id can
                     # only ever resolve to a companion row, never a dispatch one.
-                    agent_activities.c.activity_type.in_(_COMPANION_ACTIVITY_TYPES),
+                    _is_companion(),
                     agent_activities.c.activity_state.in_(states),
                 )
             )
