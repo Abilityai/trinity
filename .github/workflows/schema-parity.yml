@@ -90,9 +90,13 @@ name: Schema Parity Gate
 # `migration_health` is complete. PR-only (it needs the merge-base, hence
 # `fetch-depth: 0`), behind the self-skip, after the dependency install
 # because the old tree's lifecycle runs under them; exit 2 (the check could
-# not run) fails the job rather than passing it. Names only, and incremental
-# (merge-base -> checkout), not every historical release: its docstring
-# states the limits.
+# not run) fails the job rather than passing it. A merge-base that cannot build
+# (a broken `dev`) does not block the PR that repairs it: the guard upgrades
+# from the newest first-parent ancestor that builds, within a stated bound, and
+# warns. Names only, and incremental (merge-base -> checkout), not every
+# historical release: its docstring states the limits. It exercises only the
+# open-source `db/migrations.py` and `db/schema.py`, never the enterprise
+# runner.
 
 on:
   pull_request:

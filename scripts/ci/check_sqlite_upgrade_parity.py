@@ -31,6 +31,16 @@ This guard models the existing install instead:
      existing install, and a removed one leaves `/health` counting a name that
      is no longer registered, so either is reported rather than passed.
 
+If the merge-base cannot build its install (its own lifecycle raises: the
+base branch is itself broken, and this PR may be the one that repairs it), the
+guard walks back the merge-base's first-parent ancestors, at most
+`MAX_BASE_WALKBACK` of them, to the newest one that builds, upgrades from that
+one instead, and prints a warning naming every commit it skipped. This is not
+fail-open: the checkout still has to upgrade an install the older tree built,
+a longer range that covers every migration the skipped commits register as
+well as the PR's own, so a gap is still reported. When no tree within the bound
+builds, or a lifecycle times out, the guard exits 2.
+
 Each tree runs in its own interpreter, so the two copies of `db.migrations`
 never meet in one `sys.modules`. Both load `db/schema.py` and `db/migrations.py`
 by file path, as the parity pytest does, so the `db` package `__init__` (and its
@@ -56,7 +66,11 @@ Stated limits:
     migrations, on a `sqlite3.Row` connection as `get_db_connection` opens it)
     is restated here, not imported.
   * The merge-base's code runs under the checkout's installed dependencies. If
-    it no longer imports, the guard fails closed (exit 2) and says so.
+    it no longer imports, it counts as a tree that cannot build: the walk-back
+    above applies, and exit 2 when it is exhausted.
+  * Open-source runner only. It exercises `db/migrations.py` and `db/schema.py`
+    and never the enterprise runner (`enterprise/backend/_migrations.py`), so
+    the tables only that runner creates, and their drift, are out of scope.
 
 Usage:
     check_sqlite_upgrade_parity.py <base_sha> <head_sha>
@@ -66,19 +80,22 @@ Usage:
 Exit codes: 0 = pass, 1 = an upgraded install misses something schema.py
 declares (each object is named) or the checkout's lifecycle fails on it,
 2 = the check could not run (no base/head, merge-base unresolvable, the
-merge-base's tree missing or failing to build its install, the checkout's
-db modules not importing). Exit 2 never means "no drift". Pure stdlib; no
+merge-base's tree missing, neither it nor any first-parent ancestor within
+`MAX_BASE_WALKBACK` building its install, the checkout's db modules not
+importing). Exit 2 never means "no drift". Pure stdlib; no
 third-party deps of its own.
 """
 from __future__ import annotations
 
 import io
+import itertools
 import json
 import os
 import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +103,12 @@ BACKEND_REL = "src/backend"
 REQUIRED_FILES = ("db/schema.py", "db/migrations.py")
 NULL_SHA = "0" * 40
 SUBPROCESS_TIMEOUT_S = 600
+
+# How many first-parent ancestors of the merge-base are tried, newest first,
+# when the merge-base itself cannot build its install (a broken base branch).
+# Past this bound the guard exits 2. A PR that has to go further raises it here,
+# in review, rather than by editing branch protection.
+MAX_BASE_WALKBACK = 20
 
 EXIT_PASS = 0
 EXIT_GAP = 1
@@ -265,40 +288,71 @@ def health_gaps(health: list[Any], unknown_ledger_names: list[str]) -> list[str]
     return gaps
 
 
-def check_trees(base_backend: Path, head_backend: Path, workdir: Path, *, base_label: str = "base") -> int:
+def check_trees(
+    base_backend: Path,
+    head_backend: Path,
+    workdir: Path,
+    *,
+    base_label: str = "base",
+    older_bases: Iterable[tuple[str, Path]] = (),
+) -> int:
     """Build an install with `base_backend`, upgrade it with `head_backend`, compare.
+
+    If `base_backend` cannot build its install, each of `older_bases` (label,
+    backend), consumed lazily and in order, is tried instead; the first that
+    builds is upgraded, and a warning names every tree skipped.
 
     The comparison core, free of git so the self-test can drive it over
     synthetic two-file backends.
     """
-    base_backend, head_backend, workdir = base_backend.resolve(), head_backend.resolve(), workdir.resolve()
-    try:
-        _require_backend(base_backend, f"{base_label}")
-        _require_backend(head_backend, "head")
-    except CannotRun as exc:
-        print(f"sqlite-upgrade-parity: CANNOT RUN — {exc}", file=sys.stderr)
-        return EXIT_CANNOT_RUN
-
-    db_path = workdir / "upgrade.db"
-    base_out = workdir / "base.json"
+    head_backend, workdir = head_backend.resolve(), workdir.resolve()
     head_out = workdir / "head.json"
-
+    failures: list[tuple[str, str]] = []  # (label, lifecycle output tail) per tree that could not build
+    built: tuple[str, Path, Path] | None = None
     try:
-        rc, output = _run_lifecycle(base_backend, db_path, base_out, "base")
+        _require_backend(head_backend, "head")
+        candidates = itertools.chain([(base_label, base_backend)], older_bases)
+        for attempt, (label, backend) in enumerate(candidates):
+            backend = backend.resolve()
+            _require_backend(backend, label)
+            attempt_dir = workdir / f"base-{attempt}"
+            attempt_dir.mkdir()
+            db_path, base_out = attempt_dir / "upgrade.db", attempt_dir / "base.json"
+            rc, output = _run_lifecycle(backend, db_path, base_out, "base")
+            if rc == 0 and base_out.is_file():
+                built = (label, db_path, base_out)
+                break
+            failures.append((label, output))
     except CannotRun as exc:
         print(f"sqlite-upgrade-parity: CANNOT RUN — {exc}", file=sys.stderr)
         return EXIT_CANNOT_RUN
-    if rc != 0 or not base_out.is_file():
+    if built is None:
+        tried = ", ".join(label for label, _ in failures)
         print(
-            f"sqlite-upgrade-parity: CANNOT RUN — the {base_label} tree failed to build its "
-            "install, so there is nothing to upgrade. This is infrastructure (for example a "
-            "dependency the old code imports is gone), not schema drift; it fails closed "
-            "rather than pass. If this PR removes or major-bumps a dependency that code "
-            "imports, land the bump on its own first; if the branch is old, update it from "
-            f"its base.\n--- {base_label} lifecycle output (tail) ---\n{output}",
+            f"sqlite-upgrade-parity: CANNOT RUN — no tree within the walk-back bound "
+            f"(MAX_BASE_WALKBACK = {MAX_BASE_WALKBACK}) built its install, so there is nothing "
+            f"to upgrade. Tried: {tried}. This is infrastructure (for example a dependency the "
+            "old code imports is gone, or the base branch has been broken for longer than the "
+            "bound), not schema drift; it fails closed rather than pass. If this PR removes or "
+            "major-bumps a dependency the old code imports, first land a PR that stops "
+            "importing it (or works with both versions), then the bump; if the base branch is "
+            "broken past the bound, raise MAX_BASE_WALKBACK in the fix PR."
+            f"\n--- {base_label} lifecycle output (tail) ---\n{failures[0][1]}",
             file=sys.stderr,
         )
         return EXIT_CANNOT_RUN
+    base_label, db_path, base_out = built
+    if failures:
+        print(
+            f"sqlite-upgrade-parity: WARNING — {failures[0][0]} failed to build its install (is "
+            f"the base branch itself broken?), so the install is built by {base_label}, the "
+            "newest that builds; skipped: "
+            f"{', '.join(label.rsplit(' ', 1)[-1] for label, _ in failures)}. The checkout "
+            "still has to upgrade over this longer range, so a gap is still a gap."
+            f"\n--- {failures[0][0]} lifecycle output (tail) ---\n{failures[0][1][-1500:]}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     try:
         rc, output = _run_lifecycle(head_backend, db_path, head_out, "head")
@@ -358,6 +412,33 @@ def _git_bytes(args: list[str]) -> bytes:
     return subprocess.run(["git", *args], check=True, capture_output=True).stdout
 
 
+def _extract_tree(sha: str, dest: Path) -> Path:
+    """`git archive` `sha`'s src/backend under `dest`; return that backend dir."""
+    dest.mkdir(parents=True)
+    try:
+        archive = _git_bytes(["archive", "--format=tar", sha, BACKEND_REL])
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
+        raise CannotRun(f"git archive {sha} {BACKEND_REL} failed: {(detail or '').strip()}") from exc
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
+            tar.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise CannotRun(f"extracting {sha}:{BACKEND_REL} failed: {exc}") from exc
+    return dest / BACKEND_REL
+
+
+def _ancestor_trees(merge_base: str, root: Path) -> Iterator[tuple[str, Path]]:
+    """Yield the merge-base's first-parent ancestors, newest first, at most
+    MAX_BASE_WALKBACK, each extracted only when the previous one failed."""
+    try:
+        revs = _git(["rev-list", "--first-parent", f"--max-count={MAX_BASE_WALKBACK + 1}", merge_base])
+    except subprocess.CalledProcessError as exc:
+        raise CannotRun(f"git rev-list --first-parent {merge_base} failed: {(exc.stderr or '').strip()}") from exc
+    for sha in revs.split()[1:]:
+        yield f"first-parent ancestor {sha[:12]}", _extract_tree(sha, root / sha)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) not in (1, 3):
         print("usage: check_sqlite_upgrade_parity.py [<base> <head>]", file=sys.stderr)
@@ -387,36 +468,20 @@ def main(argv: list[str]) -> int:
     head_backend = repo / BACKEND_REL
     with tempfile.TemporaryDirectory(prefix="sqlite-upgrade-parity-") as tmp:
         tmp_path = Path(tmp)
-        base_root = tmp_path / "base"
-        base_root.mkdir()
         try:
-            archive = _git_bytes(["archive", "--format=tar", merge_base, BACKEND_REL])
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else exc.stderr
-            print(
-                f"sqlite-upgrade-parity: CANNOT RUN — git archive {merge_base} {BACKEND_REL} "
-                f"failed: {(detail or '').strip()}",
-                file=sys.stderr,
-            )
-            return EXIT_CANNOT_RUN
-        try:
-            with tarfile.open(fileobj=io.BytesIO(archive), mode="r") as tar:
-                tar.extractall(base_root, filter="data")
-        except (tarfile.TarError, OSError) as exc:
-            print(
-                f"sqlite-upgrade-parity: CANNOT RUN — extracting {merge_base}:{BACKEND_REL} "
-                f"failed: {exc}",
-                file=sys.stderr,
-            )
+            base_backend = _extract_tree(merge_base, tmp_path / "base")
+        except CannotRun as exc:
+            print(f"sqlite-upgrade-parity: CANNOT RUN — {exc}", file=sys.stderr)
             return EXIT_CANNOT_RUN
         workdir = tmp_path / "work"
         workdir.mkdir()
         print(f"sqlite-upgrade-parity: merge-base {merge_base} (base {base}, head {head}).", flush=True)
         return check_trees(
-            base_root / BACKEND_REL,
+            base_backend,
             head_backend,
             workdir,
             base_label=f"merge-base {merge_base[:12]}",
+            older_bases=_ancestor_trees(merge_base, tmp_path / "ancestors"),
         )
 
 

@@ -23,7 +23,10 @@ renamed migration and a duplicate registration are gaps; the restated
 lifecycle is pinned (migrations before `init_schema`, the second pass, and a
 `sqlite3.Row` connection as production opens it); a head that does not import, and every git-side failure (usage, no
 base/head, no repository, an unresolvable merge-base), fail closed with exit 2.
-One test runs `main()` end to end over a throwaway git repository.
+One test runs `main()` end to end over a throwaway git repository. A broken
+merge-base (a broken `dev`) is walked back over first-parent ancestors, bounded,
+to the newest that builds, so the PR that repairs `dev` is not blocked; a gap
+over that longer range is still a gap, and an exhausted walk exits 2.
 """
 from __future__ import annotations
 
@@ -381,3 +384,91 @@ def test_main_over_a_git_history(tmp_path, monkeypatch, capsys):
 
     assert guard.main(["x", base_sha, "f" * 40]) == guard.EXIT_CANNOT_RUN
     assert "merge-base" in capsys.readouterr().err
+
+
+# --- a broken merge-base (a broken `dev`) -------------------------------------------
+#
+# The PR that repairs a broken `dev` has the broken commit as its merge-base.
+# The guard walks back first-parent ancestors, bounded, to the newest one that
+# builds, and upgrades from it; exit 2 only when none within the bound builds.
+
+_BROKEN = "def _migrate_broken(cursor, conn):\n    raise RuntimeError('dev is broken')\n"
+
+
+def _commit_tree(repo: Path, message: str, **backend: object) -> str:
+    db = repo / "src" / "backend" / "db"
+    if db.exists():
+        for f in db.iterdir():
+            f.unlink()
+        db.rmdir()
+    _backend(repo / "src" / "backend", **backend)  # type: ignore[arg-type]
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _new_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    return repo
+
+
+_BROKEN_TREE = {"tables": [T_A], "migrations": _BROKEN, "registry": '("broken", _migrate_broken)'}
+
+
+def test_broken_merge_base_walks_back_to_the_newest_ancestor_that_builds(tmp_path, monkeypatch, capsys):
+    repo = _new_repo(tmp_path)
+    good = _commit_tree(repo, "good", tables=[T_A])
+    broken = _commit_tree(repo, "A: dev breaks", **_BROKEN_TREE)
+    fix = _commit_tree(repo, "B: the fix PR", tables=[T_A])
+    monkeypatch.chdir(repo)
+
+    assert guard.main(["x", broken, fix]) == guard.EXIT_PASS
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+    assert f"skipped: {broken[:12]}" in captured.err
+    assert "dev is broken" in captured.err
+    assert f"first-parent ancestor {good[:12]}" in captured.out
+
+
+def test_walk_back_still_finds_a_gap_over_the_longer_range(tmp_path, monkeypatch, capsys):
+    # Not fail-open: the fix PR adds t.b with no migration; upgrading from the
+    # older ancestor still has to deliver it.
+    repo = _new_repo(tmp_path)
+    _commit_tree(repo, "good", tables=[T_A])
+    broken = _commit_tree(repo, "A: dev breaks", **_BROKEN_TREE)
+    fix = _commit_tree(repo, "B: fix plus an unmigrated column", tables=[T_AB])
+    monkeypatch.chdir(repo)
+
+    assert guard.main(["x", broken, fix]) == guard.EXIT_GAP
+    assert "column t.b:" in capsys.readouterr().err
+
+
+def test_walk_back_is_bounded_and_fails_closed_when_exhausted(tmp_path, monkeypatch, capsys):
+    repo = _new_repo(tmp_path)
+    good = _commit_tree(repo, "good", tables=[T_A])
+    broken1 = _commit_tree(repo, "dev breaks", **_BROKEN_TREE)
+    broken2 = _commit_tree(repo, "dev stays broken", **_BROKEN_TREE)
+    fix = _commit_tree(repo, "the fix PR", tables=[T_A])
+    monkeypatch.chdir(repo)
+
+    monkeypatch.setattr(guard, "MAX_BASE_WALKBACK", 1)
+    assert guard.main(["x", broken2, fix]) == guard.EXIT_CANNOT_RUN
+    err = capsys.readouterr().err
+    assert "CANNOT RUN" in err
+    assert broken2[:12] in err and broken1[:12] in err
+    assert good[:12] not in err
+
+    monkeypatch.setattr(guard, "MAX_BASE_WALKBACK", 2)
+    assert guard.main(["x", broken2, fix]) == guard.EXIT_PASS
+
+
+def test_broken_root_with_no_ancestor_fails_closed(tmp_path, monkeypatch, capsys):
+    repo = _new_repo(tmp_path)
+    broken = _commit_tree(repo, "broken root", **_BROKEN_TREE)
+    fix = _commit_tree(repo, "the fix PR", tables=[T_A])
+    monkeypatch.chdir(repo)
+
+    assert guard.main(["x", broken, fix]) == guard.EXIT_CANNOT_RUN
+    assert "CANNOT RUN" in capsys.readouterr().err
