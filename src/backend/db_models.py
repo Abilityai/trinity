@@ -313,6 +313,9 @@ class ScheduleExecution(BaseModel):
     open_canvas_id: Optional[str] = None
     # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
     chain_depth: Optional[int] = None
+    # ent#862 — verified AAuth peer identity of an inbound A2A caller
+    # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
+    a2a_caller_identity: Optional[str] = None
 
 
 # =========================================================================
