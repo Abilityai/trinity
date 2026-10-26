@@ -185,6 +185,17 @@ STANDING = [
 ]
 
 
+# Creator-gated routes that name no agent and create or act on the owner's agents
+# (PR #3778 review): the key carries the owner's role, so `require_role("creator")`
+# alone let a shared person's turn create an agent cloned with the owner's PAT.
+OWNER_UNNAMED = [
+    ("POST", "/api/agents"),
+    ("POST", "/api/agents/deploy-local"),
+    ("POST", "/api/systems/deploy"),
+    ("POST", "/api/systems/my-system/restart"),
+]
+
+
 @pytest.fixture
 def visitor_shell(monkeypatch):
     setting = {}
@@ -203,6 +214,23 @@ def test_a_shared_persons_turn_cannot_set_up_standing_work(method, path, visitor
 def test_the_owners_turn_and_no_turn_may(method, path, visitor_shell):
     for run in ("e-owner", "e-sched", "manual", None):
         dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+@pytest.mark.parametrize("method,path", OWNER_UNNAMED)
+def test_a_shared_persons_turn_cannot_create_or_deploy_agents(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("method,path", OWNER_UNNAMED)
+def test_the_owners_turn_may_create_and_deploy_agents(method, path, visitor_shell):
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+def test_reading_the_agent_list_is_not_fenced(visitor_shell):
+    dep._enforce_standing_work_fence(_Req("GET", "/api/agents"), _key("e-mate"))
 
 
 def test_a_visitor_may_while_the_owner_allows_it_and_not_after(visitor_shell):

@@ -311,6 +311,57 @@ def test_standing_work_routes_that_name_no_agent_are_live():
         assert not names_an_agent(template)
 
 
+# Creator-gated routes that name no agent and are deliberately open in a restricted
+# turn, with the reason. Everything else of that shape must be in OWNER_TIER_UNNAMED.
+CREATOR_UNNAMED_OPEN = {
+    ("GET", "/api/systems/manifests"): "a read of the manifest list; creates and touches nothing",
+    ("GET", "/api/systems/manifests/{manifest_id}"): "a read of one manifest; creates and touches nothing",
+}
+
+
+def _creator_gated_unnamed_routes():
+    out = set()
+    for f in sorted(_ROUTERS.rglob("*.py")):
+        src = f.read_text()
+        tree = ast.parse(src)
+        pre = _prefixes(tree)
+        for n in ast.walk(tree):
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            gated = any(
+                isinstance(c, ast.Call) and getattr(c.func, "id", getattr(c.func, "attr", None)) == "require_role"
+                and c.args and isinstance(c.args[0], ast.Constant) and c.args[0].value == "creator"
+                for c in ast.walk(n.args)
+            )
+            if not gated:
+                continue
+            for d in n.decorator_list:
+                if (isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute)
+                        and d.func.attr in HTTP and d.args and isinstance(d.args[0], ast.Constant)):
+                    path = pre.get(getattr(d.func.value, "id", ""), "") + d.args[0].value
+                    if not _names_an_agent(path):
+                        out.add((d.func.attr.upper(), path))
+    return out
+
+
+def test_every_creator_gated_route_that_names_no_agent_is_fenced_or_declared_open():
+    """PR #3778 review: `POST /api/agents` named no agent, so it had no census row
+    and was open in a restricted turn — while the agent key carries the owner's role.
+    A new create/deploy route of that shape fails here until it is classified."""
+    import sys
+    sys.path.insert(0, str(_BACKEND))
+    try:
+        from services.route_tier_service import OWNER_TIER_UNNAMED
+    finally:
+        sys.path.remove(str(_BACKEND))
+    found = _creator_gated_unnamed_routes()
+    assert found, "the scan found no creator-gated route; it has gone blind"
+    unclassified = found - set(OWNER_TIER_UNNAMED) - set(CREATOR_UNNAMED_OPEN)
+    assert not unclassified, f"classify in OWNER_TIER_UNNAMED or CREATOR_UNNAMED_OPEN: {sorted(unclassified)}"
+    stale = (set(OWNER_TIER_UNNAMED) | set(CREATOR_UNNAMED_OPEN)) - found
+    assert not stale, f"no longer a live creator-gated route: {sorted(stale)}"
+
+
 def test_the_runtime_reads_the_same_agent_naming_test_as_the_census():
     import sys
     sys.path.insert(0, str(_BACKEND))
