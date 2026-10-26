@@ -170,7 +170,7 @@ Compute/Auth, Git sync.
 
 | Lines | Element | Notes |
 |-------|---------|-------|
-| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `50 (default)`; blank = inherit baseline |
+| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `200 (default)`; blank = inherit baseline |
 | 77-91 | Props/consts | `agentName`, `notify` (toast callback); `MIN_TURNS=1`, `MAX_TURNS=500`, `DEFAULT_TURNS=200` |
 | 100-101, 116-117 | `otherKeys` | **Preserves out-of-scope overrides** — `load()` splits off `execution_timeout_sec` / `*_deny` / `disallowed_tools` so the whole-config PUT doesn't wipe API-set values |
 | 126-132 | `validateField` | Client-side mirror of backend bounds (whole number 1–500) |
@@ -270,7 +270,7 @@ Immutable, root-owned `0444`. Contents:
 - **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row and a `.env.local` deny / `.env.example` allow pair.
 - **`path_allow`** (`[".env.example"]`, #3868): not overridable from `AGENT_GUARDRAILS`; mirrored into the platform prompt as `_GUARDRAIL_PATH_ALLOW`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
-- **Budgets**: `max_turns_chat: 200`, `max_turns_task: 200` (raised from 50 in trinity-enterprise#471). The baseline is baked into the agent image, so a deployed agent adopts a new default only after `./scripts/deploy/build-base-image.sh` and a **cold start** (stop → start; image drift is evaluated only when the agent was not already running, #1809). No recreate is needed, and a per-agent override (`AGENT_GUARDRAILS`) is unaffected, `execution_timeout_sec: 1800`.
+- **Budgets**: `max_turns_chat: 200`, `max_turns_task: 200` (raised from 50 in trinity-enterprise#471), `execution_timeout_sec: 1800`. The baseline is baked into the agent image, so a deployed agent adopts a new default only after `./scripts/deploy/build-base-image.sh` and a **cold start** (stop → start; image drift is evaluated only when the agent was not already running, #1809). No recreate is needed, and a per-agent override (`AGENT_GUARDRAILS`) is unaffected.
 - **Override slots** (empty by default): `extra_bash_deny: []`, `extra_path_deny: []`, `disallowed_tools: []`.
 
 ### Config file locations (inside container)
