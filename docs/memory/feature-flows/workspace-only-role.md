@@ -102,6 +102,27 @@ runs included (`agent_page._client_scope`), voice and model choice. The narrower
 (`roster` canvases, their own work) is for people without a platform account. Decided at #837;
 nothing new is exposed, since a `user` saw all of it on Agent Detail before.
 
+**One Workspace whichever door (#3922, ruled option b).** The Workspace's own code page
+gives a platform account no client session. `client_portal.service.platform_login_admits`
+decides "platform account" as `/login` would: a `users` row exists, and either it has a
+password (`/api/token` takes the email, e.g. the admin) or the platform email login admits it
+(email login on, the login policy allows codes, the address allow-listed). The user row is
+required because an allow-list row is not an account: sharing and access-request approval
+wrote allow-list rows for outside clients before trinity-enterprise#837, and `/login` would
+create a user for such a client and drop the #3139 viewer scope. An account with neither (no
+password, not allow-listed, e.g. SSO-created) keeps the client door; `/login`'s code path
+would refuse it. Such an address gets a code at
+`/auth/request` even with nothing shared to it, and once the code verifies `/auth/verify`
+answers **409** `{"reason": "platform_login_required"}` and mints nothing. The verdict
+comes only after a correct code, so it tells nobody but the inbox owner that the account
+exists. `Portal.vue` then sends the person to `/login?redirect=<the Workspace page>&email=<address>`;
+`/login` fills the address and says "This email has a Trinity account. Sign in here to open
+your Workspace." Every platform login (`auth._finalizeLogin`: password, email, SSO, after 2FA)
+also ends a Workspace client sign-in left in the browser, because `clientPortal.authHeader`
+sends a held portal token before the platform JWT. An address the platform login cannot
+admit keeps the client door unchanged. Residual: a portal session minted for a platform
+address before #3922 keeps the client view until it ends or a `/login` supersedes it.
+
 **Known limit (follow-up):** the loop routes keep their pre-#837 reach — a member lists every
 loop on a reachable agent and may stop any of them.
 
@@ -216,7 +237,10 @@ self-signup and SSO first sign-in keep writing.
 ## Sequence — a `user` signs in
 
 ```
-/login → POST /api/auth/email/verify → _finalizeLogin → GET /api/users/me (marked) → role "user"
+/workspace code page → POST …/client-portal/auth/verify → 409 platform_login_required (#3922)
+      → /login?redirect=<Workspace page>&email=<address>
+/login → POST /api/auth/email/verify → _finalizeLogin (ends any Workspace client sign-in)
+      → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
 /workspace → App.vue connect() → POST /api/ws/ticket (marked) → /ws
            → GET /api/enterprise/client-portal/my-agents (portal door) → roster
