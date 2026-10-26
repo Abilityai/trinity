@@ -272,7 +272,7 @@ const idempotencyKey = deriveMcpIdempotencyKey([
 ]);
 ```
 
-**Turn scope (#3296)**: `turnScope` is `callerTurn` (the platform's `X-Trinity-Execution-Id`, never the model-typed `execution_id`), so the same text sent from a later turn is a new delegation instead of a replay of the first turn's run; a retry from the same turn still replays. See [idempotency-keys.md](idempotency-keys.md#mcp-layer-invariant-13--third-surface-in-sync).
+**Turn scope (#3296)**: `turnScope` is `callerTurn` (the platform's `X-Trinity-Execution-Id`, never the model-typed `execution_id`), so the same text sent from a later turn is a new delegation instead of a replay of the first turn's run; a retry from the same turn still replays, and so does a scheduler retry of the run (the scope is the retry chain's original execution, `delegationTurnScope`). See [idempotency-keys.md](idempotency-keys.md#mcp-layer-invariant-13--third-surface-in-sync).
 
 **Why**: the backend derives the same `agent:{name}` idempotency scope for BOTH `/chat` and `/task`. A sequential agent→agent call dispatched as sync `/chat` (flag OFF) vs async `/task` (flag ON) must NOT share an idempotency key — else a flag flip mid-soak could replay a wrong-shape snapshot across endpoints. The pull-routed call therefore gets a distinct `"chat-pull-task"` token. A transport retry WITHIN one mode keeps the same key (still dedupes). Existing parallel / self-task / `scope='user'` tokens are unchanged, so no in-flight key is invalidated on deploy. (See `idempotency-keys.md`, Invariant #18.)
 

@@ -158,6 +158,12 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
           source_mcp_key_id: "key-agent-1",
         }]);
       }
+      // #3296 review: the caller's own turn row, read to scope a delegation's key
+      // to its retry chain. None of these turns is a retry.
+      const turnRow = url.match(/^\/api\/agents\/([^/]+)\/executions\/([^/?]+)$/);
+      if (turnRow && req.method === "GET") {
+        return json(res, 200, { id: decodeURIComponent(turnRow[2]), agent_name: decodeURIComponent(turnRow[1]) });
+      }
       if (url === "/api/mcp/validate") {
         return json(res, 200, {
           valid: true,
@@ -598,7 +604,8 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     const timeout = await off.call("chat_with_agent", { agent_name: TARGET, message: "t13b", execution_id: TYPED }, HEADER);
     assert.equal(timeout.out.status, "queued_timeout");
     assert.equal(timeout.out.report_back, "requested");
-    assert.equal("report_back_note" in timeout.out, false);
+    // #3296 review: a typed-arm REPLAY says where its report goes (the 409 is an in-flight replay).
+    assert.equal(timeout.out.report_back_note, chatMod.REPORT_BACK_TYPED_REPLAY_NOTE);
     assert.equal(timeout.arms.length, 1);
     assert.equal(timeout.arms[0].executionId, "exec-child-replay");
     assert.equal(timeout.arms[0].body.parent_execution_id, HEADER, "the header turn wins over the typed id here too");

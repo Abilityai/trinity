@@ -259,9 +259,19 @@ export const REPORT_BACK_DEFAULT_NOTE =
  * names was asked to report here. What it must not claim is a fresh request.
  */
 export const REPORT_BACK_REPLAY_NOTE =
-  "This repeats an earlier identical call from this same turn: no new run was started, and the receipt " +
-  "names that earlier run. It reports into this conversation once when it ends, and may already have. " +
-  "Do not re-send this one.";
+  "This repeats an earlier identical call from this same turn (or an earlier attempt of this run): no new " +
+  "run was started, and the receipt names that earlier run. It reports into this conversation once when it " +
+  "ends, and may already have. Do not re-send this one.";
+
+/**
+ * #3296 review: a replay on the TYPED arm. The key does not carry a typed id
+ * (Invariant #18), so with no header turn two typed ids collapse onto one key,
+ * and the replayed run reports into the parent the FIRST call named.
+ */
+export const REPORT_BACK_TYPED_REPLAY_NOTE =
+  "This repeats an earlier identical call: no new run was started, and the receipt names that earlier " +
+  "run. It reports once, into the execution the earlier call named, which may not be the one you named " +
+  "now. Do not re-send this one.";
 
 /**
  * On `report_back: off` results of an opted-in call. Future-only, and never on a
@@ -376,15 +386,16 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
  */
 function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
   if (!fields) return result;
-  // #3296: a replayed receipt that carries a note says it repeats an earlier run
-  // rather than reading as a fresh request. A typed-arm `requested` carries no
-  // note by design (the caller asked), and keeps none.
+  // #3296: a replayed receipt says it repeats an earlier run rather than
+  // reading as a fresh request. A typed-arm `requested` carries no note on a
+  // fresh run (the caller asked); on a replay it says where the report goes,
+  // since the replayed run reports into the parent the FIRST call named.
   if (
     fields.report_back === "requested" &&
-    fields.report_back_note !== undefined &&
     (result as { idempotent_replay?: unknown }).idempotent_replay === true
   ) {
-    return { ...result, ...fields, report_back_note: REPORT_BACK_REPLAY_NOTE };
+    const note = fields.report_back_note !== undefined ? REPORT_BACK_REPLAY_NOTE : REPORT_BACK_TYPED_REPLAY_NOTE;
+    return { ...result, ...fields, report_back_note: note };
   }
   const status = (result as { status?: unknown }).status;
   if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy" || status === "rate_limited")) {
@@ -392,6 +403,33 @@ function withReportBack<T extends object>(result: T, fields: ReportBackFields | 
     return { ...result, ...rest };
   }
   return { ...result, ...fields };
+}
+
+/**
+ * #3296 review: the turn a delegation's idempotency key is scoped to — the
+ * retry chain's ORIGINAL execution when the caller's turn is a scheduler retry
+ * (the backend links each retry to it in `retry_of_execution_id`), else the
+ * turn itself. Read from the caller's own execution row; any failure to read
+ * it falls back to the turn (the #3296 behaviour: a retry then runs a second
+ * child rather than the call failing). No turn → undefined, so the key stays
+ * byte-identical to the pre-#3296 one.
+ */
+export async function delegationTurnScope(
+  apiClient: TrinityClient,
+  sourceAgent: string | undefined,
+  callerTurn: string | undefined,
+): Promise<string | undefined> {
+  if (!callerTurn || !sourceAgent) return callerTurn;
+  try {
+    const row = await apiClient.getExecution(sourceAgent, callerTurn);
+    const root = row?.retry_of_execution_id;
+    return typeof root === "string" && root.length > 0 ? root : callerTurn;
+  } catch (err) {
+    console.warn(
+      `[#3296] retry-chain lookup failed for ${sourceAgent}/${callerTurn}; scoping to the turn: ${String(err)}`,
+    );
+    return callerTurn;
+  }
 }
 
 /** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
@@ -561,7 +599,13 @@ export async function runAgentChat(
   // key, so it cannot run the work twice. Appended only when there is a turn,
   // so a key without one is byte-identical to before and nothing in flight for
   // user keys or manual sessions is invalidated.
-  const turnScope = callerTurn;
+  //
+  // #3296 review: a scheduler retry is a NEW execution row
+  // (`retry_of_execution_id` → the chain's original), so scoping by the raw
+  // turn made every delegation of a retried scheduled run run a second child.
+  // The scope is the retry chain's original execution, as the backend
+  // records it; attempt 1 and its retries share one key and replay.
+  const turnScope = await delegationTurnScope(apiClient, sourceAgent, callerTurn);
 
   // RELIABILITY-006 (#525): deterministic key so a transport retry of this
   // exact call dedupes at the backend.

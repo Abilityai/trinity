@@ -22,13 +22,23 @@
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { createChatTools, deriveMcpIdempotencyKey, REPORT_BACK_DEFAULT_NOTE } from "./tools/chat.js";
+import {
+  createChatTools,
+  deriveMcpIdempotencyKey,
+  REPORT_BACK_DEFAULT_NOTE,
+  REPORT_BACK_TYPED_REPLAY_NOTE,
+} from "./tools/chat.js";
 import type { TrinityClient } from "./client.js";
 
 type Call = { idempotencyKey?: string; options?: any };
 
-function makeTool(calls: Call[], receipt: Record<string, unknown> = {}) {
+function makeTool(
+  calls: Call[],
+  receipt: Record<string, unknown> = {},
+  getExecution?: (agent: string, id: string) => Promise<any>,
+) {
   const fake: Partial<TrinityClient> = {
+    ...(getExecution ? { getExecution: getExecution as any } : {}),
     getBaseUrl: () => "http://localhost:8000",
     isAgentPermitted: async () => true,
     getAgentAccessInfo: async () => ({ owner: "u1", is_shared: true }) as any,
@@ -133,5 +143,85 @@ describe("#3296 a replayed receipt says it is a replay", () => {
     assert.equal(fresh.report_back, "requested");
     assert.equal(fresh.idempotent_replay, undefined);
     assert.notEqual(fresh.report_back_note, replay.report_back_note);
+  });
+});
+
+// Review follow-up: a scheduler retry is a NEW execution row, linked to the
+// chain's original by `retry_of_execution_id`. Its delegations must replay
+// attempt 1's children, not run them a second time.
+const ROWS: Record<string, any> = {
+  "exec-attempt-1": { id: "exec-attempt-1" },
+  "exec-attempt-2": { id: "exec-attempt-2", retry_of_execution_id: "exec-attempt-1" },
+  "exec-attempt-3": { id: "exec-attempt-3", retry_of_execution_id: "exec-attempt-1" },
+  "exec-other-run": { id: "exec-other-run" },
+};
+const rows = async (_agent: string, id: string) => {
+  if (!(id in ROWS)) throw new Error("404");
+  return ROWS[id];
+};
+
+describe("#3296 a scheduler retry is the same delegation as its original attempt", () => {
+  it("attempt 1 and its retries derive one key", async () => {
+    const calls: Call[] = [];
+    const tool = makeTool(calls, {}, rows);
+    for (const turn of ["exec-attempt-1", "exec-attempt-2", "exec-attempt-3"]) {
+      await run(tool, DELEGATION, agentTurn(turn));
+    }
+    assert.equal(calls[0].idempotencyKey, calls[1].idempotencyKey);
+    assert.equal(calls[0].idempotencyKey, calls[2].idempotencyKey);
+    assert.equal(
+      calls[0].idempotencyKey,
+      deriveMcpIdempotencyKey(["caller", "target", "task", undefined, "async", DELEGATION.message, "turn:exec-attempt-1"]),
+    );
+  });
+
+  it("another run is still a new delegation", async () => {
+    const calls: Call[] = [];
+    const tool = makeTool(calls, {}, rows);
+    await run(tool, DELEGATION, agentTurn("exec-attempt-2"));
+    await run(tool, DELEGATION, agentTurn("exec-other-run"));
+    assert.notEqual(calls[0].idempotencyKey, calls[1].idempotencyKey);
+  });
+
+  it("the retry still reports into its own turn", async () => {
+    const calls: Call[] = [];
+    await run(makeTool(calls, {}, rows), DELEGATION, agentTurn("exec-attempt-2"));
+    assert.equal(calls[0].options?.parent_execution_id, "exec-attempt-2");
+  });
+
+  it("an unreadable row scopes to the turn itself, and the call still goes out", async () => {
+    const calls: Call[] = [];
+    await run(makeTool(calls, {}, rows), DELEGATION, agentTurn("exec-unknown"));
+    assert.equal(
+      calls[0].idempotencyKey,
+      deriveMcpIdempotencyKey(["caller", "target", "task", undefined, "async", DELEGATION.message, "turn:exec-unknown"]),
+    );
+  });
+
+  it("the row is read from the CALLER's executions, for its own turn", async () => {
+    const asked: Array<[string, string]> = [];
+    const calls: Call[] = [];
+    await run(
+      makeTool(calls, {}, async (agent, id) => { asked.push([agent, id]); return ROWS[id]; }),
+      DELEGATION, agentTurn("exec-attempt-2"),
+    );
+    assert.deepEqual(asked, [["caller", "exec-attempt-2"]]);
+  });
+});
+
+describe("#3296 a typed-arm replay says where its report goes", () => {
+  it("carries the typed replay note, not silence", async () => {
+    const out = await run(
+      makeTool([], { idempotent_replay: true }),
+      { ...DELEGATION, execution_id: "exec-typed-b" }, agentTurn(undefined),
+    );
+    assert.equal(out.report_back, "requested");
+    assert.equal(out.report_back_note, REPORT_BACK_TYPED_REPLAY_NOTE);
+  });
+
+  it("a fresh typed-arm receipt still carries no note", async () => {
+    const out = await run(makeTool([]), { ...DELEGATION, execution_id: "exec-typed-b" }, agentTurn(undefined));
+    assert.equal(out.report_back, "requested");
+    assert.equal(out.report_back_note, undefined);
   });
 });
