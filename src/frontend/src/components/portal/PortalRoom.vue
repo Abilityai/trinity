@@ -80,6 +80,7 @@
              whatever the count (principle 30); the list opens below. -->
         <button
           v-if="room"
+          ref="peopleToggle"
           :class="HEADER_ACTION_CLASS"
           :aria-expanded="peopleOpen ? 'true' : 'false'"
           title="People in this room"
@@ -108,6 +109,7 @@
       :room="room"
       @changed="load({ full: true })"
       @left="(id) => emit('left-room', id)"
+      @close="closePeople"
     />
 
     <!-- Add-agent picker (AC#3) -->
@@ -530,6 +532,13 @@ const HEADER_ACTION_CLASS = 'px-2 py-1.5 rounded-lg text-xs font-medium text-act
 const addOpen = ref(false)
 // trinity-enterprise#701: the people panel, and how many people are present.
 const peopleOpen = ref(false)
+const peopleToggle = ref(null)
+// Close from the panel's own ✕ or Esc; focus goes back to the control that
+// opened it, so a keyboard user is not left on a removed element.
+function closePeople() {
+  peopleOpen.value = false
+  nextTick(() => peopleToggle.value?.focus())
+}
 // trinity-enterprise#701: the room is gone for this reader (a 404 on load).
 const roomGone = ref(false)
 const peopleCount = computed(() => (room.value?.people || []).filter((p) => !p.left_at).length || 1)

@@ -8,8 +8,20 @@
     and removes them. Elsewhere the panel names the next step — @mention a
     colleague to let them read along — rather than a control that would refuse.
   -->
-  <div class="shrink-0 border-b border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-900 px-4 py-3" data-testid="room-people">
-    <ul class="max-h-48 overflow-y-auto space-y-1.5" aria-label="People in this room">
+  <div
+    class="shrink-0 border-b border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-900 px-4 py-3"
+    role="region"
+    aria-label="People in this room"
+    data-testid="room-people"
+    @keydown.esc.stop="emit('close')"
+  >
+    <div class="flex items-center justify-between mb-2">
+      <p class="font-mono text-[11px] uppercase tracking-wider text-gray-600 dark:text-gray-300">People in this room</p>
+      <BaseButton variant="ghost" size="sm" aria-label="Close people panel" title="Close (Esc)" data-testid="room-people-close" @click="emit('close')">
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" /></svg>
+      </BaseButton>
+    </div>
+    <ul class="max-h-48 overflow-y-auto space-y-1.5">
       <li
         v-for="p in people"
         :key="`${p.kind}:${p.identity}`"
@@ -132,7 +144,7 @@ const props = defineProps({
   // The room payload: `people`, `you`, `can_seat_people`.
   room: { type: Object, default: null },
 })
-const emit = defineEmits(['changed', 'left'])
+const emit = defineEmits(['changed', 'left', 'close'])
 
 const store = useClientPortalStore()
 const people = computed(() => props.room?.people || [])

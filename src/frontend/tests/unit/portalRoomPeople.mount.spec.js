@@ -79,6 +79,22 @@ describe('roster', () => {
   })
 })
 
+describe('closing', () => {
+  it('closes from its own ✕ button', async () => {
+    open()
+    const close = wrapper.find('[data-testid="room-people-close"]')
+    expect(close.attributes('aria-label')).toBe('Close people panel')
+    await close.trigger('click')
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+
+  it('closes on Esc from inside the panel', async () => {
+    open()
+    await wrapper.find('#room-seat-search').trigger('keydown', { key: 'Escape' })
+    expect(wrapper.emitted('close')).toHaveLength(1)
+  })
+})
+
 describe('offer', () => {
   it('offers seating only where the room says so, and names the next step elsewhere', () => {
     open(room({ can_seat_people: false }))
