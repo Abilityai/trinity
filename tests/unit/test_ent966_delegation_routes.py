@@ -730,9 +730,12 @@ class TestDelegationCensus:
         import _route_census as census
 
         key = "routers/nevermined_delegation.py::get_agent_delegation"
-        assert census.AGENT_CALLABLE[key][0] == "GET /api/nevermined/agents/{agent_name}/delegation"
+        assert census.AGENT_CALLABLE_SELF[key][0] == "GET /api/nevermined/agents/{agent_name}/delegation"
         route = census.walk().routes[key]
         assert route.code_class not in ("person", "admin_tier")
+        # trinity-enterprise#840: the self-gate is the census-recognised helper,
+        # building the router's uniform 404 (`refusal=`), not a hand copy.
+        assert route.self_gate is not None and route.self_gate.refusal
 
 
 BIND_BODY = {"delegationId": DLG_ID, "paymentMethodId": "pm_0123456789", "provider": "stripe"}

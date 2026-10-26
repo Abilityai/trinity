@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from database import db
 from dependencies import (
     agent_may_reach,
+    assert_own_agent,
     get_current_user,
     AuthorizedAgent,
     OwnedAgent,
@@ -184,11 +185,7 @@ async def create_report(
 
     Self-gated: an agent-scoped key may only report as itself.
     """
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only report as itself",
-        )
+    assert_own_agent(current_user, name, detail="Agent-scoped key may only report as itself")
 
     # Cap report volume per agent so a runaway agent can't flood the table
     # between retention sweeps (review I3). Fail-open if Redis is down.
