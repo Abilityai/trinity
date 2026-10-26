@@ -289,7 +289,8 @@ async def post_brain_orb_action(
         body = json.dumps(payload).encode()
 
     # Idempotency FIRST (before rate limit) so a legit retry replays instead of 429ing.
-    scope = idempotency_service.make_agent_scope(agent_name)
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+    scope = idempotency_service.make_caller_scope(agent_name, current_user)
     key = f"brain_orb_action:{action}:{idempotency_key}" if idempotency_key else None
     decision = idempotency_service.begin(scope, key)
     if decision.replay:

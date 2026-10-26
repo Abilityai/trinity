@@ -317,6 +317,10 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     record_otp_attempt(otp_scope, success=True)
+    if token is service.PLATFORM_LOGIN_REQUIRED:
+        # #3922: the code was right, but this is a platform account. It signs in
+        # at `/login`, so it gets the team view, not a client session.
+        raise HTTPException(status_code=409, detail={"reason": "platform_login_required"})
     return PortalSession(token=token, email=email)
 
 

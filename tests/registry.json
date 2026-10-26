@@ -934,6 +934,18 @@
       "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
     },
     {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -1682,6 +1694,18 @@
         "tools"
       ],
       "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
+    },
+    {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -6302,6 +6326,17 @@
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     },
     {
+      "file": "unit/test_3825_password_change.py",
+      "feature": "#3825",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
+    },
+    {
       "file": "unit/test_3751_a2a_bearer_task_scope.py",
       "feature": "#3751",
       "added": "2026-10-20",
@@ -6403,6 +6438,18 @@
         "reliability"
       ],
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
+    },
+    {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
     },
     {
       "file": "unit/test_3651_recovery_companion_close.py",
