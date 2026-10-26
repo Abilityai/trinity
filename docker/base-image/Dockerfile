@@ -304,8 +304,9 @@ RUN set -eu; \
 # (`@ai-sdk/openai-compatible`) was not fetched automatically at all and had to
 # be installed by hand.
 #
-# startup.sh symlinks this tree into the agent's XDG config dir, and each turn's
-# private config dir symlinks it again, so no turn ever resolves from the
+# startup.sh copies this tree into the agent's XDG config dir, and each turn's
+# private config dir copies it again (ent#819: no links, Abilityai/lilu#627),
+# so no turn ever resolves from the
 # network. Root-owned and read-only to the agent by construction.
 RUN set -eu; \
     mkdir -p /opt/trinity/opencode; \

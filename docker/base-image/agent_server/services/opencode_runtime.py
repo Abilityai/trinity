@@ -66,7 +66,8 @@ single shared config file would race across the parallel ``/api/task`` path, so
 each turn gets its own ``XDG_CONFIG_HOME`` (the one relocation mechanism that
 was actually measured to work) holding a generated ``opencode.json`` whose
 ``instructions`` names that turn's prompt file. The pre-seeded provider
-``node_modules`` tree is symlinked in from the shared root rather than copied,
+``node_modules`` tree is copied in from the shared root (a copy, not a link:
+ent#819, Abilityai/lilu#627),
 so a cold turn still never reaches the npm registry (finding 2).
 """
 from __future__ import annotations
@@ -99,6 +100,7 @@ from ..utils.credential_sanitizer import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
+from .agents_md_mirror import refresh_agents_md
 from .execution_env import build_execution_env
 from .opencode_mcp import apply_mcp_config
 from .opencode_provider import (
@@ -353,7 +355,7 @@ def _load_shared_config() -> Dict[str, object]:
     return dict(_BASE_CONFIG)
 
 
-_LINK_FROM_SHARED = ("node_modules", "package.json", "package-lock.json", "auth.json")
+_COPY_FROM_SHARED = ("node_modules", "package.json", "package-lock.json", "auth.json")
 
 
 def _prepare_turn_config(
@@ -372,25 +374,30 @@ def _prepare_turn_config(
     overwriting each other's identity. Per-turn ``XDG_CONFIG_HOME`` is the one
     relocation mechanism that was actually measured to work.
 
-    The pre-seeded provider ``node_modules`` tree is SYMLINKED in, never
-    copied: OpenCode installs provider npm packages at runtime into
+    The pre-seeded provider ``node_modules`` tree is COPIED in: OpenCode
+    installs provider npm packages at runtime into
     ``$XDG_CONFIG_HOME/opencode/node_modules``, so a turn that could not see
     the seeded tree would reach the live npm registry on every cold container.
+    A copy, not a link, because ent#819 forbids the platform creating links
+    under the agent home (Abilityai/lilu#627; measured ~21 MB, ~0.5 s/turn).
     """
     turn_dir = os.path.join(_opencode_root(), "turns", _safe_token(execution_id))
     config_dir = os.path.join(turn_dir, "opencode")
     os.makedirs(config_dir, exist_ok=True)
 
     shared = _shared_config_dir()
-    for name in _LINK_FROM_SHARED:
+    for name in _COPY_FROM_SHARED:
         source = os.path.join(shared, name)
         target = os.path.join(config_dir, name)
         if not os.path.exists(source) or os.path.lexists(target):
             continue
         try:
-            os.symlink(source, target)
+            if os.path.isdir(source):
+                shutil.copytree(source, target, symlinks=False)
+            else:
+                shutil.copy2(source, target)
         except OSError as exc:  # pragma: no cover — defensive
-            logger.warning("[OpenCode] could not link %s into turn config: %s", name, exc)
+            logger.warning("[OpenCode] could not copy %s into turn config: %s", name, exc)
 
     config = _load_shared_config()
     if system_prompt:
@@ -441,9 +448,9 @@ def _safe_token(execution_id: str) -> str:
 
 
 def _cleanup_turn_dir(turn_dir: str) -> None:
-    """Remove the per-turn config tree. Symlinks are unlinked, never followed —
-    ``shutil.rmtree`` does not recurse into a symlinked directory, so the shared
-    provider tree is safe."""
+    """Remove the per-turn config tree, including its private copy of the
+    provider tree. ``shutil.rmtree`` never follows a symlink, so the shared
+    seeded tree is safe even if a link were ever placed here."""
     try:
         shutil.rmtree(turn_dir, ignore_errors=True)
     except Exception as exc:  # noqa: BLE001 — cleanup is best-effort
@@ -882,6 +889,7 @@ class OpenCodeRuntime(AgentRuntime):
         # (Abilityai/lilu#272), which names nothing they can set.
         require_ollama_base_url(model, config=_load_shared_config())
 
+        refresh_agents_md()  # Abilityai/lilu#627: identity tracks CLAUDE.md per turn
         turn_dir = _prepare_turn_config(execution_id, system_prompt, model)
         cmd = self._build_command(
             model=model, session_id=session_id, directory=_AGENT_HOME

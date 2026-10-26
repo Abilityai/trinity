@@ -61,6 +61,7 @@ from ..utils.credential_sanitizer import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
+from .agents_md_mirror import refresh_agents_md
 from .execution_env import build_execution_env, strip_protected_env_lines
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
@@ -1190,6 +1191,7 @@ class CodexRuntime(AgentRuntime):
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
 
+        refresh_agents_md()  # Abilityai/lilu#627: identity tracks CLAUDE.md per turn
         api_key = _load_openai_api_key()
         codex_home = _ensure_codex_home()
         # trinity-enterprise#1001: the CLI loads `$CODEX_HOME/.env` over the

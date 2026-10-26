@@ -663,34 +663,45 @@ fi
 _agent_runtime_lc="$(printf '%s' "${AGENT_RUNTIME:-}" | tr '[:upper:]' '[:lower:]')"
 case "$_agent_runtime_lc" in
   codex|opencode)
-    # SYMLINK, not a copy (Abilityai/lilu#257 step 0). The copy was made once,
-    # on the first boot that found no AGENTS.md, and then never again — so every
-    # later edit to CLAUDE.md (a git sync, a skill install, an operator change)
-    # left the Codex agent running on a frozen snapshot of its own identity,
-    # silently and with no way to notice. A relative symlink re-resolves on
-    # every read, so the two files cannot diverge.
+    # A REFRESHED COPY with a provenance record (Abilityai/lilu#627). Upstream's
+    # one-time `cp` froze the identity at first boot; lilu#257 made it a
+    # symlink, but ent#819 forbids the platform creating any link in an agent
+    # home. So: a plain copy, refreshed here and again at the start of every
+    # Codex/OpenCode turn (agent_server/services/agents_md_mirror.py, which
+    # applies the same rule and reads the same record).
     #
-    # Upgrade path off the copy-era image, in three cases, because a regular
-    # AGENTS.md is ambiguous — it is either the copy this block used to make or
-    # an AGENTS.md the template author deliberately wrote:
-    #   * absent, or a symlink pointing anywhere else  -> (re)link. Self-healing.
-    #   * regular file BYTE-IDENTICAL to CLAUDE.md     -> provably our own
-    #     mirror, so replacing it with the link loses nothing.
-    #   * regular file that DIFFERS                    -> left alone; it may be
-    #     authored. But say so loudly: an unexplained divergence here is exactly
-    #     the failure that was previously silent.
-    if [ -f "/home/developer/CLAUDE.md" ]; then
-        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ] || \
-           cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
-            if [ "$(readlink /home/developer/AGENTS.md 2>/dev/null)" != "CLAUDE.md" ]; then
-                ln -sfn CLAUDE.md /home/developer/AGENTS.md 2>/dev/null && \
-                    echo "  Linked AGENTS.md -> CLAUDE.md for Codex/OpenCode" || \
-                    echo "  Warning: could not create AGENTS.md symlink"
+    # A regular AGENTS.md is either our copy or one the template author wrote.
+    # The record (sha256 of the last copy WE wrote) tells them apart:
+    #   * absent, or a leftover lilu#257 symlink     -> copy
+    #   * byte-identical to CLAUDE.md                -> ours, current
+    #   * sha256 matches the record                  -> our stale copy, refresh
+    #   * anything else                              -> authored, left alone
+    _agents_md_record="${AGENT_TMPDIR}/agents-md.sha256"
+    if [ -f "/home/developer/CLAUDE.md" ] && [ ! -L "/home/developer/CLAUDE.md" ]; then
+        _claude_sha="$(sha256sum /home/developer/CLAUDE.md | cut -d' ' -f1)"
+        _agents_ours=0
+        if [ -L "/home/developer/AGENTS.md" ] || [ ! -e "/home/developer/AGENTS.md" ]; then
+            _agents_ours=1
+        elif cmp -s /home/developer/CLAUDE.md /home/developer/AGENTS.md; then
+            _agents_ours=1
+        elif [ -f "$_agents_md_record" ] && \
+             [ "$(sha256sum /home/developer/AGENTS.md | cut -d' ' -f1)" = "$(tr -d '[:space:]' < "$_agents_md_record")" ]; then
+            _agents_ours=1
+        fi
+        if [ "$_agents_ours" = 1 ]; then
+            rm -f /home/developer/AGENTS.md 2>/dev/null
+            if cp /home/developer/CLAUDE.md /home/developer/AGENTS.md 2>/dev/null; then
+                mkdir -p "${AGENT_TMPDIR}" 2>/dev/null
+                printf '%s\n' "$_claude_sha" > "$_agents_md_record" 2>/dev/null || true
+                echo "  Mirrored CLAUDE.md -> AGENTS.md for Codex/OpenCode"
+            else
+                echo "  Warning: could not create AGENTS.md"
             fi
         else
-            echo "  Warning: AGENTS.md is a regular file whose content differs from" \
-                 "CLAUDE.md — leaving it alone. Codex and OpenCode read AGENTS.md, so this" \
-                 "agent identity will NOT track CLAUDE.md. Delete AGENTS.md to adopt the mirror."
+            echo "  Warning: AGENTS.md is a regular file Trinity did not write (it differs" \
+                 "from CLAUDE.md and from the last mirror) — leaving it alone. Codex and" \
+                 "OpenCode read AGENTS.md, so this agent identity will NOT track CLAUDE.md." \
+                 "Delete AGENTS.md to adopt the mirror."
         fi
     fi
     ;;
@@ -769,13 +780,14 @@ OPENCODE_JSON
     # The image pre-seeds the provider npm packages into /opt/trinity/opencode
     # because OpenCode installs them at RUNTIME into
     # $XDG_CONFIG_HOME/opencode/node_modules — a live npm-registry dependency
-    # on every cold container, and an air-gap failure. Link, don't copy: the
-    # tree is large and the image copy is read-only and shared.
+    # on every cold container, and an air-gap failure. Copy, don't link:
+    # ent#819 forbids the platform creating links in the agent home
+    # (Abilityai/lilu#627). Measured: ~21 MB, well under a second.
     if [ -d /opt/trinity/opencode/node_modules ] && \
        [ ! -e "${OPENCODE_CONFIG_DIR}/node_modules" ]; then
-        ln -s /opt/trinity/opencode/node_modules "${OPENCODE_CONFIG_DIR}/node_modules" \
-            && echo "  Linked pre-seeded OpenCode provider packages" \
-            || echo "  Warning: could not link pre-seeded provider packages"
+        cp -R /opt/trinity/opencode/node_modules "${OPENCODE_CONFIG_DIR}/node_modules" \
+            && echo "  Copied pre-seeded OpenCode provider packages" \
+            || echo "  Warning: could not copy pre-seeded provider packages"
         for _f in package.json package-lock.json; do
             [ -f "/opt/trinity/opencode/$_f" ] && [ ! -e "${OPENCODE_CONFIG_DIR}/$_f" ] && \
                 cp "/opt/trinity/opencode/$_f" "${OPENCODE_CONFIG_DIR}/$_f" 2>/dev/null || true
