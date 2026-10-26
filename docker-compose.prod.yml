@@ -972,8 +972,14 @@ networks:
   # cloudflared (.3) at reserved addresses OUTSIDE the dynamic pool (.128/25),
   # the backend at .4, the MCP server from the pool. Agents, Redis, the
   # scheduler, Vector, Postgres and the OTel collector never join it. The
-  # gateway (.1) is never trusted. TRINITY_PROXY_PREFIX moves the whole /24
-  # (start.sh refuses one that overlaps an existing Docker network).
+  # gateway (.1) is never trusted. TRINITY_PROXY_PREFIX moves the whole /24.
+  # This file is run by `docker compose` directly, so nothing checks the
+  # range first: if `compose up` stops with Docker's "Pool overlaps with
+  # other one on this address space", another network on this host already
+  # holds the /24. Set TRINITY_PROXY_PREFIX in .env to a free one (for
+  # example 172.31.250) and re-run; Docker creates networks before it touches
+  # containers, so a running install is left as it was. (`start.sh --hosted`
+  # runs that check itself and names the network in the way.)
   trinity-proxy:
     driver: bridge
     name: trinity-proxy-network
