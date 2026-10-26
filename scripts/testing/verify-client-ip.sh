@@ -68,6 +68,9 @@ fail() { log "FAIL  $*"; FAILS=$((FAILS + 1)); }
 error() { log "ERROR $*"; FAILS=$((FAILS + 1)); }
 check() { local name="$1"; shift; if "$@"; then pass "$name"; else fail "$name"; fi; }
 die() { log "ABORT $*"; exit 1; }
+# RFC 6455 4.1: a fresh nonce per connection, 16 random bytes base64-encoded.
+# The checks below read the status and access log, not Sec-WebSocket-Accept.
+ws_nonce() { openssl rand -base64 16; }
 
 cleanup() {
     [ "$KEEP" = "1" ] && { log "--keep: leaving ${PROJECT} resources up"; return; }
@@ -436,10 +439,10 @@ log "      malformed CF-Connecting-IP -> ${st}"
 [ "$st" = 400 ] && pass "B: malformed required identity is refused (400)" || fail "B: malformed required identity is refused (400)"
 ws_bad=$(docker exec "${PROJECT}-client-a" curl -s -o /dev/null -w '%{http_code}' --max-time 10 --http1.1 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "http://${DIND_IP}:9004/ws")
+    -H "Sec-WebSocket-Key: $(ws_nonce)" "http://${DIND_IP}:9004/ws")
 ws_ok=$(docker exec "${PROJECT}-client-b" curl -s -o /dev/null -w '%{http_code}' --max-time 10 --http1.1 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "http://${DIND_IP}:9002/ws")
+    -H "Sec-WebSocket-Key: $(ws_nonce)" "http://${DIND_IP}:9002/ws")
 ws_line="$(inner docker logs --tail 30 trinity-backend 2>&1 | grep 'WebSocket /ws' | tail -2 | tr '\n' '|')"
 log "      ws malformed -> ${ws_bad}; ws valid -> ${ws_ok}; access log: ${ws_line}"
 [ "$ws_bad" = 403 ] && pass "B: a WebSocket with malformed identity is refused before accept" || fail "B: a WebSocket with malformed identity is refused before accept"
@@ -608,7 +611,7 @@ st6=$(login_in_dind "http://[::1]:8443" a6@example.com wrong -g)
 check "A: an IPv6 client crosses PROXY v2 intact (status ${st6})" expect_keys "login_attempts_ip:::1=1 "
 ws=$(docker exec "${PROJECT}-client-a" curl -s -o /dev/null -w '%{http_code}' --max-time 10 --http1.1 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "http://${DIND_IP}:8443/ws")
+    -H "Sec-WebSocket-Key: $(ws_nonce)" "http://${DIND_IP}:8443/ws")
 ws_line="$(inner docker logs --tail 20 trinity-backend 2>&1 | grep 'WebSocket /ws' | tail -1)"
 log "      WebSocket via Caddy+PROXY -> ${ws}; access log: ${ws_line}"
 case "$ws_line" in *"${CLIENT_A}:0 - \"WebSocket /ws"*) pass "A: WebSocket upgrades reach the backend attributed to the client" ;; *) fail "A: WebSocket upgrades reach the backend attributed to the client" ;; esac
@@ -620,7 +623,7 @@ ticket=$(docker exec "${PROJECT}-client-b" curl -s --max-time 15 -X POST -H "Aut
     "http://${DIND_IP}:8443/api/ws/ticket" | sed -n 's/.*"ticket":"\([^"]*\)".*/\1/p')
 ws101=$(docker exec "${PROJECT}-client-b" curl -s -o /dev/null -w '%{http_code}' --max-time 4 --http1.1 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
-    -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' "http://${DIND_IP}:8443/ws?ticket=${ticket}")
+    -H "Sec-WebSocket-Key: $(ws_nonce)" "http://${DIND_IP}:8443/ws?ticket=${ticket}")
 ws_ok_line="$(inner docker logs --tail 20 trinity-backend 2>&1 | grep 'WebSocket /ws?ticket' | tail -1 | sed 's/ticket=[^ "]*/ticket=<redacted>/')"
 log "      authenticated WebSocket via Caddy+PROXY -> ${ws101}; access log: ${ws_ok_line}"
 case "${ws101}|${ws_ok_line}" in 101\|*"${CLIENT_B}:0 - \"WebSocket /ws?ticket"*accepted*) pass "A: a WebSocket upgrade completes (101) through the PROXY transport, attributed to the client" ;;
