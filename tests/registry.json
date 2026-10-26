@@ -6425,6 +6425,17 @@
         "unit"
       ],
       "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_3940_cron_dst_fold.py",
+      "feature": "#3940",
+      "added": "2026-10-26",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "A cron's next fire time never goes backwards at a DST transition: tests/requirements-test.txt pins the scheduler image's exact APScheduler and the installed version equals it (a floor let CI pass on a fixed release while the image ran 3.11.0), the pin is past the fold bug; the pinned CronTrigger strictly advances for */N crons across the 2026 EU and US fall-backs in Lisbon, London, Berlin, New York and Los Angeles with pytz and zoneinfo zones (spring-forward, hour-pinned and UTC controls); MonotonicCronTrigger matches CronTrigger when APScheduler is right, replaces a backwards answer with previous + 1 minute computed in UTC, compares instants rather than wall clocks (a fold=0 01:30 after a fold=1 01:00), logs once per trigger, passes a finished trigger's None through, and is what _add_job registers."
     }
   ]
 }
