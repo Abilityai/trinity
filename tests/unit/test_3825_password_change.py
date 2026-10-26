@@ -585,6 +585,20 @@ class TestSessionCutoff:
         assert deps.session_predates_user_revoke(before) is True
         assert deps.session_predates_user_revoke(after) is False
 
+    def test_a_token_minted_in_the_cutoff_millisecond_is_refused(self, deps, monkeypatch):
+        """`iat_ms == at_ms`: the mint and the change cannot be ordered, so the
+        token is refused (`<=`, rounding toward revoking). One ms later passes."""
+        from jose import jwt
+        clock = {"ms": 1_700_000_000_500}
+        monkeypatch.setitem(deps.create_access_token.__globals__, "_epoch_ms", lambda: clock["ms"])
+        same = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u8"}))
+        assert deps.revoke_user_sessions("u8")
+        clock["ms"] += 1
+        later = jwt.get_unverified_claims(deps.create_access_token(data={"sub": "u8"}))
+        assert same["iat_ms"] == 1_700_000_000_500
+        assert deps.session_predates_user_revoke(same) is True
+        assert deps.session_predates_user_revoke(later) is False
+
     def test_a_token_dated_only_to_the_second_is_refused_in_the_cutoff_second(self, deps, monkeypatch):
         """No `iat_ms` (a caller-supplied `iat`): the cutoff second cannot be
         split, so it is refused — rounding toward revoking."""
