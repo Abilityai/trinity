@@ -296,22 +296,36 @@ def email_has_access(email: str | None) -> bool:
 PLATFORM_LOGIN_REQUIRED = object()
 
 
-def platform_email_login_admits(email: str | None) -> bool:
-    """#3922 — True when the platform email login (`POST /api/auth/email/verify`)
-    would sign this address in: email login on, the login policy allows codes
-    (the pair `GET /api/auth/mode` reports as `email_code_login_enabled`), and
-    the address is allow-listed (the #2381 re-check that route applies).
+def platform_login_admits(email: str | None) -> bool:
+    """#3922 — True when this address has a platform account that `/login`
+    can sign in: a `users` row exists for it, AND either
+
+    * it has a password (`POST /api/token` takes the email for an account with
+      a password hash — the admin, `authenticate_user`), or
+    * the platform email login (`POST /api/auth/email/verify`) would admit it:
+      email login on, the login policy allows codes (the pair
+      `GET /api/auth/mode` reports as `email_code_login_enabled`), and the
+      address is allow-listed (the #2381 re-check that route applies).
 
     Such an address is a platform account, so the Workspace door sends it to
     `/login` rather than minting a client session that resolves as
-    `is_platform=False`. Anything else, including a lookup error, keeps the
-    client door: a `/login` that cannot admit the person is a dead end."""
+    `is_platform=False`. The user row is required: an allow-list row is not
+    an account (sharing and access-request approval wrote allow-list rows for
+    outside clients before trinity-enterprise#837, and those remain), and
+    sending such a client to `/login` would create a user for them there.
+    Anything else, including a lookup error, keeps the client door: a `/login`
+    that cannot admit the person is a dead end."""
     addr = (email or "").strip().lower()
     if not addr:
         return False
     from config import EMAIL_AUTH_ENABLED
     from database import db as core_db
     try:
+        user = core_db.get_user_by_email(addr)
+        if not user:
+            return False
+        if user.get("password"):
+            return True
         setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
         if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
             return False
@@ -331,7 +345,7 @@ def portal_signin_request(email: str | None) -> str | None:
     so the verify step can send it on to `/login` instead of leaving it waiting
     for a code that never comes."""
     email = (email or "").strip().lower()
-    if not email or not (email_has_access(email) or platform_email_login_admits(email)):
+    if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -354,7 +368,7 @@ def portal_signin_verify(email: str | None, code: str | None):
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
-    if platform_email_login_admits(email):
+    if platform_login_admits(email):
         return PLATFORM_LOGIN_REQUIRED
     if not email_has_access(email):
         return None

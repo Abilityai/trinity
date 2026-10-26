@@ -103,9 +103,15 @@ runs included (`agent_page._client_scope`), voice and model choice. The narrower
 nothing new is exposed, since a `user` saw all of it on Agent Detail before.
 
 **One Workspace whichever door (#3922, ruled option b).** The Workspace's own code page
-gives a platform account no client session. `client_portal.service.platform_email_login_admits`
-decides "platform account" as the platform email login would: email login on, the login
-policy allows codes, the address allow-listed. Such an address gets a code at
+gives a platform account no client session. `client_portal.service.platform_login_admits`
+decides "platform account" as `/login` would: a `users` row exists, and either it has a
+password (`/api/token` takes the email, e.g. the admin) or the platform email login admits it
+(email login on, the login policy allows codes, the address allow-listed). The user row is
+required because an allow-list row is not an account: sharing and access-request approval
+wrote allow-list rows for outside clients before trinity-enterprise#837, and `/login` would
+create a user for such a client and drop the #3139 viewer scope. An account with neither (no
+password, not allow-listed, e.g. SSO-created) keeps the client door; `/login`'s code path
+would refuse it. Such an address gets a code at
 `/auth/request` even with nothing shared to it, and once the code verifies `/auth/verify`
 answers **409** `{"reason": "platform_login_required"}` and mints nothing. The verdict
 comes only after a correct code, so it tells nobody but the inbox owner that the account
