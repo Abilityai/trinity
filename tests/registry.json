@@ -6417,6 +6417,18 @@
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
     },
     {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
+    },
+    {
       "file": "unit/test_3651_recovery_companion_close.py",
       "feature": "#3651",
       "added": "2026-10-22",
