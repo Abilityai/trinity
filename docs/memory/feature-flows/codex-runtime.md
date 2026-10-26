@@ -27,11 +27,13 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
 3. **Chat / Task.** `POST /api/chat` → `runtime.execute()`; `POST /api/task` →
    `runtime.execute_headless()`. Both build `codex exec --json --skip-git-repo-check
    -C /home/developer --sandbox <mode> -o <CODEX_HOME>/<exec_id>-last.txt
-   [-m model] [resume <thread_id>] -- <prompt>` and stream the JSONL.
+   [-m model] [resume <thread_id>] -- -`, write the prompt to stdin, close
+   it, and stream the JSONL.
    `<mode>` = `danger-full-access` normally (no inner bwrap sandbox — see Safety
    parity), `read-only` when the agent is read-only. Exec-level flags **precede**
    `resume` (the `resume` sub-subcommand rejects them — the turn-2+ continuity
-   fix); `--` ends options so a `-`-leading prompt can't be reparsed as a flag.
+   fix). The prompt is never an argument: Linux refuses one argv element over
+   131,072 bytes (`MAX_ARG_STRLEN`), which a room transcript passes (#3838).
 4. **Parse.** `thread.started`→session id; `turn.completed.usage`→tokens (cost
    estimated; `reasoning_output_tokens` ⊂ `output_tokens`, never double-counted);
    `item.completed`→agent message / tool activity; `turn.failed`/`error`→error.

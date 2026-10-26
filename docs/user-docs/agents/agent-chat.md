@@ -39,7 +39,7 @@ While a turn runs, **Send** becomes **Stop**. Click it, or press **Esc** with no
 
 Attach files to any chat message using the paperclip button or by dragging and dropping onto the chat input.
 
-**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON, and ZIP. Images are passed to the agent as vision content blocks. Other files are written to `/home/developer/uploads/` inside the agent container and are readable by name; a ZIP is stored as-is, not extracted. The paperclip picker filters to images and text-like files — drop a ZIP onto the input instead.
+**Supported types:** images (JPEG, PNG, GIF, WebP), plain text, CSV, JSON, and ZIP. Images are passed to the agent as vision content blocks. Other files are written to `/home/developer/uploads/` inside the agent container and are readable by name; a ZIP is stored as-is, not extracted.
 
 **Unsupported:** PDF, tar, gzip, rar, video, audio.
 

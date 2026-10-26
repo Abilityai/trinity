@@ -670,7 +670,7 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   cancellation shield bound the cascade; the ent#218 rule keeps an in-flight reply that
   was already billed from being discarded by a budget trip.
 - **A reply is never refused for its size, and a landed message never fails its post
-  (#3210).** `MAX_CONTENT_CHARS` (8,000) is an **inbound** rule — people, Workspace
+  (#3210).** `MAX_CONTENT_CHARS` (100,000 since #3706, matching Workspace chat and `MAX_AGENT_REPLY_CHARS`) is an **inbound** rule — people, Workspace
   clients, and agents calling the API. The engine's own post of a turn's reply is fitted
   to `MAX_AGENT_REPLY_CHARS` (100,000) by `_fit_reply` instead: past the bound it keeps
   head and tail around a marker, and there is no size at which it raises. It stays **one
