@@ -2,24 +2,47 @@
 Schema Parity Test (test_schema_parity.py)
 
 Issue #713 — Fail PRs that add a migration without updating schema.py.
+Issue #3395 — and fail the reverse: an object schema.py declares that the
+fresh-install lifecycle never produces.
 
-Builds two in-memory SQLite snapshots and asserts they match:
+Builds two in-memory SQLite snapshots and compares them in BOTH directions:
 
   DB_schema = init_schema(empty)                                # canonical declarative
   DB_full   = run_all_migrations() + init_schema() + run_all_migrations()  # init_database() lifecycle
 
+DB_full replays the SQLite branch of ``database.py::init_database`` on an
+empty database: first migration pass, ``init_schema``, second migration pass.
 If ``schema.py`` is faithful, the two snapshots are identical (modulo the
 ``schema_migrations`` tracker table that ``run_all_migrations`` creates
 internally). Any drift fails with a clear message naming the offending
 table / column / index / trigger.
 
+* ``TestSchemaParity`` (forward, ``DB_full - DB_schema``): a migration created
+  something ``schema.py`` does not declare.
+* ``TestReverseSchemaParity`` (reverse, ``DB_schema - DB_full``): ``schema.py``
+  declares something a fresh install does not end up with. Two ways that
+  happens: an old creating migration's ``CREATE TABLE`` loses a column that
+  ``init_schema``'s ``IF NOT EXISTS`` then never adds back, or a rebuild
+  migration on the second pass (after ``init_schema``) drops indexes or
+  triggers, since ``_atomic_rebuild(..., indexes=())`` recreates none.
+
 The full ``init_database()`` lifecycle is required: many migrations
 short-circuit when their target table already exists (e.g.
-``_migrate_audit_log_table`` at ``migrations.py:1356-1364`` returns early
-when ``audit_log`` exists). Running migrations on an empty DB *first*
-forces each migration to create the full table+indexes+triggers it
-intended to, exposing schema.py omissions that the early-return would
-otherwise hide.
+``_migrate_audit_log_table`` returns early when ``audit_log`` exists).
+Running migrations on an empty DB *first* forces each migration to create
+the full table+indexes+triggers it intended to, exposing schema.py omissions
+that the early-return would otherwise hide.
+
+Shape and limits. Both fixtures are the fresh-install shape (an empty
+database, no rows, no prior install), so this file says nothing about a
+database that already exists. In particular the reverse check is blind to a
+column whose migration was never registered when its table is created only
+by ``init_schema``: on a fresh install that migration hits "no such table",
+is skipped, and ``init_schema`` then creates the table with the column, so
+both snapshots agree while every existing install never gets the column.
+That existing-install shape is covered by the merge-base upgrade guard, not
+here. Only names (and, forward, column types) are compared, not index or
+trigger SQL or column defaults / NOT NULL / primary keys.
 """
 
 import importlib.util
@@ -108,7 +131,7 @@ def production_snapshot() -> dict:
     """Snapshot of the full ``init_database()`` lifecycle:
     ``run_all_migrations`` -> ``init_schema`` -> ``run_all_migrations``.
 
-    Mirrors ``src/backend/database.py:139-164`` exactly. The first migrations
+    Mirrors the SQLite branch of ``database.py::init_database``. The first migrations
     pass on an empty DB lets every migration create the table+indexes+triggers
     it intended to, exposing any short-circuit-hidden drift in schema.py.
     """
@@ -169,4 +192,57 @@ class TestSchemaParity:
             "schema.py drift detected: triggers exist after init_database() but "
             f"not in init_schema(): {missing}. Add CREATE TRIGGER statements "
             "to src/backend/db/schema.py."
+        )
+
+
+class TestReverseSchemaParity:
+    """Every object ``schema.py`` declares must exist after a fresh install (#3395).
+
+    The other shape this runs is the fresh install: both fixtures start from an
+    empty database, and the drift caught here (a creating migration's
+    ``CREATE TABLE`` losing a column, a second-pass rebuild dropping indexes or
+    triggers) exists only on that shape.
+    """
+
+    def test_no_schema_only_tables(self, schema_snapshot: dict, production_snapshot: dict) -> None:
+        missing = sorted(schema_snapshot["tables"] - production_snapshot["tables"])
+        assert not missing, (
+            "reverse schema drift: tables declared in init_schema() are absent "
+            f"after init_database() on a fresh install: {missing}. A migration "
+            "that runs after init_schema() dropped or renamed them."
+        )
+
+    def test_no_schema_only_columns(self, schema_snapshot: dict, production_snapshot: dict) -> None:
+        # Tables missing outright are reported by test_no_schema_only_tables.
+        missing_cols = sorted(
+            f"{table}.{col_name} ({col_type})"
+            for table, schema_cols in schema_snapshot["columns"].items()
+            if table in production_snapshot["columns"]
+            for col_name, col_type in schema_cols.items()
+            if col_name not in production_snapshot["columns"][table]
+        )
+        assert not missing_cols, (
+            "reverse schema drift: columns declared in init_schema() are absent "
+            "after init_database() on a fresh install:\n  " + "\n  ".join(missing_cols)
+            + "\nThe fresh-install lifecycle never creates them: register their "
+            "migration in MIGRATIONS (src/backend/db/migrations.py), or fix the "
+            "creating migration's CREATE TABLE."
+        )
+
+    def test_no_schema_only_indexes(self, schema_snapshot: dict, production_snapshot: dict) -> None:
+        missing = sorted(schema_snapshot["indexes"] - production_snapshot["indexes"])
+        assert not missing, (
+            "reverse schema drift: indexes declared in init_schema() are absent "
+            f"after init_database() on a fresh install: {missing}. A migration "
+            "that runs after init_schema() dropped them (check the indexes= "
+            "argument of _atomic_rebuild in src/backend/db/migrations.py)."
+        )
+
+    def test_no_schema_only_triggers(self, schema_snapshot: dict, production_snapshot: dict) -> None:
+        missing = sorted(schema_snapshot["triggers"] - production_snapshot["triggers"])
+        assert not missing, (
+            "reverse schema drift: triggers declared in init_schema() are absent "
+            f"after init_database() on a fresh install: {missing}. A migration "
+            "that runs after init_schema() dropped them (a table rebuild through "
+            "_atomic_rebuild drops its triggers; recreate them after the swap)."
         )
