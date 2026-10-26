@@ -80,6 +80,9 @@ CONVERTED = {
     "routers/agents.py::send_voice_reply_endpoint": "Agent-scoped key may only speak as itself",
     "routers/a2a.py::call_a2a_agent": "An agent may only place outbound A2A calls as itself",
     "routers/a2a.py::get_a2a_task": "An agent may only place outbound A2A calls as itself",
+    # Arrived from dev (#3914) with a hand copy; converted with `refusal=`, so its
+    # 404 stays the access dependency's own (pinned over HTTP in test_ent966).
+    "routers/nevermined_delegation.py::get_agent_delegation": "Agent not found",
 }
 
 

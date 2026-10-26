@@ -507,7 +507,9 @@ describe("#3435 human-only credential tools are not advertised to agent sessions
   // canAccess allow-list {user, system}. This boots the REAL server in key
   // mode and drives it over the real transport with a user key and an agent
   // key — listing AND calling, because advertisement alone is not a control.
-  const CREDENTIAL_TOOLS = ["export_credentials", "get_credential_encryption_key", "import_credentials"];
+  const CREDENTIAL_TOOLS = ["export_credentials", "get_credential_encryption_key", "import_credentials",
+    // ent#966 (M6): revoke_agent_delegation sits behind `require_person` — human keys only.
+    "revoke_agent_delegation"];
 
   /**
    * The other tools whose backend gate refuses every agent key (the `ADMIN_ONLY`

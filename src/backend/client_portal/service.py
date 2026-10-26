@@ -198,10 +198,12 @@ INTERNAL_FAILURE_DETAIL = (
 def _public_chat_url() -> str:
     """Local mirror of OSS ``settings_service.get_public_chat_url()`` — the
     fallback base when no explicit portal base URL is set."""
+    from services.settings_service import normalize_public_url  # #3881
+
     url = db.get_setting("public_chat_url", "")
     if url:
-        return url.rstrip("/")
-    return os.getenv("PUBLIC_CHAT_URL", "").rstrip("/")
+        return normalize_public_url(url)
+    return normalize_public_url(os.getenv("PUBLIC_CHAT_URL", ""))
 
 
 def get_portal_base_url() -> str:

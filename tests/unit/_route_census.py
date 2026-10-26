@@ -873,6 +873,11 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/a2a.py::get_a2a_task": (
         "POST /api/agents/{agent_name}/a2a/task",
         "MCP a2a_call follow-up: polls a remote task one of the agent's own calls started (#736)"),
+    "routers/nevermined_delegation.py::get_agent_delegation": (
+        "GET /api/nevermined/agents/{agent_name}/delegation",
+        "MCP get_agent_spending: a READ of the agent's own spending budget, live from Nevermined "
+        "(trinity-enterprise#966); a sibling gets the router's uniform 404, the same as a missing agent "
+        "(refusal=), and bind and revoke are person-only"),
     # The agent's own asks (ent#611): get_self_acting_agent admits only the agent's own
     # key (or trinity-system as itself) and refuses every person.
     "routers/operator_queue.py::raise_my_ask": (
