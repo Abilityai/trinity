@@ -75,6 +75,24 @@ name: Schema Parity Gate
 # edited together, so only a graph-level assertion sees it. The step below runs
 # UNCONDITIONALLY — see the comment on it for why it must not sit behind the
 # self-skip.
+#
+# SQLITE UPGRADE PARITY (#3395): the parity pytest models a FRESH install only.
+# There, a migration whose target table does not exist yet is skipped as a
+# fresh install and `init_schema` then creates the table with every column
+# `schema.py` lists, so a `schema.py` column with no registered migration is
+# present on every fresh install and absent on every EXISTING one, invisibly to
+# any fresh-install comparison. That is the case for every table only
+# `init_schema` creates (`schedule_executions`, `users`, ...), which 213 of the
+# 306 `ADD COLUMN` sites in `db/migrations.py` target. The step below
+# (`scripts/ci/check_sqlite_upgrade_parity.py`) builds an install with the PR's
+# merge-base code, upgrades it with the checkout's lifecycle, and fails unless
+# every table, column, index and trigger `schema.py` declares arrived and
+# `migration_health` is complete. PR-only (it needs the merge-base, hence
+# `fetch-depth: 0`), behind the self-skip, after the dependency install
+# because the old tree's lifecycle runs under them; exit 2 (the check could
+# not run) fails the job rather than passing it. Names only, and incremental
+# (merge-base -> checkout), not every historical release: its docstring
+# states the limits.
 
 on:
   pull_request:
@@ -89,6 +107,8 @@ on:
       - 'tests/unit/test_alembic_parity_guard.py'
       - 'scripts/ci/check_alembic_parity.py'
       - 'scripts/ci/check_alembic_heads.py'
+      - 'scripts/ci/check_sqlite_upgrade_parity.py'
+      - 'tests/unit/test_sqlite_upgrade_parity_guard.py'
       - 'tests/requirements-test.txt'
       - '.github/workflows/schema-parity.yml'
   workflow_dispatch:
@@ -183,7 +203,7 @@ jobs:
           fi
           CHANGED="$(git diff --name-only "$PR_BASE_SHA...$PR_HEAD_SHA")"
           echo "Changed files in PR:"; echo "$CHANGED"
-          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/unit/test_alembic_parity_guard\.py$|scripts/ci/check_alembic_parity\.py$|tests/requirements-test\.txt$|\.github/workflows/schema-parity\.yml$)'; then
+          if printf '%s\n' "$CHANGED" | grep -qE '^(src/backend/db/|src/backend/database\.py$|src/backend/utils/helpers\.py$|tests/unit/test_schema_parity\.py$|tests/unit/test_alembic_parity_guard\.py$|scripts/ci/check_alembic_parity\.py$|scripts/ci/check_sqlite_upgrade_parity\.py$|tests/unit/test_sqlite_upgrade_parity_guard\.py$|tests/requirements-test\.txt$|\.github/workflows/schema-parity\.yml$)'; then
             echo "relevant=true" >> "$GITHUB_OUTPUT"
             echo "schema-relevant files changed — running the parity check."
           else
@@ -218,6 +238,21 @@ jobs:
           REDIS_PASSWORD: "test"
           REDIS_BACKEND_PASSWORD: "test"
         run: pytest tests/unit/test_schema_parity.py tests/unit/test_alembic_parity_guard.py -v --tb=short
+
+      # #3395: an install built by the merge-base's code, upgraded by this
+      # checkout, must end with every object schema.py declares. PR-only (the
+      # merge-base comes from the PR's base/head SHAs); same dummy env as the
+      # parity pytest, because both lifecycles import the same migrations.
+      - name: SQLite upgrade parity (merge-base → head)
+        if: github.event_name == 'pull_request' && steps.changes.outputs.relevant == 'true'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CREDENTIAL_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+          REDIS_URL: "redis://test:test@redis:6379"
+          REDIS_PASSWORD: "test"
+          REDIS_BACKEND_PASSWORD: "test"
+        run: python scripts/ci/check_sqlite_upgrade_parity.py
 
       # #2434: the PostgreSQL tier. `TEST_POSTGRES_URL` is what makes
       # `db_harness.db_backend` parametrize onto real PostgreSQL — without it the
