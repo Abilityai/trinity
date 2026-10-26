@@ -28,7 +28,7 @@ httpx>=0.28.0
 websockets>=13.0
 python-dotenv>=1.0.1
 docker>=7.1.0
-apscheduler>=3.11.0
+apscheduler==3.11.3
 pydantic[email]>=2.10.0
 # Cap fastapi to prod's 0.115.x line. `docker/backend/Dockerfile` pins
 # `fastapi==0.115.6` EXACTLY, so an unbounded floor here resolved 0.140.13 —
