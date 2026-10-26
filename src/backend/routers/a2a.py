@@ -43,7 +43,7 @@ from fastapi.routing import APIRoute
 
 from database import db
 from db.write_params import TaskExecutionFields
-from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
+from dependencies import AuthorizedAgentByName, assert_own_agent, get_current_user, get_user_or_anonymous, agent_may_reach
 from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, TaskExecutionStatus, User
 from routers.public import _get_client_ip
 from services import (
@@ -1922,33 +1922,25 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
-def _assert_outbound_self(current_user: User, agent_name: str) -> None:
-    """An agent-scoped key may place outbound calls only AS ITSELF.
-
-    `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
-    access, so without this a permitted sibling could place calls under a
-    neighbour's name.
-
-    Be precise about what that buys, because the obvious reading is wrong under
-    the shipped OSS provider: endpoints there are **platform-scope**, so there
-    is no "own" versus "neighbour" credential — every agent may name every
-    registered endpoint. What this check protects is **attribution**: the
-    rate-limit key, the audit row and the `agent_activities` row all name the
-    agent that actually spent the call, so a sibling cannot launder its egress
-    through a neighbour. It also holds the line for a future per-agent provider,
-    where the obvious reading becomes the literal one — which is why it is here
-    now rather than added later, after the surface has callers.
-
-    `reject_agent_principal` is deliberately NOT used. This is a *use* of a
-    capability an admin already granted by registering the endpoint, not a
-    *grant* of one (the Invariant #8 line) — refusing agent principals here
-    would make the feature unreachable by the only callers it exists for.
-    """
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="An agent may only place outbound A2A calls as itself",
-        )
+# An agent-scoped key may place outbound calls only AS ITSELF: both routes call
+# `assert_own_agent` as their first statement (trinity-enterprise#840).
+#
+# `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
+# access, so without this a permitted sibling could place calls under a
+# neighbour's name. Be precise about what that buys, because the obvious reading
+# is wrong under the shipped OSS provider: endpoints there are **platform-scope**,
+# so there is no "own" versus "neighbour" credential — every agent may name every
+# registered endpoint. What this check protects is **attribution**: the
+# rate-limit key, the audit row and the `agent_activities` row all name the agent
+# that actually spent the call, so a sibling cannot launder its egress through a
+# neighbour. It also holds the line for a future per-agent provider, where the
+# obvious reading becomes the literal one.
+#
+# `reject_agent_principal` is deliberately NOT used. This is a *use* of a
+# capability an admin already granted by registering the endpoint, not a *grant*
+# of one (the Invariant #8 line) — refusing agent principals here would make the
+# feature unreachable by the only callers it exists for.
+_OWN_OUTBOUND = "An agent may only place outbound A2A calls as itself"
 
 
 def _require_outbound_enabled() -> None:
@@ -1957,6 +1949,13 @@ def _require_outbound_enabled() -> None:
     404, not 403: "this capability is not present" is answered with a 404
     everywhere else in Trinity, and it keeps a disabled deployment from
     advertising a surface it will not serve.
+
+    A DEPENDENCY, declared after the access dependency and the principal, so it
+    runs before the body is validated: with the switch off a body that fails
+    schema validation, or none, answers the same 404 as a good one (the
+    `aauth_person.require_live` shape), and the handler's first statement can be
+    the self-gate. JSON that does not parse is still a 422: FastAPI decodes the
+    body before it solves dependencies.
     """
     if not a2a_outbound_service.is_outbound_enabled():
         raise HTTPException(status_code=404, detail="Not found")
@@ -1968,6 +1967,7 @@ async def call_a2a_agent(
     body: A2ACallRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Task an external A2A agent from `agent_name` and return its answer (#736).
 
@@ -1987,8 +1987,7 @@ async def call_a2a_agent(
       agent running untrusted work is the last principal that should be able to
       spend a stored credential.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.call_agent(
@@ -2058,6 +2057,7 @@ async def get_a2a_task(
     body: A2ATaskRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Poll a remote A2A task by id on a registered endpoint (#736).
 
@@ -2069,8 +2069,7 @@ async def get_a2a_task(
     would answer "has it finished yet?" from a cached snapshot of the last time
     it had not.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.poll_task(

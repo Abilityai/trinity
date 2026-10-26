@@ -4993,7 +4993,7 @@
         "security",
         "guard"
       ],
-      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
+      "description": "Route census (Invariant #8): every OSS HTTP route, every method, resolves to exactly one policy class (interactive / person / admin_widened / admin_tier / portal from code; agent_callable_self (the assert_own_agent self-gate, recognised AND listed, trinity-enterprise#840) / agent_callable_any / own_auth / delegated from reviewed tables; or the frozen human_only_route_baseline.json). Ratchet rules: unclassified fails, stale entry fails, gated baseline entry fails, exact FROZEN_BASELINE_COUNT, key in two lists fails, duplicate key fails, an AGENT_CALLABLE_SELF entry without its self-gate fails. Gates count only as Depends or as the handler's first statement on its principal, imported unaliased from dependencies. Websocket routes pinned as a literal set. Self-tests plant sources in a temp tree to show each rule bites. Walker: tests/unit/_route_census.py (pure-stdlib AST, rglob over src/backend minus enterprise/)."
     },
     {
       "file": "unit/test_2996_route_census_runtime.py",
@@ -6538,6 +6538,28 @@
         "ui"
       ],
       "description": "The Create Agent dialog prefills Name from the source: Import a GitHub repository gives the repo name without the owner for owner/repo, URL, .git and trailing-slash input and every import intent, following the field as it is typed; a GitHub template gives its agent_name, else its repo name (featured and preselected templates included); Blank and local templates stay empty; a hand-typed Name and an ID override survive a source change while a Name still equal to the previous prefill follows it; a repo name that sanitizes to nothing leaves Name empty with the usual submit error; the payload is unchanged."
+    },
+    {
+      "file": "unit/test_ent840_agent_self_gate.py",
+      "feature": "trinity-enterprise#840",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard"
+      ],
+      "description": "The agent-key self-gate is one helper the route census recognises. dependencies.assert_own_agent's truth table (an agent key on its own agent passes; a sibling gets 403 with the route's own detail; JWT, user, system, connector and event-loopback principals pass, like the hand copies it replaced; refusal= builds the exception; a non-string agent_name is not an agent key). Then ONE sibling refusal per AGENT_CALLABLE_SELF route, driven off the census: each handler (or the get_self_acting_agent dependency its signature names) is called directly with a sibling agent's key on the path agent and the caller's own name in every other argument, so a gate comparing the wrong parameter fails; the routes this change converted keep their pre-existing messages; both self-gate mechanisms are exercised (per family, not a total). No Docker, no network."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/self-fenced-overrides.test.ts",
+      "feature": "trinity-enterprise#840",
+      "added": "2026-10-23",
+      "categories": [
+        "mcp",
+        "security"
+      ],
+      "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
     }
   ]
 }
