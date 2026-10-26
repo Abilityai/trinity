@@ -237,7 +237,7 @@ jobs:
           REDIS_URL: "redis://test:test@redis:6379"
           REDIS_PASSWORD: "test"
           REDIS_BACKEND_PASSWORD: "test"
-        run: pytest tests/unit/test_schema_parity.py tests/unit/test_alembic_parity_guard.py -v --tb=short
+        run: pytest tests/unit/test_schema_parity.py tests/unit/test_alembic_parity_guard.py tests/unit/test_sqlite_upgrade_parity_guard.py -v --tb=short
 
       # #3395: an install built by the merge-base's code, upgraded by this
       # checkout, must end with every object schema.py declares. PR-only (the
