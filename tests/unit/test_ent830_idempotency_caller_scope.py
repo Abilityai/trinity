@@ -144,3 +144,58 @@ def test_every_header_key_boundary_claims_under_the_caller_scope(path, func):
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == func)
     assert _calls(fn, "make_caller_scope"), f"{path}::{func} claims a client key without the caller"
+
+
+# Boundaries that take the header but deliberately claim under the agent scope.
+AGENT_SCOPE_ALLOWED = {
+    # Agent-to-backend, no client principal: the key comes from the platform.
+    "routers/internal.py": "agent-to-backend boundary",
+    # The key is always derived from (payment-signature, message); the header
+    # is accepted for contract compliance and never claimed (#1018).
+    "routers/paid.py": "header key never participates",
+}
+
+
+def _takes_header_key(fn):
+    args = fn.args.args + fn.args.kwonlyargs
+    defaults = dict(zip(reversed(fn.args.args), reversed(fn.args.defaults)))
+    defaults.update({a: d for a, d in zip(fn.args.kwonlyargs, fn.args.kw_defaults) if d is not None})
+    for a in args:
+        if a.arg != "idempotency_key":
+            continue
+        d = defaults.get(a)
+        if isinstance(d, ast.Call) and getattr(d.func, "id", getattr(d.func, "attr", None)) == "Header":
+            return True
+    return False
+
+
+def test_no_header_key_boundary_claims_under_the_agent_scope_alone():
+    """Beyond HEADER_SITES: any function that takes an ``Idempotency-Key``
+    header and builds ``make_agent_scope`` must also build
+    ``make_caller_scope`` (a derived-key fallback, as reminders has, is fine).
+    A new boundary that claims the header under the agent scope alone fails
+    here even though nobody added it to the list."""
+    offenders = []
+    for path in sorted(_BACKEND.rglob("*.py")):
+        rel = path.relative_to(_BACKEND).as_posix()
+        if rel.startswith(("enterprise/", "migrations/")) or rel in AGENT_SCOPE_ALLOWED:
+            continue
+        tree = ast.parse(path.read_text())
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not _takes_header_key(fn):
+                continue
+            if _calls(fn, "make_agent_scope") and not _calls(fn, "make_caller_scope"):
+                offenders.append(f"{rel}::{fn.name}")
+    assert offenders == [], f"header key claimed without the caller: {offenders}"
+
+
+def test_the_agent_scope_allowlist_is_live():
+    for rel in AGENT_SCOPE_ALLOWED:
+        tree = ast.parse((_BACKEND / rel).read_text())
+        assert any(
+            isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and _takes_header_key(fn) and _calls(fn, "make_agent_scope")
+            for fn in ast.walk(tree)
+        ), f"{rel} no longer needs its allowlist entry"
