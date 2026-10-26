@@ -1641,6 +1641,43 @@ nevermined_payment_log = Table(
     Column("created_at", Text),
 )
 
+# trinity-enterprise#966 — see the DDL comment in db/schema.py.
+nevermined_organization = Table(
+    "nevermined_organization",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, nullable=False),
+    Column("environment", Text, nullable=False),
+    Column("encrypted_credentials", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_by", Text),
+)
+
+agent_delegations = Table(
+    "agent_delegations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("delegation_id", Text, nullable=False),
+    Column("payment_method_id", Text),
+    Column("provider", Text),
+    Column("environment", Text, nullable=False),
+    Column("api_key_injected", Integer, nullable=False, server_default="0"),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("revoked_at", Text),
+    Column("revoked_by", Text),
+    Column("agent_deleted_at", Text),
+    Index(
+        "uq_agent_delegations_active",
+        "agent_name",
+        unique=True,
+        sqlite_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+        postgresql_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+    ),
+)
+
 agent_event_subscriptions = Table(
     "agent_event_subscriptions",
     metadata,

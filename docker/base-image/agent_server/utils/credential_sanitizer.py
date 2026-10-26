@@ -428,6 +428,113 @@ _credential_values: Optional[Set[str]] = None
 
 REDACTION_PLACEHOLDER = "***REDACTED***"
 
+# --- #3840: config values that share a vendor prefix are not secrets ----------
+# The vendor prefixes in SENSITIVE_VAR_PATTERNS (`FIBERY_.*`, `GITHUB_.*`,
+# `TRINITY_MCP.*`, …) also put the VALUE of every matching variable into the
+# exact-value set, and step 1 of `sanitize_text` erases that value wherever it
+# appears. So `FIBERY_HOST=acme.fibery.io` erased the hostname from every link
+# an agent handed out: `https://***REDACTED***/Client_Ops/Client_Tasks/3103`.
+#
+# A name ending in a non-secret suffix stays out of the VALUE set, unless the
+# name also carries a secret word: `SLACK_WEBHOOK_URL` and `FIBERY_TOKEN_URL`
+# still redact, because a webhook URL IS the credential. Only the value set
+# narrows: the `KEY=value` pass keeps every vendor prefix, so `FIBERY_HOST=…`
+# in a dump still redacts.
+#
+# The URL suffixes are exempted on the name AND the value (#3876 review). A URL
+# can carry its credential where neither `redact_url_userinfo` nor the
+# `KEY=value` pass looks: a capability path (`SLACK_RESPONSE_URL`, a private
+# iCal feed), a SAS `&sig=`, a fragment, `;PWD=` connection-string pairs, or
+# userinfo the #3770 regex stops short of (`app:ab"cd@db`). So a `_URL/_URI/
+# _ENDPOINT` value leaves the set only when it is a plain URL; anything else —
+# including anything that fails to parse — stays in (fail-closed).
+#
+# The other non-secret suffixes are exempted on the value too (second #3876
+# review): `DB_HOST=Server=x;Pwd=…`, `MONGO_HOST=mongodb://app:ab"cd@db/app` and
+# `DATABASE_PROJECT=Host=db;Password=…` carry a credential no other pass sees.
+# A `_HOST/_REPO/_PROJECT/…` value leaves the set only when it is a plain
+# config value — no `;@?#%"'`, whitespace, backslash or `://` — which a
+# hostname, `org/repo`, a region or a project id never needs.
+_NON_SECRET_NAME_SUFFIXES = (
+    "_HOST", "_HOSTNAME", "_DOMAIN", "_PORT",
+    "_REPO", "_REPOSITORY", "_BRANCH", "_ORG", "_OWNER", "_TEAM_ID",
+    "_WORKSPACE", "_REGION", "_PROJECT", "_PROJECT_ID",
+)
+_URL_NAME_SUFFIXES = ("_URL", "_URI", "_ENDPOINT")
+# `PAT` matches `secret_settings._CREDENTIAL_SUFFIXES` (`_pat`).
+_SECRET_NAME_WORDS = (
+    "KEY", "TOKEN", "SECRET", "PASS", "PWD", "CREDENTIAL", "AUTH", "BEARER",
+    "HOOK", "SIGN", "DSN", "PAT",
+)
+_PLAIN_URL_SCHEMES = frozenset({"http", "https", "ws", "wss"})
+# What a plain `_HOST/_REPO/…` value never contains (second #3876 review).
+_NOT_PLAIN_CONFIG_CHARS = frozenset(";@?#%\"' \t\r\n\\")
+# A path segment of a plain URL: short, unencoded, and not token-shaped.
+_PLAIN_SEGMENT_RE = re.compile(r"[A-Za-z0-9._~-]{0,32}\Z")
+_SECRET_SEGMENT_WORDS = (
+    "KEY", "TOKEN", "SECRET", "PRIVATE", "SIG", "PASS", "PWD", "AUTH",
+    "CRED", "HOOK",
+)
+
+
+def _is_token_shaped(segment: str) -> bool:
+    """16+ characters: what an opaque credential looks like.
+
+    Whatever the alphabet (second #3876 review) — a capability URL's last
+    segment can be letters only, a private feed id digits only. A real path
+    word that long is rare enough that keeping it redacted is the cheap side."""
+    return len(segment) >= 16
+
+
+def _is_plain_config_value(value: str) -> bool:
+    """True only for a `_HOST/_REPO/_PROJECT/…` value that can carry no
+    credential: none of `;@?#%"'`, whitespace, backslash or `://` (#3876)."""
+    return "://" not in value and not any(c in _NOT_PLAIN_CONFIG_CHARS for c in value)
+
+
+def _is_plain_url(value: str) -> bool:
+    """True only for a URL that can carry no credential (#3876 review).
+
+    `scheme://host[:port][/path]` with an http(s)/ws(s) scheme, no userinfo,
+    no query, no fragment, no `;` pairs, no percent-encoding, and only short
+    path segments that are neither token-shaped nor named like a secret.
+    Every other value — including one that does not parse — is not plain.
+    """
+    if any(c in value for c in ";@?#%\"' \t\r\n\\"):
+        return False
+    try:
+        parts = urlsplit(value)
+        parts.port  # raises on a malformed port
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in _PLAIN_URL_SCHEMES or not parts.hostname:
+        return False
+    if parts.username is not None or parts.password is not None:
+        return False
+    if parts.query or parts.fragment:
+        return False
+    for segment in parts.path.split("/"):
+        if not _PLAIN_SEGMENT_RE.match(segment) or _is_token_shaped(segment):
+            return False
+        upper = segment.upper()
+        if any(word in upper for word in _SECRET_SEGMENT_WORDS):
+            return False
+    return True
+
+
+def _is_credential_value(var_name: str, var_value: str) -> bool:
+    """True if the VALUE of `var_name` belongs in the exact-value set (#3840)."""
+    if not any(pattern.match(var_name) for pattern in _sensitive_var_re):
+        return False
+    upper = var_name.upper()
+    if any(word in upper for word in _SECRET_NAME_WORDS):
+        return True
+    if upper.endswith(_URL_NAME_SUFFIXES):
+        return not _is_plain_url(var_value)
+    if upper.endswith(_NON_SECRET_NAME_SUFFIXES):
+        return not _is_plain_config_value(var_value)
+    return True
+
 
 def _load_credential_values() -> Set[str]:
     """
@@ -439,10 +546,8 @@ def _load_credential_values() -> Set[str]:
     # Get values from environment variables matching sensitive patterns
     for var_name, var_value in os.environ.items():
         if var_value and len(var_value) >= 8:  # Skip short values
-            for pattern in _sensitive_var_re:
-                if pattern.match(var_name):
-                    values.add(var_value)
-                    break
+            if _is_credential_value(var_name, var_value):
+                values.add(var_value)
 
     # Also read from .env file if it exists
     env_file = os.path.expanduser("~/.env")
@@ -465,10 +570,8 @@ def _load_credential_values() -> Set[str]:
                         # identically), so redaction happened to work.
                         var_value = _unquote_env_value(var_value.strip())
                         if var_value and len(var_value) >= 8:
-                            for pattern in _sensitive_var_re:
-                                if pattern.match(var_name):
-                                    values.add(var_value)
-                                    break
+                            if _is_credential_value(var_name, var_value):
+                                values.add(var_value)
         except Exception as e:
             logger.warning(f"Failed to read .env file for credential values: {e}")
 

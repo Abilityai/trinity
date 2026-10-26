@@ -28,7 +28,7 @@ class RoomRename(BaseModel):
 class RoomMessageCreate(BaseModel):
     """``sender`` is deliberately absent — the acting principal comes from the
     auth context, never the body, so nobody can post as someone else."""
-    content: str = Field(min_length=1, max_length=8000)
+    content: str = Field(min_length=1, max_length=100_000)
     # trinity-enterprise#631 — the PEOPLE this message tags, by address, as
     # picked in the composer. Optional: every existing caller (the MCP
     # `post_to_room` tool included) is unaffected. Bounded loosely here; the

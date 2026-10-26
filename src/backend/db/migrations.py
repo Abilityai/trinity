@@ -4921,7 +4921,7 @@ def _migrate_idempotency_claim_token(cursor, conn):
     on the token, so the original request, if it was only slow, cannot overwrite
     or delete the reclaimer's row. Nullable, no backfill: a pre-existing claim
     has no token and is matched by `IS NULL`.
-    PostgreSQL half: Alembic `0102_idempotency_claim_token`.
+    PostgreSQL half: Alembic `0103_idempotency_claim_token`.
     """
     _safe_add_column(
         cursor,
@@ -5361,6 +5361,59 @@ HELD_PORTAL_ROWS_BACKFILL = (
     "    WHERE origin_execution_id IS NOT NULL)"
 )
 
+
+def _migrate_nevermined_delegations(cursor, conn):
+    """trinity-enterprise#966 — a person funds an agent with a card mandate
+    held by Nevermined.
+
+    * ``nevermined_organization`` — the instance's one Nevermined organization
+      (singleton row ``id = 'default'``): org id, environment, and the widget
+      secret + agent API key in one AES-256-GCM envelope (Invariant #12).
+    * ``agent_delegations`` — the delegation id a person bound to an agent. One
+      active row per agent, enforced by a partial unique index; a deleted
+      agent's row is kept (``agent_deleted_at``) as a financial record.
+
+    Additive. Idempotent. Mirrored by Alembic 0102_nevermined_delegations,
+    which executes the same statements (``NEVERMINED_DELEGATIONS_DDL``).
+    """
+    for statement in NEVERMINED_DELEGATIONS_DDL:
+        cursor.execute(statement)
+    conn.commit()
+
+
+# trinity-enterprise#966: shared by both tracks (`0102_nevermined_delegations`
+# imports it), so the SQLite and PostgreSQL tables cannot drift apart.
+NEVERMINED_DELEGATIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS nevermined_organization ("
+    " id TEXT PRIMARY KEY,"
+    " org_id TEXT NOT NULL,"
+    " environment TEXT NOT NULL,"
+    " encrypted_credentials TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " updated_at TEXT NOT NULL,"
+    " updated_by TEXT)",
+    "CREATE TABLE IF NOT EXISTS agent_delegations ("
+    " id TEXT PRIMARY KEY,"
+    " agent_name TEXT NOT NULL,"
+    " delegation_id TEXT NOT NULL,"
+    " payment_method_id TEXT,"
+    " provider TEXT,"
+    " environment TEXT NOT NULL,"
+    " api_key_injected INTEGER NOT NULL DEFAULT 0,"
+    " created_by TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " revoked_at TEXT,"
+    " revoked_by TEXT,"
+    " agent_deleted_at TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent"
+    " ON agent_delegations(agent_name, created_at DESC)",
+    # One active binding per agent at the DB, not only in service code. A
+    # deleted agent's kept row is not active: it must never block a later
+    # agent of the same name.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active"
+    " ON agent_delegations(agent_name)"
+    " WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
+)
 
 def _migrate_agent_peer_skill_grants(cursor, conn):
     """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
@@ -5827,5 +5880,6 @@ MIGRATIONS = [
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
+    ("nevermined_delegations", _migrate_nevermined_delegations),
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
 ]

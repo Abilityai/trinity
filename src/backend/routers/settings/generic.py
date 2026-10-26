@@ -526,9 +526,9 @@ async def update_setting(
     # `http://` stays legal — the managed fleet advertises exactly that behind a
     # tunnel — and clearing the setting stays legal.
     if key == "public_chat_url":
-        from services.settings_service import classify_advertised_url
+        from services.settings_service import classify_advertised_url, normalize_public_url
 
-        body.value = (body.value or "").strip().rstrip("/")
+        body.value = normalize_public_url(body.value)
         if body.value and classify_advertised_url(body.value) == "unconfigured":
             raise HTTPException(
                 status_code=422,

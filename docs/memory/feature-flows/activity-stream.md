@@ -461,9 +461,11 @@ activity_id = await activity_service.track_activity(
 )
 await activity_service.complete_activity(activity_id=activity_id, status=ActivityState.COMPLETED)
 ```
-The watchdog claim additionally closes the execution's open collaboration / self-task
-companions from the persisted row (`activity_service.close_companion_activities`, #3588) —
-see `architecture/execution.md` § Terminal-Activity Close Contract.
+Every terminal writer's owner close (`close_execution_activity`) also closes the
+execution's open collaboration / self-task companions from the persisted row
+(`activity_service.close_companion_activities`, #3588/#3651), including the direct-dispatch
+`/task` hop that carries no `backlog_metadata` — see `architecture/execution.md`
+§ Terminal-Activity Close Contract.
 
 ### Schedule Integration (via `execute-task`)
 
