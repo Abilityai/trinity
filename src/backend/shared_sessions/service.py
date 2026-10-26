@@ -605,11 +605,20 @@ def create_room(current_user, name: str, agents: list[str], topic: Optional[str]
 def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
-    messages = db.get_messages(room_id, since_seq)
+    kind, identity = _caller(current_user)
+    # trinity-enterprise#701: a person seated mid-conversation reads from their
+    # join point. The floor is on THEIR participant row (an admin who is not a
+    # participant reads everything, as before). It bounds the READ, not a filter
+    # over its page: the page holds at most 500 rows and the room cap doesn't
+    # count system lines, so filtering after the limit could hand a person seated
+    # past row 500 an empty page on every poll.
+    me = next((p for p in participants
+               if p.get("kind") == kind and p.get("identity") == identity), None)
+    history_from = int((me or {}).get("visible_from_seq") or 0) if kind in PEOPLE_KINDS else 0
+    messages = db.get_messages(room_id, max(since_seq, history_from - 1))
     # trinity#3402: an agent reading the room (MCP `read_room`) is not handed
     # what its own skill gate stopped — the rule its wakes follow. People see
     # everything. Fails closed: this read is not scanned by any gate.
-    kind, identity = _caller(current_user)
     if kind == "agent":
         try:
             held = db.gate_held_seqs(room_id, identity)
@@ -617,14 +626,6 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
             logger.warning("room %s: gate holds unreadable for %s (%s)", room_id, identity, e)
             raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
         messages = [m for m in messages if m["seq"] not in held]
-    # trinity-enterprise#701: a person seated mid-conversation reads from their
-    # join point. The floor is on THEIR participant row (an admin who is not a
-    # participant reads everything, as before).
-    me = next((p for p in participants
-               if p.get("kind") == kind and p.get("identity") == identity), None)
-    history_from = int((me or {}).get("visible_from_seq") or 0) if kind in PEOPLE_KINDS else 0
-    if history_from:
-        messages = [m for m in messages if m["seq"] >= history_from]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
     return {
         **room,

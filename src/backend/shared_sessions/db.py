@@ -179,18 +179,17 @@ def seat_person(room_id: str, kind: str, identity: str, role: str,
         raise ValueError("seat_person seats people, not agents")
     params = {"room": room_id, "kind": kind, "identity": identity, "role": role,
               "floor": int(visible_from_seq), "now": now}
+    # One statement, so two concurrent seats of the same person can't both miss
+    # the UPDATE and race the INSERT into the UNIQUE(room_id, kind, identity).
     with get_engine().begin() as conn:
-        updated = conn.execute(text(
-            "UPDATE enterprise_room_participants "
-            "SET role = :role, visible_from_seq = :floor, joined_at = :now, left_at = NULL "
-            "WHERE room_id = :room AND kind = :kind AND identity = :identity"
-        ), params).rowcount or 0
-        if not updated:
-            conn.execute(text(
-                "INSERT INTO enterprise_room_participants "
-                "(room_id, kind, identity, role, joined_at, last_read_seq, visible_from_seq) "
-                "VALUES (:room, :kind, :identity, :role, :now, 0, :floor)"
-            ), params)
+        conn.execute(text(
+            "INSERT INTO enterprise_room_participants "
+            "(room_id, kind, identity, role, joined_at, last_read_seq, visible_from_seq) "
+            "VALUES (:room, :kind, :identity, :role, :now, 0, :floor) "
+            "ON CONFLICT (room_id, kind, identity) DO UPDATE SET "
+            "role = excluded.role, visible_from_seq = excluded.visible_from_seq, "
+            "joined_at = excluded.joined_at, left_at = NULL"
+        ), params)
 
 
 def set_visible_from(room_id: str, kind: str, identity: str, visible_from_seq: int) -> bool:

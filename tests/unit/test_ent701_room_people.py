@@ -123,6 +123,24 @@ def test_a_backscroll_grant_opens_the_earlier_transcript(rooms_db):
     assert bob["sees_history"] is True
 
 
+
+def test_a_person_seated_past_the_page_limit_still_reads_the_room(rooms_db):
+    """The floor bounds the read, not the page: a room holds more than 500 rows
+    (system lines don't count toward its cap), and filtering the first 500 by
+    the floor would hand a late seat an empty page on every poll."""
+    rooms = rooms_db
+    room = _room(rooms)
+    for i in range(505):
+        _say(rooms, ALICE, room["id"], f"before {i}")
+    _seat(rooms, room["id"], "bob")
+    after = _say(rooms, ALICE, room["id"], "after bob")
+
+    seen = [m["seq"] for m in rooms.get_room(BOB, room["id"])["messages"]]
+    assert seen == [after]
+    # A poll from the start re-reads nothing below the floor either.
+    assert [m["seq"] for m in rooms.get_room(BOB, room["id"], since_seq=0)["messages"]] == [after]
+    assert rooms.get_room(BOB, room["id"], since_seq=after)["messages"] == []
+
 def test_an_incremental_read_respects_the_floor(rooms_db):
     rooms = rooms_db
     room = _room(rooms)
@@ -274,6 +292,40 @@ def test_a_departed_person_is_not_counted(rooms_db):
     _seat(rooms, room["id"], "bob")
     rooms.leave_room(BOB, room["id"])
     assert "people are in this room" not in _prompt(rooms, rooms.db.list_participants(room["id"]))
+
+
+def test_the_people_line_reaches_the_agent_on_a_real_wake(rooms_db, monkeypatch):
+    """The roster is passed from the wake, not just accepted by the builder:
+    drop it from the `_build_turn_prompt` call and this goes red."""
+    rooms = rooms_db
+    room = _room(rooms)
+    _seat(rooms, room["id"], "bob")
+    _say(rooms, BOB, room["id"], "@agent-a status?")
+
+    monkeypatch.setattr(rooms, "_mark_agent_working", lambda *a, **k: None)
+    monkeypatch.setattr(rooms, "_clear_agent_working", lambda *a, **k: None)
+    monkeypatch.setattr(rooms, "_without_gate_holds", lambda room_id, agent, delta: delta)
+
+    async def _no_inbox(*a, **k):
+        return "", []
+    monkeypatch.setattr(rooms, "_room_inbox_context", _no_inbox)
+
+    sent = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def _dispatch(**kwargs):
+        sent.update(kwargs)
+        raise _Stop()
+
+    import services.task_execution_service as tes
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", _dispatch)
+
+    _run(rooms._wake_agent_locked(ALICE, room["id"], "agent-a", 1))
+
+    assert "2 people are in this room" in sent["message"]
+    assert "bob (collaborator: can read and talk here, but cannot approve, spend or reassign)" in sent["message"]
 
 
 def test_a_seated_colleague_keeps_the_room_internal(rooms_db):
