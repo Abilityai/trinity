@@ -3,7 +3,7 @@
 
 # Core scheduling
 #
-# #1823: EXACT, and equal to `docker/backend/Dockerfile`'s `apscheduler==3.11.0`
+# #1823: EXACT, and equal to `docker/backend/Dockerfile`'s `apscheduler==3.11.3`
 # — the one deliberate exception to this file's floor convention. The backend
 # validates a schedule by constructing the same `CronTrigger` this service will
 # register ("reject exactly what the scheduler would", #1472), so a floor here
@@ -14,7 +14,7 @@
 #
 # Nothing ties these two declarations together yet; keep them equal by hand when
 # either moves.
-APScheduler==3.11.0
+APScheduler==3.11.3
 croniter>=2.0.1
 
 # Async HTTP
