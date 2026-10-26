@@ -1045,15 +1045,31 @@ def resolve_mentions(content: str, participants: list[dict]) -> list[str]:
 def seated_people_mentioned(content: str, participants: list[dict],
                             sender_identity: Optional[str] = None) -> list[str]:
     """Usernames of people seated in this room (platform accounts, still
-    present) that `content` @mentions, in order, the sender excluded."""
-    names = {p["identity"] for p in participants
-             if p.get("kind") == "user" and not p.get("left_at")
-             and p.get("identity") != sender_identity}
+    present) that `content` @mentions, in order, the sender excluded.
+
+    An account made by email login has the email as its username, which an
+    @mention cannot spell, so `@bob` also names `bob@example.com` — by the
+    local part, case-insensitively, and only when exactly one seated person
+    has it (an ambiguous `@carol` names no one)."""
+    seated = [p["identity"] for p in participants
+              if p.get("kind") == "user" and not p.get("left_at")]
+    by_name: dict[str, str] = {u.lower(): u for u in seated}
+    local_counts: dict[str, int] = {}
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            local_counts[local] = local_counts.get(local, 0) + 1
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            if local_counts[local] == 1 and local not in by_name:
+                by_name[local] = u
     found, seen = [], set()
     for raw in _MENTION_RE.findall(content or ""):
-        if raw in names and raw not in seen:
-            seen.add(raw)
-            found.append(raw)
+        who = by_name.get(raw.lower())
+        if who and who != sender_identity and who not in seen:
+            seen.add(who)
+            found.append(who)
     return found
 
 

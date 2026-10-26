@@ -79,14 +79,20 @@
         <!-- trinity-enterprise#701: who is in the room, one fixed-size control
              whatever the count (principle 30); the list opens below. -->
         <button
+          v-if="room"
           :class="HEADER_ACTION_CLASS"
           :aria-expanded="peopleOpen ? 'true' : 'false'"
           title="People in this room"
           data-testid="room-people-toggle"
           @click="peopleOpen = !peopleOpen; addOpen = false"
-        >People · {{ peopleCount }}</button>
+          :aria-label="`People in this room: ${peopleCount}`"
+        >
+          <!-- Phone width keeps the room's title readable: an icon + the count. -->
+          <svg class="sm:hidden w-4 h-4 inline -mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.36-1.86M17 20H7m10 0v-2c0-.66-.13-1.28-.36-1.86M7 20H2v-2a3 3 0 015.36-1.86M7 20v-2c0-.66.13-1.28.36-1.86m0 0a5 5 0 019.28 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+          <span class="hidden sm:inline">People · </span>{{ peopleCount }}
+        </button>
         <button
-          v-if="!isClosed"
+          v-if="!isClosed && !roomGone"
           :class="HEADER_ACTION_CLASS"
           title="Add another agent to this conversation"
           @click="addOpen = !addOpen; peopleOpen = false"
@@ -131,6 +137,14 @@
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
+        <!-- trinity-enterprise#701: the room answered "not found" — the reader
+             left it, was removed, or was never in it. Say so and offer the way
+             out, rather than an empty room with a live composer. -->
+        <div v-else-if="roomGone" class="py-16 text-center space-y-3" data-testid="room-gone">
+          <p class="text-sm font-medium">You're no longer in this room.</p>
+          <p class="text-xs">You may have left it, or been removed by the person who manages it.</p>
+          <BaseButton variant="secondary" size="sm" @click="emit('left-room', roomId)">Back to chats</BaseButton>
+        </div>
 
         <div v-for="m in messages" :key="m.seq">
           <!-- A system line is the room narrating itself: a join, a budget
@@ -296,7 +310,7 @@
              The condition is therefore stated rather than inherited. A `v-else`
              is a promise about the neighbour above it, and this neighbourhood
              has broken that promise three times. -->
-        <form v-if="!isClosed" @submit.prevent="send">
+        <form v-if="!isClosed && !roomGone" @submit.prevent="send">
           <!-- #2662: the same composer shell as the 1:1 thread — field on top,
                controls in a row inside it. The two composers are the same
                markup in two files (the #2211 lesson recorded in
@@ -516,6 +530,8 @@ const HEADER_ACTION_CLASS = 'px-2 py-1.5 rounded-lg text-xs font-medium text-act
 const addOpen = ref(false)
 // trinity-enterprise#701: the people panel, and how many people are present.
 const peopleOpen = ref(false)
+// trinity-enterprise#701: the room is gone for this reader (a 404 on load).
+const roomGone = ref(false)
 const peopleCount = computed(() => (room.value?.people || []).filter((p) => !p.left_at).length || 1)
 const adding = ref(false)
 const addError = ref(null)
@@ -951,7 +967,8 @@ async function load({ full = false } = {}) {
     if (full) await pinToBottom()
     else if (incoming.length) await onMessagesArrived(incoming.length)
   } catch (err) {
-    if (full) sendError.value = 'Could not load this conversation.'
+    if (full && err?.response?.status === 404) { roomGone.value = true; room.value = null }
+    else if (full) sendError.value = 'Could not load this conversation.'
   } finally {
     loading_ = false
     loading.value = false
@@ -1023,7 +1040,7 @@ function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
     // Nothing to wait for once the room is closed.
-    if (!isClosed.value && !document.hidden) load()
+    if (!isClosed.value && !roomGone.value && !document.hidden) load()
   }, POLL_MS)
 }
 function stopPolling() {

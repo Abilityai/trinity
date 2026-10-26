@@ -297,6 +297,20 @@ def test_seated_people_mentioned_picks_only_present_platform_people(rooms_db):
     assert rooms.seated_people_mentioned(text, parts, sender_identity="alice") == ["bob"]
 
 
+def test_an_email_username_is_mentioned_by_its_local_part(rooms_db):
+    """Accounts made by email login have the email as their username, which an
+    @mention cannot spell — so `@bob` reaches `bob@example.com` when exactly one
+    seated person has that local part."""
+    rooms = rooms_db
+    parts = [{"kind": "user", "identity": "Bob@example.com"},
+             {"kind": "user", "identity": "carol@example.com"},
+             {"kind": "user", "identity": "carol@other.org"}]
+    assert rooms.seated_people_mentioned("@bob please", parts) == ["Bob@example.com"]
+    assert rooms.seated_people_mentioned("@carol please", parts) == []      # ambiguous
+    assert rooms.seated_people_mentioned("@BOB again", parts,
+                                         sender_identity="Bob@example.com") == []
+
+
 def test_mentioning_a_seated_person_tags_them_and_wakes_no_one_new(rooms_db, monkeypatch):
     rooms = rooms_db
     room = _room(rooms)
