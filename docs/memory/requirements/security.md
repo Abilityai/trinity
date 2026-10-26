@@ -844,7 +844,7 @@
 - **Priority**: HIGH
 - **Description**: Enforce execution limits on every Claude Code invocation via CLI flags in agent-server.py. Prevents runaway cost, infinite loops, and excessive tool access.
 - **Key Features**:
-  - `--max-turns` on all executions (configurable per agent, default: 50 for chat, 20 for tasks)
+  - `--max-turns` on all executions (configurable per agent, default: 200 for chat and tasks — trinity-enterprise#471)
   - `--allowedTools` on task/headless executions (restrict to minimum required tools)
   - `--disallowedTools` for globally banned tools (e.g., block `WebFetch` for agents that shouldn't access the internet)
   - Execution timeout enforced by agent-server.py (kill process after configurable limit, default: 30 minutes)
@@ -857,8 +857,8 @@
 - **Configuration Model**:
   ```yaml
   guardrails:
-    max_turns_chat: 50
-    max_turns_task: 20
+    max_turns_chat: 200
+    max_turns_task: 200
     execution_timeout_minutes: 30
     allowed_tools: null          # null = all tools allowed
     disallowed_tools: []         # tools to remove from context
