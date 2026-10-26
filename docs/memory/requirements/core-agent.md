@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)

@@ -6425,6 +6425,28 @@
         "unit"
       ],
       "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_ent964_template_agent_name.py",
+      "feature": "trinity-enterprise#964",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "templates"
+      ],
+      "description": "GitHub catalog entries carry agent_name, the template.yaml name: alone (trimmed, capped at 128), never the admin or template display title; a missing, blank or non-string name: (or a non-mapping template.yaml) is None without raising, so the Create Agent dialog falls back to the repo name."
+    },
+    {
+      "file": "../src/frontend/tests/unit/createAgentNamePrefill964.spec.js",
+      "feature": "trinity-enterprise#964",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "The Create Agent dialog prefills Name from the source: Import a GitHub repository gives the repo name without the owner for owner/repo, URL, .git and trailing-slash input and every import intent, following the field as it is typed; a GitHub template gives its agent_name, else its repo name (featured and preselected templates included); Blank and local templates stay empty; a hand-typed Name and an ID override survive a source change while a Name still equal to the previous prefill follows it; a repo name that sanitizes to nothing leaves Name empty with the usual submit error; the payload is unchanged."
     }
   ]
 }
