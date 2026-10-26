@@ -221,7 +221,9 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
       name: "set_a2a_inbound_allowlist",
       description:
         "Manage which external identities may task an agent over A2A inbound. Provide `add` and/or " +
-        "`remove` (identity strings — e.g. a caller URL, client id, or key id). Owner/admin and human-only. " +
+        "`remove` (identity strings). Two formats: an email or username for a Trinity account on this " +
+        "instance, or `aauth:<agent>@<peer-host>` for an agent on a peer Trinity instance over AAuth " +
+        "(e.g. `aauth:my-agent@peer.example.com`). Owner/admin and human-only. " +
         "Enterprise feature; returns { not_entitled: true } if A2A is not licensed.",
       parameters: z.object({
         agent_name: z.string().describe("The agent whose inbound allow-list to modify."),
@@ -284,6 +286,12 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           + "only). Omit to let the platform infer "
           + "it from the value. Send it alone to re-label a credential already stored.",
         ),
+        auth_scheme: z.enum(["bearer", "aauth"]).optional().describe(
+          "How calls authenticate. 'bearer' (the default for a new endpoint) sends the stored "
+          + "credential. 'aauth' signs each call as the calling agent's own AAuth identity "
+          + "(aauth:<agent>@<this host>) — no credential is stored, switching to it clears one, "
+          + "and the peer must list that identity. Omit to keep the stored scheme.",
+        ),
       }),
       execute: async (
         params: {
@@ -293,9 +301,24 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
           credentials?: string;
           clear_credentials?: boolean;
           credential_kind?: "api_key" | "payment_token";
+          auth_scheme?: "bearer" | "aauth";
         },
         context?: { session?: McpAuthContext },
       ) => {
+        if (params.auth_scheme === "aauth" && params.credentials) {
+          // ent#862: an aauth endpoint holds no secret — the store refuses one.
+          // Refused here too, so the caller learns it without a round trip.
+          return JSON.stringify(
+            {
+              success: false,
+              error:
+                "An auth_scheme 'aauth' endpoint stores no credential: each call is signed "
+                + "as the calling agent. Drop `credentials`, or use auth_scheme 'bearer'.",
+              invalid: true,
+            },
+            null, 2,
+          );
+        }
         if (params.clear_credentials && params.credential_kind) {
           // Contradictory instructions about one slot (#3185). Refused here as
           // well as at the route, so the caller learns it without spending a
@@ -333,6 +356,7 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
             credentials: params.credentials,
             clear_credentials: params.clear_credentials,
             credential_kind: params.credential_kind,
+            auth_scheme: params.auth_scheme,
           });
           return ok({
             endpoint: result?.endpoint,

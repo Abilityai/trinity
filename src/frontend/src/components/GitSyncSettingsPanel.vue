@@ -5,11 +5,13 @@
     keeps failing. Both apply live: the agent's loop reads the auto-sync flag
     every cycle, and the scheduler reads the freeze flag at every fire.
   -->
-  <section class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6">
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Git sync</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      Keep this agent's work in its GitHub repository automatically.
-    </p>
+  <section :class="embedded ? '' : 'rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6'">
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Git sync</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Keep this agent's work in its GitHub repository automatically.
+      </p>
+    </template>
 
     <div
       v-if="view.state === 'loading'"
@@ -36,8 +38,8 @@
       data-testid="git-sync-unbound"
     >
       This agent isn't connected to a GitHub repository, so there is nothing to
-      sync. Connect one from the <span class="font-medium">Git</span> tab, then
-      come back to turn auto-sync on.
+      sync. Bind one under <span class="font-medium">GitHub repository</span>
+      above, then turn auto-sync on.
     </p>
 
     <div v-else class="space-y-4" data-testid="git-sync-ready">
@@ -123,6 +125,9 @@ import SkeletonLoader from './SkeletonLoader.vue'
 const props = defineProps({
   agentName: { type: String, required: true },
   notify: { type: Function, default: null },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 const agents = useAgentsStore()

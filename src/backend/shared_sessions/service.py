@@ -22,8 +22,9 @@ from typing import Optional
 from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
-from services.skill_gate_errors import SkillGateError
+from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
 from utils.helpers import utc_now_iso
+from utils.skill_invocation import find_gated_invocations
 
 from . import db
 
@@ -99,6 +100,11 @@ ROOM_DEFAULT_TTL_HOURS_KEY = "room_default_ttl_hours"
 # never be a value a caller would have been refused.
 MAX_MESSAGES_CEILING = 500
 MAX_TTL_HOURS = 168
+# #3495: the cost cap had no upper bound, so `max_cost_usd` was the one budget
+# field a caller could set to any figure. Per room, in USD. The operator default
+# shares it (`RoomBudgetDefaultsUpdate`), and a stored default above it is
+# CLAMPED to it by `_coerce_cost` — never read as "uncapped".
+MAX_COST_USD_CEILING = 1000.0
 MAX_PARTICIPANTS = 12
 
 # How much transcript a COLD agent gets when it has no resumable session.
@@ -116,7 +122,14 @@ ROOM_MAX_CHAIN_DEPTH = 8
 
 # The INBOUND cap: what a person, a workspace client or an agent calling the API
 # may post as one message (it mirrors `RoomMessageCreate.max_length`).
-MAX_CONTENT_CHARS = 8000
+# #3706: 100,000, the Workspace chat limit (`PortalChatRequest.message`) and
+# the agent reply bound below, so a person can paste a reference document for
+# the agents to work from. What an agent is SHOWN is bounded separately by
+# `ROOM_TRANSCRIPT_BUDGET_CHARS`, so this number does not set the size of a
+# wake. Kept at or below `MAX_AGENT_REPLY_CHARS`: `_fit_transcript` keeps two
+# messages whole (the newest and this agent's ask), and two at the larger of
+# these bounds must fit the transcript budget.
+MAX_CONTENT_CHARS = 100_000
 # #3210: the engine's own post of a turn's reply is NOT inbound, and was held to
 # the cap above anyway — so a 9,000-character research brief, the ordinary output
 # of a room turn, was billed and then discarded without a line. A reply has its
@@ -133,9 +146,10 @@ AGENT_REPLY_TAIL_CHARS = 10_000
 # #3210: the transcript one wake hands its agent. Raising the reply bound raises
 # what the NEXT agent is shown, and an unbounded transcript only moves the
 # failure one hop along: the turn overflows its context, and a cold wake repeats
-# it on every retry. 240,000 is what a cold wake could already receive
-# (ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS), so a room of ordinary
-# messages is shown exactly what it was.
+# it on every retry. A room of ordinary messages fits whole. It is a literal on
+# purpose: ROOM_COLD_CONTEXT_MESSAGES x MAX_CONTENT_CHARS is 3,000,000, far
+# past an agent's context. It must stay above 2 x max(MAX_CONTENT_CHARS, MAX_AGENT_REPLY_CHARS),
+# the two messages `_fit_transcript` always keeps whole.
 ROOM_TRANSCRIPT_BUDGET_CHARS = 240_000
 ROOM_TURN_TIMEOUT_SECONDS = 300
 # #3114: how long a room turn waits for a pull pilot's worker to claim it. A
@@ -294,6 +308,15 @@ def _assert_can_reach_agent(current_user, agent_name: str) -> None:
                         f"You do not have access to agent {agent_name!r}")
 
 
+def _can_still_reach(current_user, agent_name: str) -> bool:
+    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check."""
+    try:
+        _assert_can_reach_agent(current_user, agent_name)
+    except RoomError:
+        return False
+    return True
+
+
 def _require_membership(room_id: str, current_user) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
@@ -384,7 +407,11 @@ def _coerce_cost(raw):
     # its first message" — the `RoomCreate` validator refuses <= 0 for the same
     # reason, and a stored 0 must not become a stricter cap than the operator can
     # express through the API.
-    return value if value > 0 else None
+    if value <= 0:
+        return None
+    # Above the ceiling (a row written before #3495, or by hand): tighten to the
+    # ceiling. Treating it as invalid would fall back to NO cap — the unsafe way.
+    return min(value, MAX_COST_USD_CEILING)
 
 
 def budget_defaults() -> dict:
@@ -448,11 +475,13 @@ def set_budget_defaults(*, max_messages=None, max_cost_usd=None, ttl_hours=None,
 def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
     """Decide the room's budget, and who was allowed to decide it (ent#387).
 
-    A **platform** principal (JWT user, MCP key, agent key) may bound a room
-    explicitly — that is the operator, and an unspecified field falls through to
-    the operator default. A **workspace client** may not: their values are
-    dropped, not refused, because the Workspace never offers the fields and a 4xx
-    would only advertise a control they cannot have.
+    A **platform** principal at `operator` or above (JWT user, MCP key, agent
+    key) may bound a room explicitly — that is the operator, and an unspecified
+    field falls through to the operator default. A **workspace client** may not,
+    and neither may a Workspace-only account (the `user` rung, an MCP key it
+    owns, or a role outside the ladder — #3495; `user` became a platform login in
+    #3488): their values are dropped, not refused, because the Workspace never
+    offers the fields and a 4xx would only advertise a control they cannot have.
 
     Ignoring rather than clamping is deliberate. A clamp still lets the bounded
     party choose anything up to the ceiling — including "the ceiling" — which is
@@ -477,10 +506,17 @@ def _resolve_budget(current_user, max_messages, max_cost_usd, ttl_hours):
         getattr(current_user, "is_platform", not getattr(current_user, "is_portal", False))
     )
 
-    if not is_platform and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
+    # #3495: being a platform principal is not enough — the Workspace-only rung
+    # logs in on the platform side too. A principal with no role at all fails
+    # closed here, as one without `is_portal` does above.
+    from dependencies import is_workspace_only_role
+
+    may_bound = is_platform and not is_workspace_only_role(getattr(current_user, "role", None))
+
+    if not may_bound and any(v is not None for v in (max_messages, max_cost_usd, ttl_hours)):
         logger.info(
-            "[rooms] ignoring caller-supplied budget from a workspace client — "
-            "operator defaults apply"
+            "[rooms] ignoring caller-supplied budget from a %s — operator defaults apply",
+            "workspace client" if not is_platform else "workspace-only account",
         )
         max_messages = max_cost_usd = ttl_hours = None
 
@@ -549,6 +585,17 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
     messages = db.get_messages(room_id, since_seq)
+    # trinity#3402: an agent reading the room (MCP `read_room`) is not handed
+    # what its own skill gate stopped — the rule its wakes follow. People see
+    # everything. Fails closed: this read is not scanned by any gate.
+    kind, identity = _caller(current_user)
+    if kind == "agent":
+        try:
+            held = db.gate_held_seqs(room_id, identity)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("room %s: gate holds unreadable for %s (%s)", room_id, identity, e)
+            raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
+        messages = [m for m in messages if m["seq"] not in held]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
     return {
         **room,
@@ -1280,15 +1327,14 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
     # ent#362 AC#6: membership is the grant, but a REVOKED share must stop
     # future wakes — checked here, at wake time, not at join time. The
     # transcript stays (the record is shared and permanent); what goes away is
-    # the ability to keep spending the agent's time. Only workspace clients are
-    # re-checked: a platform member's access was already resolved by the
-    # platform ACL when the room was created.
-    if targets and getattr(current_user, "is_portal", False):
-        from client_portal.service import agent_on_roster
-        email = _workspace_identity(current_user)
-        include_owned = bool(getattr(current_user, "is_platform", False))
-        still_reachable = [t for t in targets
-                           if agent_on_roster(t, email, include_owned)]
+    # the ability to keep spending the agent's time. trinity-enterprise#860:
+    # EVERY principal is re-checked, with the rule room creation applies
+    # (`_assert_can_reach_agent`) — a platform member's access was resolved
+    # when the room was made, and no unshare path touches rooms. An agent's
+    # reply carries the person whose turn started the chain, so a cascade is
+    # held to that person's access too.
+    if targets:
+        still_reachable = [t for t in targets if _can_still_reach(current_user, t)]
         if len(still_reachable) != len(targets):
             revoked = [t for t in targets if t not in still_reachable]
             _post_system(room_id,
@@ -1496,6 +1542,52 @@ async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: 
         _post_system(room_id, f"{agent_name} is still busy with an earlier turn.")
 
 
+def _without_gate_holds(room_id: str, agent_name: str, delta: list[dict]) -> list[dict]:
+    """trinity#3402: ``delta`` minus what this agent's skill gate already stopped
+    — a post it held (or refused for good) and the notice line. The transcript
+    AND the text the gate scans are built from what this returns, so nothing is
+    shown that is not scanned. Fails OPEN: unread, the post is scanned again and
+    held again (one more ask) — over-gating, never an unchecked request."""
+    try:
+        held = db.gate_held_seqs(room_id, agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: gate holds unreadable for %s (%s) — showing the delta "
+                       "unfiltered; the gate still scans all of it", room_id, agent_name, e)
+        return delta
+    kept = [m for m in delta if m.get("seq") not in held]
+    # The SAME list when nothing was removed: the caller reads identity as
+    # "this delta held nothing this agent's gate stopped".
+    return delta if len(kept) == len(delta) else kept
+
+
+def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
+                      notice_seq: Optional[int], exc: SkillGateError) -> None:
+    """trinity#3402: never put this request to this agent again. Without it the
+    next wake asks a second time (or refuses forever) and a cold one replays
+    the post as prose. Recorded: each shown post whose OWN text invokes a skill
+    gated on this agent — the gate's own matcher, which cannot match across the
+    line the transcript joins posts with — and the notice line. A refusal that
+    clears by itself records nothing: the next wake delivers the post again."""
+    from services import skill_gate_service
+
+    if not (isinstance(exc, SkillApprovalRequired)
+            or getattr(exc, "code", None) in skill_gate_service.STANDING_REFUSALS):
+        return
+    try:
+        gates = skill_gate_service.read_gates(agent_name)
+    except Exception:  # noqa: BLE001 — unreadable now: the next wake re-holds it once
+        gates = {}
+    seqs = [m["seq"] for m in shown
+            if m.get("seq") is not None and m.get("sender_kind") != "system"
+            and find_gated_invocations(m.get("content"), gates)]
+    seqs.append(notice_seq)
+    try:
+        db.record_gate_holds(room_id, agent_name, seqs, hold_marker(exc), utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("room %s: could not record what %s's skill gate stopped — its next "
+                     "wake raises it again", room_id, agent_name, exc_info=True)
+
+
 async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
                              chain_depth: int) -> None:
     """One agent turn: delta -> execute_task -> auto-post the reply.
@@ -1521,16 +1613,23 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         return
 
     top_seq = max(m["seq"] for m in delta)
+    # trinity#3402: never what this agent's gate already stopped — not shown,
+    # so not scanned (one list feeds both). Left with nothing to answer, the
+    # wake is over. The cursor stays (it moves on a reply): the next wake reads
+    # these rows again and leaves them out again.
+    visible = _without_gate_holds(room_id, agent_name, delta)
+    if visible is not delta and not any(m.get("sender_kind") != "system" for m in visible):
+        return
     # #3210: what the agent is SHOWN is bounded; what it is marked as having
     # read is not — the cursor still moves past every message in the delta,
     # omitted ones included, or each later wake would be handed the same
     # overflow again. (`top_seq` is read above, from the rows the table
     # returned: the line standing in for an omitted run has no seq.)
-    shown = _fit_transcript(delta, agent_name)
-    if shown is not delta:
+    shown = _fit_transcript(visible, agent_name)
+    if shown is not visible:
         logger.info("room %s: transcript for %s is over budget — showing %d of %d "
                     "messages", room_id, agent_name,
-                    sum(1 for m in shown if m.get("seq") is not None), len(delta))
+                    sum(1 for m in shown if m.get("seq") is not None), len(visible))
     # The WS broadcast reaches clients that are CONNECTED right now. A client
     # that reloads mid-turn missed it and has nothing to re-derive the state
     # from — the room looked idle while two agents were thinking. So the state
@@ -1622,7 +1721,11 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         raise
     except SkillGateError as e:
         # trinity-enterprise#751: nothing ran; say why in the room.
-        _post_system(room_id, getattr(e, "message", None) or str(e))
+        notice_seq = _post_system(room_id, getattr(e, "message", None) or str(e))
+        # trinity#3402: and never put that request to this agent again. The
+        # cursor keeps its rule — it moves on a reply — so anything else in
+        # this delta is delivered on the next wake.
+        _record_gate_hold(room_id, agent_name, shown, notice_seq, e)
         return
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)

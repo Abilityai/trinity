@@ -121,6 +121,31 @@ describe('Run', () => {
   })
 })
 
+describe('canon role labels (trinity-enterprise#848)', () => {
+  it('one chain for the picker and the sentence: the kind, else the API label, else the humanised id', () => {
+    expect(kindOptionLabel('primary', 'primary')).toBe('Primary contact')   // the API labels a kind with its value
+    expect(kindLabel('approver', 'approver')).toBe('an approver')
+    expect(kindOptionLabel('role:head-of-sales', 'Head of Sales EMEA')).toBe('Head of Sales EMEA')
+    expect(kindOptionLabel('role:head-of-sales')).toBe('Head of sales')
+    expect(kindOptionLabel('role:CFO.eu_2')).toBe('Cfo eu 2')
+    expect(kindOptionLabel('primary')).toBe('Primary contact')
+    expect(kindLabel('role:finance', 'Finance')).toBe('Finance')
+    expect(kindLabel('role:finance')).toBe('Finance')
+    expect(kindLabel('approver')).toBe('an approver')
+    expect(kindLabel('something-else')).toBe('something-else')
+  })
+
+  it('a role-gated skill names the role, never its stored value', () => {
+    const approvers = [...PRIMARY_OTHER, { kind: 'role:finance', reachable: true, viewer_fills: false,
+      label: 'Finance team', role_id: 'finance' }]
+    const r = cards({ agentList: [live('pay')], gates: [gate('pay', { approver: 'role:finance' })], approvers })
+    expect(r.own[0].gateLine).toEqual({ tone: 'locked', text: 'Needs approval from Finance team' })
+    const nobody = cards({ agentList: [live('pay')], approvers: PRIMARY_OTHER,
+      gates: [gate('pay', { approver: 'role:head-of-sales', approver_reachable: false })] })
+    expect(nobody.own[0].gateLine).toEqual({ tone: 'warn', text: 'Needs approval from Head of sales: nobody fills it yet' })
+  })
+})
+
 describe('gate line — everyone sees it, it names a kind, never a person', () => {
   it('a gated skill says who approves', () => {
     const r = cards({ agentList: [live('pay')], gates: [gate('pay')] })
@@ -130,6 +155,19 @@ describe('gate line — everyone sees it, it names a kind, never a person', () =
   it('"you approve this" when the viewer fills the kind', () => {
     const r = cards({ agentList: [live('pay')], gates: [gate('pay')], approvers: PRIMARY_ME, canManage: false })
     expect(r.own[0].gateLine).toEqual({ tone: 'locked', text: 'Needs approval: you approve this' })
+  })
+
+  // trinity-enterprise#881: filled, but its people can't open the agent — the
+  // remedy is a share, not an assignment.
+  it('an approver whose people cannot open the agent says to share it', () => {
+    const r = cards({ agentList: [live('pay')], gates: [gate('pay')],
+      approvers: [{ kind: 'primary', reachable: false, viewer_fills: false, unreachable: 'not_shared' }] })
+    expect(r.own[0].gateLine).toEqual({ tone: 'warn',
+      text: 'Needs approval from the primary contact: not shared with them' })
+    const fromGate = cards({ agentList: [live('pay')], approvers: PRIMARY_OTHER,
+      gates: [gate('pay', { approver: 'role:head-of-sales', approver_reachable: false,
+        approver_unreachable: 'not_shared' })] })
+    expect(fromGate.own[0].gateLine.text).toMatch(/: not shared with them$/)
   })
 
   it('a kind nobody fills is a warning, not a lock', () => {

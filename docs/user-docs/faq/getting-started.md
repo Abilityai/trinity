@@ -55,6 +55,14 @@ Two common reasons: their address isn't on the email whitelist, or no email serv
 
 The default email provider is `console`, which is meant for development — it prints the email (including the code) to the backend logs instead of sending it. For real delivery, add a Resend key and a sender address under Settings > Integrations — no `.env` edit needed ([Platform Keys](../credentials/platform-keys.md#email-provider-resend)) — or set `EMAIL_PROVIDER` in `.env` to `smtp`, `sendgrid`, or `resend` and fill in the matching credentials. Also confirm your address is on the whitelist, since codes only go to allowed emails. See [Setup](../getting-started/setup.md).
 
+## Why does the login page say no email provider is configured?
+
+Because this install cannot send email, so no code was sent. After you enter an address, the code step shows *No email provider is configured on this install, so no email was sent* whenever the email provider is `console` (the default when first-run setup skipped the email key) or a real provider is missing what it needs — its API key, or the SMTP host, user and password. The notice is the same for every address, since the request never reveals whether an address is allowed to sign in. Add an email provider key under **Settings → Integrations**, or set `EMAIL_PROVIDER` and its credentials in `.env`, and the page goes back to "We sent a code". See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
+
+## I requested a login code on localhost and nothing arrived — am I locked out?
+
+No. With no email provider configured — the default when first-run setup skipped the email key — Trinity sends no email: the code is written to the backend log, and the login page says so instead of "We sent a code". Read it with `docker compose logs backend` (look for the `EMAIL (console mode)` block) and type it into the code field. Or skip the code: choose **Admin Login** and sign in with the admin password from your `.env`. To get real emails, add an email provider key under **Settings → Integrations**. See [Platform Keys](../credentials/platform-keys.md#email-provider-resend).
+
 ## Why does nothing load when I open http://localhost?
 
 First check that Docker is actually running — Trinity can't start without it. If Docker is up, another process may already hold port 80, which the frontend binds by default; add `FRONTEND_PORT=8090` (or any free port) to `.env`, restart with `./scripts/deploy/start.sh`, and open `http://localhost:8090` instead. See [Deploying Trinity](../guides/deploying-trinity.md).
@@ -65,11 +73,15 @@ The web UI is at http://localhost, the backend API with interactive Swagger docs
 
 ## How is the web UI organized?
 
-The top navigation has five entries. **Dashboard** is the fleet, in three interchangeable views — Timeline, Grid, and List — with `v` to cycle the view and `/` to type-filter by name; there is no separate Agents page (`/agents` redirects to the Dashboard's List mode). **Library** holds everything installable: agent templates, systems, and the shared skills library. **Operations** is the operator queue, notifications, health, and executions. **Settings** holds platform configuration. **Workspace** is the chat app — one continuous conversation per agent — and opens in its own browser tab so the console page you were on stays put. Clicking an agent opens its detail page, whose header has **Start/Stop**, **Autonomy**, **Workspace**, and **Talk** (a voice call that opens in the Workspace); there is no browser terminal tab — shell access is by SSH. On a narrow window, top navigation links that do not fit move into a counted **N more** menu, and Settings and Operations tabs into a **More** menu, instead of scrolling out of sight. See [Using Trinity](../guides/using-trinity.md).
+The top navigation has five entries. **Dashboard** is the fleet, in three interchangeable views — Timeline, Grid, and List — with `v` to cycle the view and `/` to type-filter by name; there is no separate Agents page (`/agents` redirects to the Dashboard's List mode). **Library** holds everything installable: agent templates, systems, and the shared skills library. **Operations** is the operator queue, notifications, health, and executions. **Settings** holds platform configuration. **Workspace** is the chat app — one continuous conversation per agent — and opens in its own browser tab so the console page you were on stays put. Clicking an agent opens its detail page, whose header has **Start/Stop**, **Autonomy**, the bound GitHub repository, the agent's tags and a small context-window ring; there is no browser terminal tab — shell access is by SSH. On a narrow window, top navigation links that do not fit move into a counted **N more** menu, and Settings and Operations tabs into a **More** menu, instead of scrolling out of sight. See [Using Trinity](../guides/using-trinity.md).
 
 ## How do I create my first agent?
 
 On a fresh install, use the **Your first agent** step of first-run setup, which comes right after **Connect Claude** so the agent can actually think. **Show me** (**Watch Cornelius work**) opens a seeded agent's chat before you build anything; **Make me one** asks one question — pick what the agent should do (**Research a market or topic**, **Advise on strategy**, **Write content & reports**, **Start from scratch**) — and opens the real Create Agent form with the matching starter template pre-selected; **Done** at the end of the sequence opens that agent's chat. The step counts as done once you own an agent Trinity did not seed, and you can come back to it any time with `?onboarding=1` or **Settings → General → First-run setup**. You can also do it manually: click **Create Agent** in the Dashboard header (present in every view — Timeline, Grid and List), choose a source (a starter template, a registered GitHub template, any GitHub repository, or a blank agent), enter a lowercase slug, and click **Create Agent** — Trinity clones the template, builds the container, and starts the agent. On an install with no agents at all, the Dashboard's empty state shows a **Get started** button that opens the same form. See [Quick Start](../getting-started/quick-start.md).
+
+## I'm starting a new organisation on Trinity. Which agents should I build first, and how many?
+
+Start with one, not an org chart. Pick the job that hurts most today (marketing content, research, a weekly report), build a single agent for it, and run it until you understand how it works, what it needs and where it gets stuck. Add the next agent when a real need appears, and connect agents to each other only once each one does its own job well. The Library's starter templates, the seeded agents and the `create-agent` wizards in the abilities marketplace are starting points you can adjust instead of writing from scratch. See [Creating Agents](../agents/creating-agents.md) and the [create-agent plugin](../abilities/create-agent-plugin.md).
 
 ## Which agents come with a fresh install, and can I delete them?
 
@@ -110,6 +122,10 @@ Yes. Trinity is licensed under the Apache License 2.0 — free for any use, comm
 ## Are some features only available in an enterprise edition?
 
 Trinity is open-core: the open-source platform in the public repository is complete and fully functional on its own. Customers with an enterprise agreement additionally get access to a private companion repository that mounts as an optional module and unlocks extra capabilities under a separate commercial license; in the UI, those surfaces simply say they require an entitlement. You can check what your instance is running via `GET /api/version`, which reports `edition` (`oss` or `enterprise`) and the list of registered enterprise features — an empty list is normal for open-source installs. See [Enterprise Modules](../../ENTERPRISE.md).
+
+## When do I need the enterprise edition?
+
+Start on the open-source edition, which is complete on its own. An enterprise agreement becomes relevant once your organisation has requirements the open-source build does not cover, typically compliance or governance needs. In the UI, those surfaces say they require an entitlement. Talk to the Trinity team about what an agreement includes. This FAQ doesn't list the modules and doesn't cover pricing. `GET /api/version` shows which edition your instance runs. See [Enterprise Modules](../../ENTERPRISE.md).
 
 ## Where can I get help if I'm stuck?
 

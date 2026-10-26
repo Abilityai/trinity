@@ -70,7 +70,31 @@ DISMISSED = "dismissed"
 # surfaces key on the pair, so it cannot collide with a person's cancel or the
 # platform's (#3130) `superseded`.
 REPLACED = "replaced"
+# trinity-enterprise#901: the other ending an agent authors — it withdrew its
+# own pending ask with a reason and NO successor. Same `cancelled` /
+# `disposed_by='agent'` pair; `disposition_reason` is the agent's own words,
+# `replaced_by` stays NULL. The two kinds are told apart ONCE, by
+# `agent_ending_kind`, from the link — never from the reason's text.
+WITHDRAWN = "withdrawn"
+AGENT_ENDING_KINDS = (REPLACED, WITHDRAWN)
+# The reason a replaced row carries is the closed token; a withdrawn row's is
+# free text, so this names the TOKENS only.
 AGENT_ENDING_REASONS = (REPLACED,)
+# A withdraw reason's bound, the person's cancel reason's (`CancelRequest`).
+MAX_WITHDRAW_REASON = 500
+
+
+def agent_ending_kind(row: Mapping[str, Any]) -> Optional[str]:
+    """Which ending an AGENT authored on this row (trinity-enterprise#901):
+    `replaced` when `replaced_by` names a successor, `withdrawn` otherwise;
+    None for every row an agent did not end (a person's, the clock's, the
+    platform's, a pending one). Derived from the raw row's link — a reason
+    that merely reads `replaced` does not make a withdraw a replace — and
+    projected as the explicit `agent_ending` field on every surface, so no
+    reader infers it from a link a projection may withhold."""
+    if row.get("disposed_by") != "agent":
+        return None
+    return REPLACED if row.get("replaced_by") else WITHDRAWN
 
 # WebSocket manager injected from main.py
 _websocket_manager = None
@@ -133,7 +157,7 @@ class EndingEvent:
     disposition: str                 # answered | cancelled | dismissed | expired
     rows: tuple                      # the CAS-won rows, as they stand after the transition
     actor_email: Optional[str]       # the person; None for timeout
-    reason: Optional[str] = None     # the operator's cancel reason — DATA, never instructions
+    reason: Optional[str] = None     # the operator's cancel reason, or the agent's withdraw reason (ent#901) — DATA, never instructions
     batch_id: Optional[str] = None   # bulk cancel only
 
 
@@ -466,9 +490,20 @@ def raise_ask(
     actor_user: Any = None,
     addressee: Optional[str] = None,
     platform_execution_id: Optional[str] = None,
+    addressees: Optional[List[str]] = None,
+    to_role_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `addressees` + `to_role_override` (trinity-enterprise#848) are the gate's
+    pre-resolved audience: the very people `skill_gate_service.enforce` decided
+    self-approval with, and the approver value the ask is recorded `to_role`
+    as — a kind, or a canon role `role:<id>` the sink's own `to` vocabulary
+    (`ASK_ROLES`, an agent's input) deliberately does not accept. Given, role
+    resolution (`_address`) is skipped, so the gate's audience and the ask's
+    cannot diverge (no second resolve between the two). Gate raises only, like
+    `addressee`; an agent's raise passing either is a programming error.
 
     `platform_execution_id` (ent#661 v3) is the raising turn as the platform
     saw it — the MCP request's `X-Trinity-Execution-Id` (#2392). When it is one
@@ -552,6 +587,7 @@ def raise_ask(
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     named = _named_addressee(addressee, raised_by)
+    pre = _named_addressees(addressees, to_role_override, raised_by, named)
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -567,8 +603,11 @@ def raise_ask(
     if norm["proposal"] is not None and predecessor is None:
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
+    to_role = to_role_override or norm["to"]
     if named:
         people, addressee, resolved = [named], named, True
+    elif pre is not None:
+        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
 
@@ -605,7 +644,7 @@ def raise_ask(
         max_pending=_max_pending() if raised_by == "agent" else None,
         channel=channel,
         raised_by=raised_by,
-        to_role=norm["to"],
+        to_role=to_role,
         resolved_to=people or None,
         proposal=norm["proposal"],
         supersedes_expired=predecessor["id"] if predecessor else None,
@@ -673,7 +712,7 @@ def raise_ask(
             "channel": channel,
             "raised_by": raised_by,
             "type": norm["type"],
-            "to_role": norm["to"],
+            "to_role": to_role,
             **({"replaces": replaced["id"]} if replaced else {}),
         },
     }]
@@ -992,31 +1031,111 @@ def _refuse_ended_predecessor(pred: Optional[Dict[str, Any]]) -> None:
     names its real state — ids and enums only, never a person's words."""
     if pred is None:
         raise AskRejected(422, "invalid_replaces", _INVALID_REPLACES)
-    disposition = pred.get("disposition") or pred.get("status")
-    successor = request_id_of(pred.get("replaced_by"))
+    _refuse_ended(pred, code="replaces_ended", key="replaces")
+
+
+def _refuse_ended(row: Dict[str, Any], *, code: str, key: str) -> None:
+    """An own ask that ended before the agent's door could end it: the replace's
+    `replaces_ended` (#3247, the row named as `replaces`) and the withdraw's
+    `ask_ended` (trinity-enterprise#901, named as `request_id`) share one 409
+    shape — ids and enums only, never a person's words."""
+    disposition = row.get("disposition") or row.get("status")
+    successor = request_id_of(row.get("replaced_by"))
+    kind = agent_ending_kind(row)
     if disposition == ANSWERED:
         message = "That ask was answered first; the answer stands — read it with get_my_ask."
     elif disposition == EXPIRED:
         message = ("That ask was denied by timeout; re-ask with supersedes_expired only "
                    "with new information.")
-    elif pred.get("disposed_by") == "agent" and successor:
+    elif kind == REPLACED:
         message = f"That ask was already replaced by {successor}."
-    elif pred.get("disposed_by") == "platform":
+    elif kind == WITHDRAWN:
+        message = "You already withdrew that ask; raise a new one if it is needed again."
+    elif row.get("disposed_by") == "platform":
         message = "The platform ended that ask; do not re-raise it unchanged."
-    elif pred.get("disposed_by") == "person":
+    elif row.get("disposed_by") == "person":
         message = "An operator cancelled that ask; do not re-raise it unchanged."
     else:
         message = "That ask was cancelled; do not re-raise it unchanged."
     # `disposed_by` is an enum (person | timeout | platform | agent) — who ended
     # it, never who they are; the message is branched on it so a platform
     # ending (#3246) is not called an operator's.
-    raise AskRejected(409, "replaces_ended", message,
-                      replaces=pred.get("request_id"),
-                      ask_status=pred.get("status"),
-                      disposition=pred.get("disposition"),
-                      disposed_by=pred.get("disposed_by"),
-                      disposed_at=pred.get("disposed_at"),
+    raise AskRejected(409, code, message,
+                      **{key: row.get("request_id")},
+                      ask_status=row.get("status"),
+                      disposition=row.get("disposition"),
+                      disposed_by=row.get("disposed_by"),
+                      disposed_at=row.get("disposed_at"),
                       replaced_by=successor)
+
+
+_INVALID_REASON = "reason must be one line of text, 1 to 500 characters after trimming."
+
+
+def withdraw(agent_name: str, request_id: str, reason: Any, *,
+             actor_user: Any = None) -> Dict[str, Any]:
+    """The agent ends one of its OWN pending asks with a reason and no successor
+    (trinity-enterprise#901): `POST /api/agents/{name}/operator-queue/{request_id}/withdraw`.
+
+    The row ends `cancelled` / `disposed_by='agent'` / `disposition_reason` =
+    the reason, `replaced_by` NULL — through the compare-and-set the replace
+    owns, so a person's answer always wins and nothing is ever written over an
+    ending. The security gate is `_replace_target`'s: the lookup is scoped to
+    `(agent_name, request_id)` and the row must carry `raised_by == 'agent'`
+    ON THE COLUMN — a gate's approval (ent#751), a platform alarm about the
+    agent, a NULL-raiser row, another agent's row and a row about a person are
+    one uniform 404 `ask_not_found`. An own row that ended first is a 409
+    `ask_ended` naming its real state; one this agent already withdrew is a
+    200 `replayed` (an exact repeat is answered with the original; a different
+    reason is reported in `differs`, never applied). The reason is
+    whitespace-collapsed and bounded at ingest (422 `invalid_reason`), stored
+    as text, and never written into the audit row. No wake: the agent holds
+    the receipt (`_wake_filer` skips agent-authored endings).
+    """
+    from services.operator_queue_service import is_about_a_person
+
+    text = " ".join(reason.split()) if isinstance(reason, str) else ""
+    if not text or len(text) > MAX_WITHDRAW_REASON:
+        raise AskRejected(422, "invalid_reason", _INVALID_REASON, limit=MAX_WITHDRAW_REASON)
+    row = db.get_operator_queue_item_for_agent_by_request_id(agent_name, request_id)
+    if not row or row.get("raised_by") != "agent" or is_about_a_person(row):
+        raise AskRejected(404, "ask_not_found", "Ask not found.")
+    out = db.withdraw_operator_queue_item(agent_name, row["id"], reason=text)
+    row = out["row"]
+    if out["outcome"] == "not_own" or row is None:
+        # the compare-and-set's belt held where the gate above did not
+        raise AskRejected(404, "ask_not_found", "Ask not found.")
+    if out["outcome"] == "ended":
+        if agent_ending_kind(row) == WITHDRAWN:
+            differs = [] if row.get("disposition_reason") == text else ["reason"]
+            return _receipt(row, status="replayed", differs=differs)
+        _refuse_ended(row, code="ask_ended", key="request_id")
+    if out["outcome"] != "withdrawn":
+        # only the compare-and-set's winner reaches the sink; an outcome the db
+        # layer grows later fails closed here instead of falling through to `_ended`
+        raise RuntimeError(f"unexpected withdraw outcome {out['outcome']!r}")
+    # Agent-keyed like the `replaced` row (#3247): there is no person `Actor`.
+    # `has_reason` only — the §26.9 rule: ids and enums, never the text.
+    audit = [{
+        "event_action": "withdrawn",
+        "source": "api",
+        "actor_agent_name": agent_name,
+        "actor_email": getattr(actor_user, "email", None),
+        "mcp_key_id": getattr(actor_user, "mcp_key_id", None),
+        "mcp_key_name": getattr(actor_user, "mcp_key_name", None),
+        "mcp_scope": getattr(actor_user, "mcp_scope", None),
+        "target_type": "operator_queue",
+        "target_id": row["id"],
+        "details": {
+            "agent_name": agent_name,
+            "request_id": row["request_id"],
+            "has_reason": True,
+        },
+    }]
+    trigger = _broadcast_payload({"type": "operator_queue_cancelled",
+                                  "data": {"id": row["id"], "agent_name": agent_name}})
+    _ended(EndingEvent(CANCELLED, (row,), None, reason=text), audit, trigger)
+    return _receipt(row, status=WITHDRAWN)
 
 
 def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
@@ -1033,6 +1152,36 @@ def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
     if "@" not in email:
         raise ValueError("raise_ask: addressee must be an email")
     return email
+
+
+def _named_addressees(addressees: Optional[List[str]], to_role_override: Optional[str],
+                      raised_by: str, named: Optional[str]) -> Optional[List[str]]:
+    """The lower-cased, de-duplicated emails a gate raise pre-lists, or None
+    when it lists none (trinity-enterprise#848).
+
+    A programming error (`ValueError`), never a refusal: an agent's raise that
+    passes either, an override without the list it stands for, an empty list
+    (a gate never asks nobody — `enforce` refused `role_unassigned` first), a
+    non-email, or a list beside a single `addressee`.
+    """
+    if addressees is None and to_role_override is None:
+        return None
+    if raised_by != "gate":
+        raise ValueError("raise_ask: only a gate raise may pre-list its audience")
+    if addressees is None:
+        raise ValueError("raise_ask: to_role_override needs addressees")
+    if named is not None:
+        raise ValueError("raise_ask: addressee and addressees are exclusive")
+    out: List[str] = []
+    for value in addressees:
+        email = str(value).strip().lower()
+        if "@" not in email:
+            raise ValueError("raise_ask: every addressee must be an email")
+        if email not in out:
+            out.append(email)
+    if not out:
+        raise ValueError("raise_ask: a gate raise must address someone")
+    return out
 
 
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
@@ -1163,6 +1312,9 @@ def _receipt(
         "replaces": replaces_request_id,
         "replaced_by": request_id_of(row.get("replaced_by")),
         "disposed_by": row.get("disposed_by"),
+        # trinity-enterprise#901: which ending the agent authored, if any —
+        # derived here, once, never inferred client-side from `replaced_by`.
+        "agent_ending": agent_ending_kind(row),
     }
     if differs is not None:
         receipt["differs"] = differs

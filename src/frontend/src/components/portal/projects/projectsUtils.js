@@ -58,6 +58,32 @@ export function workOnItOptions(project, rosterNames) {
 }
 
 /**
+ * The Continue action (trinity-enterprise#896): ONE primary — my newest linked
+ * chat across every agent (reopen), else the first agent I could start with
+ * (new) — and the other actionable agents one click away. Pending, archived and
+ * unavailable rows are not offered here; the Work on it list explains them.
+ */
+export function continueChoice(options) {
+  const actionable = (options || []).filter((o) => o.kind === 'reopen' || o.kind === 'new')
+  const reopen = actionable.filter((o) => o.kind === 'reopen')
+    .sort((a, b) => String(b.chat?.last_message_at || '').localeCompare(String(a.chat?.last_message_at || '')))
+  const primary = reopen[0] || actionable[0] || null
+  return { primary, others: actionable.filter((o) => o !== primary) }
+}
+
+/** The Steward card's schedule line for the server's `{state, next_run_at}`. */
+export function stewardScheduleLine(schedule) {
+  if (!schedule) return ''
+  if (schedule.state === 'none') return 'No sweep scheduled'
+  if (schedule.state === 'scheduled') return schedule.next_run_at ? 'Next run' : 'Scheduled'
+  if (schedule.state === 'hidden') return 'Scheduled'
+  return "Schedule couldn't be read"
+}
+
+/** The one-time "how a project moves" line (ent#896): remembered per browser. */
+export const HOW_IT_MOVES_KEY = 'trinity.workspace.projects.howItMovesDismissed'
+
+/**
  * Whether a chat header offers project controls, and which. An invited
  * outside client (v2.4) sees a linked chat's badge and Detach only — no
  * "Project" button (guests don't create or file into projects) and no Wrap up

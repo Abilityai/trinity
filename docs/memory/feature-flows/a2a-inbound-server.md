@@ -58,6 +58,26 @@ before an envelope exists to carry an error.
    This one is a *restriction on an already-authenticated caller*, not a
    security boundary: it runs last, and it fails open.
 
+## Who may poll or cancel a task (#3751)
+
+Each door binds a task handle to the caller that minted it:
+
+| Door | Binding |
+|---|---|
+| Bearer (MCP key or JWT) | `routers/a2a.py::_bearer_started_by` — the row's `triggered_by == "a2a"`, `source_user_id == caller.id` (never None), `source_mcp_key_id == caller.mcp_key_id` (None on both sides for a JWT) |
+| AAuth | `aauth_inbound.execution_owned_by(exec_id, identity)` |
+| Paid | `_payer_for_task` — the payer bound to the row |
+
+The key id, not the user id, is the bearer identity: every agent key of one
+owner resolves to that owner's user id and role, so the user id alone would let a
+sibling agent poll another agent's task. There is no owner/admin override for the
+same reason. A refusal is the unknown-id `Task not found` (no existence oracle),
+and a refused `tasks/cancel` signals nothing. A re-minted key loses its in-flight
+tasks, as it loses its `messageId` namespace. This scopes the A2A task handle
+only; `GET /api/agents/{name}/executions/{id}` and its terminate route are the
+execution REST surface (trinity-enterprise#875). Pinned by
+`tests/unit/test_3751_a2a_bearer_task_scope.py`.
+
 ## `messageId` dedup — why the scope carries the caller
 
 Invariant #18 wants a re-delivered task to not double-execute, and A2A's
@@ -148,6 +168,77 @@ breaker, activity rows, and cost tracking like any other trigger.
 | `_TRIGGER_BUCKETS` | `db/schedules/analytics.py` | `"Agent-to-agent"` | an inbound A2A task IS agent-to-agent work; it shares the bucket with `agent`/`self_task` rather than landing in `Other` |
 | `_VALID_TRIGGERS` | `routers/executions.py` | listed | an unlisted value degrades to **no filter**, so `?triggered_by=a2a` would return every execution on the install |
 | `_AUTONOMOUS_TRIGGERS` | `services/task_execution_service.py` | listed | **the judgement call.** The set means "no human is watching the reply", so an unresolved slash-command run earns an Operating Room alert (#1410). A2A is dispatched by a remote *machine* caller — structurally the same as `agent`, which is already in the set — so nobody on this install sees the "Unknown command" text come back. The interactive-ish triggers deliberately left out (`manual`, `mcp`, `public`, `chat`, `session`) all have a person reading the reply. |
+
+## Long turns: `working` + poll (#3749)
+
+`message/send` used to hold the HTTP request for the whole agent turn. The
+bundled client's 30 s read timeout (`A2A_RPC_TIMEOUT`, `services/a2a_client.py`)
+then turned any longer turn into a 504, and the caller never learned the
+execution id. The request is now bounded and the turn is not:
+
+1. **Mint.** `_mint_a2a_execution` creates the execution row *before* dispatch.
+   The row is created `running`, with `model_used` resolved (`execute_task`
+   stamps it only on rows it creates itself) and `subscription_id`
+   best-effort. `execute_task(execution_id=...)` then skips its own row
+   creation. This is the pre-created-row contract `/chat` uses. The
+   idempotency claim is attached to the id at once (`attach_execution`). If
+   the mint fails, the claim is released with `fail()` and the caller gets
+   `-32603`. There is no fallback to an un-minted dispatch.
+2. **Detach + hold.** `_finish_send` holds the pre-#3749 tail unchanged:
+   terminal Task, `complete()` with the snapshot, AAuth ownership and activity,
+   the single `a2a_task` audit row. It runs as an `asyncio` task, kept alive by
+   a strong reference in `_INFLIGHT_SENDS` (#1968). `_hold_turn` waits with
+   `asyncio.wait`, never `wait_for`, under `A2A_SEND_WORKING_AFTER_SECONDS =
+   25.0`. That value is strictly under the client's 30 s and leaves room for a
+   10 s cold card fetch inside the MCP tool's 40 s outer limit.
+   `test_budget_is_below_client_rpc_timeout` pins both inequalities. Inside the
+   budget, the response and the snapshot are byte-identical to before.
+3. **Early answer.** Past the budget, the router answers from the **row**
+   (`_task_from_row`): `queued` → `submitted`, `running`/`pending_retry` →
+   `working`, a terminal row → the terminal Task (the turn ended at the
+   deadline), and `skipped` → `rejected`. It writes no snapshot and no audit
+   row. The claim is completed exactly once, by the tail, at the terminal.
+   AAuth: `remember_execution` (now `bool`) is written **before** the id is
+   disclosed. If it returns `False`, the request keeps holding, because the
+   id would 404 on that caller's `tasks/get`.
+4. **`configuration.blocking`** (A2A v0.3 `MessageSendConfiguration`). `true`
+   holds the whole turn (the old behaviour). `false` answers right after the
+   mint. Absent or non-bool uses the budget. `message/stream` ignores it.
+5. **Replay.** A re-send of a running `messageId` (`in_flight` with an attached
+   `execution_id`, scoped to the caller principal and checked against
+   `agent_name`) is answered from the row, so it gets `working` while the turn
+   runs and the terminal Task once the row has finished. That holds even
+   before the tail completes the claim, and after a restart mid-turn. A claim
+   with no id keeps the retryable `-32603`.
+
+**Paid door.** The mint happens inside `execute()`, after verify, dedup and
+the allow-list, so an unverified stranger never leaves a `running` row behind.
+The id travels back through `_TurnHandle.minted`. At the deadline with no id
+yet, the request waits for the mint or the terminal, whichever comes first.
+Before it answers `working`, it writes a `verify` row carrying the id for the
+admitted payer (captured by `run_a2a_paid_turn(on_verified=...)`), so
+`payer_owns_execution` is true mid-turn. That is the third `verify` row for
+the turn and is accepted (T6). A paid re-send while the turn runs keeps the
+shared orchestrator's `IN_FLIGHT` refusal (T2). The payer may `tasks/cancel`
+mid-turn: the turn is never settled and delivers no answer (T5).
+
+**The caller went away.** The app's HTTP middleware does not cancel a handler
+on client disconnect ([execution.md](../architecture/execution.md), Interactive
+turns on a pilot). Whether or not the handler is ever cancelled, the detached
+turn is not: it runs to its terminal, completes the claim and writes its audit
+row. The waiter inside `dispatch_and_await_terminal` is the detached turn, so
+its "caller went away" branch (a queued row left CANCELLED) can only fire at
+loop shutdown. A queued A2A turn whose caller left is claimed and run, bounded
+by `claim_budget`, and its result waits on `tasks/get`. A loop-shutdown
+`CancelledError` inside the tail re-raises **without** `fail()`. The container
+may still be running the turn, and the row is what a replay answers from.
+
+Residual, stated: a backend restart mid-turn loses that turn's `a2a_task`
+audit row, as it did before, while the row, `tasks/get` and replay still
+answer. Tests: `tests/unit/test_3749_a2a_working_task.py` (drives
+`_dispatch_jsonrpc` / `_send_paid_task` under `asyncio.run` with an
+Event-gated dispatch stub, because `TestClient` request loops would kill a
+detached task).
 
 ## Schema / migration
 
@@ -292,10 +383,13 @@ oracle. The binding is written **when the turn's result exists, before the
 settle**: `run_paid_turn` logs a `verify` row carrying the execution id as soon
 as `execute()` returns, because when only the `settle` / `settle_failed` rows
 carried the pair, a payer was locked out of a finished task while its settle was
-still running, and for good when a concurrent settle wrote no row. It is **not**
-written mid-turn — `execute()` returns at the terminal, so a poll during the
-turn reads as not-found and a payer's `tasks/cancel` can only answer "already in
-a terminal state". No schema change; those columns were already on the row.
+still running, and for good when a concurrent settle wrote no row. Since #3749
+it is **also** written mid-turn when the turn outlives the `message/send`
+budget: the router writes the same `verify` row for the admitted payer before
+it answers `working` (see [Long turns](#long-turns-working--poll-3749)). A
+poll during the turn then reads `working`, and a payer's `tasks/cancel`
+cancels the turn, with no settle and no answer. No schema change; those
+columns were already on the row.
 
 **A refusal is classified once, rendered twice.** `routers/a2a.py`'s
 `_classify_paid_refusal` is the single table, consumed by `message/send` (which
@@ -366,33 +460,43 @@ The real facilitator (verify + settle) and what a duration-plan settle actually
 burns are **not** provable from the SDK source and are a live sandbox run before
 merge, not a unit test. Stated rather than hidden.
 
-## Trusted internal networks (trinity-enterprise#838)
+## Outbound endpoint allowlist (trinity-enterprise#838, outbound-only since trinity-enterprise#885)
 
 Requirements: `requirements/mcp.md` §32.7.
 
+The admin's "trusted networks" list (setting key `a2a_trusted_networks`, name
+kept) is read **only on the outbound side**. Nothing on this inbound server
+consults it: every inbound call needs a Trinity credential or an x402 payment,
+whatever network it arrives from.
+
 ```
 caller instance (agent → call_a2a_agent)                 provider instance
-  a2a_outbound_service.call_agent                          POST /a2a/{name}
-   └ validate_endpoint → validate_a2a_endpoint_url          │ anonymous → internal_source(request)
-       public-HTTPS rule refuses (http / CGNAT)             │   cached list; CF headers → public; X-Real-IP
-       └ _validate_trusted_a2a_url(entries)                 │   only from the proxy container
-           name entry or CIDR; never metadata/              │   none → _anonymous_jsonrpc (limiter first;
-           loopback/platform; addresses pinned              │          internal agent → 401, as unexposed)
-   http://inst.<tailnet>/a2a/{name}  ───────────────────►   │   trusted → per-source + per-agent limits
-                                                            │     _internal_gate: internal + keyless →
-                                                            │       dispatch(triggered_by="a2a", source_host)
-                                                            │ keyed → internal + untrusted → 404
+  a2a_outbound_service.register / call_agent               POST /a2a/{name}
+   └ validate_endpoint → validate_a2a_endpoint_url          │ no credential → _anonymous_jsonrpc
+       public-HTTPS rule refuses (http / CGNAT)             │   limiter first; free path → 401
+       └ _validate_trusted_a2a_url(entries)                 │   (x402 path unchanged, ent#679)
+           name entry or CIDR; never metadata/              │ Trinity key → _authorize_inbound
+           loopback/platform; addresses pinned              │   (exposure, allow-list, access)
+   http://inst.<tailnet>/a2a/{name}  + Bearer key ──────►   │     → dispatch(triggered_by="a2a")
 ```
 
 - **Storage**: `system_settings['a2a_trusted_networks']` (JSON list, typed
-  admin route only), `['a2a_internal_base_url']`; `agent_ownership.a2a_scope`
-  and `a2a_keyless_internal`; `schedule_executions.source_host`. SQLite
-  migration `a2a_internal_scope`, Alembic `0096_a2a_internal_scope`.
-- **Setter**: `PUT /api/enterprise/a2a/{agent}/exposure {enabled, scope?,
-  keyless?}` (entitled, owner, human only); `A2aPanel.vue` "Who can reach it".
-- **Why the proxy is named, not ranged**: agents share the Docker bridge with
-  the proxy, and an agent calls `backend:8000` directly. Reading `X-Real-IP` from
-  any bridge peer would let an agent claim a trusted source.
-- **Why the trusted list is cached**: the anonymous door reads it before its
-  rate limiter, to choose a budget; the ent#679 ordering forbids a DB read per
-  flood request.
+  admin route only, the generic `PUT /api/settings/{key}` refuses the key).
+- **Checked twice**: when an endpoint is registered and again on every call
+  (`a2a_client` re-validates and pins the resolved addresses), so a name that
+  later resolves outside the allowed set is refused at call time.
+- **Off the list**: the v0.9.5 refusal, unchanged — `endpoint_private_address`
+  for a private/CGNAT address, `endpoint_not_https` for `http://`.
+- **Removed before 1.0 (ent#885)**: the keyless door, the internal-only scope
+  (`_internal_gate`, the card's internal base URL, the `a2a_internal_base_url`
+  setting), the inbound source resolution (proxy-container `X-Real-IP` trust,
+  cloudflared header sniffing) and the `source_host` attribution. The columns
+  `agent_ownership.a2a_scope`, `a2a_keyless_internal` and
+  `schedule_executions.source_host` (SQLite migration `a2a_internal_scope`,
+  Alembic `0096_a2a_internal_scope`) stay in the DDL, unread and unwritten; an
+  rc-era `internal` row is now an ordinary exposed agent. The exposure setter
+  is `PUT /api/enterprise/a2a/{agent}/exposure {enabled}` again.
+- **Tests**: `tests/unit/test_ent838_a2a_trusted_networks.py`,
+  `tests/unit/test_ent885_outbound_allowlist.py`,
+  `tests/unit/test_ent885_keyless_refused.py`,
+  `src/frontend/tests/unit/a2aPanelNoScope.spec.js`.

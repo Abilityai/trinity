@@ -14,7 +14,8 @@ Create is **self-gated** (review/Codex #1): ``AuthorizedAgent`` checks the key
 owner can access the path agent, but does NOT stop an agent-scoped key from
 reporting as a *sibling* agent the owner also accesses. So we additionally
 require an agent-scoped caller's bound ``agent_name`` to equal the path agent
-(mirrors heartbeat_service.authorize_heartbeat). User-scoped callers fall back to
+(the agent-scope half of heartbeat_service.authorize_heartbeat; the system
+agent's system-scoped key is not admitted here). User-scoped callers fall back to
 the access check.
 """
 import json
@@ -27,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from database import db
 from dependencies import (
     agent_may_reach,
+    assert_own_agent,
     get_current_user,
     AuthorizedAgent,
     OwnedAgent,
@@ -183,11 +185,7 @@ async def create_report(
 
     Self-gated: an agent-scoped key may only report as itself.
     """
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only report as itself",
-        )
+    assert_own_agent(current_user, name, detail="Agent-scoped key may only report as itself")
 
     # Cap report volume per agent so a runaway agent can't flood the table
     # between retention sweeps (review I3). Fail-open if Redis is down.

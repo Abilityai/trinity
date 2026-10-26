@@ -185,8 +185,10 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "integrations. (`list_a2a_endpoints` (operator-only) shows the registered names.) " +
         "`dedup_label` is required and must DIFFER for each distinct question you ask in this " +
         "turn: calls are deduplicated on the endpoint and conversation, not on your message, so " +
-        "reusing a label returns the earlier answer. If the remote replies with state 'working' " +
-        "or 'submitted', poll get_a2a_task with the returned task_id. " +
+        "reusing a label returns the earlier answer. A Trinity remote answers within 25 s: a " +
+        "longer turn comes back with state 'working' (or 'submitted') and a `task_id` — the " +
+        "remote is still running it, so poll get_a2a_task with that task_id; NEVER re-send the " +
+        "message, which asks the question again. " +
         "If the result carries `payment_required`, the remote charges for this call: relay the " +
         "`payment` details to a person ONCE and stop — do not retry, and do not call a different " +
         "endpoint instead. Only a person can buy the token, and an admin stores it on the " +
@@ -259,7 +261,9 @@ export function createA2ACallTools(client: TrinityClient, requireApiKey: boolean
         "timed out after the remote had already accepted the task. A `payment_required` result " +
         "here means the same as it does on a call: relay it to a person once and stop polling.",
       parameters: z.object({
-        agent_name: z.string().describe("The Trinity agent that placed the original call."),
+        agent_name: z.string().describe(
+          "The Trinity agent that placed the original call. An agent-scoped key may only pass its own name.",
+        ),
         endpoint: z.string().min(1).max(200).describe(
           "The same registered endpoint name the task was started on.",
         ),

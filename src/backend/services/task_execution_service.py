@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Optional, Tuple
+from types import SimpleNamespace
 
 import httpx
 
@@ -51,7 +52,7 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
-from services import skill_gate_service
+from services import peer_skill_policy, skill_gate_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
@@ -87,19 +88,82 @@ from db.write_params import ExecutionResult, TaskExecutionFields
 from db.skill_gate_requests import APPROVED_RUN_STATES
 
 
-def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
-    """The person a scheduled seat run is addressed to (ent#637), or None —
-    picks the seat the prompt names (trinity-enterprise#814). One row read, and
-    only for a schedule fire; fail-soft."""
+#: The resume turn a person answered (trinity-enterprise#329). Mirrors
+#: `operator_resume_service.TRIGGERED_BY`; not imported, to keep this module free
+#: of that service's import graph.
+_RESUME_TRIGGER = "operator_response"
+
+
+def served_person_for_row(row: Any) -> Optional[str]:
+    """The person a run serves, read off its execution row, or None — picks the
+    seat the prompt names (trinity-enterprise#814). Never rendered.
+
+    Two kinds of run serve one person: a scheduled seat run (ent#637, via
+    `schedule_seat_memory.seat_for_execution`) and the resume turn of an ask
+    the addressee discussed in the Workspace (ent#886). The resume row carries
+    no person column — who answered stays in the operator-queue row and the
+    audit row, never in the agent's prompt (ent#715) — so its served person is
+    the Workspace stamp `_workspace_destination` wrote, which exists only when
+    the responder IS the addressee. Read off the row so the push and the pull
+    composer agree: a pull claim rebuilds the turn from the row alone.
+
+    Accepts the ORM-ish row `db.get_execution` returns and the dict a pull claim
+    returns. Pure; fail-soft (any doubt is None, i.e. the primary's seat).
+    """
     from services import schedule_seat_memory
 
-    if not execution_id or (triggered_by or "").lower() not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+    if row is None:
+        return None
+
+    def field(name: str) -> Any:
+        if isinstance(row, dict):
+            return row.get(name)
+        return getattr(row, name, None)
+
+    trigger = (field("triggered_by") or "").lower()
+    if trigger in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS:
+        return schedule_seat_memory.seat_for_execution(SimpleNamespace(
+            triggered_by=field("triggered_by"),
+            schedule_id=field("schedule_id"),
+            source_channel=field("source_channel"),
+            source_channel_client=field("source_channel_client"),
+        ))
+    if trigger == _RESUME_TRIGGER:
+        if (field("source_channel") or "").lower() != schedule_seat_memory.PORTAL_SOURCE_CHANNEL:
+            return None
+        client = (field("source_channel_client") or "").strip().lower()
+        return client or None
+    return None
+
+
+def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str]) -> Optional[str]:
+    """`served_person_for_row` for the push composer: one row read, and only
+    for a trigger that can serve a person; fail-soft."""
+    from services import schedule_seat_memory
+
+    trigger = (triggered_by or "").lower()
+    if not execution_id or (
+        trigger not in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS and trigger != _RESUME_TRIGGER
+    ):
         return None
     try:
-        return schedule_seat_memory.seat_for_execution(db.get_execution(execution_id))
+        return served_person_for_row(db.get_execution(execution_id))
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_served_person_for({execution_id}) failed: {e}")
         return None
+
+
+def _default_model_for(agent_name: str) -> Optional[str]:
+    """The model a turn with no explicit model runs on.
+
+    The platform default is a Claude model id, so only a Claude Code agent gets
+    it. A Codex or Gemini agent gets ``None`` and runs on its own model
+    (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
+    ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+    """
+    if _resolve_agent_runtime(agent_name) != "claude-code":
+        return None
+    return settings_service.get_platform_default_model()
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -892,10 +956,53 @@ async def dispatch_and_await_terminal(
     return result_from_execution_row(result.execution_id) or result
 
 
+async def start_dispatch_activity(
+    *,
+    agent_name: str,
+    message: str,
+    execution_id: Optional[str],
+    triggered_by: str,
+    source_agent_name: Optional[str],
+    source_user_id: Optional[int],
+    parent_activity_id: Optional[str],
+    extra_activity_details: Optional[dict],
+) -> Optional[str]:
+    """Open the CHAT_START dispatch activity. Shared by push dispatch
+    (``execute_task`` step 3) and the pull claim (#3932), so the two paths
+    write the same timeline bar.
+
+    Best-effort — a tracking failure logs and returns ``None`` (the
+    turn proceeds without a paired activity, as before).
+    """
+    activity_id: Optional[str] = None
+    activity_details = {
+        "message_preview": message[:100] if message else "",
+        "source_agent": source_agent_name,
+        "execution_id": execution_id,
+        "triggered_by": triggered_by,
+    }
+    if extra_activity_details:
+        activity_details.update(extra_activity_details)
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=agent_name,
+            activity_type=ActivityType.CHAT_START,
+            user_id=source_user_id,
+            triggered_by=triggered_by,
+            parent_activity_id=parent_activity_id,
+            related_execution_id=execution_id,
+            details=activity_details,
+        )
+    except Exception as e:
+        logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
+    return activity_id
+
+
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
-    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    terminal writer does. Also the a2a queued-cancel close (#3651). Fire-and-
+    forget; every caller runs inside a request or task, so a loop is running."""
     activity_service.spawn_close_execution_activity(execution_id, status, error=error)
     event_dispatch_service.spawn_task_terminal_event(
         agent_name, execution_id, terminal_status=status, summary_or_error=error,
@@ -955,9 +1062,21 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
     )
     error_code, error = _split_error_code(error)
+    # #3487: a pulled turn that walked the subscription pool carries the same
+    # summary a pushed one returns (`subscription_switch`, #3470 shape).
+    subscription_switch = None
+    try:
+        walk_state = json.loads(getattr(execution, "backlog_metadata", None) or "{}").get(
+            "subscription_walk"
+        )
+        if isinstance(walk_state, dict) and isinstance(walk_state.get("summary"), dict):
+            subscription_switch = walk_state["summary"]
+    except (TypeError, ValueError, AttributeError):
+        subscription_switch = None
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
+        subscription_switch=subscription_switch,
         response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
@@ -1486,9 +1605,9 @@ class TaskExecutionService:
         # splats straight into this signature — an unaccepted keyword here is a
         # TypeError on every Workspace turn, not a silently-dropped column.
         source_channel_client: Optional[str] = None,
-        # trinity-enterprise#838: a keyless trusted-network A2A caller's address,
-        # stamped on the row as its attribution.
-        source_host: Optional[str] = None,
+        # trinity#3653: the agent whose channel binding owns the context, for a
+        # row that is not that agent's direct turn (a gated request's wake-up).
+        source_channel_agent: Optional[str] = None,
         # ent#555 — which canvas the user had open when they sent this turn.
         open_canvas_id: Optional[str] = None,
         # #3114: the conversation this turn continues, e.g. "session:<key>".
@@ -1547,10 +1666,11 @@ class TaskExecutionService:
         if timeout_seconds is None:
             timeout_seconds = db.get_execution_timeout(agent_name)
 
-        # #831: Resolve null model → platform default so the agent always receives
-        # a concrete model string. Avoids the stale "sonnet" hardcode in base-image.
+        # #831: Resolve null model → platform default so a Claude Code agent
+        # always receives a concrete model string. Avoids the stale "sonnet"
+        # hardcode in base-image.
         if model is None:
-            model = settings_service.get_platform_default_model()
+            model = _default_model_for(agent_name)
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the
@@ -1606,7 +1726,7 @@ class TaskExecutionService:
                     # persisting it would leave `_resolve_portal` failing closed on
                     # every row this branch creates — the sync Workspace turn.
                     source_channel_client=source_channel_client,
-                    source_host=source_host,
+                    source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
                 ),
             )
@@ -1684,7 +1804,6 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
-                        source_host=source_host,
                     ),
                 )
 
@@ -1704,7 +1823,7 @@ class TaskExecutionService:
                 return admission_denied
 
             # ---- 3. Track activity start -------------------------------------
-            activity_id = await self._start_dispatch_activity(
+            activity_id = await start_dispatch_activity(
                 agent_name=agent_name,
                 message=message,
                 execution_id=execution_id,
@@ -1944,12 +2063,15 @@ class TaskExecutionService:
         so the caller answers pending / refused instead of dispatching.
         """
         try:
-            # The gate map first: while nothing is gated (the common case, and
-            # every install until gates are set) this is the only read.
+            # The gate map first: while nothing is gated and the agent holds no
+            # library skill (the common case) these are the only reads.
+            # abilityai/trinity-enterprise#662: an agent with library skills
+            # but no gates still goes through `enforce`, whose peer check is
+            # the rule for what an edge exposes.
             gates = skill_gate_service.read_gates(agent_name)
-            if not gates:
+            if not gates and not peer_skill_policy.has_library_skills(agent_name):
                 return
-            if execution_id:
+            if gates and execution_id:
                 approved = db.get_gate_request_by_dispatched_execution(execution_id)
                 if (approved and approved.get("agent_name") == agent_name
                         and approved.get("state") in APPROVED_RUN_STATES):
@@ -2183,47 +2305,6 @@ class TaskExecutionService:
                 )
 
         return slot_acquired, None
-
-    async def _start_dispatch_activity(
-        self,
-        *,
-        agent_name: str,
-        message: str,
-        execution_id: Optional[str],
-        triggered_by: str,
-        source_agent_name: Optional[str],
-        source_user_id: Optional[int],
-        parent_activity_id: Optional[str],
-        extra_activity_details: Optional[dict],
-    ) -> Optional[str]:
-        """Step 3 of execute_task: open the CHAT_START dispatch activity.
-
-        Best-effort — a tracking failure logs and returns ``None`` (the
-        turn proceeds without a paired activity, as before).
-        """
-        activity_id: Optional[str] = None
-        # ---- 3. Track activity start -------------------------------------
-        activity_details = {
-            "message_preview": message[:100] if message else "",
-            "source_agent": source_agent_name,
-            "execution_id": execution_id,
-            "triggered_by": triggered_by,
-        }
-        if extra_activity_details:
-            activity_details.update(extra_activity_details)
-        try:
-            activity_id = await activity_service.track_activity(
-                agent_name=agent_name,
-                activity_type=ActivityType.CHAT_START,
-                user_id=source_user_id,
-                triggered_by=triggered_by,
-                parent_activity_id=parent_activity_id,
-                related_execution_id=execution_id,
-                details=activity_details,
-            )
-        except Exception as e:
-            logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-        return activity_id
 
     async def _breaker_fast_fail(
         self,

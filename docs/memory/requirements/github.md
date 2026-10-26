@@ -220,6 +220,25 @@
 - **FR-6 — Private repos with no token fail with a named error**, never a raw
   500 (FR-2's combined 400 at create; auth-classified clone failure +
   `.git-clone-status` marker in-container if a repo goes private later).
+- **FR-7 — A public template's metadata read does not depend on one tier's
+  token (#3725)**: the create-path `template.yaml` read keeps today's single
+  read with the preferred tier when it answers (200, or a clean 404 = absent).
+  When that read is unreadable it walks the remaining tiers in resolver order
+  (per_user → global, each token value once — `resolve_github_pat_candidates`),
+  where only a 200 ends the walk; then the credential-free path: an anonymous
+  `git ls-remote` proves the repo public and pins the ref to a SHA
+  (`probe_anonymous_ref`), and `raw.githubusercontent.com/{owner}/{repo}/{sha}/template.yaml`
+  is read through the hardened loader — a 404 there is definitive absence and
+  clears the earlier rejections. Skipped (fail-closed) on a non-default
+  `TRINITY_GIT_BASE_URL`. Only an HTTP 401 replaces the create's identity (with
+  the tier that read, or tokenless — re-gated by FR-1, naming the rejected
+  saved token); never persisted, never on fork, never on 403 or an outage. A
+  403 from the REST access check is re-checked over the git transport with the
+  same token against the branch to clone (`probe_tokened_repo_access`). When no
+  path can read, the refusal stays 503 `TEMPLATE_METADATA_UNAVAILABLE` and
+  names every tier tried with a status category (`detail.attempts`), never a
+  token or URL. The ent#14 fail-closed gate is unchanged for a template no
+  path can read.
 - **Mixed-fleet caveat (release note)**: an un-rebuilt base image still has the
   old `GITHUB_PAT`-gated clone block — tokenless creation on an old image
   yields an empty agent with no failure marker. Base-image rebuild is a hard
@@ -255,7 +274,7 @@
   proxy timeout can resolve the outcome). Orchestration lives in
   `services/agent_service/repo_binding.py` (Invariant #1); the router is a thin
   HTTP mapper over domain errors.
-- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → GitHub token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
+- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
 
 - **FR-1 — Supported row states are an explicit table; the unclassified is
   refused by name, never guessed.** Partitioned by `source_mode`, which is the

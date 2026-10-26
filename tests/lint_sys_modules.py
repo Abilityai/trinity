@@ -10,7 +10,11 @@ that re-import the same module later.
 Allowed patterns:
   - inside an explicit allowlist of conftest paths
     (tests/conftest.py, tests/*/conftest.py)
-  - via `monkeypatch.setitem(sys.modules, ...)` / `monkeypatch.delitem(...)`
+  - via `monkeypatch.setitem(sys.modules, ...)` to stub a module, and
+    `module_split_guard.evict(monkeypatch, ...)` (tests/module_split_guard.py)
+    to evict one: it also restores the parent package attribute (see below)
+  - `monkeypatch.delitem(sys.modules, ...)` of a top-level name, and of any
+    name under tests/unit/ (see below)
   - named snapshot/restore helpers identified by the `_STUBBED_MODULE_NAMES`
     + `_restore_sys_modules` fixture pair already established in
     tests/unit/test_telegram_webhook_backfill.py
@@ -45,6 +49,17 @@ body):
   - `del sys.modules[key]`
   - `sys.modules.pop(key)`
 
+Banned outside tests/unit/, even in a file with the snapshot/restore helpers
+(baselined like the rest):
+  - `monkeypatch.delitem(sys.modules, <dotted or computed name>)` (#3390). It
+    puts back only the sys.modules entry. The re-import that usually follows
+    also rebinds the parent package attribute, and nothing restores that, so
+    the rest of the session runs two copies of the module: a test that patches
+    one copy runs code that reads the other (#3272's 40 failures). Under
+    tests/unit/ the conftest's split guard repairs it after every test;
+    nothing does in the other suites. A literal top-level name ("database")
+    has no parent attribute and stays allowed.
+
 CLI:
   python tests/lint_sys_modules.py
         Exit 0 if zero NEW violations vs baseline; 1 otherwise.
@@ -67,9 +82,12 @@ TESTS_ROOT = Path(__file__).resolve().parent
 BASELINE_FILE = TESTS_ROOT / "lint_sys_modules_baseline.txt"
 
 BANNED_METHODS = {"setdefault", "update", "pop"}
+# The unit island's conftest repairs a split package attribute after every test
+# (#3390), so the delitem rule below is for the rest of tests/.
+SPLIT_HEALED_DIR = TESTS_ROOT / "unit"
 FIX_HINT = (
-    "use monkeypatch.setitem(sys.modules, ...) or "
-    "monkeypatch.delitem(sys.modules, ..., raising=False), "
+    "use monkeypatch.setitem(sys.modules, ...) to stub a module and "
+    "module_split_guard.evict(monkeypatch, ...) to evict one, "
     "or move to conftest.py. "
     "For import-time stubs that monkeypatch can't reach (e.g. preloads "
     "of heavy backend deps before any fixture runs), declare a top-level "
@@ -151,6 +169,37 @@ EVICTION_HINT = (
 )
 
 
+EVICT_HINT = (
+    "monkeypatch.delitem(sys.modules, ...) puts back only the sys.modules entry; "
+    "the re-import that usually follows also rebinds the parent package "
+    "attribute, and nothing restores that, so the rest of the session runs two "
+    "copies of the module (#3390, #3272). Use "
+    "module_split_guard.evict(monkeypatch, name), which restores both halves"
+)
+
+
+def _is_sys_modules_delitem(node: ast.AST) -> bool:
+    """`<anything>.delitem(sys.modules, ...)`: monkeypatch's eviction, any receiver."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "delitem"
+        and bool(node.args)
+        and _is_sys_modules_expr(node.args[0])
+    )
+
+
+def _may_evict_a_submodule(call: ast.Call) -> bool:
+    """A literal top-level name has no parent attribute to leave behind; a
+    dotted literal does, and a computed key (a loop variable, an f-string) may."""
+    key = call.args[1] if len(call.args) > 1 else next(
+        (kw.value for kw in call.keywords if kw.arg == "name"), None
+    )
+    if isinstance(key, ast.Constant) and isinstance(key.value, str):
+        return "." in key.value
+    return True
+
+
 def _contains_sys_modules_pop(node: ast.AST) -> bool:
     return any(
         _is_sys_modules_attr_call(sub, {"pop"}) or (
@@ -226,6 +275,20 @@ def _check_file(path: Path) -> list[Finding]:
             )
         )
 
+    # Before the helper exemption: the snapshot/restore pair restores sys.modules
+    # entries, not the package attributes this rule is about.
+    if not path.is_relative_to(SPLIT_HEALED_DIR):
+        for node in ast.walk(tree):
+            if _is_sys_modules_delitem(node) and _may_evict_a_submodule(node):
+                findings.append(
+                    Finding(
+                        path=path,
+                        lineno=node.lineno,
+                        col=node.col_offset,
+                        message=f"monkeypatch.delitem of a submodule: {EVICT_HINT}",
+                    )
+                )
+
     helper_exception = _has_stubbed_module_names_helper(tree)
     if helper_exception:
         return findings
@@ -277,7 +340,9 @@ def iter_test_files(root: Path) -> Iterable[Path]:
     # baseline doesn't drift on dep upgrades or machine-local venvs.
     EXCLUDED_DIR_PARTS = {".venv", "venv", "__pycache__", ".pytest_cache", "node_modules"}
     for path in sorted(root.rglob("*.py")):
-        if path.name in {"lint_sys_modules.py", "test_lint_sys_modules.py"}:
+        # _split_guard_sample.py leaves a module in sys.modules on purpose: it is
+        # the polluter test_3390_module_split_guard.py runs in a subprocess.
+        if path.name in {"lint_sys_modules.py", "test_lint_sys_modules.py", "_split_guard_sample.py"}:
             continue
         if EXCLUDED_DIR_PARTS.intersection(path.parts):
             continue
@@ -410,7 +475,7 @@ def main(argv: list[str]) -> int:
         print(line)
     print(
         f"\nFAIL: {len(new_or_grew)} file(s) exceed baseline. "
-        f"Fix the new occurrences (use monkeypatch.setitem / monkeypatch.delitem) "
+        f"Fix the new occurrences (use monkeypatch.setitem / module_split_guard.evict) "
         f"or, if you intentionally accept more, run "
         f"`python tests/lint_sys_modules.py --regenerate-baseline`."
     )

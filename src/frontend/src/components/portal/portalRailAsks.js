@@ -9,8 +9,9 @@
 // through `asksByAgent` exactly as the sidebar reads it, so the tab and the
 // mark cannot disagree.
 
-import { actionItems, itemKey } from './portalInbox'
+import { actionItems, itemKey, INBOX_SORT_DEFAULT } from './portalInbox'
 import { asksHomeRoute } from './portalUtils'
+import { feedView } from './portalRail'
 
 export const ASKS_TAB_ID = 'asks'
 
@@ -19,14 +20,19 @@ const names = (participants) => (Array.isArray(participants) ? participants : []
   .map((p) => p.trim())
 
 /**
- * The rows: Action's items (pending only, urgency order — `askUrgencyCompare`)
- * kept only for the participants. A filter over the finished list, never a
- * re-sort, so a 1:1 lists exactly `filterByAgent(actionItems(asks), agent)`.
+ * The rows: Action's items (pending only) kept only for the participants. A
+ * filter over the finished list, never a re-sort, so a 1:1 lists exactly
+ * `filterByAgent(actionItems(asks), agent)`.
+ *
+ * trinity-enterprise#856 (T3): in Action's DEFAULT order (Newest), passed by
+ * name so it is a decision rather than an inheritance — the rows open the Inbox
+ * on Action, which opens in that order. The rail has no sort control and does
+ * not read the viewer's remembered Inbox sort.
  */
 export function railAskItems(openAsks, participants, now = Date.now()) {
   const keep = new Set(names(participants))
   if (!keep.size) return []
-  return actionItems(openAsks, now).filter((it) => keep.has(it.agent_name))
+  return actionItems(openAsks, now, INBOX_SORT_DEFAULT).filter((it) => keep.has(it.agent_name))
 }
 
 /**
@@ -55,4 +61,18 @@ export function asksSignalFrom(askCounts, participants) {
   return { live: 0, updated: true, agents, note: `${count} ${count === 1 ? 'ask' : 'asks'}`, count }
 }
 
-export { asksTabPresent } from './portalRail'
+/**
+ * ent#892 — the body's verdict, now that the tab is always present: the empty
+ * copy only after a read SUCCEEDED with nothing waiting (never in the frame
+ * before the first read lands). An instance that does not serve asks (the
+ * store's 404/403 verdict, `asksAbsent`) has nothing waiting, so it is empty
+ * rather than a skeleton that never resolves. `count` is the narrowed rows.
+ */
+export function railAsksView({ participants = [], asksLoaded = false, asksAbsent = false, asksFailed = false, count = 0 } = {}) {
+  return feedView({
+    participants,
+    hasLoaded: asksLoaded === true || asksAbsent === true,
+    error: asksFailed === true && asksAbsent !== true ? 'failed' : null,
+    count,
+  })
+}

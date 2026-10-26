@@ -6,13 +6,13 @@ Trinity is **the operating system for the AI-native company** — open source, s
 
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 24, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
 **Template** -- A GitHub repository or local directory that defines an agent's initial configuration, including CLAUDE.md, template.yaml, .mcp.json.template, and credential declarations.
 
-**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 160 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
+**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 168 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
 
 **System Agent** -- An auto-deployed platform orchestrator (`trinity-system`) that manages fleet operations such as health checks, scaling, and coordination. It is deployed when the backend starts, or — on an install whose admin is created in the browser — right after that account exists.
 
@@ -32,7 +32,7 @@ Trinity runs as a set of Docker containers on your local machine or server. Afte
 
 1. **Start the platform** -- Run `./scripts/deploy/start.sh` to bring up all services. The web UI is available at `http://localhost` and the API at `http://localhost:8000/docs`. On your first login a short first-run setup connects Claude and walks you to your first agent (see [Setup](setup.md#your-first-dashboard)).
 2. **Create an agent** -- From the dashboard, click "Create Agent" and select a template (GitHub repo URL or local path). Trinity pulls the template, builds a container, and deploys the agent.
-3. **Configure credentials** -- Add API keys and secrets on the agent's **Credentials** tab. Trinity writes them into the agent's `.env` and credential files inside the container, with hot-reload support — no restart needed (see [Credential Management](../credentials/credential-management.md)).
+3. **Configure credentials** -- Add API keys and secrets in the agent's **Settings › Storage › Credentials** section. Trinity writes them into the agent's `.env` and credential files inside the container, with hot-reload support — no restart needed (see [Credential Management](../credentials/credential-management.md)).
 4. **Chat with the agent** -- Open the **Workspace** for a continuous conversation, or use the stateless Chat tab on the agent detail page for one-off turns. The agent processes your request using its configured tools, MCP connections, and reasoning context.
 5. **Schedule autonomous work** -- Set up cron-based schedules so the agent executes tasks on its own. Enable Autonomy Mode to let the agent's enabled schedules run.
 6. **Monitor the fleet** -- Use the Dashboard (Timeline, Grid, or List) to view agent health and execution history; inter-agent calls show up in the Timeline replay. A new agent appears on the Dashboard as soon as it is created.
@@ -47,7 +47,7 @@ All platform operations are available through the REST API and the MCP server.
 |-----------|-----------|------|---------|
 | Frontend | Vue.js 3 + Tailwind CSS | 80 | Web dashboard and chat UI |
 | Backend | FastAPI (Python) | 8000 | REST API, 600+ endpoints across 80+ routers |
-| MCP Server | FastMCP, Streamable HTTP | 8080 | 160 tools for agent-to-agent and agent-to-platform communication |
+| MCP Server | FastMCP, Streamable HTTP | 8080 | 168 tools for agent-to-agent and agent-to-platform communication |
 | Vector | Log aggregation | 8686 | Structured logging from all containers |
 | Redis | Event bus and cache | 6379 | Real-time event stream, rate limits, transient secrets |
 | Database | SQLite or PostgreSQL | -- | Platform state. A local `start.sh` install uses SQLite, which reached end-of-support on 2026-09-01; a fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL |

@@ -268,8 +268,11 @@ const idempotencyKey = deriveMcpIdempotencyKey([
   model,
   asyncMode ? "async" : "sync",
   message,
+  ...(turnScope ? [`turn:${turnScope}`] : []),  // #3296: the platform-stamped caller turn
 ]);
 ```
+
+**Turn scope (#3296)**: `turnScope` is `callerTurn` (the platform's `X-Trinity-Execution-Id`, never the model-typed `execution_id`), so the same text sent from a later turn is a new delegation instead of a replay of the first turn's run; a retry from the same turn still replays, and so does a scheduler retry of the run (the scope is the retry chain's original execution, `delegationTurnScope`). See [idempotency-keys.md](idempotency-keys.md#mcp-layer-invariant-13--third-surface-in-sync).
 
 **Why**: the backend derives the same `agent:{name}` idempotency scope for BOTH `/chat` and `/task`. A sequential agent→agent call dispatched as sync `/chat` (flag OFF) vs async `/task` (flag ON) must NOT share an idempotency key — else a flag flip mid-soak could replay a wrong-shape snapshot across endpoints. The pull-routed call therefore gets a distinct `"chat-pull-task"` token. A transport retry WITHIN one mode keeps the same key (still dedupes). Existing parallel / self-task / `scope='user'` tokens are unchanged, so no in-flight key is invalidated on deploy. (See `idempotency-keys.md`, Invariant #18.)
 
@@ -768,8 +771,11 @@ result = mcp__trinity__chat_with_agent(
 Slack, Telegram or Workspace conversation, an async delegation carries that
 turn as `parent_execution_id` by default, so the delegated run posts its
 outcome there when it ends (the receipt says `report_back: "requested"`).
-Pass `execution_id="manual"` to keep a call quiet; a `parallel=true` sync call opts in by
-passing your own `execution_id`. Rules and debugging:
+A plain sequential call reports too when it comes back with a receipt instead of
+the reply (#3295) — it is armed at that moment, so a call that answers inline
+never posts a second "done". Pass `execution_id="manual"` to keep a call quiet;
+a `parallel=true` sync call opts in by passing your own `execution_id`. Rules
+and debugging:
 [channel-completion-report.md](channel-completion-report.md#how-an-mcp-delegation-carries-the-parent-3232).
 
 See [Parallel Headless Execution](parallel-headless-execution.md) for complete async mode documentation.

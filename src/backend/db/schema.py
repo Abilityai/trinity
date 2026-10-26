@@ -100,8 +100,8 @@ TABLES = {
             circuit_breaker_enabled INTEGER DEFAULT 0,
             mcp_exposed INTEGER DEFAULT 0,
             a2a_exposed INTEGER DEFAULT 0,
-            a2a_scope TEXT DEFAULT 'public',
-            a2a_keyless_internal INTEGER DEFAULT 1,
+            a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
+            a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -302,6 +302,9 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- ent#862: AAuth peer identity that triggered this execution,
+            -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
+            a2a_caller_identity TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -678,7 +681,10 @@ TABLES = {
             attachments TEXT,
             -- #3166: the execution (turn) that wrote the row. NULL on rows from
             -- before the column and on rows no turn wrote (completion reports).
-            execution_id TEXT
+            execution_id TEXT,
+            -- trinity#3402: as `public_chat_messages.gate_hold` — a turn the
+            -- gate held or refused, and its notice, never replayed to the agent.
+            gate_hold TEXT
         )
     """,
 
@@ -780,6 +786,23 @@ TABLES = {
             execution_id TEXT,                         -- schedule_executions.id (nullable)
             created_at TEXT NOT NULL,
             UNIQUE(room_id, seq)
+        )
+    """,
+
+    # trinity#3402 — the room messages one agent's skill gate stopped: a post
+    # it held (or refused for good) and the notice line, per agent. Every wake
+    # of that agent leaves them out of what it is shown and of what the gate
+    # scans; other agents still read them. `gate_hold` is the request id or
+    # `refused:<code>`. No `enterprise_` prefix: on the room tables that prefix
+    # is the three legacy names' history.
+    "room_gate_holds": """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
         )
     """,
 
@@ -1073,6 +1096,12 @@ TABLES = {
             cost REAL,
             sender_email TEXT,
             sender_label TEXT,
+            -- trinity#3402: NULL for an ordinary row. Otherwise the row is a
+            -- gated request that did not run as itself, or the platform's
+            -- answer to one, and is never replayed to the agent: the request
+            -- id the gate raised (`gate-…`), `refused:<code>`, or `named`
+            -- (written naming a gated skill, before its verdict).
+            gate_hold TEXT,
             FOREIGN KEY (session_id) REFERENCES public_chat_sessions(id) ON DELETE CASCADE
         )
     """,
@@ -1277,6 +1306,19 @@ TABLES = {
             granted_by TEXT NOT NULL,
             granted_at TEXT NOT NULL,
             PRIMARY KEY (agent_name, capability)
+        )
+    """,
+    # abilityai/trinity-enterprise#662 — the per-skill grant over an edge: caller
+    # X may run library-assigned skill Y on target Z. Without a row a peer may
+    # invoke only Z's DECLARED skills. Both agent columns are CASCADE AgentRefs.
+    "agent_peer_skill_grants": """
+        CREATE TABLE IF NOT EXISTS agent_peer_skill_grants (
+            caller_agent TEXT NOT NULL,
+            target_agent TEXT NOT NULL,
+            skill_name TEXT NOT NULL,
+            granted_by TEXT NOT NULL,
+            granted_at TEXT NOT NULL,
+            PRIMARY KEY (caller_agent, target_agent, skill_name)
         )
     """,
 
@@ -1851,6 +1893,39 @@ TABLES = {
         )
     """,
 
+    # Nevermined card delegation (trinity-enterprise#966). The organization is
+    # a singleton (id = 'default'); its widget secret and agent API key live in
+    # one AES-256-GCM envelope and are never returned by any route. Nevermined
+    # holds the card and the mandate; Trinity keeps only the delegation id.
+    "nevermined_organization": """
+        CREATE TABLE IF NOT EXISTS nevermined_organization (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            encrypted_credentials TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        )
+    """,
+
+    "agent_delegations": """
+        CREATE TABLE IF NOT EXISTS agent_delegations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            delegation_id TEXT NOT NULL,
+            payment_method_id TEXT,
+            provider TEXT,
+            environment TEXT NOT NULL,
+            api_key_injected INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_by TEXT,
+            agent_deleted_at TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Agent Event Subscription Tables (EVT-001)
     # -------------------------------------------------------------------------
@@ -2250,6 +2325,7 @@ INDEXES = [
     # Agent skills indexes
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_agent ON agent_skills(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_agent_skills_skill ON agent_skills(skill_name)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_peer_skill_grants_target ON agent_peer_skill_grants(target_agent)",
     # ent#596: "which agents hold capability X" is the grant list's one read.
     "CREATE INDEX IF NOT EXISTS idx_agent_capability_grants_cap ON agent_capability_grants(capability)",
     # ent#237: resolution order for the custom-wins precedence merge.
@@ -2328,6 +2404,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_agent ON nevermined_payment_log(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_execution ON nevermined_payment_log(execution_id)",
+    # trinity-enterprise#966 — one active binding per agent; a deleted agent's
+    # kept row is not active.
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent ON agent_delegations(agent_name, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active ON agent_delegations(agent_name) WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
 
     # Agent event subscription indexes (EVT-001)
     "CREATE INDEX IF NOT EXISTS idx_event_subs_subscriber ON agent_event_subscriptions(subscriber_agent)",

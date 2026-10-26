@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)
@@ -106,8 +107,18 @@
 
 ### 1.6 Agent Live Telemetry
 - **Status**: ✅ Implemented
-- **Description**: Real-time container metrics in agent header
+- **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
+
+### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
+- **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
+- **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
+- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials → credentials` (trinity-enterprise#951), `folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
+- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. Credentials (trinity-enterprise#951, directly after General) is the former Credentials tab — guided setup, credential files, Quick Inject, upload, export/import; its file list never reports "not present" for an agent it could not read (stopped, or a failed read), and an agent with no `.env` gets a next action. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
+- **FR-3 — One restart banner**: every change waiting for a restart (file sharing, shared folders, memory/CPU, guardrail rules, GitHub token, funding) is named in ONE banner at the top of Settings with one Restart (or Start, when stopped) button. It keeps its footprint when nothing waits. Memory/CPU is saved and applied on the next restart — no longer an immediate restart.
+- **FR-4 — Execution timeout (ent#353)**: minutes, 1–120, default 60; out-of-range input gets a named error before any request; #929's `agent_timeout_below_active_schedules` refusal is rendered as a sentence naming the longest schedule and an "Open Schedules" button.
+- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Credentials, Guardrails and Integrations (Credentials since trinity-enterprise#951 — it always had the Credentials tab). At phone width the rail becomes a pane select; no horizontal page scroll.
+- **Open decision**: ent#891 asks that People hide when user management is unentitled. It is shown to every owner for now, because the pane holds OSS sharing (adding a person by email) that the Access tab offered to every owner; its entitled sections gate themselves.
 
 ---
 
@@ -217,7 +228,7 @@
 - **Admin surface**: `GET/PUT/DELETE /api/settings/template-registry`, registered **before** the `/{key}` catch-all (Invariant #4) like `/skills-library` and `/brain-orb`. Writes are `assert_admin` **+ `reject_agent_principal`** — a role gate answers *what role*, never *is this a human*, and `get_current_user` resolves an agent-scoped MCP key to its owner **carrying the owner's role**, so on a default admin-owned install any agent's injected `TRINITY_MCP_API_KEY` satisfies a bare admin gate (trinity-ops-agent#232 class). Here the consequence is direct: an agent could otherwise repoint the platform's template registry at a URL it controls. Both keys are additionally **422-blocked on the generic `PUT /api/settings/{key}`** (which takes an unvalidated `Dict[str, str]`) — without that the SSRF gate is one generic PUT away from being bypassed. Validate at the boundary **and** at the sink (#1525).
 - **Status is part of the contract**: `GET` returns `{last_fetch_at, last_status: ok|failed|disabled|never, last_error_code, template_count, stale, errors[]}`. This is what makes fail-open **visible** rather than silent — an operator whose registry 404s must see that from the panel, not by grepping logs (ent#236's "the panel must be able to show a *failing* auto-sync"). `last_error_code` is a fixed lowercase vocabulary (`unreachable`, `timeout`, `http_error`, `too_large`, `encoding_refused`, `parse_refused`, `unsupported_version`, `bad_shape`, `invalid_url`, `redirect`) — **never a raw exception string**, so a hostile server's response text cannot reach the panel.
 - **Honest cost — the GitHub cold-cache call count returns**: #1931's side-effect was "zero outbound GitHub calls on a cold metadata cache". A non-empty registry re-introduces one `template.yaml` fetch per listed repo per cold cache. At the 600 s per-repo TTL and `--workers 2` the steady state is `workers × windows/hr × entries` — `12 × entries` per hour at a 10-minute window. On an install with **no platform PAT** GitHub's anonymous limit is 60 req/hr per IP, so above ~5 entries the metadata fetch is rate-limited some of the time. Three things make this acceptable: it degrades gracefully by design (a 403 returns `{}` and `_build_template` falls back to the **registry-supplied** display fields, so the card still renders and only derived chips go empty — the concrete payoff of reusing the `admin_override` shape); it is not new (an admin curating 25 repos via TMPL-001 hits the same wall today); and a platform PAT raises the limit to 5000/hr and is already a first-class settings surface. `MAX_REGISTRY_TEMPLATES = 25` is sized against this, and the 3600 s registry TTL keeps the *registry's own* fetch off that budget entirely. **Operators listing more than ~5 repos without a platform PAT should configure one.**
-- **`fork_to_own` fails closed on unreadable metadata (the fix that gates default-ON)**: graceful display degradation is true for display fields and **false** for `fork_to_own`. `_fetch_template_yaml_result` distinguishes "no `template.yaml`" from "could not read it" and the catalog wrapper used to throw the reason away, so a rate-limited (403) fetch produced `fork_to_own: None` and `crud._apply_fork_to_own`'s `== "required"` test never fired — creating the agent **bound to the shared upstream template repo instead of a user-owned copy** (the ent#162 class, reached with no attacker). Pre-existing, but this feature converts it from unreachable to *expected*: it re-introduces per-repo fetches on a **default** install, ships default-ON, and its own arithmetic puts `N > 5` over the anonymous budget — while ent#137's curated fleet is very likely to include the `fork_to_own: required` agent. The creation path now **refuses** (`503`, `TEMPLATE_METADATA_UNAVAILABLE`) rather than treating unreadable as absent. **Which read decides is the whole fix**: both the availability verdict and the `fork_to_own` value come from the CREATION-path read (`crud._read_source_template` → `fetch_template_metadata_result_for_create`) — the PAT that will actually clone, at the requested ref, cache-bypassed — not from the catalog dict, whose `metadata_unavailable`/`fork_to_own` come from the global-platform-PAT, default-branch, 600 s-cached `_get_cached_metadata_result`. Reading the catalog failed in both directions: GitHub answers **404, not 403**, for a repo a token cannot see, so a *private* `fork_to_own: required` template readable only by the creator's per-user PAT (ent#162) classified as ABSENT and the gate passed — the precise outcome it exists to prevent, no attacker involved — while a shared 403 in the cache 503'd every non-forking `github:` create for the full TTL. Fixing only the availability half would not have closed the false pass: the *value* must come from the correctly-credentialed read too. Costs zero extra GitHub calls (it consumes the read ent#89 already makes for `schedules:`), and `required` declared by **either** read enforces, so the change can only remove a false pass, never add one. A clean **HTTP 404 is still "absent"**, so a repo that genuinely ships no `template.yaml` creates exactly as before. The trade is deliberate and is the `learnings.md` 2026-07-15 direction-of-failure rule applied to a gate: agent creation now depends on GitHub API reachability where it previously depended only on `git clone`, and a loud retryable refusal beats a silent wrong-repo binding. Regression-tested by `tests/unit/test_ent14_fork_to_own_failclosed.py`.
+- **`fork_to_own` fails closed on unreadable metadata (the fix that gates default-ON)**: graceful display degradation is true for display fields and **false** for `fork_to_own`. `_fetch_template_yaml_result` distinguishes "no `template.yaml`" from "could not read it" and the catalog wrapper used to throw the reason away, so a rate-limited (403) fetch produced `fork_to_own: None` and `crud._apply_fork_to_own`'s `== "required"` test never fired — creating the agent **bound to the shared upstream template repo instead of a user-owned copy** (the ent#162 class, reached with no attacker). Pre-existing, but this feature converts it from unreachable to *expected*: it re-introduces per-repo fetches on a **default** install, ships default-ON, and its own arithmetic puts `N > 5` over the anonymous budget — while ent#137's curated fleet is very likely to include the `fork_to_own: required` agent. The creation path now **refuses** (`503`, `TEMPLATE_METADATA_UNAVAILABLE`) rather than treating unreadable as absent. **Which read decides is the whole fix**: both the availability verdict and the `fork_to_own` value come from the CREATION-path read (`crud._read_source_template` → `fetch_template_metadata_result_for_create`) — the PAT that will actually clone, at the requested ref, cache-bypassed — not from the catalog dict, whose `metadata_unavailable`/`fork_to_own` come from the global-platform-PAT, default-branch, 600 s-cached `_get_cached_metadata_result`. Since #3725 that creation read is no longer one read with one platform-PAT remedy: when the preferred tier cannot read the template it walks the remaining tiers, then a credential-free SHA-pinned read, and the 503 names every tier tried — see FR-7 in [`github.md` §11.11](github.md#1111-pat-free-clone-of-public-templates-trinity-enterprise123). Reading the catalog failed in both directions: GitHub answers **404, not 403**, for a repo a token cannot see, so a *private* `fork_to_own: required` template readable only by the creator's per-user PAT (ent#162) classified as ABSENT and the gate passed — the precise outcome it exists to prevent, no attacker involved — while a shared 403 in the cache 503'd every non-forking `github:` create for the full TTL. Fixing only the availability half would not have closed the false pass: the *value* must come from the correctly-credentialed read too. Costs zero extra GitHub calls (it consumes the read ent#89 already makes for `schedules:`), and `required` declared by **either** read enforces, so the change can only remove a false pass, never add one. A clean **HTTP 404 is still "absent"**, so a repo that genuinely ships no `template.yaml` creates exactly as before. The trade is deliberate and is the `learnings.md` 2026-07-15 direction-of-failure rule applied to a gate: agent creation now depends on GitHub API reachability where it previously depended only on `git clone`, and a loud retryable refusal beats a silent wrong-repo binding. Regression-tested by `tests/unit/test_ent14_fork_to_own_failclosed.py`.
   - **Known adjacent defect, deliberately not fixed here**: `_get_cached_metadata`/`_fetch_all_metadata` write `_metadata_cache[repo] = (…, metadata, reason)` **unconditionally**, so a `{}` from a transient 403 overwrites a previously-good entry and is served for a full 600 s TTL. That is what turns the window from one request into ten minutes. It is strictly wider than the registry — the shared metadata cache serves every template path — so it is tracked separately. It no longer reaches the fail-closed gate at all: since the gate moved to the creation-path read, a poisoned cache entry degrades display fields and cannot make creation either refuse or pass wrongly. (Caching the *reason* alongside the empty metadata still keeps `metadata_unavailable` honest for the catalog surface.)
   - **`mcp_servers` and `resources` degrade the same way** on an unreadable `template.yaml`, silently falling back to defaults. Only `fork_to_own` has a security consequence, so only it fails closed — but the pattern is named here so the next reader does not have to rediscover it.
 - **`hidden` is inert on the GitHub half — a real local/github asymmetry**: `_build_local_template` sets it and `get_local_templates` filters on it, but `_build_template` never emits it and `_safe_build_github_template` never filters on it. So a registry cannot mark an entry hidden, *and* a listed repo whose own `template.yaml` says `hidden: true` is still shown. Neither is exploitable; the divergence is recorded so it is not rediscovered as a bug.
@@ -902,11 +913,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the
@@ -1479,7 +1495,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `signal` (the shape it carries). `visibleTabs(tabs, session)` is the ONE gate
   for render AND mount: a tab whose door the session fails has no icon, no
   label and no mounted body, so nothing it would fetch is ever requested. An
-  unknown door fails closed. Fixed order Work · Loops · Canvas · Files.
+  unknown door fails closed. Fixed order (since trinity-enterprise#892) Info ·
+  Canvas · Files · Projects · Asks · Work · Loops; the tab a rail opens on is
+  still Work (`RAIL_DEFAULT_TAB`).
 - **AC-3 — the collapsed rail signals live activity without opening**: two
   shapes, one hue (principle 24) — *live now* (8px dot in a 3px ring,
   `motion-safe:animate-pulse`, static under reduced motion) and *updated since
@@ -1556,6 +1574,21 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   `⌥.` (ent#621) reaches it, the collapsed strip shows its dot and "Asks · 2
   asks", and the open strip's tab carries the count. A room lists every
   participant's asks grouped by agent, absence visible.
+- **AC-11 — the Asks tab is always present; the order reads Info · Canvas ·
+  Files · Projects · Asks · Work · Loops (trinity-enterprise#892)**: operator
+  ruling 2026-10-13 supersedes AC-10's presence rule. The Asks tab renders like
+  every other tab (door `AGENT` only), and with nothing waiting its body shows an
+  empty state that names the agent ("Nothing from scout is waiting on you…") with
+  **Open the Inbox** (the agent's asks home, `?tab=action&from=<agent>`). Its
+  body has all four states (`railAsksView`): a skeleton before the asks feed has
+  a verdict, LoadFailed for a failed first read, the empty state only after a
+  read succeeded with nothing waiting (a 404/403 verdict reads as empty), the
+  rows otherwise. Its "needs you" mark still appears only when an ask waits. No
+  tab moves when asks arrive or clear, so Asks no longer has to be last and
+  takes its place in the reading order. The default tab (Work) and a viewer's
+  remembered tab are unchanged; `⌥.` walks the new visual order. A session that
+  cannot see Work (an outside client) falls back to the first visible tab, which
+  is now Info.
 - **Not in this slice (recorded on the issue)**: the Work tab's content
   (#457), re-homing Loops / Canvas / Files (#472's second child), the sidebar /
   thread tab strip / top band / Agent-details panel / drop target of the
@@ -3821,7 +3854,7 @@ to localStorage in the clear.
 - **Three windows (tabs)**:
   | Tab | Membership | Source |
   |---|---|---|
-  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; ordered by urgency — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1) | the ONE asks list (`openAsks`) |
+  | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
   | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
   | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
@@ -3910,8 +3943,10 @@ to localStorage in the clear.
   on the answered card; a second Enter while the answer is on its way sends nothing. In the
   Inbox pane the card's header carries the priority and the expiry (the row's badges), where
   the person decides — its context below the answer row does not repeat them.
-- **Open canvas (§3g C10)**: the pane offers "Open canvas" — on a chat or an ask — only when
-  the item's agent has a canvas this viewer can see; it opens the rail on that canvas.
+- **Open canvas (§3g C10)**: the pane offers "Open canvas" on a chat only, when the chat's
+  agent has a canvas this viewer can see; it opens the rail on that canvas. An ask's header
+  carries **Open in chat** for the chat whose turn raised it instead — none for a background
+  ask (#3714).
 - **Long tabs page (§3g SM / C4)**: every tab renders 50 rows, states "Showing 50 of 212", and
   offers "Show more" (50 at a time, focus to the first new row); the window resets when the tab
   changes, never on a refresh, and always includes the selected row.
@@ -3957,6 +3992,40 @@ to localStorage in the clear.
   When split, the tab's first row is previewed (the rail column does not pop in on the first
   click); the preview is never a read and never enters the URL — `?item=` holds only what the
   reader opened (§3g S5, T2).
+- **Action's sort — Newest by default, Urgency on a switch (trinity-enterprise#856, operator
+  ruling 2026-10-09)**: an inbox reads newest first; urgency is one click away, not the default.
+  - **AC B1** Action opens Newest first (`askRecencyCompare`: `created_at` desc, id desc — the
+    rule All already uses for its rows). **AC B2** the Urgency order is §3g C1, unchanged.
+  - **AC B3** the control is a `BaseSelect variant="ghost"` ("Newest" / "Urgency", named
+    "Sort asks") in the list's head line, beside the total. The line's 44px box is held on
+    every tab and in every state (loading, empty, failed), so switching tab or sort moves
+    nothing; the native select gives keyboard operation and the phone picker.
+  - **AC B4** the choice lives in `?sort=` (`newest` | `urgency`; anything else is ignored)
+    and in a per-viewer memory (`localStorage`, keyed by the viewer bucket the column widths
+    use). Precedence: the URL, then the memory, then Newest. A change writes both, through
+    `router.replace` (never a history entry). A refused storage degrades to session-only.
+  - **AC B5** a sort change starts a new visit of the list (`visitKey` carries the sort), so
+    the rows re-sort on the click and hold still after it, as on a tab change.
+  - **AC B6** `?from=` narrowing and paging work the same in both orders (the filter runs on
+    the sorted list).
+  - **AC B7** the row marks that say WHY an ask is urgent (priority, "Expires in …") render in
+    both orders.
+  - **T1 — Action only.** Unread and All are already recency, and Urgency means nothing for a
+    chat or a tag row; the control is not drawn there, and a stray `?sort=` on those tabs is
+    removed from the URL like a stray `?from=`.
+  - **T2 — the operator queue's Open tab (Operations) is left as it is**: priority, then the
+    longest-waiting — an operator's triage surface with its own semantics, outside the
+    Workspace and outside this change.
+  - **T3 — the rail's Asks list follows Action's default, passed explicitly**
+    (`actionItems(openAsks, now, INBOX_SORT_DEFAULT)`): its rows open the Inbox on Action,
+    which shows the same order. It has no control and does not read the viewer's memory.
+  - **T5 — inconsistencies recorded, not fixed here**: (i) an unknown priority ranks as
+    **medium** in the Workspace (a malformed priority must not bury an ask) and **last** in
+    the operator queue; (ii) expiry affects order **only in the Workspace** (the queue has no
+    expiry mark); (iii) within a priority the server returns pending asks **newest first**
+    (`db/operator_queue.py::list_items`) while both clients show the **longest-waiting
+    first**, so a page truncated at the read cap drops the oldest — a public bug listed in the
+    PR's handoffs, not fixed here (no endpoint change).
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
@@ -4075,3 +4144,44 @@ to localStorage in the clear.
   `own_tags` and per-message `tags`; history rows carry `tags` on the reader's own messages;
   `GET /api/enterprise/client-portal/mentions`, `GET …/mentions/{id}`, `POST …/mentions/{id}/read`.
 - **Flow**: `feature-flows/workspace-person-tag.md`.
+
+### 5.43 Workspace — recency that holds still (trinity-enterprise#856)
+
+- **Status**: 🚧 in progress (Part A — chat tabs and landing; Part B — Action's sort — is
+  specified in §5.40)
+- **Why**: the operator's 2026-10-09 ruling — a reply must change a badge, never a
+  position, while the person is looking at the strip; recency is the order you
+  ARRIVE to, not an order that re-sorts under the cursor.
+- **AC-1 — the arrival snapshot**: on arriving at an agent (any door — row, key,
+  deep link, `/c/:id`, bootstrap, Undo, Reset, the return from the Inbox or a
+  room) the shell takes ONE snapshot of that agent's chat order: Main first, then
+  recency, every non-room row of the agent including archived ones. It is taken by
+  one watcher keyed on the agent on stage (not by each door), retaken once when the
+  thread list first becomes trustworthy (a cold link), and cleared when no agent is
+  on stage — the Inbox, the unreachable notice, or a room whether opened from the
+  sidebar or reached by URL (Back, a link). Re-clicking the agent already on stage
+  keeps it.
+- **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
+  the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
+  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  (the provisional tab's slot), born chats among themselves by creation time. A
+  closed chat drops out and the gap closes; Undo returns it to its own slot. A
+  deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and
+  close-next walk the same frozen order the eye reads.
+- **AC-3 — landing arms (operator ruling 2026-10-13)**, in order: **0** the agent's
+  most recent unarchived chat with an unread answer (Main included); **1** the chat
+  last open for that agent this session — in memory per tab, never persisted;
+  then the fresh-session arms of ent#784 (a drafted chat, the empty chat, a new
+  chat). A route-driven landing replaces the history entry, so Back does not loop.
+  **Behaviour change, by that ruling:** Back to `/workspace/a/:name`, or a click on
+  the agent's sidebar row, from one of that agent's chats now returns to the chat
+  left open in this session (arm 1) — before ent#856 it opened a fresh chat. This
+  is the landing the operator ruled for, not a side effect.
+- **AC-4 — forget on close**: closing (archiving) or losing a chat removes it from
+  the session's last-open memory (`forgetLastOpen`), on top of `agentLanding`'s
+  own validation.
+- **Out**: any endpoint or schema change.
+- **Tests**: `portalChatTabsHold.spec.js`, `portalAgentLandingUnread.spec.js`
+  (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
+  `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
+  `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.

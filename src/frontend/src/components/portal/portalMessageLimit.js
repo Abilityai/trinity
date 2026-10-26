@@ -9,7 +9,11 @@
 // `tests/unit/portalMessageLimit.mount.spec.js`, which reads the backend model;
 // change the server's limit and that test names this line. The server stays the
 // authority either way — `messageRefusalReason` quotes ITS number, not this one.
-export const PORTAL_MESSAGE_MAX_CHARS = 8000
+export const PORTAL_MESSAGE_MAX_CHARS = 100_000
+// #3706 — the room composer's copy of `RoomMessageCreate.content`'s max_length
+// (`src/backend/shared_sessions/models.py`), held equal by
+// `tests/unit/roomMessageLimit.mount.spec.js`.
+export const ROOM_MESSAGE_MAX_CHARS = 100_000
 
 // The count appears for the last stretch only: a counter under every "ok" would
 // be standing noise, and a limit first mentioned at 8001 is the bug.
@@ -70,7 +74,9 @@ export function messageRefusalReason(err) {
   const detail = err.response.data?.detail
   if (!Array.isArray(detail)) return null
   const fieldOf = (d) => (Array.isArray(d?.loc) ? d.loc[d.loc.length - 1] : null)
-  const tooLong = detail.find((d) => d?.type === 'string_too_long' && fieldOf(d) === 'message')
+  // `message` is the chat turn's field, `content` the room post's (#3706).
+  const tooLong = detail.find((d) => d?.type === 'string_too_long'
+    && ['message', 'content'].includes(fieldOf(d)))
   if (tooLong) {
     const max = Number(tooLong.ctx?.max_length) || PORTAL_MESSAGE_MAX_CHARS
     return `That message is too long — a message can be at most ${fmt(max)} characters. Shorten it and send again.`

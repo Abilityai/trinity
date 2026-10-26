@@ -33,7 +33,8 @@ As an agent owner, I want to see, run and gate every skill my agent has — its 
 |---|---|
 | `components/skills/SkillsTab.vue` | The tab: filter, in-agent enforcement line, Own section, Shared section, the three dialogs |
 | `components/skills/SkillCard.vue` | One card with fixed-height slots; renders decisions, emits verbs |
-| `components/skills/SkillAssignModal.vue` | "Assign skills": the library picker, moved out of the deleted `SkillsPanel.vue` |
+| `components/skills/SkillAssignModal.vue` | "Assign skills": the library picker, moved out of the deleted `SkillsPanel.vue`; **Select all** / **Deselect all** on the list's header row and the confirm before a save drops an approval requirement (trinity-enterprise#539) |
+| `utils/skillAssignDraft.js` | The dialog's draft rules, pure: `bulkSelection` (what each bulk button would change, and its disabled reason), `withSelectAll` / `withDeselectAll`, `gatedRemovals` (whether Save confirms), `removalConfirm` (its words) |
 | `components/skills/SkillDetailsModal.vue` | A Shared card's full story: the #2914 conflict + "Unassign library skill", every delivery warning, the injection error, the superseded text |
 | `components/skills/AgentSkillSets.vue` | Unchanged; shown inside the "Manage sets" `BaseModal` |
 | `components/skills/ExecutionGateMarker.vue` | "Ran without approval" — `badge` (list row) or `line` (detail, Workspace turn) |
@@ -48,6 +49,7 @@ As an agent owner, I want to see, run and gate every skill my agent has — its 
   - meta line, last-known (warning tone): "The agent is stopped. Start the agent to run. Showing its skills as of <relative time>." or "The agent isn't answering. Showing its skills as of …"; the absolute time is on hover (`Listed <date>`).
 - **Shared skills** (`:127-267`):
   - head: count (`store.assigned.length`); for the owner or an admin (not on the system agent), on a configured library: **Assign skills** (opens `SkillAssignModal`), **Manage sets** (opens `AgentSkillSets` in a `BaseModal`), **Sync now** (disabled while stopped; primary-styled while a save did not deliver — `pendingSync`, #2703; `store.inject()`);
+  - the Assign skills dialog (`SkillAssignModal.vue`, trinity-enterprise#539): the list's header row carries "N skills in the library" and two ghost buttons. **Select all** ticks every listed skill except deprecated ones (a held deprecated skill keeps its tick), never a set's locked row and never a name the PUT refuses (`SKILL_NAME_RE`). **Deselect all** unticks every listed skill except a set-only one. Both change only the draft, and only listed rows: an assignment whose skill left the library stays, and its card's Unassign removes it. Each is disabled with its reason as the title (not loaded, no library, empty library, a save in flight, nothing to change), and enabled titles count what the click changes. Deselect all carries `data-destructive`, so the dialog never opens on it. Focus never falls out of the dialog: a `flush: 'post'` watcher over the bulk buttons' disabled states, `dirty`, `saving` and the confirm moves focus off a control that was just disabled or removed (to the bulk button that undoes it, else Close), whatever disabled it: its own click, a manual tick, Reset, Save or the confirm closing. **Save** asks first (a `ConfirmDialog`, opening on Cancel) when it would take a skill with an approval requirement off the agent, because a person's unassign drops it (trinity-enterprise#753). A save that removes anything re-reads the gate map first, so a requirement added since the tab opened counts. With the map unreadable it asks for any removal. A name an assigned set still holds does not ask (unless a held set is unresolved, when the server keeps only set-only rows), and neither does a `conflict` name;
   - set chips: up to 3 (`MAX_SET_CHIPS`) + "+N more"; purple when complete, warning with a dot when partial, unresolved or missing credentials (`setVariant` / `setTitle`), plus "Some sets need credentials" when any set lacks them; a failed sets read shows "Couldn't read this agent's sets" with a Retry (`store.loadSets()`) instead of an absent line; a click opens Manage sets;
   - the shared line (`:194-204`): the last verb's outcome (save / unassign / sync error, plus the ent#672 deprecation note), else "Last sync <time>" or "Not synced from this screen yet: statuses appear after a sync. Skills are also copied in when the agent starts.";
   - body: skeleton / `LoadFailed` / the named empty states by `store.emptyReason` (`library_unconfigured` with an admin link to `/settings?tab=agents`, `library_empty`, `none_assigned` worded by role) / "No shared skill matches the filter." / the grid.
@@ -136,13 +138,14 @@ Gate line (`gateLineFor`, `skillCards.js:120-134`). It names a **kind**, never a
 |---|---|---|
 | Gated, `approvers[kind].viewer_fills` | lock | Needs approval: you approve this |
 | Gated, the kind reaches nobody (`reachable: false`; with no `approvers` row, the gate's own `approver_reachable`) | warning | Needs approval from <kind>: nobody fills it yet |
-| Gated | lock | Needs approval from <kind> (`primary` → "the primary contact", `approver` → "an approver") |
+| Gated | lock | Needs approval from <kind> (`primary` → "the primary contact", `approver` → "an approver", `role:<id>` → the entry's `label`, else the humanised id — trinity-enterprise#848) |
 | Not gated, `approval: recommended`, and the approval row is shown | warning | Author recommends approval: not gated |
 
 `recommended` reads the library entry's `approval` (Shared) or the agent server's `approval` field (both sections).
 
 Approval row (`SkillCard.vue:158-189`, `:219-248`):
 - the picker lists `approvers` (fallback: `primary`); a kind nobody fills is listed as `(nobody yet)` and cannot be selected; a gate whose kind the install no longer offers is appended, disabled;
+- canon roles (trinity-enterprise#848, `kind: "role:<id>"`) follow the kinds in an `<optgroup label="Roles">`, labelled by `utils/skillCards.kindOptionLabel` (a kind's own name, else the API's `label`, else the humanised id); the same "(nobody yet)" / disabled rule; a stored role no longer listed is appended to the group, disabled; with no roles (OSS) there is no group;
 - toggle on → `set-gate` with the shown kind: the gate's own, else the first reachable kind, else `primary` — never a bodiless PUT;
 - toggle off → `clear-gate`; changing the kind of a gated skill → `set-gate` with the new kind;
 - `SkillsTab.onSetGate` / `onClearGate` (`:536-544`) → `stores/skillGates.js::setGate` / `clearGate`.
@@ -274,7 +277,7 @@ list_skills(agent, last_known)          (the agent-page route only)     :131-155
 
 Auth is unchanged (`get_skill_gate_readable_agent_by_name`). Models: `SkillGateApproverStatus` / `SkillGateMapResponse` (`models.py:3877-3902`).
 
-- **`approvers: [{kind, reachable, viewer_fills}]`**, one entry per kind in `approver_kinds()` (`skill_gate_map_service.approver_status`, `:156-179`):
+- **`approvers: [{kind, reachable, viewer_fills, label, role_id}]`**, one entry per kind in `approver_kinds()`, then one per canon role on the agent's roster (trinity-enterprise#848; see [skill-gate.md](skill-gate.md) §6) (`skill_gate_map_service.approver_status`, `:156-179`):
   - `reachable`: the kind resolves to at least one person (`skill_gate_service.approver_people`, `skill_gate_service.py:311-319`, which is `_approvers` without the refusal);
   - `viewer_fills`: `requester_from_principal(caller)` (`skill_gate_service.py:658-681`) is a person and its casefolded email is in that list. These are the functions `enforce` uses to decide self-approval, so the card cannot say "you approve this" for a run the gate would hold. An agent key, a connector or the event loopback never fills a kind;
   - booleans only: no name or email.
@@ -345,13 +348,16 @@ A skipped field is warned once per `(file, field, value)` (`_SKIPPED_FIELD_WARNE
 | Agent answered non-200 | That status, "Agent returned error: …" — never masked by the copy (the public link: that status, "The agent could not list its skills") | `LoadFailed` with retry on first load; a failed refresh keeps the list |
 | Body not JSON | 500 "Failed to fetch playbooks: …" | `LoadFailed` |
 | Listing over 256 KB | 200 live; not kept, older copy dropped | Stopped later: no list |
-| Gate PUT/DELETE refused | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` / `approver_unavailable`; 409 `ephemeral_agent`; 403 `person_required` / `skill_management_not_permitted`; 404 | `InlineError` in that card's description slot |
+| Gate PUT/DELETE refused | 422 `invalid_skill_name` / `invalid_approver` / `invalid_deadline` / `approver_unavailable` / `unknown_role`; 409 `ephemeral_agent`; 403 `person_required` / `skill_management_not_permitted`; 404 | `InlineError` in that card's description slot |
 | Name can't carry a gate | (client-side, `SKILL_NAME_RE`) | Toggle disabled, reason on hover |
 | Run held | 202 `pending_approval` | Info toast, 8 s, no navigation |
 | Run refused by the gate | Named refusal + `X-Trinity-Error-Code` | Error toast until dismissed |
 | Run, other failure | e.g. 429 / 503 | `InlineError` on the card |
 | Sync while one runs | 409 | Shared line: "A skill sync is already running for this agent. Try again in a moment." |
 | Unassign fails | Server error | `InlineError` on the card |
+| Assign dialog: the gate map can't be re-read at Save | `GET /skill-gates` fails | Save asks for any removal: "Which skills need approval couldn't be read, so any approval requirement on them will go too." |
+| Assign dialog: the save fails after a bulk verb | PUT error | The error line in the dialog; the draft is kept, Save stays enabled |
+| Assign dialog: the library lists a name the PUT refuses | (client-side, `SKILL_NAME_RE`) | Select all skips it and its title says so; a manual tick gets the named 422 `invalid_skill_name` |
 | Hook probe, no answer | `hook: "unknown"` | Nothing (not "not ok") |
 | Self-approved read fails | Flags false (logged) | No marker |
 | `record_self_approval` write failed | No record | No marker. Named gap: the in-container hook refuses the skill inside that run anyway |
@@ -443,6 +449,8 @@ Covered by unit tests:
 | `src/frontend/tests/unit/skillGateSenders.spec.js` | Ported: the SkillsTab Run among the UI senders of a 202 / refusal (trinity#3274) |
 | `src/frontend/tests/unit/skillSets.spec.js`, `skillDeprecation.spec.js` | Ported to `SkillsTab` / the dialogs: sets, chips and Manage sets; deprecated badge, superseded line, the conflict's way out in the details dialog |
 | `src/frontend/tests/unit/skillAssignDraftSurvivesSync.spec.js` | Ported from `skillsPanelDraftSurvivesSync`: the picker draft survives a sync (`SkillAssignModal`) |
+| `src/frontend/tests/unit/skillAssignDraft.spec.js` | trinity-enterprise#539, the pure rules: what each bulk button adds or removes over every row type (plain, deprecated, a set's row, a refused name, an unlisted assignment); every disabled reason and its precedence; the counted titles, and the refused-name clause; what a save removes (set-held kept, unless the sets are untrusted); which saves confirm (gated, case-insensitive; never set-held or `conflict`, with the map read or not; any other removal with the map unread); the confirm's words |
+| `src/frontend/tests/unit/skillAssignSelectAll.spec.js` | trinity-enterprise#539, mounted through the real Teleport (a stubbed one re-creates the dialog's nodes on every patch, which made focus tests pass for the wrong reason): no write on a bulk click; the PUT body after each verb (the unlisted assignment kept, the set's row never sent); Reset after each verb; each disabled reason on the button; the dialog opens on Select all, never Deselect all; focus re-homed after a bulk click, a manual tick, Reset, Save and Confirm; the confirm names the skill, opens on Cancel and sends nothing until confirmed; the gate map re-read at save time (not for a save that only adds), a failed re-read, an unresolved set, a double click and a dialog closed mid-read; a failed save keeps the draft. 27 mutants, all killed |
 | `src/frontend/tests/unit/agentDetailTabSuperset.spec.js` | `playbooks` is an alias to `skills`; `skills` is offered to a non-owner |
 | `src/frontend/tests/unit/agentDetailGateNotice.spec.js` | `<SkillsTab>` receives the page's toast host (`:notify`) |
 | `tests/unit/test_1560_agent_redis_key_parity.py` | Existing: every `agent:` key literal is registered (`agent:skills_list:` in `CLEARED_KEYSPACES`) |
@@ -454,7 +462,8 @@ pytest tests/unit/test_ent754_*.py tests/unit/test_1560_agent_redis_key_parity.p
 # frontend
 cd src/frontend && npx vitest run tests/unit/skillCards.spec.js tests/unit/skillGatesStore.spec.js \
   tests/unit/skillsTab.mount.spec.js tests/unit/executionGateMarker.mount.spec.js tests/unit/portalSelfApprovedTurn.spec.js \
-  tests/unit/tasksPanelRunRefresh.spec.js tests/unit/baseSelectSize.spec.js
+  tests/unit/tasksPanelRunRefresh.spec.js tests/unit/baseSelectSize.spec.js \
+  tests/unit/skillAssignDraft.spec.js tests/unit/skillAssignSelectAll.spec.js
 ```
 
 ### Status
@@ -463,9 +472,12 @@ Implemented (2026-10-08).
 
 Known limits:
 - the Overview tab's "N skills" button counts library assignments only;
-- canon roles in the approver picker are follow-up trinity-enterprise#848;
 - a renamed agent that is stopped shows no own skills until it starts: rename clears the last-known copy under both names rather than moving it (PR review, deferred);
-- Shared cards show no file count or size, which the old rows did; both stay in the Assign dialog (PR review, kept).
+- Shared cards show no file count or size, which the old rows did; both stay in the Assign dialog (PR review, kept);
+- in the Assign dialog, the checkboxes stay editable while a save is in flight (only the bulk buttons wait), and a successful save resets the draft, so a tick made meanwhile is lost (trinity-enterprise#539, stated limit);
+- Save's confirm says the approval requirement goes with the skill, as the card's Unassign confirm does; on a stopped or busy agent the package removal defers, and a requirement set by hand then stays until someone clears it (security.md §26.13; stated limit, worded as the card's);
+- the library lists every directory with a SKILL.md, including names the PUT refuses: Select all skips them, a manual tick still gets the named 422 (stated limit; the listing is shared with the Library page and sets);
+- a disabled bulk button's reason is its hover title only, like Sync now's.
 
 ## Related Flows
 
@@ -483,3 +495,4 @@ Known limits:
 | 2026-10-08 | Review round (ent#754): agent-switch guards in the tab and the skills store; sections wait for the reads they depend on and name each failure; gate writes keyed on the gate the card shows; a live default approver; Unassign confirms; dialogs focus the safe action; hook states in words. Backend: a container removed mid-read is a plain 404 (no Docker text, public link included); transport errors are unreachable; the connector keeps its wording; the self-approved read is chunked; a machine Workspace viewer is never "you"; the synchronous Workspace reply carries both flags; `GET /skills/library` names `approval`. |
 | 2026-10-08 | Eyeball round (ent#754): a Run's Tasks row settles without a Refresh (the poll re-reads while a row is in flight; the highlighted row opens once); the Own meta line names each folder once (store, and the agent server scans its folder once); the Unassign confirm speaks in the future tense; the approver picker is `BaseSelect size="sm"`, so it fits the 40px row; the Own count includes kept gates; the not-synced line says statuses appear after a sync. |
 | 2026-10-09 | PR review (#3412): an unsaved Assign draft no longer carries to the next agent; the Tasks poll stops while the page is away; the public link answers fixed sentences and keeps to its listing keys; a Docker daemon fault serves the kept copy (tri-state lookup); the probe is capped at 3 s overall; a switch reads the next agent once; the text links take the focus ring; "people only" includes a person's user-scoped key; line citations re-pointed. |
+| 2026-10-22 | trinity-enterprise#539: Select all / Deselect all in the Assign dialog (rules in `utils/skillAssignDraft.js`; listed rows only, set rows and unlisted assignments untouched, deprecated skills never ticked in bulk), the confirm before a save drops an approval requirement, and focus kept in the dialog after a bulk verb or Reset. |

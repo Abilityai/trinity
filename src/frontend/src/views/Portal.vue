@@ -135,6 +135,8 @@
           :projects-available="store.projectsAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
+          :settled="sidebarReady"
+          :threads-failed="store.sessionsFailed"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
@@ -147,6 +149,7 @@
           @open-keys="keyListOpen = true"
           @toggle-star="toggleStar"
           @sign-out="onSignOut"
+          @retry-threads="refreshThreads"
         />
       </div>
       <!-- #2617: `:value` is the EFFECTIVE width, not the desired one. The two
@@ -185,6 +188,8 @@
             :projects-available="store.projectsAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
+            :settled="sidebarReady"
+            :threads-failed="store.sessionsFailed"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
@@ -198,6 +203,7 @@
             @open-keys="() => { mobileNav = false; keyListOpen = true }"
             @toggle-star="toggleStar"
             @sign-out="onSignOut"
+            @retry-threads="refreshThreads"
           />
         </div>
       </div>
@@ -432,6 +438,7 @@
           :reply-target="replyTarget"
           :starred="isStarred('thread', activeSessionId || pendingSession)"
           :threads="threads"
+          :tab-order="tabOrder"
           :rename="renameChat"
           :close-error="closeError"
           @switch-agent="switchAgent"
@@ -769,7 +776,8 @@
           />
         </template>
         <!-- ent#836: Asks — the agent's open asks, each a door into the Inbox.
-             Reads the one asks feed; present only while something waits. -->
+             Reads the one asks feed; always present, with an empty state
+             when nothing waits (ent#892). -->
         <template #tab-asks="{ participants }">
           <PortalRailAsks :participants="participants" />
         </template>
@@ -835,7 +843,8 @@
           @focus-composer="() => { railSheetOpen = false; focusConversationComposer() }"
         />
       </template>
-      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation closes it. -->
+      <!-- ent#836: the sheet's own `#tab-asks`; a row's navigation (or the
+           empty state's "Open the Inbox", ent#892) closes it. -->
       <template #tab-asks="{ participants }">
         <PortalRailAsks :participants="participants" @open="railSheetOpen = false" />
       </template>
@@ -970,20 +979,22 @@ import {
   // disagree about the number.
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
-  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs,
+  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
-  // rail's door gate (the Asks tab's presence) and its signal, so the tab and
-  // the mark cannot disagree.
+  // rail's Asks signal, so the tab's mark and the row's mark cannot disagree.
+  // (ent#892 removed the tab's presence rule; the counts no longer gate it.)
   asksByAgent,
   // ent#621 T6: the order the sidebar SHOWS is now computed here, once, and
   // passed down — so the switch-agent keys walk exactly what the eye reads.
   orderRosterAgents,
+  // #3672: the sidebar's one first-load verdict.
+  sidebarSettled,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
 import {
-  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen,
+  resolveWorkspaceKey, workspaceChord, keymapSuppressed, hasModalOpen, nextAgent, recordLastOpen, forgetLastOpen,
   nextRailTab, keyListRows, hostPlatform, WORKSPACE_KEYMAP,
   loadKeyTipsDismissed, saveKeyTipsDismissed,
 } from '@/components/portal/portalKeymap'
@@ -1062,21 +1073,29 @@ function backToEmail() { step.value = 'email'; code.value = ''; error.value = nu
 async function onVerify() {
   if (code.value.length < 6 || busy.value) return
   busy.value = true; error.value = null
+  // #2261 — read the resume target BEFORE the roster load, since the sign-in
+  // that consumed the expiry is what makes it spendable. `endSession` recorded
+  // where the client was when their session lapsed, and until now nothing ever
+  // read it back: the expired notice promises "pick up where you left off", so
+  // it has to actually land there rather than on the roster root.
+  // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+  const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
+  const address = email.value.trim().toLowerCase()
   try {
-    // #2261 — read the resume target BEFORE the roster load, since the sign-in
-    // that consumed the expiry is what makes it spendable. `endSession` recorded
-    // where the client was when their session lapsed, and until now nothing ever
-    // read it back: the expired notice promises "pick up where you left off", so
-    // it has to actually land there rather than on the roster root.
-    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
-    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
-    await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
+    await store.verifyCode(address, code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
       store.resumePath = null
       router.push(resumeTo)
     }
   } catch (err) {
+    // #3922: the code was right, but this address has a platform account. It
+    // signs in at `/login`, which gives it the team view, then comes back here.
+    if (err.response?.status === 409 && err.response?.data?.detail?.reason === 'platform_login_required') {
+      store.resumePath = null
+      router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
+      return
+    }
     error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
     code.value = ''
     await nextTick(); codeInput.value?.focusFirst()
@@ -1110,6 +1129,25 @@ const convGen = ref(0)                // bumps on explicit thread switches → r
 // Deliberately a separate bit from `store.rosterLoaded`: that one says the
 // ROSTER reached a verdict, this one says the deep link did.
 const bootstrapResolved = ref(false)
+// #3672 — the sidebar's first-load verdict, LATCHED: once the list has landed
+// it never drops back to skeletons (a background refresh is invisible, §6), so
+// the next bootstrap's `bootstrapResolved = false` cannot re-flash it. It
+// resets only when the session ends, so the next person's first load is calm
+// too. The rule itself is `sidebarSettled` (pure, tested).
+const sidebarReady = ref(false)
+watch(
+  () => [store.isClientSignedIn, sidebarSettled({
+    resolved: bootstrapResolved.value,
+    asksLoaded: store.asksLoaded,
+    asksAbsent: store.asksAbsent,
+    asksFailed: store.asksFailed,
+  })],
+  ([signedIn, settled]) => {
+    if (!signedIn) sidebarReady.value = false
+    else if (settled) sidebarReady.value = true
+  },
+  { immediate: true },
+)
 
 const activeSessionId = computed(() => route.params.sessionId || null)
 const chatUnavailable = computed(() => !!activeSessionId.value && unavailableChatId.value === activeSessionId.value)
@@ -1323,7 +1361,6 @@ const railTabs = computed(() => visibleTabs(RAIL_TABS, {
   isPlatform: store.isPlatformSession,
   participants: railParticipants.value,
   capabilities: { projects: store.projectsAvailable },
-  askCounts: railAskCounts.value,
 }))
 // Keyed on the route and the stage VERDICT — synchronous facts — never on data
 // still arriving (a room's participants land with its own fetch), so a live
@@ -1908,13 +1945,13 @@ function openAgentPage(name) {
 // is the arrival's focus mode: a key press IS a gesture (there is a keyboard in
 // the room by definition), so the keys ask for `'always'` where the route
 // watcher keeps ent#784's `'fine-pointer'`.
-function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer' } = {}) {
+function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer', replace = false } = {}) {
   if (!name) return
   // ent#551 class: `activeAgentName` feeds `convKey`, so writing it remounts
   // the conversation and ends a live call without a word. The click doors ask
   // first; back/forward and a typed `/workspace/a/:name` come through here, and
   // did not. Ask before touching anything.
-  if (guardLeaveCall(() => landOnAgent(name, { lastOpenSessionId, focus }))) return
+  if (guardLeaveCall(() => landOnAgent(name, { lastOpenSessionId, focus, replace }))) return
   // ent#621 Decision 34 — the guard is the FIRST thing, above the focus-mode
   // write and above `agentLanding`. It used to sit after the branch, which made
   // it a guard against re-minting and nothing else: the key path's own
@@ -1953,7 +1990,10 @@ function landOnAgent(name, { lastOpenSessionId = null, focus = 'fine-pointer' } 
     // (review) A landing on a chat with NO draft — the agent's empty one — is
     // restored by nothing, so that mount leaves focus on the sidebar row the
     // click came from. `focusLandedComposer` covers it under the same rule.
-    if (row) { openThread(row); focusLandedComposer(); return }
+    // ent#856: a ROUTE-driven landing replaces `/workspace/a/:name` with the
+    // chat it resolved to — pushed, Back would return to `/a/:name`, land on
+    // the same chat again and push again (a loop arm 1 makes the common case).
+    if (row) { openThread(row, { replace }); focusLandedComposer(); return }
   }
   unreachableAgent.value = null
   activeAgentName.value = name
@@ -2068,8 +2108,8 @@ function newChatWithAgent(name) {
   escapeStage()
 }
 function switchAgent(name) { newChatWithAgent(name) }   // mid-thread = plain new chat, no carry-over
-function openThread(t) {
-  if (guardLeaveCall(() => openThread(t))) return   // ent#534/ent#551: ask, then leave
+function openThread(t, { replace = false } = {}) {
+  if (guardLeaveCall(() => openThread(t, { replace }))) return   // ent#534/ent#551: ask, then leave
   unreachableAgent.value = null
   // Opening an existing thread is the opposite intent; clear it so a later
   // send does not still ask for a fresh one.
@@ -2085,7 +2125,8 @@ function openThread(t) {
   activeAgentName.value = t.agent_name || activeAgentName.value
   pendingSession.value = sid; prefill.value = ''; convGen.value++
   search.value = ''
-  router.push(`/workspace/c/${sid}`)
+  if (replace) router.replace(`/workspace/c/${sid}`)
+  else router.push(`/workspace/c/${sid}`)
 }
 // trinity-enterprise#747: open a chat that may have just been created (Discuss)
 // — adopted through `openThread`, so the #3140 guard does not read an id the
@@ -2119,6 +2160,7 @@ function threadListTrusted() { return threadsLoaded.value && !store.sessionsFail
 // the person has already left must not blank the one they moved to.
 function onThreadMissing(id) {
   if (id && route.params.sessionId === id) {
+    forgetLastOpen(lastOpen, id)   // ent#856 AC 8: a chat that is gone is no one's last-open
     unavailableChatId.value = id
     pendingSession.value = null
   }
@@ -2409,10 +2451,12 @@ async function closeChat(t) {
   const wasActive = (activeSessionId.value || pendingSession.value) === sid
   let next = null
   if (wasActive) {
-    const tabs = agentChatTabs(threads.value, t.agent_name, { activeId: sid }).filter((x) => x.thread)
+    // ent#856: close-next walks the frozen strip the eye reads, not a re-sort.
+    const tabs = agentChatTabs(threads.value, t.agent_name, { activeId: sid, order: tabOrder.value }).filter((x) => x.thread)
     const i = tabs.findIndex((x) => x.id === sid)
     next = (tabs[i + 1] || tabs[i - 1] || null)?.thread || null
   }
+  forgetLastOpen(lastOpen, sid)   // ent#856 AC 8; Undo re-records it via `openThread`
   const archivedAt = new Date().toISOString()
   const write = archiveGuard.begin(key, archivedAt)
   setArchivedLocally(key, archivedAt)
@@ -2532,6 +2576,29 @@ watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) 
     keyChanged: keyChanged || (fresh && !sid),
   })
 })
+
+// trinity-enterprise#856 — the arrival snapshot of the chat strip.
+//
+// `stageAgent` is the agent whose conversation is on stage, else null (the
+// Inbox, a room, the unreachable notice). ONE watcher on it is the only writer
+// of `tabOrder`, so every door — row, key, deep link, `/c/:id`, bootstrap, Undo,
+// Reset, the return from the Inbox or a room — goes through one rule, and take
+// and clear cannot run in the wrong order: a new agent takes a snapshot, null
+// clears it, the same agent keeps it (a re-click holds still). A snapshot taken
+// before the thread list could be trusted (a cold link) is `ids: null` —
+// untaken — and is retaken ONCE when it becomes trustworthy; a later poll never
+// retakes. In memory only, like `lastOpen`. A room counts by its URL as well as
+// by `openRoom`'s ref: Back/forward or a link to `/workspace/r/:id` never writes
+// the ref, and the room is on stage all the same.
+const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !activeRoomIdFromRoute.value
+  && !unreachableAgent.value ? activeAgentName.value || null : null))
+const tabOrder = ref(null)   // { agent, ids } | null
+watch([stageAgent, () => threadListTrusted()], ([agent, trusted]) => {
+  if (!agent) { tabOrder.value = null; return }
+  const cur = tabOrder.value
+  if (cur && cur.agent === agent && (cur.ids || !trusted)) return
+  tabOrder.value = { agent, ids: trusted ? tabOrderFrom(threads.value, agent) : null }
+}, { immediate: true })
 
 // What assistive tech hears after a key move. The shell says it once; the band,
 // the tab strip and the browser-tab title say it visually.
@@ -2920,7 +2987,9 @@ watch([activeAgentPageName, () => threads.value.length], ([name], [prevName]) =>
   //     and has to land fresh. A thread URL carries no `agentName` param, so
   //     that hop always changes `name` and is never mistaken for a re-fire.
   if (name === prevName && activeAgentName.value === name) return
-  landOnAgent(name)
+  // ent#856: every door passes the session's last-open chat (landing arm 1),
+  // and this one replaces the history entry it lands from.
+  landOnAgent(name, { lastOpenSessionId: lastOpen.get(name) ?? null, replace: true })
 })
 
 // ent#547: the "close details on every agent change" watcher is retired with

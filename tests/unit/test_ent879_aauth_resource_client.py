@@ -11,7 +11,8 @@ What is proven here, on synthetic keys and recorded Senzing/Hellō header shapes
   * `resource_meta`: issuer equality, same-origin jwks/control endpoints,
     tolerant `AAuth-Budget`, caches;
   * `resource_token.verify_resource_token`: the happy path and ONE RED TEST PER
-    CHECK (wrong iss / dwk / aud / agent_jkt / ps / sub / presented_jti, expired,
+    CHECK (wrong iss / dwk / aud [non-identifier; the four-party aud is ent#928] /
+    agent_jkt / ps / sub / presented_jti, expired,
     future iat, lifetime, bad typ / alg / header params / kid, unknown kid, bad
     signature, malformed) — the security sink;
   * the ladder: every transition in the module docstring of `resource_client`,
@@ -223,6 +224,8 @@ def harness(monkeypatch):
     state = {"issuer": OUR, "ps": PS, "res": res, "ps_fake": ps, "redis": redis, "kid": kid}
 
     monkeypatch.setattr(config, "active_issuer", lambda: state["issuer"])
+    # ent#862: Flows 5–6 also need the prototype switch (gated at require_live).
+    monkeypatch.setattr(config, "is_prototype_enabled", lambda: True)
     monkeypatch.setattr(config, "get_person_server", lambda: state["ps"])
     monkeypatch.setattr(keys, "get_instance_key",
                         lambda: keys.InstanceKey(kid=kid, public_jwk={**jwk, "kid": kid}, private_key=instance_key))
@@ -479,8 +482,9 @@ def test_resource_token_happy_path():
     ("iss", lambda rk: mint(rk, iss=OTHER)),
     ("iss", lambda rk: mint(rk, iss=...)),
     ("dwk", lambda rk: mint(rk, dwk="aauth-agent.json")),
-    ("aud", lambda rk: mint(rk, aud="https://as.example")),       # four-party: unsupported_aud
-    ("aud", lambda rk: mint(rk, aud=...)),
+    ("aud", lambda rk: mint(rk, aud="as.example")),               # not a server identifier (ent#928: a
+    ("aud", lambda rk: mint(rk, aud="https://as.example:8443")),  # four-party aud must be https://host;
+    ("aud", lambda rk: mint(rk, aud=...)),                        # the discoverable-AS success is in ent#928)
     ("agent_jkt", lambda rk: mint(rk, agent_jkt="someone-elses-key")),
     ("ps", lambda rk: mint(rk, ps=OTHER)),
     ("sub", lambda rk: mint(rk, sub="another-person")),

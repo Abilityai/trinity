@@ -20,23 +20,23 @@ Click any agent to open its detail page. The page lands on the **Overview** tab 
 | **Schedules** | `schedules` | Cron-based automation -- see [Scheduling](../automation/scheduling.md) |
 | **Loops** | `loops` | Sequential bounded task runs -- see [Agent Loops](../automation/agent-loops.md) |
 | **Skills** | `skills` | The agent's own skills and those shared from the library, each with **Run**; owners also set approval and assign skills -- see [Skills](../automation/skills-and-playbooks.md) |
-| **Credentials** | `credentials` | Credential injection and export |
 | **Payments** | `nevermined` | Paid access configuration |
-| **Access** | `access` | Operator access roster (owners only) |
 | **Sharing** | `sharing` | External clients and channels (owners only) |
 | **Permissions** | `permissions` | Which agents may call this one (owners only) |
 | **A2A** | `a2a` | External-orchestrator interoperability (owners only, where available) |
-| **Git** | `git` | Git sync controls — only for GitHub-synced agents |
+| **Git** | `git` | Git status, pending changes, recent commits, **Pull**, **Push** and **Refresh** — only for GitHub-synced agents |
 | **Files** | `files` | Workspace file browser |
-| **Folders** | `folders` | Shared folder configuration (owners only) |
-| **Settings** | `settings` | Per-agent configuration (owners only) -- see [Agent Configuration](agent-configuration.md) |
-| **Info** | `info` | Template metadata and capabilities |
+| **Settings** | `settings` | The one configuration home (owners only), pinned last on the strip: a rail of panes — **General**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage** — with the pane in `?section=`. See [Agent Configuration](agent-configuration.md#the-settings-home) |
 
-Tabs marked *owners only* are hidden from users an agent is merely shared with, and are never shown on the system agent. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
+Tabs marked *owners only* are hidden from users an agent is merely shared with. The system agent shows none of them except **Settings**, where it gets the General (read-only), Guardrails and Integrations panes. **Dashboard**, **Brain**, **Git**, and **A2A** appear only when that agent or instance supports them.
 
-Every visible tab is deep-linkable with `?tab=` — including the conditional ones. The URL follows the tab you pick, so a reload keeps you on that tab, you can copy the address to link to it, and the browser's Back button steps back through the tabs you visited before it leaves the page. Returning to an agent page through a link that names no tab (from the Dashboard, say) keeps the tab you were on, as long as that agent has it. A `?tab=` value naming a tab you cannot see falls back to Overview, and the address is corrected to match. Three legacy links still resolve: `?tab=guardrails` opens **Settings**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+The Info, Credentials, Access and Folders tabs no longer exist. Template details are under **Settings › General**, credentials and shared folders under **Settings › Storage**, and the access roster under **Settings › People**.
 
-When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
+Every visible tab is deep-linkable with `?tab=` — including the conditional ones. The URL follows the tab you pick, so a reload keeps you on that tab, you can copy the address to link to it, and the browser's Back button steps back through the tabs you visited before it leaves the page. Returning to an agent page through a link that names no tab (from the Dashboard, say) keeps the tab you were on, as long as that agent has it. A `?tab=` value naming a tab you cannot see falls back to Overview, and the address is corrected to match.
+
+Inside Settings the pane is in the URL too: `?tab=settings&section=general|guardrails|people|channels|integrations|storage`. A bare `?tab=settings` opens General, a `section` naming a pane you cannot see lands on the first pane you can, and Back steps between the panes you visited. Legacy links still resolve: `?tab=info` opens **Settings › General**, `?tab=guardrails` opens **Settings › Guardrails**, `?tab=credentials` and `?tab=folders` open **Settings › Storage**, `?tab=access` opens **Settings › People**, `?tab=playbooks` opens **Skills**, and `?tab=session` redirects to that agent's [Workspace](../sharing-and-access/workspace.md) conversation.
+
+When the window is too narrow to fit every tab, the trailing tabs collapse into a **More ▾** menu at the end of the tab strip. **Settings** sits outside that menu, pinned at the end of the strip, so it is always one click away. If the active tab is inside the menu, the More button carries the active highlight. Deep links via `?tab=` work either way.
 
 ### Overview Tab
 
@@ -51,10 +51,15 @@ The Overview tab is a glanceable, database-backed summary. It renders even when 
 - **Recent activity** -- the last five executions; click one to open it in the Tasks tab.
 - **Footprint** -- schedule, skill, and share counts, plus git sync status.
 
-The persistent header above the tabs still owns live "now" state: status, CPU/memory gauges, cost, and quick controls. The Overview shows trends; the header shows the present. Two of its buttons are doors into other surfaces:
+The agent header's second and third rows show the present: for a running agent, CPU and memory against their limits (with sparklines); for a stopped one, when it was created and the CPU and memory allocated to it. Once the agent has run anything, a second line shows spend — today, a 7-day sparkline and trend, and lifetime cost and run count (API-price equivalents for a subscription-funded agent). Nothing in the strip is a control; the limits and funding are set under **Settings › General**.
 
-- **Workspace** opens this agent in the [Workspace](../sharing-and-access/workspace.md) — the conversation surface where you and the agent work together.
-- **Talk** starts a voice call with this agent. The call opens in the Workspace and the conversation lives there, not in this page's Chat tab — see [Voice Chat](../advanced/voice-chat.md).
+The persistent header above the tabs holds the agent's identity (avatar, name, id, description), its running state and badges, the **Autonomy** chip and the Start/Stop switch. As an owner you can edit the identity right there: the pencil beside the name edits the display name in place (Enter saves, Esc cancels, leave it empty to show the id), and hovering the avatar offers **Generate an avatar** when there is none, or **Change avatar prompt** and **Next emotion** when there is one. The same rows live under **Settings › General › Identity**, which is also the only place to rename the agent's id. Among the badges, the funding badge names what pays for the agent (a subscription or the API key); as an owner, click it to switch. The second row holds the **Autonomy** and **Read-only** switches, the tags, and the live CPU and memory sparklines. Below those the header shows:
+
+- **Repository** — when the agent is bound to a GitHub repository and running, the repo (a link to GitHub), the current branch, and how many changes are waiting to be pushed or pulled. Pull and Push are on the **Git** tab.
+- **Tags** — the first two tags, with a "+N" count for the rest. Owners click the pencil (or **Add tag**) to add and remove tags; the same editor is in **Settings › General**.
+- **Context** — for a running agent, a small ring showing how full its context window is. It reads "—" until there is a reading.
+
+To work with the agent in the [Workspace](../sharing-and-access/workspace.md) or start a voice call, open the Workspace from the navigation bar — see [Voice Chat](../advanced/voice-chat.md).
 
 - **API:** `GET /api/agents/{name}/analytics?window=7d|14d|30d`
 
@@ -73,6 +78,7 @@ A start also delivers the agent's assigned skills, and the start response says h
 
 The **display label** is the friendly name shown across the UI — the header, agent pickers, search, sort, and the activity timeline. Editing it is the everyday "rename": it changes what people read without moving the immutable slug (`name`), so it never breaks URLs, MCP tool names, schedules, or webhooks. For most day-to-day relabeling, this is the change you want; the heavier [Rename](#rename) below moves the slug itself.
 
+- Edit it from the pencil beside the name in the agent header, or from **Settings › General › Identity › Display name**.
 - Owner-only. The label is non-unique (the slug guarantees uniqueness) and clears back to the slug when left blank.
 - Input is trimmed; control characters and line breaks are rejected with a named error.
 - There is no MCP tool for the display label — it is a UI/API-only, presentation-only change. (The MCP `rename_agent` tool moves the slug, not the label.)
@@ -83,7 +89,7 @@ The **display label** is the friendly name shown across the UI — the header, a
 
 Renaming moves the immutable slug itself — the heavier operation. Because the slug is what URLs, MCP tool names, schedules, and webhooks resolve to, prefer the [Display Label](#display-label) above when you only need to change the friendly name.
 
-Click the pencil icon next to the agent name on the Agent Detail page to edit inline. Renaming is atomic: it updates the database, renames the Docker container, and broadcasts the change via WebSocket.
+Open **Settings › General › Identity › Agent id** and click **Rename…**. The editor warns that the rename stops and restarts the agent, re-keys its URLs and MCP keys, and leaves its data volumes under the old id; **Rename id** confirms. (To change only the name people see, edit the **Display name** row above it.) Renaming is atomic: it updates the database, renames the Docker container, and broadcasts the change via WebSocket.
 
 Restrictions: system agents cannot be renamed. Only owners and admins have permission to rename.
 
@@ -92,7 +98,7 @@ Restrictions: system agents cannot be renamed. Only owners and admins have permi
 
 ### Delete
 
-Use the Delete button on the Agent Detail page. A confirmation dialog is required.
+Open **Settings › General › Danger zone** and click **Delete…**. A confirmation dialog is required. The row appears only for agents you may delete; there is no delete button in the header.
 
 Deletion is a soft delete. The container is stopped and removed at once, and the agent's schedules stop firing. Its workspace volumes, schedules, chat history, sharing records, permissions and credentials are kept until a retention sweep purges them (`agent_soft_delete_retention_days`, default 180 days). Until then the name stays reserved, and an admin can recover the agent with `POST /api/admin/soft-deleted/agents/{name}/recover` (list them with `GET /api/admin/soft-deleted/agents`). Recovery restores the record but not the container, so start the agent afterwards.
 
@@ -103,7 +109,7 @@ Volume clean-up stays inside this Trinity installation. Each agent volume carrie
 
 ### Health and Status
 
-The agent header displays status (Running/Stopped), CPU and memory usage, network I/O, and uptime. Telemetry auto-refreshes every 10 seconds.
+The agent header displays status (Running/Stopped). CPU and memory usage are on the header's second row; telemetry auto-refreshes every 10 seconds.
 
 Fleet-wide health for the agents you can access is at `GET /api/monitoring/status`; one agent's is at `GET /api/monitoring/agents/{name}`. Admins also have `GET /api/ops/fleet/health` — see [Monitoring](../operations/monitoring.md). Health levels, from best to worst: healthy, degraded, unhealthy, critical, unknown.
 
@@ -111,9 +117,9 @@ Fleet-wide health for the agents you can access is at `GET /api/monitoring/statu
 
 ### Resource Allocation
 
-Configure per-agent memory and CPU limits from the agent header: click the gear button ("Configure resources") to open the resource modal. Limits are enforced at the container level and take effect on the next restart. A CPU limit above the host's CPU count is capped to that count -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
+Configure per-agent memory and CPU limits under **Settings › General › Execution › Memory and CPU**. Limits are enforced at the container level; a change is saved at once and applied on the next restart, which the bar at the top of Settings offers. A CPU limit above the host's CPU count is capped to that count -- see [Agent Configuration](agent-configuration.md#resource-allocation) for valid values and fleet-wide defaults.
 
-Execution timeout is configurable per agent (range: 60--7200 seconds, default: 3600 seconds / 60 minutes).
+Execution timeout is configurable per agent under **Settings › General › Execution › Execution timeout**, in whole minutes from 1 to 120 (default 60); the API takes seconds (range: 60--7200, default: 3600).
 
 The agent's timeout is the ceiling for any of its schedules — setting it below an active schedule's `timeout_seconds` is rejected with `400 error=agent_timeout_below_active_schedules`.
 

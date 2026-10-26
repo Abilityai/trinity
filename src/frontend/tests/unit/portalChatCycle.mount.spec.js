@@ -36,7 +36,7 @@ vi.mock('axios', () => {
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
-import { agentChatTabs } from '@/components/portal/portalUtils'
+import { agentChatTabs, tabOrderFrom } from '@/components/portal/portalUtils'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
 
@@ -151,5 +151,40 @@ describe('ent#621 — cycleChat walks the strip', () => {
     await mountChat()
     expect(typeof wrapper.vm.cycleChat).toBe('function')
     expect(typeof wrapper.vm.focusComposer).toBe('function')
+  })
+})
+
+describe('trinity-enterprise#856 — the walk holds still when a reply lands', () => {
+  // The shell hands the conversation its arrival snapshot as `tabOrder`. A
+  // reply mid-walk re-sorts the thread list (recency); the keys must keep
+  // walking the frozen strip — no tab skipped, none visited twice.
+  const ORDER = { agent: 'scout', ids: tabOrderFrom([MAIN, T2, T3, OTHER], 'scout') }
+
+  it('a reply to a later tab mid-walk causes no skip and no repeat', async () => {
+    expect(ORDER.ids).toEqual(['m', 't2', 't3'])
+    await mountChat({ tabOrder: ORDER })
+    wrapper.vm.cycleChat(1)
+    expect(opened()).toEqual(['t2'])
+    await wrapper.setProps({ sessionId: 't2' })
+
+    // Q3 numbers gets an answer: by recency it now outranks Pricing page.
+    const T3_REPLIED = { ...T3, last_message_at: '2026-09-29T10:00:00Z', unread: 1 }
+    await wrapper.setProps({ threads: [MAIN, T3_REPLIED, T2, OTHER] })
+    // Unfrozen, the strip would read m, t3, t2 — and the next press from t2
+    // would wrap to Main, skipping the chat that just answered.
+    expect(agentChatTabs([MAIN, T3_REPLIED, T2, OTHER], 'scout', { activeId: 't2' }).map((t) => t.id))
+      .toEqual(['m', 't3', 't2'])
+
+    wrapper.vm.cycleChat(1)
+    expect(opened()).toEqual(['t2', 't3'])
+    await wrapper.setProps({ sessionId: 't3' })
+    wrapper.vm.cycleChat(1)
+    expect(opened()).toEqual(['t2', 't3', 'm'])   // each tab once, then the wrap
+  })
+
+  it('a snapshot for another agent is ignored — the walk is the arrival sort', async () => {
+    await mountChat({ tabOrder: { agent: 'sage', ids: ['t3', 't2', 'm'] } })
+    wrapper.vm.cycleChat(1)
+    expect(opened()).toEqual(['t2'])
   })
 })

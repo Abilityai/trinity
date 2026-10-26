@@ -221,11 +221,12 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     state = {"executions": {}}
     fake_db = types.SimpleNamespace(
         get_a2a_exposed=lambda name: name == "remotebot",
-        # ent#838: every agent here is public-scope — today's A2A behaviour.
-        get_a2a_scope=lambda name: {"scope": "public", "keyless": True},
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # #3749: message/send mints the row before dispatch.
+        create_task_execution=lambda **kw: types.SimpleNamespace(id="exec-minted-736"),
+        get_agent_subscription_id=lambda name: None,
         # ent#679: the card producer reads the payment config to decide whether
         # to declare a price. `remotebot` is not priced here — stub it
         # explicitly so the card this loopback fetches is the unpriced one
@@ -244,15 +245,18 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     monkeypatch.setattr(a2a, "_fetch_template_data", _tmpl)
 
     class _Result:
-        execution_id = "exec-1"
         status = "success"
         response = "the remote agent answered"
         error = None
 
+        def __init__(self, execution_id):
+            # #3749: echo the id the inbound router minted.
+            self.execution_id = execution_id
+
     class _Svc:
         async def execute_task(self, **kwargs):
             state["last"] = kwargs
-            return _Result()
+            return _Result(kwargs.get("execution_id") or "exec-stream")
 
     # #2524: the inbound bridge goes through the sync edge adapter now (it is
     # `execute_task` plus a wait when the dispatch queues). Forwarding double, so
@@ -267,7 +271,10 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
     class _Idem:
         def begin(self, scope, key):
             return types.SimpleNamespace(enabled=False, replay=False, in_flight=False,
-                                         snapshot=None, key=None)
+                                         snapshot=None, key=None, execution_id=None)
+
+        def attach_execution(self, *a, **k):
+            return None
 
         def complete(self, *a, **k):
             return None
@@ -647,6 +654,22 @@ def test_both_routes_404_when_the_kill_switch_is_off(client, monkeypatch):
     assert client.http.post(
         "/api/agents/bot/a2a/task", json={"endpoint": "partner", "task_id": "t"}
     ).status_code == 404
+
+
+def test_with_the_switch_off_a_malformed_body_is_the_same_404(client, monkeypatch):
+    """trinity-enterprise#840: the switch is a DEPENDENCY, solved before the body
+    is validated, so a disabled route answers a body that fails schema
+    validation with the same 404 as a good one — not a 422 that says the route
+    exists (the aauth `require_live` shape). The service's own switch check
+    cannot do this: it runs after validation. With the switch on, the same body
+    is an ordinary 422. (JSON that does not parse is a 422 either way: FastAPI
+    decodes the body before it solves dependencies.)"""
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: False)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 404
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 404
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: True)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 422
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 422
 
 
 def _settings_singleton():

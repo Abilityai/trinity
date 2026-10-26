@@ -70,10 +70,13 @@ Sign-in / reload on bare /workspace
                entry our open pushed, else replaces the item away (a deep link never walks out)
       split: the tab's first row is a local PREVIEW — not ?item=, NOT a read, emitted as
                update:preview (§3g S5, T2); stacked: nothing selected
-    actionItems(openAsks, now)  Action's order is URGENCY (§3g C1, askUrgencyCompare): asks
+    actionItems(openAsks, now, sort)  Action's order is NEWEST by default (ent#856,
+                               askRecencyCompare: created_at desc, ties on id desc); on the
+                               sort switch, URGENCY (§3g C1, askUrgencyCompare): asks
                                expiring within 24h first (soonest first — the A10 badge is
                                the reason shown), then priority critical > high > medium > low
-                               (unknown = medium), then the OLDEST first; ties on id
+                               (unknown = medium), then the OLDEST first; ties on id.
+                               See "Sort: Newest / Urgency" below
     agent facets (§3g C2)      Action only, when ≥ 1 agent is waiting (round 2: from one, so a
                                second agent's ask never pushes the list down): a second dense
                                OverflowTabs strip (inbox-agent-facets, tablist "Asks by
@@ -108,7 +111,7 @@ Sign-in / reload on bare /workspace
                       row); the limit resets on a tab change, never on a poll; a selected row past
                       the window widens it (a ?item= at row 72 shows 72). Not virtualisation.
                       All's footer (§3g D-4b, allFooterNotes): "Answered, expired and cancelled
-                      asks drop off after 7 days."; "Showing your 200 most recent asks." when the
+                      asks drop off after 7 days."; "Showing your first 200 asks: the ones waiting longest come first." when the
                       asks read hit its cap (T16; server total is #3059); "Rooms aren't in the
                       Inbox yet…" only to a viewer with rooms. Empty All: "No chats or asks yet"
                       + a New chat link (/workspace?new=1)
@@ -172,6 +175,12 @@ Sign-in / reload on bare /workspace
                 [Reply][Open in chat] — volatile actions leftmost; stacked [Back][title] …
                 [Open in chat][More ▾ → Mark read · Reply] (a disclosure: Esc returns focus),
                 and the Inbox's title, subtitle and tabs are hidden over the pane
+              ask header (#3714): split [title] … [Open in chat] when a chat turn raised it;
+                stacked [Back][title] … [Open in chat] — no More (never an empty menu);
+                a background ask: no actions (the header keeps its reserved height)
+              ask's Open in chat → portalInbox.askOriginThread(item) → askThreadLink(item.ask)
+                             → $emit('open-thread', {id: chat_id, agent_name}) — the card's
+                               own path → Portal.openNewThread (lands at the chat's bottom)
               Open in chat → /workspace/c/:id?anchor=m:<first_unread> | d:<report>
                              → PortalConversation + composables/useConversationAnchor.js
                                (data-message-id / data-report-id, useStickToBottom.detach(),
@@ -197,7 +206,7 @@ Sign-in / reload on bare /workspace
         agent switch on a URL that does not name the chat); the Inbox path survives its own
         navigation because the /c/:id handler sets pendingSession in the remounting tick
               Open canvas  → shown when inboxCanvasCount({tabs: railTabs, canvases: the rail feed
-                             store, agent}) > 0 — on chats AND asks (T6); split: leftmost of
+                             store, agent}) > 0 — thread items only (#3714); split: leftmost of
                              the actions; stacked: in More → open-canvas → openRailOn('canvas')
                              (§3g C10)
     Mark N chats read (ghost; Unread + All only — §3g A9) → k > 1: ConfirmDialog (variant info,
@@ -401,8 +410,51 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent610_ask_context.py` | PR A2 §3g L7: origin only from a verified thread, run gates (agent, live window, audience), schedule name for platform only, recent answers, no `cost`/`execution_id`, one 404 body, 503 on a roster outage, the `# mcp:` header |
 | `src/frontend/tests/unit/portalAskAnswerFlow.mount.spec.js`, `queueBrief.mount.spec.js`, `portalAskContext.mount.spec.js` | PR A2: B2/B3/B5 + focus after Send; the brief seam order, impact hints, XSS; the context below the card, its states, anchors |
 | `src/frontend/tests/unit/portalInboxActionSort.spec.js`, `portalInboxAgentFilter.spec.js`, `portalChatAsksElsewhere.spec.js` | PR A2: C1 urgency order, C2 `?from=` facets (+ mount cases in `portalInbox.mount.spec.js`), B1 a client's link to the Inbox |
+| `src/frontend/tests/unit/portalInboxSort.spec.js` (+ the ent#856 block in `portalInbox.mount.spec.js`, the T3 case in `portalRailAsks.spec.js`) | ent#856: Newest default and its total order, Urgency = C1 unchanged, `?sort=` / memory / default precedence, identity-keyed fail-open storage, `?from=` + paging in both orders; mounted: the control on Action only, replace not push, stray/unknown `?sort=` stripped, a sort change is a new visit, the marks in both orders, one head-line box |
 | `src/frontend/e2e/workspace-inbox.spec.js` (`@smoke`) | landing, the pinned row, explicit targets still win |
 | `src/frontend/e2e/workspace-rail-reserved.spec.js`, `e2e/contrast-ratchet.spec.js` | retargeted to `?agent=` / `?new=1`; `/workspace/inbox` held at zero contrast failures |
+
+## Sort: Newest / Urgency (trinity-enterprise#856)
+
+Action opens **Newest first** — an inbox reads newest first (operator ruling
+2026-10-09) — and the §3g C1 urgency order is one switch away, unchanged.
+
+```
+PortalInbox.vue
+  sort = inboxSortFor(tab, route.query.sort, storedSort)       portalInbox.js (pure)
+         ?sort= (newest|urgency)  →  this viewer's memory  →  'newest'
+         null on Unread / All (T1: they are recency already)
+  actionBase = actionItems(openAsks, now, sort)                 askRecencyCompare | askUrgencyCompare
+  visitKey   = tab | from | sort                                a change = a new stableRows visit
+  onSort(v)  → storedSort + saveInboxSort(storage, viewer, v)   'trinity-workspace-inbox-sort:<viewer>'
+             → replaceQuery({ sort: v })                        replace, never a history entry
+  watch: ?sort= off Action, or not one of the two → replaceQuery({ sort: undefined })
+  <PortalInboxList> #head-end → <BaseSelect variant="ghost" aria-label="Sort asks"> Newest | Urgency
+```
+
+- **Precedence**: the URL, then the memory, then Newest. A link carrying
+  `?sort=` shows that order without overwriting the reader's memory; a change on
+  the control writes both. The memory is keyed by the viewer bucket the column
+  widths use (`useColumnResize.resolveLayoutIdentity`), so a second person on
+  the same browser starts at Newest; a storage that is absent or throws costs
+  the memory and nothing else.
+- **Holds still**: the sort is part of the visit key, so the click re-sorts the
+  rows once and the visit then holds as on a tab change — a poll that raises a
+  priority does not move a row until the reader asks.
+- **The control**: a `BaseSelect variant="ghost"` beside the total in the list's
+  head line, Action only. That line is one fixed 44px box (the ghost select's own
+  height) on every tab and in every state — the loading reserve draws the same
+  box — so switching tab or sort, or data landing, moves nothing. The native
+  select carries keyboard operation and the phone picker.
+- **`?from=` and paging** filter and page the sorted list, so both work the same
+  in either order; the row marks that say why an ask is urgent (priority,
+  "Expires in …") render in both.
+- **The rail's Asks tab** lists Action's DEFAULT order (`INBOX_SORT_DEFAULT`,
+  passed explicitly, T3); it has no control and does not read the memory.
+- **Left as is, recorded in §5.40**: the operator queue's Open tab keeps its own
+  triage order (T2); the unknown-priority and expiry splits between the two
+  surfaces, and the server-newest vs client-oldest direction within a priority,
+  are T5 (iii being a public bug for handoff).
 
 ## A door from the agent page, and a calmer mark (trinity-enterprise#836)
 

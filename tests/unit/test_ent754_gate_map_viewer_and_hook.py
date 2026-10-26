@@ -114,6 +114,9 @@ def env(monkeypatch):
 
     monkeypatch.setattr(db, "list_agent_skill_gates", lambda name: list(rows))
     monkeypatch.setattr(role_addressing, "owner_email", lambda name: owners["email"])
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    from services import skill_gate_service as _sgs
+    monkeypatch.setattr(_sgs, "_can_open", lambda agent, email: True)
     monkeypatch.setattr(db, "can_user_share_agent", lambda username, name: username in managers)
     # trinity-enterprise#629 (#3346 review): an agent key's capability reaches
     # only agents its owner OWNS — "owner" owns the gated agent in this world.
@@ -169,7 +172,8 @@ def test_oss_lists_primary_only_and_the_owner_fills_it(env):
     body = _get(env, OWNER)
 
     assert body["approver_kinds"] == ["primary"]
-    assert _kinds(body) == {"primary": {"kind": "primary", "reachable": True, "viewer_fills": True}}
+    assert _kinds(body) == {"primary": {"kind": "primary", "reachable": True, "viewer_fills": True,
+                                        "label": None, "role_id": None, "unreachable": None}}
 
 
 def test_the_compare_is_casefolded_like_enforce(env):
@@ -193,7 +197,8 @@ def test_an_owner_without_an_email_reaches_nobody(env):
 
     k = _kinds(_get(env, OWNER))["primary"]
 
-    assert k == {"kind": "primary", "reachable": False, "viewer_fills": False}
+    assert k == {"kind": "primary", "reachable": False, "viewer_fills": False,
+                 "label": None, "role_id": None, "unreachable": "unfilled"}
 
 
 def test_an_agent_key_never_fills_a_kind_even_for_its_owners_address(env):
@@ -210,8 +215,10 @@ def test_enterprise_lists_both_kinds_with_their_own_reach(env):
 
     assert body["approver_kinds"] == ["primary", "approver"]
     assert _kinds(body) == {
-        "primary": {"kind": "primary", "reachable": True, "viewer_fills": True},
-        "approver": {"kind": "approver", "reachable": False, "viewer_fills": False},
+        "primary": {"kind": "primary", "reachable": True, "viewer_fills": True,
+                    "label": None, "role_id": None, "unreachable": None},
+        "approver": {"kind": "approver", "reachable": False, "viewer_fills": False,
+                     "label": None, "role_id": None, "unreachable": "unfilled"},
     }
 
 
@@ -240,7 +247,10 @@ def test_viewer_fills_agrees_with_what_enforce_does(env):
 def test_no_person_data_in_the_new_field(env):
     body = _get(env, OWNER)
 
-    assert set(body["approvers"][0]) == {"kind", "reachable", "viewer_fills"}
+    # trinity-enterprise#848 added `label` / `role_id` (null for a kind); #881
+    # added `unreachable`, a reason code — still no person data.
+    assert set(body["approvers"][0]) == {"kind", "reachable", "viewer_fills", "label", "role_id",
+                                         "unreachable"}
     assert "example.com" not in str(body["approvers"]).lower()
 
 

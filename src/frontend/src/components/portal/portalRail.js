@@ -93,11 +93,14 @@ export const RAIL_DEFAULT_TAB = 'work'
  * docks later, per #472. Loops, Canvas and Files are slice 2 — they are named
  * here so the order is a contract and not a side effect of registration order.
  */
-// ent#836 — Asks is LAST on purpose: it is the one tab that comes and goes
-// with data (a presence rule, below), and a tab that appears at the top of the
-// collapsed strip pushes every other icon down under the pointer. Last, nothing
-// else moves when it arrives or leaves.
-export const RAIL_TAB_ORDER = Object.freeze(['work', 'loops', 'canvas', 'files', 'projects', 'info', 'asks'])
+// ent#892 (operator, 2026-10-13) — what the agent IS first, then what it has
+// made, then what it needs from you, then what it is running: Info, Canvas,
+// Files, Projects, Asks, Work, Loops. ent#836 had pinned Asks last because it
+// came and went with data; it is always present now (an empty state when
+// nothing waits), so no tab moves when asks arrive or clear and its place can
+// follow the reading order instead. The default TAB is unchanged (Work,
+// `RAIL_DEFAULT_TAB`): order is where a tab sits, not which one opens.
+export const RAIL_TAB_ORDER = Object.freeze(['info', 'canvas', 'files', 'projects', 'asks', 'work', 'loops'])
 
 /**
  * The registry. Slice 1 (ent#474) docked ONE tab — Work (#457's Activity),
@@ -248,35 +251,32 @@ export const RAIL_TABS = Object.freeze([
   // row opens that ask in the Inbox. It answers nothing: the Inbox is the one
   // answer surface.
   //
-  // AGENT door (asks are addressed to clients and platform users alike) plus a
-  // PRESENCE rule: the tab exists only while a participant has an open ask,
-  // read off the same per-agent counts the sidebar's "needs you" mark reads
-  // (`asksByAgent(openAsks)`, handed in as `session.askCounts`). An answered
-  // or expired ask leaves the tab the moment it leaves Action — and with the
-  // last one gone the tab is not rendered at all, so there is no empty state
-  // to declare (`empty: null`, the ent#547/ent#465 shape). The signal is the
-  // "updated" dot with a note AND a count ("2 asks"), which the open strip
-  // draws as the same unfilled mark the agent row wears.
+  // AGENT door (asks are addressed to clients and platform users alike). ent#892
+  // (operator ruling 2026-10-13) removed ent#836's PRESENCE rule: the tab is
+  // always there, like every other tab, and with nothing waiting it says so —
+  // the empty state below, the same shape as Loops, Canvas and Files. The
+  // signal is the "updated" dot with a note AND a count ("2 asks"), read off
+  // the same per-agent counts the sidebar's "needs you" mark reads, and drawn
+  // by the open strip as the same unfilled mark the agent row wears — so the
+  // mark appears only when an ask is waiting.
   Object.freeze({
     id: 'asks',
     label: 'Asks',
     door: RAIL_DOORS.AGENT,
-    presence: asksTabPresent,
     scope: RAIL_SCOPE_PARTICIPANTS,
     signal: RAIL_SIGNAL_UPDATED,
     icon: 'asks',
-    empty: null,
+    empty: Object.freeze({
+      title: 'No asks',
+      body: (participants) => {
+        const who = whoIs(participants)
+        return `Nothing from ${who} is waiting on you. When it needs your answer or approval, the ask shows up here and in the Inbox.`
+      },
+      action: 'Open the Inbox',
+      event: 'open-inbox',
+    }),
   }),
 ])
-
-/**
- * ent#836 — does a participant have an open ask? The presence rule for the
- * Asks tab. Strict integers: a count that is not a number is no count.
- */
-export function asksTabPresent(session = {}) {
-  const counts = session && session.askCounts && typeof session.askCounts === 'object' ? session.askCounts : {}
-  return participantList(session.participants).some((p) => Number.isInteger(counts[p]) && counts[p] > 0)
-}
 
 /** "scout" in a 1:1, "an agent in this room" otherwise — one rule for every empty copy. */
 function whoIs(participants) {
@@ -298,9 +298,6 @@ export function tabPassesDoor(tab, session = {}) {
   // ent#661 — a tab that needs a capability shows only when the session was
   // told it has it (the roster's strict `=== true`); absent means no.
   if (tab && tab.capability && (session.capabilities || {})[tab.capability] !== true) return false
-  // ent#836 — a tab with a presence rule exists only while it has something:
-  // checked HERE, on the one gate, so "not shown" is also "not mounted".
-  if (tab && typeof tab.presence === 'function' && tab.presence(session) !== true) return false
   switch (tab && tab.door) {
     case RAIL_DOORS.PLATFORM: return session.isPlatform === true
     case RAIL_DOORS.AUDIENCE: return true

@@ -528,29 +528,59 @@ class OperatorQueueOperations:
         gives `(ended row, None)`; a lost one gives the row as it stands and the
         outcome dict the create returns instead of inserting.
 
-        The predicate is respond's (`pending` AND not past the deadline) plus
-        the ownership belt (`agent_name`, `raised_by='agent'`): one writer sees
-        `rowcount 1` whatever races it — a person's answer, a cancel, the expiry
-        sweep — and "denied by timeout" cannot be sidestepped by a replace.
+        The replace's vocabulary over `_end_own_pending`: the predicate keeps
+        respond's deadline clause, so "denied by timeout" cannot be sidestepped
+        by a replace (an approval must never land late through a successor).
+        """
+        row, refusal = self._end_own_pending(
+            conn, agent_name, pred_id, reason="replaced", replaced_by=new_id, honour_deadline=True)
+        if refusal is None:
+            return row, None
+        if refusal["outcome"] == "not_own":
+            return row, {"outcome": "replaces_not_own"}
+        return row, {"outcome": "replaces_ended", "expired_now": refusal["expired_now"]}
+
+    def _end_own_pending(
+        self, conn, agent_name: str, row_id: str, *,
+        reason: str, replaced_by: Optional[str], honour_deadline: bool,
+    ) -> Tuple[Optional[Dict], Optional[Dict]]:
+        """The one compare-and-set an AGENT ends its own pending ask with — the
+        replace (#3247, `replaced_by` set, reason `replaced`) and the withdraw
+        (trinity-enterprise#901, `replaced_by` NULL, the agent's reason). Writes
+        `cancelled` / `disposition='cancelled'` / `disposed_by='agent'`, no
+        person's email. Returns `(row, refusal)`: a won CAS gives `(ended row,
+        None)`; a lost one gives the row as it stands and `{"outcome": "not_own"}`
+        (missing, another agent's, a NULL-raiser, a gate's) or `{"outcome":
+        "ended", "expired_now": bool}`.
+
+        The predicate is the ownership belt (`agent_name`, `raised_by='agent'`
+        on the column) plus `status='pending'`, so one writer sees `rowcount 1`
+        whatever races it — a person's answer, a cancel, the expiry sweep, the
+        other agent door. With `honour_deadline` (the replace) it also refuses a
+        row past its deadline, and — T5b — expires that row here as the clock
+        would, in this transaction, so the refusal states a real disposition
+        instead of a dead zone until the sweep. Without it (the withdraw, like
+        a person's `cancel_item`) a pending row past its deadline simply ends:
+        a withdraw lands no approval, so there is nothing to deny by timeout,
+        and recording it `expired` would call the agent's own close-out a
+        denial the C6 re-ask guard then holds against it.
         """
         now = utc_now_iso()
-        mine = and_(operator_queue.c.id == pred_id, operator_queue.c.agent_name == agent_name)
+        mine = and_(operator_queue.c.id == row_id, operator_queue.c.agent_name == agent_name)
+        conds = [mine, operator_queue.c.raised_by == "agent", operator_queue.c.status == "pending"]
+        if honour_deadline:
+            conds.append(or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now))
         result = conn.execute(
             update(operator_queue)
-            .where(and_(
-                mine,
-                operator_queue.c.raised_by == "agent",
-                operator_queue.c.status == "pending",
-                or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now),
-            ))
+            .where(and_(*conds))
             .values(
                 status="cancelled",
                 disposition="cancelled",
                 disposed_at=now,
                 disposed_by="agent",
                 disposed_by_email=None,
-                disposition_reason="replaced",
-                replaced_by=new_id,
+                disposition_reason=reason,
+                replaced_by=replaced_by,
             )
         )
         if result.rowcount:
@@ -558,12 +588,10 @@ class OperatorQueueOperations:
             return self._row_to_item(row), None
         row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
         if row is None:
-            return None, {"outcome": "replaces_not_own"}
+            return None, {"outcome": "not_own"}
         if row["status"] == "pending":
-            if row["expires_at"] is not None and row["expires_at"] <= now and row["raised_by"] == "agent":
-                # T5b: still pending past its deadline — end it as the clock
-                # would, in this transaction, so the refusal states a real
-                # disposition instead of a dead zone until the sweep.
+            if (honour_deadline and row["expires_at"] is not None and row["expires_at"] <= now
+                    and row["raised_by"] == "agent"):
                 expired = conn.execute(
                     update(operator_queue)
                     .where(and_(mine, operator_queue.c.status == "pending"))
@@ -572,10 +600,27 @@ class OperatorQueueOperations:
                             disposition_reason=_TIMEOUT_REASON)
                 ).rowcount
                 row = conn.execute(select(*self._SELECT_COLS).where(mine)).mappings().first()
-                return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": bool(expired)}
+                return self._row_to_item(row), {"outcome": "ended", "expired_now": bool(expired)}
             # pending but not this agent's own agent-raised ask: the belt held
-            return self._row_to_item(row), {"outcome": "replaces_not_own"}
-        return self._row_to_item(row), {"outcome": "replaces_ended", "expired_now": False}
+            return self._row_to_item(row), {"outcome": "not_own"}
+        return self._row_to_item(row), {"outcome": "ended", "expired_now": False}
+
+    def withdraw_item(self, agent_name: str, row_id: str, *, reason: str) -> Dict:
+        """The agent ends one of its OWN pending asks with a reason and no
+        successor (trinity-enterprise#901) — `_end_own_pending` without the
+        deadline clause, in its own transaction (the UPDATE first, so SQLite
+        takes the write lock at once). Returns `{"outcome": "withdrawn" |
+        "ended" | "not_own", "row"}`: `withdrawn` carries the row as the CAS
+        left it; `ended` the row as it stands (nothing written); `not_own` the
+        row when it is this agent's (a NULL-raiser or gate row), else None.
+        """
+        with get_engine().begin() as conn:
+            row, refusal = self._end_own_pending(
+                conn, agent_name, row_id, reason=reason, replaced_by=None, honour_deadline=False)
+        if refusal is None:
+            _note_commit_lag(row["disposed_at"])
+            return {"outcome": "withdrawn", "row": row}
+        return {"outcome": refusal["outcome"], "row": row}
 
     @staticmethod
     def _pending_proposal_match(conn, agent_name: str, proposal: Dict) -> Optional[str]:
@@ -1104,7 +1149,9 @@ class OperatorQueueOperations:
         (trinity-enterprise#611 — the Execution Context line).
 
         Ids and the ending only — `request_id`, `disposition`, `disposed_at`,
-        `disposed_by` (#3247: `agent` reads `replaced`) — never a title, an answer or a reason: the line reaches every composed
+        `disposed_by` and `replaced_by` (#3247 / trinity-enterprise#901: an
+        `agent` ending reads `replaced` when `replaced_by` is set, `withdrawn`
+        otherwise) — never a title, an answer or a reason: the line reaches every composed
         turn. Only rows that carry the ledger (a row that ended before it has no
         ending time to show); platform alarms excluded by prefix (the agent
         raised none of them, ent#499).
@@ -1115,6 +1162,7 @@ class OperatorQueueOperations:
                 operator_queue.c.disposition,
                 operator_queue.c.disposed_at,
                 operator_queue.c.disposed_by,
+                operator_queue.c.replaced_by,
             )
             .where(
                 and_(
@@ -1329,11 +1377,14 @@ class OperatorQueueOperations:
         if conds is None:
             return []
 
-        # Sort: pending items by priority then age; ended items by WHEN THEY
-        # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
-        # cancellation made this morning by the day the ask was filed buried it.
-        # A row that ended before the ledger falls back to its answer time, then
-        # to its filing time (no other timestamp exists for it).
+        # Sort: pending items by priority, then OLDEST FIRST (#3679): both
+        # clients read one capped page and show it oldest first, so a newest-
+        # first page dropped the asks that had waited longest the moment the
+        # queue outgrew the cap. Ended items by WHEN THEY ENDED, newest first
+        # (trinity-enterprise#611, #627 AC6) — sorting a cancellation made this
+        # morning by the day the ask was filed buried it. A row that ended
+        # before the ledger falls back to its answer time, then to its filing
+        # time (no other timestamp exists for it).
         is_pending = operator_queue.c.status == "pending"
         status_order = case((is_pending, 0), else_=1)
         priority_order = case(
@@ -1360,7 +1411,12 @@ class OperatorQueueOperations:
             stmt.order_by(
                 status_order,
                 pending_priority,
-                sort_time.desc(),
+                # Two age keys, one per group: `status_order` already separates
+                # pending from ended, so each key is NULL across the whole other
+                # group and NULL placement never decides an order (SQLite and
+                # PostgreSQL put NULLs at opposite ends).
+                case((is_pending, operator_queue.c.created_at), else_=None).asc(),
+                case((is_pending, None), else_=sort_time).desc(),
                 # #3059: the last key, so rows that tie on everything above
                 # (raised in the same instant) still order the same way on every
                 # read — which is what lets an offset page without overlapping

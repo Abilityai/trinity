@@ -7,6 +7,7 @@ services:
     # edited during the demo.
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --no-server-header
     environment:
+      - AAUTH_ENABLED=true
       - AAUTH_PROTOTYPE_ENABLED=true
       - AAUTH_ISSUER=${AAUTH_ISSUER:?AAUTH_ISSUER must be set}
       # The served agent card's `url` must be the public origin, or A's client

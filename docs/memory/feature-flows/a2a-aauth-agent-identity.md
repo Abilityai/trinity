@@ -11,9 +11,12 @@ bootstrap: no Person Server, no Access Server, no missions) applied to the A2A
 seam Trinity already ships. It is an **authentication** change, not a new
 transport: the wire is still A2A JSON-RPC 2.0 over `POST /a2a/{name}`.
 
-> **Status:** prototype behind `aauth_prototype_enabled`, **OFF by default**.
-> With the flag off, inbound, outbound and the served card behave exactly as
-> they did before (§32.8 in `docs/memory/requirements/mcp.md`).
+> **Status:** Flows 1–4 graduated for Trinity-to-Trinity calls behind
+> `aauth_enabled`, **OFF by default**, switchable from Settings → Integrations
+> (ent#862 PR1). Flows 5–6 stay prototype behind a second switch,
+> `aauth_prototype_enabled`, and need both. With the switch off, inbound,
+> outbound and the served card behave exactly as they did before (§32.8 in
+> `docs/memory/requirements/mcp.md`).
 
 ## Why it exists
 
@@ -48,7 +51,8 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 
 | Layer | File | Notes |
 |---|---|---|
-| Flag + issuer | `services/aauth/config.py` | `aauth_prototype_enabled`, `aauth_issuer` — both `system_settings` → env → default. Issuer must be `https://<host>`: no port, no path, lowercase |
+| Switches + issuer | `services/aauth/config.py` | `aauth_enabled` (Flows 1–4, the single input of `active_issuer()`), `aauth_prototype_enabled` (Flows 5–6, read once at `require_live` via `prototype_active_issuer()`), `aauth_issuer` — all `system_settings` → env → default. Issuer must be `https://<host>`: no port, no path, lowercase |
+| Settings surface (ent#862) | `services/aauth/settings.py`, `routers/settings/aauth.py`, `components/settings/AAuthPanel.vue`, `stores/a2aFederation.js`, `utils/aauthSettings.js` | `GET/PUT /api/settings/aauth`: each value with its source, `live` = switch AND valid issuer, the readiness checklist; the write is admin + interactive, diff-only, `invalid_issuer` by name; the panel asks before changing a live issuer |
 | JOSE | `services/aauth/jose.py` | Compact JWS with the fully-specified `Ed25519` alg (PyJWT only registers `EdDSA`, which the draft forbids verifiers to accept), JWK ⇄ key, RFC 7638 thumbprints |
 | RFC 9421 profile | `services/aauth/httpsig.py` | Signature base, `@authority` normalisation, Content-Digest, and a **strict** RFC 8941 subset (anything unexpected is refused, not interpreted) |
 | Instance key | `services/aauth/keys.py` | One Ed25519 key per instance, AES-256-GCM in `system_settings.aauth_signing_key_encrypted` (Invariant #12), created on first use via insert-if-absent |
@@ -79,6 +83,7 @@ key. The token says *who this is*; the signature proves *this request is theirs*
 | POST | `/a2a/{name}` | **AAuth** *or* bearer | The existing JSON-RPC task endpoint. A request carrying `Signature-Key` takes the AAuth path; everything else is unchanged |
 | POST | `/api/agents/{name}/aauth/person-token` | the agent's **own** key only | ent#878: obtain a person token for `resource` as the agent, or resume a pending binding by `pending_handle` (Flow 5). Uniform 404 while inert — before body validation |
 | POST | `/api/agents/{name}/aauth/resource-call` | the agent's **own** key only | ent#879: call an allow-listed AAuth resource (`{resource}{path}`) as the agent — the whole requirement ladder, every token held by the platform — or resume a pending call by `pending_handle` (Flow 6). Same gates as the person-token route, consulted before the allow-list |
+| GET/PUT | `/api/settings/aauth` | admin; the write **interactive-only** | ent#862: the switches, issuer, person server and resource allow-list with their sources, `live`, the identity example and the readiness checklist. PUT writes only the fields sent; `422 invalid_{issuer,person_server,resource_allowlist}`; audited. The generic catch-all refuses all five keys |
 
 All three documents answer a uniform **404** unless AAuth is live (flag on **and**
 a valid issuer), so a default install publishes nothing. They are per-IP rate
@@ -88,7 +93,8 @@ limited like the public card route.
 
 | Key | Where | Meaning |
 |---|---|---|
-| `aauth_prototype_enabled` | `system_settings` → `AAUTH_PROTOTYPE_ENABLED` | Master switch, default **off** |
+| `aauth_enabled` | `system_settings` → `AAUTH_ENABLED` | The switch for Flows 1–4, default **off**; Settings → Integrations → AAuth (ent#862) |
+| `aauth_prototype_enabled` | `system_settings` → `AAUTH_PROTOTYPE_ENABLED` | The Flow 5–6 prototypes, default **off**; inert without `aauth_enabled` |
 | `aauth_issuer` | `system_settings` → `AAUTH_ISSUER` | This instance's AAuth identity domain, `https://<host>` |
 | `aauth_signing_key_encrypted` | `system_settings` | The instance key envelope. Blocked on the generic settings PUT/DELETE; included in the credential-rotation script |
 | `aauth_person_server` | `system_settings` → `AAUTH_PERSON_SERVER` | ent#878: the person server agents bind through, `https://<host>` (same strict rule as the issuer, never repaired). Unset → `person_server_unconfigured` |
@@ -103,7 +109,7 @@ the ordinary bearer 401.
 
 ## Flow 1 — Enablement (per instance)
 
-1. Operator sets `aauth_issuer` to the instance's public origin and turns the flag on.
+1. An admin sets the issuer to the instance's public origin and turns the switch on — in Settings → Integrations → "Calls between Trinity instances" (or `AAUTH_ISSUER` / `AAUTH_ENABLED` for bootstrap; a stored row wins over the environment in both directions). The panel reports "On, inactive" until the issuer is valid, and asks before changing a live issuer, since that re-keys every agent's identity for every peer.
 2. First use of the key (a signature, or a JWKS fetch) creates one Ed25519 key,
    encrypts it, and writes it **insert-if-absent**, then re-reads the row — so two
    uvicorn workers racing on first use converge on one key rather than forking.
@@ -366,17 +372,28 @@ it sees is a credential.
    → retry once. 401 `requirement=auth-token; resource-token="…"` → step 5.
 5. **Verify the resource token** (the sink, one red test per check): JWKS `kid` +
    Ed25519 signature + no forbidden headers; `iss` = the resource, `dwk` =
-   `aauth-resource.json`, `aud` = our PS (three-party; an Access-Server `aud` is refused
-   `unsupported_aud`), `agent_jkt` = our current key, `ps` = ours, `sub` +
-   `presented_jti` = the token we just presented, `exp` future, `iat` not future,
-   lifetime ≤ 1 h. A failure is a named refusal + a WARN "possible tampering", never a
-   PS trip. An auth-token challenge while presenting the **agent** token is
-   `unexpected_challenge` (the agent token is never a `presented_token`).
+   `aauth-resource.json`, `aud` = our PS (**three-party**) **or an access server**
+   (**four-party**, ent#928 — draft §Federated Authorization Access): any other `aud`
+   is accepted only as a strict `https://host` identifier whose
+   `/.well-known/aauth-access.json` is fetchable through the pinned public-URL egress
+   and names itself as `issuer`; that fetch runs only AFTER the signature verifies, so
+   a forged token cannot make the backend dial a host of its choosing, and anything
+   else is the named refusal `resource_token_invalid:aud` with no PS trip. Then
+   `agent_jkt` = our current key, `ps` = ours, `sub` + `presented_jti` = the token we
+   just presented, `exp` future, `iat` not future, lifetime ≤ 1 h. A failure is a named
+   refusal + a WARN "possible tampering", never a PS trip. An auth-token challenge while
+   presenting the **agent** token is `unexpected_challenge` (the agent token is never a
+   `presented_token`).
 6. **Exchange** at the PS: signed `POST auth_token_endpoint {resource_token,
    presented_token, justification, capabilities: ["interaction"]}`, `Prefer: wait=10`.
-   200 → the `aa-auth+jwt` is inspected (`typ`, `iss` = the resource token's `aud`,
-   `aud` = the resource, `cnf` = our key, `sub`, `exp` ≤ the presented token's; the PS
-   signature is **not** verified, plan T5), cached in Redis under
+   The agent's part is the same in both modes — the resource token always goes to
+   **our** PS, and in four-party the PS federates with the access server named in
+   `aud` (the agent never dials the AS). 200 → the `aa-auth+jwt` is inspected (`typ`;
+   `iss` = the resource token's `aud` — our PS with `dwk` `aauth-person.json` in
+   three-party, the access server with `dwk` `aauth-access.json` in four-party, a token
+   from the other kind of server refused; `ps` = our PS in both; `aud` = the resource,
+   `cnf` = our key, `sub`, `exp` ≤ the presented token's; the issuer's signature is
+   **not** verified, plan T5), held under its real issuer, cached in Redis under
    `aauth:at:{sha256(issuer|ps|agent|key_thumbprint|resource|scope)}` with TTL
    `exp − 300`, and the original request is re-sent with it → `result`
    (`token_kind: auth`, `challenges: ["auth-token"]`, budget cost 2 on Senzing). 202
@@ -429,7 +446,7 @@ pause. `senzing_check.py` works from a laptop with the agent's MCP key.
 | The resource's 429, or a local rate budget | 429 | `rate_limited` + `retry_after`, or the limiter's detail |
 | Pending state unreadable / unwritable (Redis) | 503 | `state_unavailable` — never an in-memory fallback |
 | The call budget ran out | 504 | `timeout` (+ `possibly_executed` after a POST was sent) |
-| The peer did something we refused or could not use | 502 | `resource_metadata_invalid`, `resource_unreachable`, `resource_token_invalid:<check>`, `unsupported_requirement:<value>`, `unexpected_challenge`, `agent_token_rejected`, `person_token_rejected`, `ps_rejected:<code>`, `ps_unreachable`, `gone`, `key_rotated`, `too_many_rounds`, `step_up_loop`, `token_unavailable`, `unsupported_aud`, `endpoint_*` |
+| The peer did something we refused or could not use | 502 | `resource_metadata_invalid`, `resource_unreachable`, `resource_token_invalid:<check>`, `unsupported_requirement:<value>`, `unexpected_challenge`, `agent_token_rejected`, `person_token_rejected`, `ps_rejected:<code>`, `ps_unreachable`, `gone`, `key_rotated`, `too_many_rounds`, `step_up_loop`, `token_unavailable`, `endpoint_*` |
 | Protocol outcomes | 200 | `outcome`: `result` · `interaction_required` / `pending` (handle + `retry_after`, link + code on an interaction) · `denied` (`denied` / `abandoned` / `revoked` / `user_unreachable`, `do_not_retry`) · `expired` (`pending_expired` / `handle_unknown`, `do_not_retry`) |
 
 No request or response field can carry a token (pinned by test): `token_kind` is one of
@@ -454,6 +471,13 @@ top of the platform patterns.
   problem, not this one.
 - **Revocation** is deleting the entry on the callee — no key rotation, no
   coordination with the peer.
+- **On the resource leg (Flow 6) the person server is the trust anchor**, not the
+  access server: a four-party resource token names an AS we have never configured, so
+  the only thing the platform checks about it is that it exists at a public `https://host`
+  and publishes metadata naming itself (ent#928). Everything that matters — whether to
+  mint for this person, this agent, this resource — is decided by OUR PS federating with
+  that AS. An allow-listed resource can therefore steer which AS the PS talks to, never
+  which PS the agent trusts.
 
 ## Stated limits (prototype)
 
@@ -500,10 +524,17 @@ top of the platform patterns.
 12. **The PS signature over the auth token is not verified** (plan T5): the token is
     inspected (`typ`, `iss`, `aud`, `cnf`, `sub`, `exp`) and the resource verifies it;
     RS256/ES256 verification against an operator-listed PS JWKS is #558 task G.
-13. **Four-party `aud` deferred**: a resource token whose `aud` names an Access Server
-    rather than our PS is refused `unsupported_aud`; only the three-party exchange
-    (Senzing's) is implemented. The PS `interaction_endpoint` relay and
-    `authorization_endpoint` pre-authorisation (T8) are likewise out of scope.
+13. **Four-party is supported, and the access server is trusted only as far as its
+    published metadata** (ent#928): a resource token whose `aud` names an access server
+    is forwarded only when that server is a strict `https://host` identifier that
+    publishes `/.well-known/aauth-access.json` naming itself as `issuer` — nothing
+    else about the AS is verified here, because the agent never talks to it: the token
+    still goes to our PS, which does the federation and the verification, and the auth
+    token that comes back is held to the four-party rule (`iss` = that AS, `dwk` =
+    `aauth-access.json`, `ps` = ours). What was lifted is only our refusal to forward
+    (ent#879 decision #18's `unsupported_aud`); the audit row names the mode
+    (`auth_mode`) and the AS. The PS `interaction_endpoint` relay and
+    `authorization_endpoint` pre-authorisation (T8) remain out of scope.
 14. **The effect guard arms only for a real execution** of the agent (the MCP path): a
     script run with `execution_id=manual` proceeds unguarded and says so; an unknown id
     is refused on a pull-pilot agent (#2392). A `result` snapshot (the sanitised answer —
@@ -536,5 +567,5 @@ top of the platform patterns.
 - `feature-flows/a2a-outbound-call.md` — the calling half this extends (#736)
 - `docs/memory/requirements/mcp.md` §32.8 — the requirement, including out-of-scope
 - `docs/memory/requirements/mcp.md` §32.9 — the person-token binding leg (ent#878), Flow 5
-- `docs/memory/requirements/mcp.md` §32.10 — the resource-call ladder (ent#879), Flow 6
+- `docs/memory/requirements/mcp.md` §32.10 — the resource-call ladder (ent#879; four-party access servers ent#928), Flow 6
 - `docs/memory/learnings.md` (2026-09-17) — why a second instance needs its own Docker daemon

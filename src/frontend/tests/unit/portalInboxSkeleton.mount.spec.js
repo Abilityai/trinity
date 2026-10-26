@@ -35,6 +35,7 @@ vi.mock('axios', () => {
 import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalInbox from '@/components/portal/PortalInbox.vue'
 import PortalInboxSkeleton from '@/components/portal/PortalInboxSkeleton.vue'
+import PortalInboxList from '@/components/portal/PortalInboxList.vue'
 
 // A ResizeObserver that reports a chosen width, so both components run the
 // same `inboxLayout` over the same number.
@@ -96,6 +97,22 @@ describe('#3060 the skeleton is the Inbox frame', () => {
     const { inbox, skel } = await both()
     expect(cls(skel, '[data-testid="inbox-skeleton-header"]')).toBe(cls(inbox, '[data-testid="inbox-header"]'))
     expect(cls(skel, '[data-testid="inbox-skeleton-tabs"]')).toBe(cls(inbox, '[data-testid="inbox-tabs"]'))
+  })
+
+  it('the list head line is the Inbox\'s one 44px box — the reserve\'s classes, the ready head\'s box (ent#856)', async () => {
+    const { inbox, skel } = await both()
+    const head = skel.find('[data-testid="inbox-skeleton-list"] > p')
+    expect(head.exists()).toBe(true)
+    expect(head.attributes('class')).toBe(cls(inbox, '[data-testid="inbox-list-total-reserve"]'))
+    // The ready list's head (PortalInboxList) is the same box: height + inset.
+    const ready = mount(PortalInboxList, {
+      props: { items: [], head: '3 need you' },
+      global: { plugins: [router] },
+    })
+    mounted.push(ready)
+    const box = (classes) => classes.filter((c) => /^(h|min-h|px|pt|pb|py)-/.test(c)).sort()
+    expect(box(head.classes())).toEqual(box(ready.find('[data-testid="inbox-list-head"]').classes()))
+    expect(box(head.classes())).toEqual(['h-11', 'px-4'])
   })
 
   it('the tab strip is the SAME strip — labels, order, the selected tab, and the reserved badge slots', async () => {

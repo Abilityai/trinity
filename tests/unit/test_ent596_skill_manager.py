@@ -377,6 +377,10 @@ def files_mod(monkeypatch, grants, audit):
     import dependencies
     monkeypatch.setattr(dependencies.db, "get_agent_owner",
                         lambda name: {"owner_username": "owner"})
+    # ent#820: the human here is the agent's owner (a share holder is refused
+    # the skills dir by tier — test_ent820_files_tier_census.py).
+    monkeypatch.setattr(files, "_passes_owner_tier",
+                        lambda u, a: getattr(u, "mcp_scope", "x") is None)
     # Past the gate, the next thing each logic function does is look up the
     # container; "not found" is the observable proof the gate let it through.
     monkeypatch.setattr(files, "get_agent_container", lambda name: None)

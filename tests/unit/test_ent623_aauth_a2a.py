@@ -77,13 +77,10 @@ def b(monkeypatch):
     from fastapi.testclient import TestClient
 
     state = {"issuer": B_ISS, "exposed": {"bot"}, "dispatched": [], "audit": [], "activity": [],
-             "owners": {}, "executions": {}, "scope": {}}
+             "owners": {}, "executions": {}, "minted": []}
 
     monkeypatch.setattr(a2a, "db", types.SimpleNamespace(
         get_a2a_exposed=lambda name: name in state["exposed"],
-        # trinity-enterprise#838 (on dev since the branch was cut): the door asks
-        # the agent's A2A scope; "public" is the pre-#838 behaviour.
-        get_a2a_scope=lambda name: state["scope"].get(name, {"scope": "public", "keyless": False}),
         # ent#679 (on dev since the branch was cut): a bearer-less request reaches
         # the payment door, which asks whether the agent is priced; None = not
         # priced, so the stranger gets today's 401 bytes.
@@ -91,6 +88,10 @@ def b(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # #3749: message/send mints the row before dispatch.
+        create_task_execution=lambda **kw: (
+            state["minted"].append(kw) or types.SimpleNamespace(id="exec-minted-623")),
+        get_agent_subscription_id=lambda name: None,
     ))
     monkeypatch.setattr(a2a, "get_agent_container",
                         lambda name: types.SimpleNamespace(status="running", labels={}))
@@ -101,7 +102,9 @@ def b(monkeypatch):
 
     async def _dispatch(**kwargs):
         state["dispatched"].append(kwargs)
-        return types.SimpleNamespace(execution_id="exec-1", status="success", response="pong", error=None)
+        # #3749: echo the minted id rather than a literal of the stub's own.
+        return types.SimpleNamespace(execution_id=kwargs["execution_id"], status="success",
+                                     response="pong", error=None)
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _dispatch)
 
     class _Audit:
@@ -112,7 +115,11 @@ def b(monkeypatch):
     class _Idem:
         def begin(self, scope, key):
             state.setdefault("scopes", []).append(scope)
-            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None)
+            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None,
+                                         execution_id=None)
+
+        def attach_execution(self, *a):
+            pass
 
         def complete(self, *a):
             pass
@@ -247,9 +254,24 @@ def test_listed_identity_runs_task_without_a_trinity_user(b):
     assert row["details"]["verification"] == "verified"
     assert row["details"]["allowlist"] == "allowed"
     assert b.state["activity"][0][1] == ECHO
-    assert b.state["owners"] == {"exec-1": ECHO}
+    assert b.state["owners"] == {"exec-minted-623": ECHO}
     # Its own namespace, distinct from any bearer principal's (ent#623).
     assert b.state["scopes"] == [f"a2a:bot:aauth|{ECHO}"]
+
+
+def test_minted_row_records_the_aauth_peer_identity(b):
+    # ent#862 PR3: the execution row names the peer that triggered it. Since
+    # #3749 the row is minted before dispatch, so the stamp lives on the mint.
+    r = b.sign_as("echo", _send())
+    assert r.status_code == 200, r.text
+    assert [kw["fields"].a2a_caller_identity for kw in b.state["minted"]] == [ECHO]
+
+
+def test_bearer_minted_row_records_no_aauth_identity(b):
+    _bearer(b)
+    r = b.http.post("/a2a/bot", json=_send(), headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200, r.text
+    assert [kw["fields"].a2a_caller_identity for kw in b.state["minted"]] == [None]
 
 
 def test_unlisted_identity_of_a_trusted_issuer_is_403(b):
@@ -322,36 +344,6 @@ def test_tasks_get_is_scoped_to_the_identity_that_started_it(b):
 
 
 # ---- card + discovery documents ----------------------------------------------
-def test_internal_scope_refuses_an_outside_aauth_caller_exactly_like_a_bearer_caller(b, monkeypatch):
-    """trinity-enterprise#838 gate on the AAuth door (merge-added, #3644 I1): an
-    internal-scope agent answers an AAuth caller from outside its trusted
-    networks with the same uniform 404 a keyed caller gets — before the
-    allow-list is read, before any issuer fetch, and without an audit row."""
-    b.state["scope"]["bot"] = {"scope": "internal", "keyless": False}
-    monkeypatch.setattr(a2a.a2a_trusted_networks, "internal_source",
-                        lambda request, entries=None: None)
-    signed = b.sign_as("echo", _send())
-    _bearer(b)
-    keyed = b.http.post("/a2a/bot", json=_send())
-    assert signed.status_code == 404 and keyed.status_code == 404
-    assert signed.content == keyed.content
-    assert b.state["fetches"] == [] and b.state["audit"] == [] and b.state["dispatched"] == []
-
-
-def test_internal_scope_admits_a_trusted_aauth_caller_as_its_identity_not_its_address(b, monkeypatch):
-    """The other side of the gate: from a trusted network the signed request
-    runs, attributed to the verified identity — never to the source address,
-    even with keyless on (the gate's `.refuse` is read, its `.caller_source` is not)."""
-    b.state["scope"]["bot"] = {"scope": "internal", "keyless": True}
-    monkeypatch.setattr(a2a.a2a_trusted_networks, "internal_source",
-                        lambda request, entries=None: "100.70.1.2")
-    r = b.sign_as("echo", _send())
-    assert r.status_code == 200, r.text
-    assert b.state["dispatched"][0].get("source_host") is None
-    assert b.state["audit"][-1]["actor_external_id"] == ECHO
-    assert b.state["scopes"] == [f"a2a:bot:aauth|{ECHO}"]
-
-
 def test_card_still_serves_when_the_flag_cannot_be_read(b, monkeypatch):
     """#3644 (d): `test_3215_public_base_url` drives the real card route with a
     settings stand-in that knows only the public URL. The card is dev's single

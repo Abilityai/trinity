@@ -7,14 +7,16 @@
   -->
   <section
     v-if="!store.hidden"
-    class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6"
+    :class="embedded ? '' : 'rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6'"
     data-testid="self-change-permissions"
   >
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Permissions to change itself</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      What this agent may change about itself and other agents on its own. Every one is off until an
-      instance admin turns it on; people and the system agent never need them.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Permissions to change itself</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        What this agent may change about itself and other agents on its own. Every one is off until an
+        instance admin turns it on; people and the system agent never need them.
+      </p>
+    </template>
 
     <div v-if="view.state === 'loading'" aria-busy="true" data-testid="self-change-loading">
       <span class="sr-only">Loading permissions…</span>
@@ -143,6 +145,9 @@ import SkeletonLoader from '../SkeletonLoader.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 const store = useCapabilityGrantsStore()

@@ -41,6 +41,7 @@ from dependencies import (
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
 from services import dispatch_admission_service, skill_gate_map_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.public_url import public_base_url
 from services.schedule_validation import (
     ScheduleValidationError,
     validate_cron_expression,
@@ -671,10 +672,15 @@ async def trigger_schedule(
 # Webhook Management Endpoints (WEBHOOK-001, #291)
 
 
-def _build_webhook_url(request_base_url: str, token: str) -> str:
-    """Construct the full webhook URL from base URL and token."""
-    base = str(request_base_url).rstrip("/")
-    return f"{base}/api/webhooks/{token}"
+def _build_webhook_url(request: Request, token: str) -> Optional[str]:
+    """Construct the full webhook URL for a token, or None with no usable host.
+
+    The origin comes from `public_base_url` so an HTTPS proxy's
+    `X-Forwarded-Proto` upgrades it to https (#3601); `request.base_url` is
+    http behind every proxy on the prod/hosted compose command.
+    """
+    base = public_base_url(request)
+    return f"{base}/api/webhooks/{token}" if base else None
 
 
 @router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -713,7 +719,7 @@ async def generate_webhook(
             detail="Failed to generate webhook token"
         )
 
-    webhook_url = _build_webhook_url(request.base_url, token)
+    webhook_url = _build_webhook_url(request, token)
     logger.info(f"Webhook token generated for schedule {schedule_id} by {current_user.username}")
 
     # ent#77: rotating the token clears any prior signing secret (revoke path in
@@ -749,7 +755,7 @@ async def get_webhook_status(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
 
     token = status_data["webhook_token"]
-    webhook_url = _build_webhook_url(request.base_url, token) if token else None
+    webhook_url = _build_webhook_url(request, token) if token else None
 
     return WebhookStatusResponse(
         schedule_id=schedule_id,
@@ -801,7 +807,7 @@ async def generate_webhook_secret(
             detail="Failed to generate webhook signing secret",
         )
 
-    webhook_url = _build_webhook_url(request.base_url, schedule.webhook_token)
+    webhook_url = _build_webhook_url(request, schedule.webhook_token)
     logger.info(
         f"Webhook signing secret generated for schedule {schedule_id} by {current_user.username}"
     )
@@ -843,7 +849,7 @@ async def disable_webhook_secret(
         schedule_id=schedule_id,
         has_token=token is not None,
         webhook_enabled=schedule.webhook_enabled,
-        webhook_url=_build_webhook_url(request.base_url, token) if token else None,
+        webhook_url=_build_webhook_url(request, token) if token else None,
         auth_enabled=False,
         has_secret=False,
         signature_header=WEBHOOK_SIGNATURE_HEADER,

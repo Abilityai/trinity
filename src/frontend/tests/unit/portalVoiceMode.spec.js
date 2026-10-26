@@ -71,7 +71,6 @@ const COMPOSABLE = read('../../src/composables/useVoiceSession.js')
 const CANVAS_COLUMN = read('../../src/components/portal/PortalVoiceCanvas.vue')
 const TABS = read('../../src/components/portal/PortalChatTabs.vue')
 const STORE = read('../../src/stores/clientPortal.js')
-const HEADER = read('../../src/components/AgentHeader.vue')
 const CODE = stripComments(CONVERSATION)
 const SHELL_CODE = stripComments(SHELL)
 
@@ -489,7 +488,7 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     // guard (see "leaving the stage mid-call asks first"). Same protection, in
     // words, and nothing else may run before the guard.
     expect(SHELL_CODE).toMatch(/function newChatWithAgent\(name\) \{\s*if \(guardLeaveCall\(\(\) => newChatWithAgent\(name\)\)\) return/)
-    expect(SHELL_CODE).toMatch(/function openThread\(t\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t\)\)\) return/)
+    expect(SHELL_CODE).toMatch(/function openThread\(t, \{ replace = false \} = \{\}\) \{\s*if \(guardLeaveCall\(\(\) => openThread\(t, \{ replace \}\)\)\) return/)
     // (merge-train 2026-10-06) the continuation re-enters as the RESUMED pass,
     // after a tick — the same event, already `preventDefault`ed by the line
     // above it, must not read as "a nearer owner claimed it" on the way back,
@@ -590,15 +589,11 @@ describe('the auto-start intent is ARMED IN THE APP, never by the URL alone', ()
   })
 })
 
-describe('the door and the hand-off are wired (source, since there is no mount harness)', () => {
-  it('the Talk button arms the one-shot BEFORE it navigates', () => {
-    const header = stripComments(HEADER)
-    expect(header).toContain("import { armVoiceAutoStart } from './portal/portalVoiceMode'")
-    const fn = header.slice(header.indexOf('function goToTalk()'), header.indexOf('function goToBrain()'))
-    expect(fn).toContain('armVoiceAutoStart()')
-    expect(fn).toMatch(/router\.push\(\{ path: '\/workspace', query: \{ agent: props\.agent\.name, voice: '1' \} \}\)/)
-    expect(fn.indexOf('armVoiceAutoStart()')).toBeLessThan(fn.indexOf('router.push'))
-  })
+describe('the hand-off is wired (source, since there is no mount harness)', () => {
+  // The Agent Detail Talk door that armed the one-shot was removed by
+  // trinity-enterprise#950 (absence pinned in agentDetailTalkDoor.spec.js).
+  // `armVoiceAutoStart` keeps its rule tests above; the shell's strip-and-
+  // disarm wiring below is what keeps a pasted `?voice=1` inert.
 
   it('the shell records the intent, and strips NOTHING, inside resolveAgentQuery', () => {
     const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('function resolveAgentQuery()'), SHELL_CODE.indexOf('const ASKS_POLL_MS'))
@@ -648,7 +643,7 @@ describe('the door and the hand-off are wired (source, since there is no mount h
   })
 
   it('does NOT use `navigator.userActivation` — it is a heuristic, not a provenance check', () => {
-    for (const src of [SHELL, HEADER, read('../../src/components/portal/portalVoiceMode.js')]) {
+    for (const src of [SHELL, read('../../src/components/portal/portalVoiceMode.js')]) {
       // The rationale lives in comments; no CODE path may consult it.
       expect(stripComments(src)).not.toContain('userActivation')
     }
@@ -827,7 +822,7 @@ describe('leaving the stage mid-call asks first', () => {
   })
 
   it('every exit from the stage routes through the one guard, and the guard ends the call through the conversation', () => {
-    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t)', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
+    for (const fn of ['function newChatWithAgent(name)', 'function openThread(t, ', 'function newChat()', 'function openRoom(roomId)', 'function openAgentPage(name)']) {
       const at = SHELL.indexOf(fn)
       expect(at, fn).toBeGreaterThan(-1)
       expect(SHELL.slice(at, at + 420), fn).toContain('guardLeaveCall(')

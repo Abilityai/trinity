@@ -62,7 +62,7 @@ width parity, short-viewport composer reachability).
 - **Summary Stats (lines 63-83)**: Total tasks, success rate, total cost, avg duration - Compact layout with smaller padding (`px-3 py-2`) and text (`text-base`, `text-[10px]`)
 - **New Task Input (lines 85-134)**: Model + Timeout selectors + textarea for task message, Run button - Uses `items-stretch` so Run button height matches textarea
   - **Model Selector (line 90, MODEL-001)**: `ModelSelector` component, persisted per-agent in localStorage
-  - **Timeout Selector (lines 93-104)**: Dropdown for `timeout_seconds` (5min/15min/30min/1hr/2hr), persisted per-agent in localStorage (default: 15min/900s)
+  - **Timeout Selector**: Dropdown for `timeout_seconds` (5min/15min/30min/1hr/2hr), persisted per-agent in localStorage (default: 1hr/3600s). Follows the agent's execution timeout (#3626): `loadAgentTimeout()` reads `GET /api/agents/{name}/timeout` through `agentsStore.getAgentTimeout`, options above the cap are hidden, the cap itself is offered, and the label reads "Timeout · agent cap N". The cap is cleared while a read is in flight, re-read on agent switch and on `onActivated`; the remembered choice is never overwritten and is reloaded per agent on switch.
   - **Keyboard shortcuts**: Enter to submit, Shift+Enter for newline, Cmd/Ctrl+Enter also works
 - **Task History**: Scrollable list of all tasks with expand/collapse — fills remaining viewport height (`flex-1 min-h-96`, #1500; formerly capped at `max-h-96`)
   - Row highlight: `highlightExecutionId` prop causes ring highlight and auto-scroll
@@ -249,7 +249,7 @@ async function runNewTask() {
   setTimeout(() => loadQueueStatus(), 2000)
 
   // Submit to server (MODEL-001: include selected model; timeout_seconds from selector)
-  const payload = { message: taskMessage, timeout_seconds: taskTimeout.value }
+  const payload = { message: taskMessage, timeout_seconds: effectiveTimeout.value }  // capped at the agent's timeout (#3626)
   if (selectedModel.value) {
     payload.model = selectedModel.value
   }

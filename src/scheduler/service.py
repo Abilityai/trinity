@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobExecutionEvent
 from croniter import croniter
@@ -36,6 +35,9 @@ from .locking import get_lock_manager, LockManager
 # unchanged. Source of truth: src/backend/services/failure_classifier.py,
 # mirrored byte-identically at src/scheduler/failure_classifier.py.
 from .failure_classifier import is_auth_failure as _is_auth_failure
+# #3940: every user schedule registers a trigger whose next fire time never
+# goes backwards, whatever APScheduler answers at a DST transition.
+from .cron_trigger import MonotonicCronTrigger
 from .utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -399,7 +401,7 @@ class SchedulerService:
 
             # Create timezone-aware trigger
             timezone = pytz.timezone(schedule.timezone) if schedule.timezone else pytz.UTC
-            trigger = CronTrigger(timezone=timezone, **trigger_kwargs)
+            trigger = MonotonicCronTrigger(timezone=timezone, **trigger_kwargs)
 
             # Add the job
             self.scheduler.add_job(
@@ -1709,9 +1711,11 @@ class SchedulerService:
         # "the retry is unattributed" for "the retry never runs". A row already
         # purged by retention lands in the same place — no origin, still fires.
         origin = ExecutionOrigin()
+        original_trigger = None  # #3363: unknown until the original is read
         try:
             original = self.db.get_execution(original_execution_id)
             if original:
+                original_trigger = getattr(original, "triggered_by", None)
                 origin = ExecutionOrigin(
                     user_id=original.source_user_id,
                     user_email=original.source_user_email,
@@ -1726,6 +1730,45 @@ class SchedulerService:
                 f"Could not read the origin of {original_execution_id} for its "
                 f"retry — the retry proceeds unattributed: {exc}"
             )
+
+        # #3363: the cron fire's gates, for a retry of a cron fire. A pending
+        # retry is autonomous work: it must stop when the operator turns the
+        # agent's autonomy off or a git-sync freeze engages, exactly as the next
+        # cron tick would. A retry of a manual (or webhook) run keeps firing, as
+        # that run did — both gates are cron-only on the fire path. An original
+        # that could not be read is not known to be an operator's, so it is
+        # gated. Row semantics match the fire: autonomy-off writes no row, a
+        # freeze writes a skipped one. Neither touches next_run_at — a retry
+        # does not consume a cron window.
+        if original_trigger in (None, "schedule"):
+            if not self.db.get_autonomy_enabled(agent_name):
+                logger.info(
+                    f"Retry for schedule {schedule_id} dropped: agent {agent_name} "
+                    "autonomy is disabled"
+                )
+                return
+            freeze_reason = self.db.sync_freeze_reason(agent_name)
+            if freeze_reason:
+                logger.warning(
+                    f"Retry for schedule {schedule_id} skipped: agent {agent_name} "
+                    f"git sync frozen ({freeze_reason})"
+                )
+                skipped = self.db.create_skipped_execution(
+                    schedule_id=schedule_id,
+                    agent_name=agent_name,
+                    message=message,
+                    triggered_by="retry",
+                    skip_reason=f"Git sync frozen: {freeze_reason}",
+                )
+                await self._publish_event({
+                    "type": "schedule_execution_skipped",
+                    "agent": agent_name,
+                    "schedule_id": schedule_id,
+                    "execution_id": skipped.id if skipped else None,
+                    "schedule_name": schedule.name,
+                    "reason": "Git sync frozen (schedules paused)",
+                })
+                return
 
         # Create a new execution record for the retry
         retry_execution = self.db.create_execution(
@@ -1757,7 +1800,10 @@ class SchedulerService:
                 timeout_seconds=timeout_seconds,
                 model=model,
                 allowed_tools=allowed_tools,
-                execution_id=retry_execution.id
+                execution_id=retry_execution.id,
+                # #3363: a Workspace-delivered schedule's retry delivers too, as
+                # the cron fire does (_dispatch_and_record_outcome).
+                deliver_to_workspace_email=schedule.deliver_to_workspace_email,
             )
         except Exception as e:
             logger.error(f"Retry execution failed for {retry_execution.id}: {e}")

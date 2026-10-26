@@ -46,6 +46,8 @@ def gate(monkeypatch):
     from services.rate_limiter import RateLimitResult
 
     state = {"gates": {}, "fingerprints": {}, "fp_calls": [], "rate_ok": True, "map_error": None}
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    monkeypatch.setattr(svc, "_can_open", lambda agent, email: True)
 
     class _Audit:
         async def log(self, **kw):
@@ -240,7 +242,7 @@ class TestRaisesAnApproval:
         _gated(gate)
         agent = "fin-751-r5e"
 
-        def _refuse(agent_name, ask):
+        def _refuse(agent_name, ask, **audience):   # ent#848: the gate hands the sink its audience
             raise ask_svc.AskRejected(409, "already_pending", "dup", request_id="x-1")
         monkeypatch.setattr(gate.svc, "_raise_ask", _refuse)
         with pytest.raises(gate.svc.SkillGateRefused) as info:

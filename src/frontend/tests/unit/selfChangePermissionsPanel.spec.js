@@ -24,6 +24,8 @@ import { useAuthStore } from '../../src/stores/auth'
 import { useCapabilityGrantsStore } from '../../src/stores/capabilityGrants'
 // eslint-disable-next-line import/first
 import { permissionRequests, SELF_CHANGE_CAPABILITIES } from '../../src/utils/capabilityGrants'
+// eslint-disable-next-line import/first
+import { makeQueue, rowsOf } from './helpers/fakeOperatorQueue'
 
 const AGENT = 'orchestrator'
 const CAPS = SELF_CHANGE_CAPABILITIES.map((c) => c.id)
@@ -144,10 +146,27 @@ describe('SelfChangePermissionsPanel (ent#756)', () => {
       { id: 'q2', status: 'pending', title: 'Weekly report ready' },
     ] } })
     const w = await mountAs('admin')
+    // #3302: every pending ask of the agent — one 500-row page, walked past it
     expect(get).toHaveBeenCalledWith('/api/operator-queue',
-      { params: { agent_name: AGENT, status: 'pending', limit: 200 } })
+      { params: { agent_name: AGENT, status: 'pending', limit: 500 } })
     expect(byId(w, 'self-change-request-q1').text()).toContain('Open in Operations')
     expect(byId(w, 'self-change-request-q2').exists()).toBe(false)
+  })
+
+  it('#3302: a request filed before 200 newer asks is still found', async () => {
+    // The route lists pending asks newest first, so the oldest one — here the
+    // permission request — sat past the old 200-row page and was never linked.
+    const queue = makeQueue([
+      { ...rowsOf(1, { prefix: 'perm', agent_name: AGENT, at: '2026-01-01T00:00:00Z' })[0],
+        title: 'Need schedules.manage to pause the sales agent' },
+      ...rowsOf(230, { prefix: 'busy', agent_name: AGENT, at: '2026-06-01T00:00:00Z' }),
+    ])
+    route()
+    const routed = get.getMockImplementation()
+    get.mockImplementation(async (url, config) =>
+      url === '/api/operator-queue' ? queue.get(config.params) : routed(url, config))
+    const w = await mountAs('admin')
+    expect(byId(w, 'self-change-request-perm-0001').text()).toContain('Open in Operations')
   })
 })
 

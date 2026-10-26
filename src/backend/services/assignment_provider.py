@@ -51,9 +51,18 @@ produces the *wrong* answer without raising.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Dict, List, Mapping, Optional, Protocol
 
 logger = logging.getLogger(__name__)
+
+#: A canon role id as a gate may name it (trinity-enterprise#848): the
+#: enterprise write-time `ROLE_ID_PATTERN` without its anchors — always matched
+#: with ``fullmatch`` (``re.match`` + ``$`` accepts a trailing newline). The
+#: MCP `set_skill_gate.approver` regex is this literal, case-insensitive.
+ROLE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+#: The most role ids one roster answer may carry (canon's own `MAX_ROLES`).
+MAX_APPROVER_ROLES = 100
 
 # The keys a provider answer may carry. Anything else is dropped — a provider
 # cannot smuggle an unrendered field into the prompt path by adding a key.
@@ -101,6 +110,29 @@ class AssignmentProvider(Protocol):
     # :func:`resolve_served_seat`, which falls back to :func:`resolve_seat`
     # (the primary's seat) for a provider that predates it.
     # def served_seat_for(self, agent_name: str, person_email: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#848): the people who FILL canon role
+    # ``role_id`` on ``agent_name`` — how a skill gate whose approver is
+    # ``role:<id>`` reaches a person. Only a `primary` / `approver` row seated in
+    # the role fills it (a viewer or collaborator seated there does not decide).
+    # Same shape as ``people_for`` — ``{"emails": [str, ...]}`` — read through
+    # ``getattr`` by :func:`resolve_role_id_people`: a provider that predates it,
+    # or answers ``None``, leaves the role unfilled (the gate refuses; there is
+    # no owner fallback for a role id). ``role_id`` arrives lower-cased; match
+    # it casefolded.
+    # def people_for_role_id(self, agent_name: str, role_id: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#848): the canon role ids ``agent_name``'s own
+    # roster names (any kind) — what the Skills tab picker lists after the kinds
+    # and what a PUT checks a ``role:<id>`` against (`unknown_role`). Shaped as
+    # ``{"roles": [{"id": str, "title": str | None}, ...]}``; ids only, never a
+    # person. ``title`` is optional (no provider sends one yet — labels are the
+    # humanised id until canon titles are cached platform-side). Read through
+    # ``getattr`` by :func:`resolve_approver_roles`; ``None`` ⇒ role ids are not
+    # available on this install (`approver_unavailable`). Reach and
+    # ``viewer_fills`` are never taken from this answer: the gate map computes
+    # them per role through the SAME function `enforce` uses (ent#754).
+    # def approver_roles_for(self, agent_name: str) -> Optional[dict]: ...
 
 
 _provider: Optional[AssignmentProvider] = None
@@ -190,6 +222,28 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
     return out or None
 
 
+def _emails_from(answer: Any, method: str, agent_name: str, role: str) -> Optional[List[str]]:
+    """The lower-cased, de-duplicated emails in a ``{"emails": [...]}`` answer,
+    ``None`` for no answer or a malformed one (with a warning). Shared by the
+    kind and the role-id reads so both normalise one way."""
+    if answer is None:
+        return None
+    emails = answer.get("emails") if isinstance(answer, Mapping) else None
+    if not isinstance(emails, (list, tuple)):
+        logger.warning(
+            "[assignment_provider] provider.%s returned %s for %s/%s "
+            "(expected {'emails': [...]}); treating as no answer",
+            method, type(answer).__name__, agent_name, role,
+        )
+        return None
+    out: List[str] = []
+    for value in emails:
+        email = value.strip().lower() if isinstance(value, str) else ""
+        if "@" in email and email not in out:
+            out.append(email)
+    return out
+
+
 def resolve_role_people(agent_name: str, role: str) -> Optional[List[str]]:
     """The emails a registered provider says fill ``role`` on ``agent_name``, or
     ``None`` for no answer (trinity-enterprise#611).
@@ -212,21 +266,90 @@ def resolve_role_people(agent_name: str, role: str) -> Optional[List[str]]:
             "using the core defaults", agent_name, role, exc_info=True,
         )
         return None
-    if answer is None:
+    return _emails_from(answer, "people_for", agent_name, role)
+
+
+def resolve_role_id_people(agent_name: str, role_id: str) -> Optional[List[str]]:
+    """The emails a registered provider says fill canon role ``role_id`` on
+    ``agent_name``, or ``None`` for no answer (trinity-enterprise#848).
+
+    The same contract as :func:`resolve_role_people` — ``None`` for every
+    degraded case (no provider, no ``people_for_role_id``, ``None``, a raise, a
+    malformed shape), ``[]`` for a real "nobody" — but the caller's fallback
+    differs: a role id has no owner default, so both refuse the gate.
+    """
+    provider = _provider
+    fn = getattr(provider, "people_for_role_id", None) if provider is not None else None
+    if fn is None:
         return None
-    emails = answer.get("emails") if isinstance(answer, Mapping) else None
-    if not isinstance(emails, (list, tuple)):
+    try:
+        answer = fn(agent_name, role_id)
+    except Exception:  # noqa: BLE001 — a provider bug must never widen a gate
         logger.warning(
-            "[assignment_provider] provider.people_for returned %s for %s/%s "
-            "(expected {'emails': [...]}); using the core defaults",
-            type(answer).__name__, agent_name, role,
+            "[assignment_provider] provider.people_for_role_id failed for %s/%s; "
+            "treating the role as unfilled", agent_name, role_id, exc_info=True,
         )
         return None
-    out: List[str] = []
-    for value in emails:
-        email = value.strip().lower() if isinstance(value, str) else ""
-        if "@" in email and email not in out:
-            out.append(email)
+    return _emails_from(answer, "people_for_role_id", agent_name, role_id)
+
+
+def resolve_approver_roles(agent_name: str) -> Optional[List[Dict[str, Optional[str]]]]:
+    """The canon role ids ``agent_name``'s roster names, as
+    ``[{"id", "title"}]``, or ``None`` when no provider answers
+    (trinity-enterprise#848).
+
+    ``None`` — no provider, no ``approver_roles_for``, an answer of ``None``, a
+    raise, or a malformed shape — means role ids are not available on this
+    install right now; the gate map then offers kinds only and refuses a
+    ``role:<id>`` as `approver_unavailable`. ``[]`` is a real empty roster.
+    Ids are lower-cased (the stored form) and de-duplicated in order; an id
+    that fails :data:`ROLE_ID_RE` is dropped with a warning (it could never be
+    stored on a gate); the list is capped at :data:`MAX_APPROVER_ROLES`.
+    """
+    provider = _provider
+    fn = getattr(provider, "approver_roles_for", None) if provider is not None else None
+    if fn is None:
+        return None
+    try:
+        answer = fn(agent_name)
+    except Exception:  # noqa: BLE001 — a provider bug must never break the map read
+        logger.warning(
+            "[assignment_provider] provider.approver_roles_for failed for %s; "
+            "offering kinds only", agent_name, exc_info=True,
+        )
+        return None
+    if answer is None:
+        return None
+    roles = answer.get("roles") if isinstance(answer, Mapping) else None
+    if not isinstance(roles, (list, tuple)) or not all(
+            isinstance(r, Mapping) and isinstance(r.get("id"), str)
+            and (r.get("title") is None or isinstance(r.get("title"), str)) for r in roles):
+        logger.warning(
+            "[assignment_provider] provider.approver_roles_for returned a malformed "
+            "answer for %s (expected {'roles': [{'id', 'title'?}, ...]}); offering kinds only",
+            agent_name,
+        )
+        return None
+    out: List[Dict[str, Optional[str]]] = []
+    seen: Dict[str, int] = {}
+    for entry in roles:
+        raw = entry["id"]
+        if not ROLE_ID_RE.fullmatch(raw):
+            logger.warning(
+                "[assignment_provider] provider.approver_roles_for returned the role id %r "
+                "for %s, which is not a valid role id; dropped", raw[:80], agent_name,
+            )
+            continue
+        role_id = raw.lower()
+        title = entry.get("title") or None
+        if role_id in seen:
+            if title and not out[seen[role_id]]["title"]:
+                out[seen[role_id]]["title"] = title
+            continue
+        if len(out) >= MAX_APPROVER_ROLES:
+            break
+        seen[role_id] = len(out)
+        out.append({"id": role_id, "title": title})
     return out
 
 

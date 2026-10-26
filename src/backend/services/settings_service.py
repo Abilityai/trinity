@@ -421,12 +421,22 @@ class SettingsService:
         """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
         return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
+    def get_public_chat_url_setting(self) -> str:
+        """The stored `public_chat_url` row only (no env fallback), normalised
+        (#3881). For the webhook registrars that have always read the row
+        directly; they must not register a dotted host either."""
+        return normalize_public_url(self.get_setting('public_chat_url', '') or '')
+
     def get_public_chat_url(self) -> str:
-        """Get Public Chat URL from settings, fallback to env var."""
+        """Get Public Chat URL from settings, fallback to env var.
+
+        Normalised on read too (#3881), so a row stored before the save path
+        stripped a trailing host dot, or a dotted env value, never reaches a
+        webhook or a link."""
         url = self.get_setting('public_chat_url')
         if url:
-            return url.rstrip('/')
-        return os.getenv('PUBLIC_CHAT_URL', '').rstrip('/')
+            return normalize_public_url(url)
+        return normalize_public_url(os.getenv('PUBLIC_CHAT_URL', ''))
 
     def get_slack_transport_mode(self) -> str:
         """Get Slack transport mode: 'socket' (default) or 'webhook'."""
@@ -1031,6 +1041,36 @@ def resolve_github_pat(agent_name: Optional[str] = None,
     return "", "none"
 
 
+def resolve_github_pat_candidates(agent_name: Optional[str] = None,
+                                  owner_id: Optional[int] = None) -> list:
+    """Every configured GitHub PAT tier, in ``resolve_github_pat``'s order (#3725).
+
+    Returns ``[(pat, tier), ...]`` — only tiers that hold a token, and each
+    token VALUE once (a per-user token equal to the global one is the same
+    credential and would get the same answer from GitHub, so the later tier is
+    dropped). The credential-free path is not an entry: an empty list means
+    "no token anywhere", and the caller owns what it does next.
+
+    This is the ladder the create path walks when the preferred tier cannot
+    read a template — a stale saved token must not mask a platform token that
+    can. ``resolve_github_pat`` stays the single-answer resolver; its first
+    answer is always this list's first entry.
+    """
+    candidates = []
+    if agent_name:
+        candidates.append((db.get_agent_github_pat(agent_name), "per_agent"))
+    if owner_id is not None:
+        candidates.append((db.get_user_github_pat(owner_id), "per_user"))
+    candidates.append((get_github_pat(), "global"))
+    seen = set()
+    ladder = []
+    for pat, tier in candidates:
+        if pat and pat not in seen:
+            seen.add(pat)
+            ladder.append((pat, tier))
+    return ladder
+
+
 def get_google_api_key() -> str:
     """Get Google API key from settings, fallback to env var."""
     return settings_service.get_google_api_key()
@@ -1087,6 +1127,30 @@ def clear_secret_setting(key: str) -> bool:
 def has_secret_setting(key: str) -> bool:
     """Whether a credential-bearing setting is configured in the DB."""
     return settings_service.has_secret_setting(key)
+
+
+def normalize_public_url(url: str) -> str:
+    """Trim whitespace and a trailing `/`, and drop a trailing dot from the host
+    (#3881). `host.example.com.` is the same name, but its TLS certificate is
+    for `host.example.com`, so Telegram (and any strict client) refuses it."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    url = (url or "").strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # A malformed authority (`https://[::1`). Hand the input through: on the
+        # save path this runs before `classify_advertised_url`, which answers
+        # 422 for it, so raising here would turn that refusal into a 500.
+        return url
+    if not (parts.hostname or "").endswith("."):
+        return url
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    host, colon, port = hostport.rpartition(":")
+    if not (colon and port.isdigit()):
+        host, colon, port = hostport, "", ""
+    netloc = f"{userinfo}{at}{host.rstrip('.')}{colon}{port}"
+    return urlunsplit(parts._replace(netloc=netloc)).rstrip("/")
 
 
 def classify_advertised_url(url: str) -> str:

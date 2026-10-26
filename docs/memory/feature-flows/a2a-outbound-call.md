@@ -109,7 +109,12 @@ Invariant #12 already blesses for `elevenlabs_api_key_encrypted`.
 | DELETE | `/api/settings/a2a-endpoints/{ref}` | admin + human-only | Remove one |
 
 Both call routes **404 when the kill switch is off** — Trinity's answer for
-"this capability is not present" everywhere else.
+"this capability is not present" everywhere else. The switch is a route
+**dependency** (`Depends(_require_outbound_enabled)`), solved before the body is
+validated, so a body that fails schema validation (or none) answers the same
+404 as a good one rather than a 422 that says the route exists
+(trinity-enterprise#840, the `require_live` shape). JSON that does not parse is
+still a 422 — FastAPI decodes the body before it solves dependencies.
 
 ---
 
@@ -122,8 +127,8 @@ agent container (LLM — prompt-injectable)
 mcp-server  tools/a2a_call.ts        canAccess: operatorOnly {user,agent,system}
    │  self-only check for scope=="agent"        AbortController 40s
    ▼
-backend  routers/a2a.py              AuthorizedAgentByName + self-check
-   │                                 kill switch → 404 when off
+backend  routers/a2a.py              AuthorizedAgentByName → kill switch (dependency, 404 when off)
+   │                                 → body validation → assert_own_agent (self-check)
    ▼
 services/a2a_outbound_service.py
    ├─ rate bounds: a2a_out:agent:{name} 30/60s  AND  a2a_out:fleet 120/60s
@@ -156,9 +161,12 @@ genuinely cancellable awaits.
 
 ## The gates, in order
 
-1. **Kill switch** (`A2A_OUTBOUND_ENABLED`, default OFF) → 404. First, so a
-   disabled feature costs nothing and advertises nothing.
-2. **`AuthorizedAgentByName`** — owner, admin, or shared.
+1. **`AuthorizedAgentByName`** — owner, admin, or shared, inside an agent key's
+   reach (uniform 404).
+2. **Kill switch** (`A2A_OUTBOUND_ENABLED`, default OFF) → 404 — a dependency,
+   before the body is validated, so a disabled feature costs nothing and
+   advertises nothing for a schema-invalid or missing body (unparseable JSON
+   is still FastAPI's 422).
 3. **Agent self-check** — an agent-scoped key may call only **as itself**.
    `AuthorizedAgentByName` resolves an agent key to its OWNER, so without this
    a *permitted sibling* could place calls under a neighbour's name. Be precise
@@ -225,7 +233,8 @@ and `validate_a2a_endpoint_url` runs on **every call**:
 
 * HTTPS only — an `http://` row is refused at **use**, with a message telling
   the operator to re-register. Not silently upgraded: a client that quietly
-  rewrites a scheme is one that will quietly rewrite it back.
+  rewrites a scheme is one that will quietly rewrite it back. The one
+  exception is a host on the admin's outbound endpoint allowlist (below).
 * No userinfo — refused, never stripped (a stripped credential is one the
   operator believes is in use).
 * IDNA/A-label normalised **once**, so the parser and the resolver cannot
@@ -235,7 +244,17 @@ and `validate_a2a_endpoint_url` runs on **every call**:
   homograph lives.
 * **Every** address `getaddrinfo` returns must be public. One internal record
   among public ones refuses the whole endpoint — which record a resolver hands
-  out is not our choice.
+  out is not our choice. Same single exception as `http://`.
+* **Outbound endpoint allowlist** (trinity-enterprise#838, outbound-only since
+  trinity-enterprise#885; setting key `a2a_trusted_networks`, admin-only route
+  `GET/PUT /api/settings/a2a-trusted-networks`): when the public-HTTPS rule
+  refuses, `_validate_trusted_a2a_url` admits the endpoint only if its host
+  matches a name entry, or every address it resolves to is public or inside a
+  CIDR entry. Such an endpoint may be private/CGNAT (a tailnet peer) and
+  `http://`; metadata, loopback and the platform's own networks stay refused
+  whatever the list says. It runs at registration and again on every call, so
+  a name that later resolves outside the list is refused. Nothing inbound
+  reads the list (requirements `mcp.md` §32.7).
 * DNS failure is fatal, and resolution runs **off the event loop**: a
   synchronous `getaddrinfo` on a per-call agent path freezes an entire worker's
   loop, which no per-agent rate limit bounds.
@@ -366,8 +385,8 @@ agent an error object as if it were an answer.
 |---|---|---|
 | `endpoint_not_found` | 404 | No registered endpoint matched (or the seam refused) |
 | *(kill switch off)* | 404 | `A2A_OUTBOUND_ENABLED` off |
-| `endpoint_not_https` | 400 | A registry row holding `http://` |
-| `endpoint_private_address` | 400 | Resolved inside the perimeter |
+| `endpoint_not_https` | 400 | A registry row holding `http://`, host not on the outbound allowlist |
+| `endpoint_private_address` | 400 | Resolved inside the perimeter, host not on the outbound allowlist |
 | `endpoint_dns_failure` | 400 | Unresolvable, or resolution timed out |
 | `message_too_long` | 422 | Over the 100 000-char outbound cap |
 | `card_redirect` / `rpc_redirect` | 502 | A 3xx — a failure, not a hop |

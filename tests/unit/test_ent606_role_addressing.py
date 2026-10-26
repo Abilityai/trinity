@@ -300,12 +300,12 @@ def test_a_message_that_cannot_reach_exactly_one_person_is_refused(ra, people, c
     assert exc.value.detail["code"] == code
 
 
-def test_a_message_to_primary_when_nobody_is_primary_is_refused(ra):
+def test_a_message_to_primary_when_nobody_is_primary_goes_to_the_owner(ra):
+    # trinity-enterprise#904: on the MESSAGE surface the owner stands in for an
+    # unwritten primary seat — otherwise the agent has no proactive channel.
     from routers import messages
     _provide({"primary": []})
-    with pytest.raises(HTTPException) as exc:
-        messages._recipient(AGENT, _msg(to="primary"))
-    assert exc.value.detail["code"] == "role_unassigned"
+    assert messages._recipient(AGENT, _msg(to="primary")) == OWNER
 
 
 def test_a_message_by_email_still_works(ra):

@@ -102,10 +102,12 @@ class ScheduleExecutionsMixin:
             # Binding-agent for channel report-back (ent#265)
             source_channel_agent=row["source_channel_agent"] if "source_channel_agent" in row_keys else None,
             source_channel_client=row["source_channel_client"] if "source_channel_client" in row_keys else None,
-            source_host=row["source_host"] if "source_host" in row_keys else None,
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
+            # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
+            a2a_caller_identity=row["a2a_caller_identity"]
+                if "a2a_caller_identity" in row_keys else None,
         )
 
     # =========================================================================

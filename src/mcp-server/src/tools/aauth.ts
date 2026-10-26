@@ -23,8 +23,9 @@
  * ── Gating (plan taste T3 / ent#879 T4) ──────────────────────────────────
  * Registered in `server.ts`'s `toolGroups` → the `operatorOnly` allow-list,
  * ALWAYS. There is deliberately no env gate and no dynamic registration: the
- * demo flips `aauth_prototype_enabled` in `system_settings` at runtime, which
- * the MCP server cannot see. With the flag off the backend answers 404 and
+ * demo flips the AAuth switches (`aauth_enabled` + `aauth_prototype_enabled`,
+ * ent#862) in `system_settings` at runtime, which the MCP server cannot see.
+ * With a switch off the backend answers 404 and
  * both tools report `aauth_disabled: true` — advertised but inert, the
  * `call_a2a_agent` precedent. The backend 404 is the authority.
  *

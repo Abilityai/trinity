@@ -133,11 +133,15 @@ const FILTERS = [
   { id: 'steward', label: 'I steward' },
 ]
 
+const props = defineProps({
+  // ent#896: the project page's Steward card opens the list on "I steward".
+  initialFilter: { type: String, default: 'all' },
+})
 defineEmits(['open'])
 
 const store = useProjectsStore()
 const portal = useClientPortalStore()
-const filter = ref('all')
+const filter = ref(FILTERS.some((f) => f.id === props.initialFilter) ? props.initialFilter : 'all')
 const query = ref('')
 const showArchived = ref(false)
 const createOpen = ref(false)

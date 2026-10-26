@@ -178,9 +178,14 @@
           :data-testid="`skill-approver-${card.name}`"
           @update:model-value="onApprover"
         >
-          <option v-for="k in kindOptions" :key="k.kind" :value="k.kind" :disabled="!k.reachable">
-            {{ k.label }}{{ k.reachable ? '' : ' (nobody yet)' }}
+          <option v-for="k in kindOptions.kinds" :key="k.kind" :value="k.kind" :disabled="!k.reachable">
+            {{ k.label }}{{ optionNote(k) }}
           </option>
+          <optgroup v-if="kindOptions.roles.length" label="Roles">
+            <option v-for="k in kindOptions.roles" :key="k.kind" :value="k.kind" :disabled="!k.reachable">
+              {{ k.label }}{{ optionNote(k) }}
+            </option>
+          </optgroup>
         </BaseSelect>
       </template>
       <span v-else-if="card.missing && card.gate && card.gate.set_at" class="truncate">
@@ -205,7 +210,8 @@ const props = defineProps({
   // Owner or admin, not ephemeral, not the system agent — the same for every
   // card on the tab, so every card is the same size for one viewer.
   showOwnerRow: { type: Boolean, default: false },
-  // [{kind, reachable, viewer_fills}] from the gate map.
+  // [{kind, reachable, viewer_fills, label?, role_id?}] from the gate map —
+  // the kinds, then the canon roles (`kind: "role:<id>"`, trinity-enterprise#848).
   approvers: { type: Array, default: () => [] },
   busy: { type: Boolean, default: false },
   running: { type: Boolean, default: false },
@@ -216,22 +222,28 @@ const emit = defineEmits(['run', 'edit-run', 'set-gate', 'clear-gate', 'unassign
 
 const description = computed(() => (props.card.missing ? '' : props.card.description || ''))
 
+// The kinds, then the canon roles in their own group (trinity-enterprise#848).
+const isRole = (kind) => typeof kind === 'string' && kind.startsWith('role:')
 const kindOptions = computed(() => {
   const list = props.approvers.length ? props.approvers : [{ kind: 'primary', reachable: true }]
-  const out = list.map((a) => ({ kind: a.kind, reachable: a.reachable !== false, label: kindOptionLabel(a.kind) }))
+  const out = list.map((a) => ({ kind: a.kind, reachable: a.reachable !== false, unreachable: a.unreachable,
+    label: kindOptionLabel(a.kind, a.label) }))
   // A gate whose kind this install no longer offers still shows what it is.
   const current = props.card.gate?.approver
   if (current && !out.some((o) => o.kind === current)) {
     out.push({ kind: current, reachable: false, label: kindOptionLabel(current) })
   }
-  return out
+  return { kinds: out.filter((o) => !isRole(o.kind)), roles: out.filter((o) => isRole(o.kind)) }
 })
 
 // Turning approval on sends the kind shown here: the gate's own, else the
 // first kind that reaches someone NOW (never a bodiless reset to `primary`,
 // and never a default fixed when the card was drawn — the map is re-read
 // after every write). A pick holds the select until its write settles.
-const defaultKind = () => kindOptions.value.find((k) => k.reachable)?.kind || 'primary'
+// trinity-enterprise#881: why a kind can't be picked — nobody fills it, or its
+// people can't open this agent.
+const optionNote = (k) => (k.reachable ? '' : k.unreachable === 'not_shared' ? ' (not shared)' : ' (nobody yet)')
+const defaultKind = () => [...kindOptions.value.kinds, ...kindOptions.value.roles].find((k) => k.reachable)?.kind || 'primary'
 const pickedKind = ref(null)
 const selectedKind = computed(() => pickedKind.value || props.card.gate?.approver || defaultKind())
 watch(() => props.busy, (now, was) => { if (was && !now) pickedKind.value = null })

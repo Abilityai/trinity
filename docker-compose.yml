@@ -79,6 +79,9 @@ services:
       # AAuth prototype (trinity-enterprise#623 / #878 / #879). Default OFF and
       # fail-closed: system_settings wins, but the env leg must be forwarded or
       # the .env levers silently do nothing (#1056 class).
+      # ent#862: the graduated agent identity (Flows 1-4). Empty default, so an
+      # unset variable reads as unset and the Settings switch stays authoritative.
+      - AAUTH_ENABLED=${AAUTH_ENABLED:-}
       - AAUTH_PROTOTYPE_ENABLED=${AAUTH_PROTOTYPE_ENABLED:-false}
       - AAUTH_ISSUER=${AAUTH_ISSUER:-}
       - AAUTH_PERSON_SERVER=${AAUTH_PERSON_SERVER:-}
@@ -88,6 +91,7 @@ services:
       # tuning lever rather than a dead feature — but this service uses an explicit
       # environment list, so forward them or the .env knobs do nothing (#1056 class).
       - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_DELEGATION_MAX_INFLIGHT=${NEVERMINED_DELEGATION_MAX_INFLIGHT:-4}  # concurrent Nevermined delegation verify/revoke calls, fleet-wide
       - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
