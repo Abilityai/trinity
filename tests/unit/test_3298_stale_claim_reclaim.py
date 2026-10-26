@@ -138,12 +138,18 @@ class TestOwnerToken:
 # ------------------------------------------------------------ the admission
 
 
-def _stale(seconds_past_lease=60):
-    """Move the admission clock past the default lease (3600 s timeout + 300 s)."""
+# Default leases: 3600 s timeout + 300 s; a claim that names no run waits out
+# the in-memory queue too, (3 + 1) x 3600 s + 300 s.
+_LEASE = 3900
+_UNNAMED_LEASE = 4 * 3600 + 300
+
+
+def _stale(seconds_past_lease=60, *, lease=_LEASE):
+    """Move the admission clock past a lease (default: a claim naming a run)."""
     from services import idempotency_service
     from utils.helpers import utc_now
     return patch.object(idempotency_service, "_now",
-                        return_value=utc_now() + timedelta(seconds=3900 + seconds_past_lease))
+                        return_value=utc_now() + timedelta(seconds=lease + seconds_past_lease))
 
 
 def _held_claim(db, agent, *, execution_status=None):
@@ -178,10 +184,22 @@ class TestStaleClaimReclaim:
     def test_past_the_lease_a_claim_that_never_named_a_run_is_reclaimed(self, real_db):
         agent = _agent()
         key, first = _held_claim(real_db, agent)
-        with _stale():
+        with _stale(lease=_UNNAMED_LEASE):
             idem, replay = _retry(agent, key)
         assert replay is None and not idem.replay  # the retry dispatches
         assert idem.claim_token and idem.claim_token != first.claim_token
+
+    def test_a_claim_that_never_named_a_run_waits_out_the_in_memory_queue(self, real_db):
+        """A /chat turn with no execution row can sit behind IN_MEMORY_DEPTH
+        turns; past the plain lease it may still be queued, so it holds."""
+        agent = _agent()
+        key, _ = _held_claim(real_db, agent)
+        with _stale():
+            idem, replay = _retry(agent, key)
+        assert replay is not None and replay.in_flight
+        with _stale(-60, lease=_UNNAMED_LEASE):
+            idem, replay = _retry(agent, key)
+        assert replay is not None and replay.in_flight
 
     def test_past_the_lease_a_claim_whose_run_ended_is_reclaimed(self, real_db):
         agent = _agent()
@@ -200,7 +218,7 @@ class TestStaleClaimReclaim:
 
     def test_the_lease_follows_the_agents_timeout(self, real_db):
         agent = _agent()
-        key, _ = _held_claim(real_db, agent)
+        key, _ = _held_claim(real_db, agent, execution_status="failed")
         from services import dispatch_admission_service as das
         # 60 s past the DEFAULT lease is still inside a 2 h timeout's lease.
         with _stale(), patch.object(das.db, "get_execution_timeout", return_value=7200):
@@ -209,7 +227,7 @@ class TestStaleClaimReclaim:
 
     def test_an_unreadable_timeout_holds(self, real_db):
         agent = _agent()
-        key, _ = _held_claim(real_db, agent)
+        key, _ = _held_claim(real_db, agent, execution_status="failed")
         from services import dispatch_admission_service as das
         with _stale(), patch.object(das.db, "get_execution_timeout", side_effect=RuntimeError("db down")):
             idem, replay = _retry(agent, key)
@@ -230,7 +248,7 @@ class TestStaleClaimReclaim:
         agent = _agent()
         key, _ = _held_claim(real_db, agent)
         seen = svc.begin(svc.make_agent_scope(agent), key)  # both retries read the stale claim
-        with _stale():
+        with _stale(lease=_UNNAMED_LEASE):
             a = das._reclaim_stale_claim(seen, name=agent)
             b = das._reclaim_stale_claim(seen, name=agent)
         assert [a.replay, b.replay].count(False) == 1  # exactly one dispatches
@@ -239,7 +257,7 @@ class TestStaleClaimReclaim:
         from services import idempotency_service as svc
         agent = _agent()
         key, original = _held_claim(real_db, agent)
-        with _stale():
+        with _stale(lease=_UNNAMED_LEASE):
             fresh, _ = _retry(agent, key)
         svc.complete(original, "exec-late", {"late": True})   # the original finally returns
         svc.fail(original)

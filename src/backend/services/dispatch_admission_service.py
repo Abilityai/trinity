@@ -36,6 +36,7 @@ from services.capacity_manager import (
     CapacityFull,
     CircuitOpen,
     EphemeralBudgetExhausted,
+    IN_MEMORY_DEPTH,
     get_capacity_manager,
 )
 from services import pull_pilot
@@ -505,6 +506,18 @@ def _stale_claim_lease_seconds(name: str) -> int:
     return int(db.get_execution_timeout(name)) + SLOT_TTL_BUFFER
 
 
+def _unnamed_claim_lease_seconds(name: str) -> int:
+    """The lease for a claim that never named a run (#3298 review).
+
+    A ``/chat`` turn whose ``create_task_execution`` returned None still runs,
+    with nothing on its claim to ask liveness of. It can wait behind up to
+    ``IN_MEMORY_DEPTH`` turns, each bounded by the agent's timeout, before its
+    own run starts, so the plain lease could reclaim a request that is only
+    queued and run it twice. Hold such a claim for the whole queue's worth of
+    turns plus its own, plus the slot buffer."""
+    return (IN_MEMORY_DEPTH + 1) * int(db.get_execution_timeout(name)) + SLOT_TTL_BUFFER
+
+
 def _reclaim_stale_claim(idem, *, name: str):
     """Let a retry dispatch when the ``in_flight`` claim it hit was left by a
     process that died (#3298). Shared by ``/chat`` and ``/task``.
@@ -515,7 +528,8 @@ def _reclaim_stale_claim(idem, *, name: str):
     only when BOTH hold:
 
     * its lease has passed — no move for the agent's timeout + slot buffer
-      (``_stale_claim_lease_seconds``); and
+      (``_stale_claim_lease_seconds``; a claim that names no run waits out
+      a full in-memory queue, ``_unnamed_claim_lease_seconds``); and
     * the run it names has ended or is gone (#3245's liveness), or it never
       named one (the process died before creating the row). A run still live —
       or one that SUCCEEDED — keeps the 409: re-dispatching a run that is
@@ -535,7 +549,8 @@ def _reclaim_stale_claim(idem, *, name: str):
     if str(idem.key or "").startswith("sched:"):
         return idem
     try:
-        lease = _stale_claim_lease_seconds(name)
+        lease = (_stale_claim_lease_seconds(name) if idem.execution_id
+                 else _unnamed_claim_lease_seconds(name))
         age = (idempotency_service._now() - parse_iso_timestamp(idem.claimed_at)).total_seconds()
     except Exception as e:  # noqa: BLE001 — a claim that cannot be dated is held
         logger.info("[#3298] claim_hold agent=%s reason=undatable (%s)", name, e)
