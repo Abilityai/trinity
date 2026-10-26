@@ -838,13 +838,24 @@ class PublicLinkOperations:
 
         return True
 
-    def update_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        """Update only the agent_notes section (written by the write_user_memory MCP tool)."""
-        return self._update_user_memory_section(
-            agent_name, user_email, agent_notes=agent_notes or ""
-        )
+    def get_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        """The stored agent_notes, or ``""`` — a read that never creates the row.
+
+        The ent#419 screen compares a write against what is already stored (so
+        old lines are not re-checked) BEFORE deciding whether anything may be
+        stored at all; a create-on-read here would leave a row behind a refusal.
+        """
+        email = user_email.lower()
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(public_user_memory.c.memory_text).where(
+                    and_(
+                        public_user_memory.c.agent_name == agent_name,
+                        public_user_memory.c.user_email == email,
+                    )
+                )
+            ).first()
+        return _parse_memory_blob(row[0])["agent_notes"] if row else ""
 
     def update_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str

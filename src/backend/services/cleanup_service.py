@@ -1262,7 +1262,8 @@ class CleanupService:
             logger.warning("[#1714] bulk terminal-event emit failed: %s", e)
 
     async def _close_bulk_swept_activities(self, rows: list) -> int:
-        """#1804: close the open dispatch activity for every CAS-won bulk-swept row.
+        """#1804: close the open dispatch and companion activities (#3651) for
+        every CAS-won bulk-swept row.
 
         Batched at the db layer (ONE transaction, no per-row WS) — mirrors what
         ``mark_stale_activities_failed`` already does, and avoids a WebSocket
@@ -1293,7 +1294,7 @@ class CleanupService:
             )
             if closed:
                 logger.info(
-                    "[#1804] Closed %d dispatch activity(ies) for bulk-swept executions",
+                    "[#1804] Closed %d activity(ies) for bulk-swept executions",
                     closed,
                 )
             return closed

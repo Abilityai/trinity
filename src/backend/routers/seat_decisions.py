@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/agents", tags=["seat-decisions"])
 
 _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
+_CHANNEL_TRIGGERS = {"slack", "telegram", "whatsapp"}
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
@@ -66,6 +67,18 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     seat = schedule_seat_memory.seat_for_execution(execution)
     if seat:
         email = seat
+    elif triggered_by in _CHANNEL_TRIGGERS:
+        # ent#419 AC 4, the same rule as `public_memory`: a channel turn serves
+        # the verified speaker of a one-to-one conversation (ent#549's stamp),
+        # never a group's unlocker.
+        email = (getattr(execution, "source_channel_client", None) or "").strip().lower()
+        if not email:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "no_seat",
+                        "message": ("A decision belongs to one person: this channel turn is a group "
+                                    "conversation or an unverified sender.")},
+            )
     elif triggered_by in _USER_FACING_TRIGGERS:
         email = execution.source_user_email
     else:

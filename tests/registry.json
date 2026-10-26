@@ -1,6 +1,63 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent966_agent_env_patch.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ],
+      "description": "#2023 quoting parity, byte-for-byte preservation, remove_keys"
+    },
+    {
+      "file": "unit/test_ent966_delegation_gate.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ]
+    },
+    {
+      "file": "unit/test_ent966_facilitator_wording.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "nevermined",
+        "unit"
+      ],
+      "description": "ent#932 AC: every card-delegation refusal names Nevermined (raised for real + AST over DelegationError messages); no string says Trinity holds a card or settles money."
+    },
+    {
+      "file": "unit/test_ent966_delegation_routes.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "api",
+        "nevermined",
+        "security",
+        "unit"
+      ],
+      "description": "Nevermined organization admin routes through the real router + require_admin: configured:false 200, write-only secrets (encrypted, never in a body or log), secret_required, environment_mismatch, delegations_active on env change/key rotation/delete, deleted agent never blocks, user and agent keys refused. Widget session (POST /api/nevermined/agents/{agent_name}/widget-session): mints for the signed-in email against the environment's fixed API base, Cache-Control no-store, nevermined_not_configured / email_required / uniform 404 / agent key 403 / unreachable / busy + Retry-After / rejected with upstream status only, rate limit before upstream, secrets and session token never logged; own delegation gate leaves the facilitator gate free; census class person/admin_tier."
+    },
+    {
+      "file": "unit/test_ent966_delegation_schema.py",
+      "feature": "abilityai/trinity-enterprise#966",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "database",
+        "nevermined",
+        "unit"
+      ],
+      "description": "Nevermined card delegation schema: SQLite migration idempotent, no replaced_at, partial unique active index (revoked/deleted rows inactive), KEEP AgentRef + agent_deleted_at stamp, Alembic 0102 after 0101, single head, shared DDL."
+    },
+    {
       "file": "unit/test_3725_public_template_tokenless_metadata.py",
       "feature": "abilityai/trinity#3725",
       "added": "2026-10-14",
@@ -6238,6 +6295,17 @@
       "description": "recreate_container_with_updated_config re-bakes AGENT_NAME and the trinity.agent-name label from the live name beside TRINITY_AGENT_AUTH_TOKEN (driven through the real recreate, red before the fix on the replayed old name); check_agent_name_env_matches flags a present-and-different env or label, matches absent values and unreadable attrs; start_agent_internal recreates a stuck renamed agent on COLD start only and leaves never-renamed and running agents alone."
     },
     {
+      "file": "unit/test_3603_channel_failure_reply.py",
+      "feature": "#3603",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "channels",
+        "unit"
+      ],
+      "description": "A failed channel turn sends the fixed member-facing line, never the execution's error (auth failure, exit code, timeout, capacity, rate limit), in a group and one-to-one, through the real ChannelMessageRouter._run_agent_task; the error stays in the router's log line; a cancelled turn always sends the fixed cancelled line (#679), never the row's error, including a pull-pilot terminated turn whose cancelled row carries the operator's error; a raised dispatch sends the same line; a successful turn is untouched. Mutation: restoring the error forwarding turns 14 red; restoring the cancel-reason forwarding turns 8 red."
+    },
+    {
       "file": "unit/test_2891_randomly_guard.py",
       "feature": "#2891",
       "added": "2026-10-20",
@@ -6303,6 +6371,71 @@
         "unit"
       ],
       "description": "A watchdog-claimed /chat turn writes its reply into the chat thread, on real SQLite: schedule_executions.chat_session_id round-trips and the real prepare_chat_execution stamps the thread it logs the user message into; through the real cleanup_service._claim_retained_result (apply_result stood in by a CAS on the real row) a won SUCCESS writes exactly one assistant message equal to the persisted response (recovered notice included, cost carried); a lost CAS, a FAILED terminal, a row with no thread and a thread of another agent write nothing; a failing message write never unclaims the turn; the notice no longer says the thread may lack the reply. Mutation: dropping the reply write or the stamp turns one test red each."
+    },
+    {
+      "file": "unit/test_3651_recovery_companion_close.py",
+      "feature": "#3651",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "Once an execution row is terminal, zero of its companion activities (caller agent_collaboration, self_task) stay `started`, whichever writer wrote it: watchdog and startup _recover_execution, lease-reaper park, stale-slot reclaim and the bulk stale sweep close a direct-dispatch companion that has no backlog_metadata; the bulk sweep leaves tool_call rows alone; a lease re-queue leaves the companion to the re-delivery; a bulk FAILED companion is still upgraded by a late SUCCESS; the AAuth inbound record (triggered_by='a2a') is never rewritten; the a2a queued-cancel CAS winner closes and emits the terminal event, a lost cancel does neither."
+    },
+    {
+      "file": "unit/test_ent419_memory_poisoning_gates.py",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "unit",
+        "security",
+        "mcp"
+      ],
+      "description": "Anti-poisoning gates on agent-written user memory (MEM-001): the write-boundary screen through the real router (each of memory_prompt_marker / memory_instruction / memory_tool_directive / memory_link_in_instruction refused with its code and the line the agent sent, nothing stored, the log carries rule and line never the text; folded spellings — zero-width, full-width, Hangul filler, combining marks, split across a line break, case; a benign table of facts, preferences, open loops, plain links and the false positives an adversarial review found; the cheap misses it found), the exemption keyed on the hit (an old hit kept is not counted again; old lines reordered, re-contextualised or respelled into a new hit are refused; a split across old and new is refused), copy-back normalisation (the rendered block stored clean; a whole-block copy-back keeps only the agent-notes section), the non-creating previous-notes read over real SQLite, AC 4 (a channel write resolves ent#549's one-to-one speaker stamp; a group turn writes no one's memory), the trust envelope on the real format_user_memory_block (nonce'd open/close lines, every splitlines() line margined incl. \\r / NEL / U+2028, forged ends and platform structure only ever margined, control characters removed, summary inside, decisions after the reminder, render failure drops memory, fresh nonce, a Hypothesis property), wiring through the seat-run and channel caller prompts, the summarizer (a tripping line is dropped and the rest kept, all lines dropped keeps the previous summary, each message clamped, the conversation margined inside its prompt), seat decisions (any line terminator refused, markers / instructions / an MCP tool id / a slotted URL refused with a sentence receipt, business-rule decisions accepted, legacy rows rendered on one line, the same one-to-one rule in _seat_for, the block's framing line pinned against the guard), the Telegram history defang, AST pins (the router stores only what prepare_write returned; the summarizer screens before it stores; one agent-notes writer across src/backend), the structural-heading list pinned against the composed prompt, totality (Hypothesis) and time budgets on adversarial and summarizer-sized input."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/memory.test.ts",
+      "feature": "abilityai/trinity-enterprise#419",
+      "added": "2026-10-22",
+      "categories": [
+        "mcp",
+        "security"
+      ],
+      "description": "write_user_memory over a fake TrinityClient: a backend 422 refusal reaches the agent as a success:false result carrying its code, message and line; a stored write passes through unchanged; the published description names all four refusal codes and the margin to drop."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignDraft.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#539: the pure rules behind Select all / Deselect all in Assign shared skills (utils/skillAssignDraft.js) over every row type: Select all adds only unticked, non-deprecated, assignable rows that are not a set's; Deselect all removes every ticked listed row except a set's; both keep a name the dialog does not list. Every disabled reason and its precedence, the counted enabled titles, and what a save removes (set-held kept unless the sets are untrusted), which saves must confirm first (a removed skill with an approval requirement, case-insensitive; never a set-held or conflict name; any other removal with the approval map unread), plus the confirm's words and the refused-name title clause. Mutation-proven."
+    },
+    {
+      "file": "frontend/tests/unit/skillAssignSelectAll.spec.js",
+      "feature": "abilityai/trinity-enterprise#539",
+      "added": "2026-10-22",
+      "categories": [
+        "frontend",
+        "unit",
+        "mount"
+      ],
+      "description": "trinity-enterprise#539, MOUNTED through the real Teleport: Select all / Deselect all change only the draft (no write), Save then sends the expected body (the unlisted assignment kept, the set's row never sent), Reset restores the saved set, every disabled state carries its reason, the dialog never opens on Deselect all, focus is re-homed whenever a control it sat on is disabled or removed (bulk click, manual tick, Reset, Save, Confirm), and Save confirms (Cancel focused) before dropping an approval requirement, deciding on a gate map re-read at save time (failed read, unresolved set, double click and a dialog closed mid-read covered). Mutation-proven (27 mutants)."
+    },
+    {
+      "file": "unit/test_3363_retry_cron_parity.py",
+      "feature": "#3363",
+      "added": "2026-10-23",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
     }
   ]
 }

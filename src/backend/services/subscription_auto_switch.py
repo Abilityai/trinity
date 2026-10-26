@@ -28,7 +28,7 @@ tests pinning that contract.
 import asyncio
 import importlib
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -947,6 +947,62 @@ class SubscriptionWalk:
         return base
 
 
+# #3487: a PULLED turn's attempts are separate result POSTs, possibly handled by
+# different backend workers, so the walk has to live on the row between them.
+# Every field round-trips EXCEPT `Rung.credential` — the secret is never written
+# anywhere; `rung_credential` resolves it again when an attempt needs it.
+_RUNG_STATE_FIELDS = ("kind", "subscription_id", "subscription_name", "why")
+
+
+def walk_to_state(walk: SubscriptionWalk) -> dict:
+    """A JSON-safe snapshot of `walk`, without any credential."""
+    state = {}
+    for f in fields(SubscriptionWalk):
+        value = getattr(walk, f.name)
+        if f.name == "active":
+            value = None if value is None else {k: getattr(value, k) for k in _RUNG_STATE_FIELDS}
+        elif isinstance(value, set):
+            value = sorted(value)
+        state[f.name] = value
+    return state
+
+
+def walk_from_state(state: dict) -> SubscriptionWalk:
+    """The inverse of `walk_to_state`. The active rung comes back without its
+    credential; `rung_credential` fetches it when an attempt needs it."""
+    kwargs = {}
+    for f in fields(SubscriptionWalk):
+        if f.name not in state:
+            continue
+        value = state[f.name]
+        if f.name == "active" and value is not None:
+            value = Rung(**{k: value.get(k) for k in _RUNG_STATE_FIELDS})
+        elif f.name == "tried_subscription_ids":
+            value = set(value or ())
+        elif f.name == "attempts":
+            value = [dict(a) for a in (value or ())]
+        kwargs[f.name] = value
+    return SubscriptionWalk(**kwargs)
+
+
+def rung_credential(rung: Optional[Rung]) -> Optional[str]:
+    """The secret a rung stands for, read fresh (#3487). None when it cannot be
+    resolved — the attempt then runs on the baseline and is attributed so."""
+    if rung is None:
+        return None
+    if rung.credential:
+        return rung.credential
+    try:
+        if rung.kind == "subscription" and rung.subscription_id:
+            return db.get_subscription_token(rung.subscription_id)
+        if rung.kind == "api_key":
+            from services.settings_service import get_anthropic_api_key
+            return get_anthropic_api_key() or None
+    except Exception as e:  # noqa: BLE001 — a missing credential is a baseline attempt
+        logger.error("[#3487] credential for a %s rung unreadable: %s", rung.kind, type(e).__name__)
+    return None
+
+
 def _subscription_count_cap() -> int:
     try:
         return int(len(db.list_subscriptions())) + 2
@@ -954,18 +1010,33 @@ def _subscription_count_cap() -> int:
         return _WALK_MAX_RUNGS_FALLBACK
 
 
-def start_subscription_walk(agent_name: str, triggered_by: Optional[str]) -> SubscriptionWalk:
+def start_subscription_walk(
+    agent_name: str,
+    triggered_by: Optional[str],
+    *,
+    baseline_subscription_id: Optional[str] = None,
+) -> SubscriptionWalk:
     """A fresh walk for one turn. Snapshots the assignment the turn starts on
     (the baseline the first attempt runs on) and whether a person is waiting.
     ONE read on the hot path — the subscription's name and the rung cap are
     resolved lazily, on the first refusal, so a turn that never fails pays
-    nothing more than it did before #3470."""
+    nothing more than it did before #3470.
+
+    ``baseline_subscription_id`` (#3487): the assignment recorded when the turn
+    STARTED, for a caller that starts the walk later than that. A pulled turn's
+    walk starts at its first refusal; reading the assignment then would take a
+    concurrent turn's move as this turn's baseline, charge the refusal to a
+    subscription it never ran on and skip the "moved by a concurrent turn"
+    re-run. Falsy → the live read, as push does at turn start."""
     try:
         from services.pull_pilot import INTERACTIVE_TRIGGERS
         interactive = (triggered_by or "") in INTERACTIVE_TRIGGERS
     except Exception:  # noqa: BLE001
         interactive = False
     walk = SubscriptionWalk(agent_name=agent_name, interactive=interactive)
+    if baseline_subscription_id:
+        walk.assigned_subscription_id = baseline_subscription_id
+        return walk
     try:
         walk.assigned_subscription_id = db.get_agent_subscription_id(agent_name)
     except Exception as e:  # noqa: BLE001
