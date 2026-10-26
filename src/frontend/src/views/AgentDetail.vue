@@ -210,6 +210,7 @@
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
+              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" :notify="showNotification" />
             </div>
 
             <!-- A2A Tab Content (trinity-enterprise#158) -->
@@ -463,6 +464,7 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import NeverminedSpendingPanel from '../components/NeverminedSpendingPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
@@ -555,7 +557,9 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // ent#967 (D30): Nevermined's redirect return carries no `tab` (its returnUrl takes no query).
+  const tab = route.query.tab ?? (route.query.delegationId && route.query.state ? 'nevermined' : undefined)
+  const resolvedTab = tab ? resolveDeepLinkTab(tab) : null
   // #2900: no tab named (or one that names nothing). The view is KeepAlive-
   // cached, so it may be showing a tab remembered from the last visit — make
   // the URL say so, or a reload would land somewhere else.

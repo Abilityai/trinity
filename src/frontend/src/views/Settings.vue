@@ -1300,6 +1300,10 @@
           <AAuthPanel v-if="activeTab === 'integrations'" />
           <A2AEndpointsPanel v-if="activeTab === 'integrations'" />
 
+          <!-- The instance's Nevermined organization (abilityai/trinity-enterprise#967):
+               the agent Payments tab's card enrollment needs it first. -->
+          <NeverminedOrganizationPanel v-if="activeTab === 'integrations'" />
+
           <!-- Trinity Prompt Section -->
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2362,6 +2366,7 @@ import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
 import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
+import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'

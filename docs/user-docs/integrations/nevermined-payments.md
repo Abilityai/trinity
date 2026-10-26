@@ -91,6 +91,42 @@ delegation id Nevermined hands back, gives it to the agent, shows what is left
 to spend (read live from Nevermined) and revokes the mandate at Nevermined when
 you ask.
 
+**From the Trinity UI.** Nevermined holds the card throughout; Trinity shows
+Nevermined's own card form and records the mandate id it returns.
+
+1. **Admin, once:** **Settings › Integrations › Nevermined organization**. Enter
+   the Nevermined organization id, pick the Nevermined environment (`sandbox`
+   first), and paste the Nevermined widget secret and agent API key. Both
+   secrets are needed the first time; afterwards the fields stay blank and a
+   pasted value rotates that secret. Switching the environment asks first.
+   **Remove Nevermined organization** is refused while any agent holds an
+   active Nevermined mandate.
+2. **Owner, per agent:** start the agent, open its **Payments** tab and find
+   **Spending · Nevermined card mandate**. Choose **Enroll a card with
+   Nevermined**. Nevermined's card form opens inside the page (or over the whole
+   page on a narrow screen — press Esc to close it). Enter the card; Nevermined
+   creates the mandate, and Trinity binds it to the agent.
+3. If binding fails after Nevermined created the mandate (for example the agent
+   stopped), the panel keeps the ids in this browser tab and offers
+   **Retry bind** — after a "too many requests" or "unreachable" answer it waits
+   the seconds the server asked for. **Discard** keeps the mandate at
+   Nevermined; revoke it there if you do not want it.
+4. A funded agent shows Nevermined's live numbers (remaining, limit, spent,
+   purchases, expiry) and **Revoke at Nevermined**, which asks first.
+
+If the browser blocks Nevermined's embedded form, the panel offers
+**Continue on Nevermined**: Nevermined's own card page opens with a one-time
+session in the address bar and brings you back to the agent's page, where
+Trinity binds the mandate only if the return matches the request this browser
+tab made. The Nevermined widget key's allowed origins must include this Trinity
+instance's address, or Nevermined's form does not start.
+
+- If Trinity asks you to sign in again when Nevermined sends you back, the
+  returned ids are lost: the mandate exists at Nevermined — revoke it there, or
+  enroll again.
+- Trinity sends `Permissions-Policy: payment=()`, so wallet buttons (Apple Pay,
+  Google Pay) inside Nevermined's form are unavailable; typing the card works.
+
 **Once per instance (admin).** Connect the instance's Nevermined organization:
 `PUT /api/nevermined/organization` with the `org_id`, the `environment`
 (`sandbox` or `live` — start with `sandbox`), the organization's widget secret
