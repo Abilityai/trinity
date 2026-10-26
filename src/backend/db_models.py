@@ -1191,6 +1191,8 @@ class AgentHealthDetail(BaseModel):
     agent_name: str
     aggregate_status: str
     last_check_at: Optional[str] = None
+    # #3950: a stored reading older than this many seconds reads `unknown`.
+    stale_after_seconds: Optional[int] = None
     docker: Optional[DockerHealthCheck] = None
     network: Optional[NetworkHealthCheck] = None
     business: Optional[BusinessHealthCheck] = None
@@ -1278,6 +1280,9 @@ class FleetHealthStatus(BaseModel):
     enabled: bool = True
     last_check_at: Optional[str] = None
     summary: FleetHealthSummary
+    # #3950: a stored reading older than this many seconds reads `unknown`
+    # (and is counted so); 3× the check interval.
+    stale_after_seconds: Optional[int] = None
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
     sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707
