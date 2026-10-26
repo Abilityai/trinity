@@ -3621,6 +3621,19 @@
       "description": "#2433: headless runs use a dedicated 32-thread pool pinned to the backend fleet ceiling; pre-spawn cancel raises 409 without Popen."
     },
     {
+      "file": "unit/test_2328_turn_cap_tighten_only.py",
+      "feature": "#2328",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "agent-server",
+        "headless-executor",
+        "guardrails",
+        "security"
+      ],
+      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and is not read as an auth failure."
+    },
+    {
       "file": "unit/test_2433_gemini_registers.py",
       "feature": "#2433",
       "added": "2026-08-28",
