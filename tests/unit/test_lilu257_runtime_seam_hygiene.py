@@ -10,7 +10,9 @@ inherit verbatim:
   2. The Codex ``CLAUDE.md -> AGENTS.md`` mirror was a one-shot ``cp`` guarded
      by ``[ ! -f AGENTS.md ]``, so it never ran again — every later edit to
      CLAUDE.md left Codex reading a frozen snapshot of the agent's identity.
-     Now a relative symlink, which re-resolves on every read.
+     Now a REFRESHED COPY with a provenance record (Abilityai/lilu#627 — a
+     symlink is forbidden in the agent home by ent#819), refreshed at boot and
+     at every Codex/OpenCode turn.
 
 The predicate itself is pinned too: it must be case-insensitive (the #1187
 casing trap) and it must be importable BOTH as a package member and standalone,
@@ -22,6 +24,7 @@ which is why the name sets live in a zero-dependency leaf module.
 from __future__ import annotations
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -167,59 +170,64 @@ def test_reinstall_still_runs_on_claude(plugins, monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------
-# 3. the AGENTS.md mirror is a symlink
+# 3. the AGENTS.md mirror is a refreshed copy (Abilityai/lilu#627)
 # --------------------------------------------------------------------------
 
-def test_startup_no_longer_copies_claude_md():
+def test_startup_mirror_is_a_copy_not_a_link():
+    """ent#819: the platform creates no links in an agent home."""
     src = _STARTUP.read_text()
-    assert "cp /home/developer/CLAUDE.md /home/developer/AGENTS.md" not in src
-    assert "ln -sfn CLAUDE.md /home/developer/AGENTS.md" in src
+    assert "cp /home/developer/CLAUDE.md /home/developer/AGENTS.md" in src
+    assert "ln -sfn CLAUDE.md /home/developer/AGENTS.md" not in src
 
 
 def _run_mirror_block(home: Path) -> str:
     """Execute just the CLAUDE.md -> AGENTS.md block against a fake $HOME.
 
     Extracted from startup.sh by text so the test exercises the SHIPPED shell,
-    not a re-typed copy of it, with `/home/developer` repointed at a tmpdir.
+    not a re-typed copy of it, with `/home/developer` repointed at a tmpdir and
+    the provenance record under `<home>/.tmp`.
     """
     src = _STARTUP.read_text()
-    start = src.index('    if [ -f "/home/developer/CLAUDE.md" ]; then')
+    start = src.index('    _agents_md_record="${AGENT_TMPDIR}/agents-md.sha256"')
     # The block lives inside a `case … esac` arm, so it ends at that arm's `;;`.
     end = src.index("\n    ;;", start)
     block = src[start:end].replace("/home/developer", str(home))
     proc = subprocess.run(
-        ["bash", "-c", block], capture_output=True, text=True, timeout=30
+        ["bash", "-c", block], capture_output=True, text=True, timeout=30,
+        env={**os.environ, "AGENT_TMPDIR": str(home / ".tmp")},
     )
     assert proc.returncode == 0, proc.stderr
     return proc.stdout
 
 
-def test_mirror_creates_relative_symlink(tmp_path):
+def test_mirror_creates_a_regular_copy(tmp_path):
     (tmp_path / "CLAUDE.md").write_text("v1\n")
     _run_mirror_block(tmp_path)
 
-    link = tmp_path / "AGENTS.md"
-    assert link.is_symlink()
-    assert link.readlink().as_posix() == "CLAUDE.md"  # relative, so it survives a move
-    assert link.read_text() == "v1\n"
+    copy = tmp_path / "AGENTS.md"
+    assert copy.is_file() and not copy.is_symlink()
+    assert copy.read_text() == "v1\n"
+    assert (tmp_path / ".tmp" / "agents-md.sha256").is_file()
 
 
-def test_mirror_tracks_later_edits(tmp_path):
-    """The defect: a copy froze at first boot. A symlink re-resolves."""
+def test_mirror_refreshes_its_own_stale_copy(tmp_path):
+    """The defect: a copy froze at first boot. Ours is refreshed."""
     (tmp_path / "CLAUDE.md").write_text("v1\n")
     _run_mirror_block(tmp_path)
     (tmp_path / "CLAUDE.md").write_text("v2 — edited by a git sync\n")
+    _run_mirror_block(tmp_path)
     assert (tmp_path / "AGENTS.md").read_text() == "v2 — edited by a git sync\n"
 
 
 def test_mirror_adopts_a_stale_identical_copy(tmp_path):
     """Upgrade path off the copy-era image: a regular AGENTS.md that is
-    byte-identical to CLAUDE.md is provably our own mirror, so replacing it
-    with the link loses nothing."""
+    byte-identical to CLAUDE.md is provably our own mirror."""
     (tmp_path / "CLAUDE.md").write_text("v1\n")
     (tmp_path / "AGENTS.md").write_text("v1\n")
     _run_mirror_block(tmp_path)
-    assert (tmp_path / "AGENTS.md").is_symlink()
+    (tmp_path / "CLAUDE.md").write_text("v2\n")
+    _run_mirror_block(tmp_path)
+    assert (tmp_path / "AGENTS.md").read_text() == "v2\n"
 
 
 def test_mirror_leaves_an_authored_agents_md_alone_but_says_so(tmp_path):
@@ -227,25 +235,18 @@ def test_mirror_leaves_an_authored_agents_md_alone_but_says_so(tmp_path):
     (tmp_path / "AGENTS.md").write_text("hand-written codex instructions\n")
     out = _run_mirror_block(tmp_path)
 
-    assert not (tmp_path / "AGENTS.md").is_symlink()
     assert (tmp_path / "AGENTS.md").read_text() == "hand-written codex instructions\n"
-    assert "differs" in out.lower()
+    assert "did not write" in out.lower()
 
 
-def test_mirror_repairs_a_dangling_or_wrong_symlink(tmp_path):
+def test_mirror_replaces_a_leftover_symlink_with_a_copy(tmp_path):
+    """The lilu#257-era link (or a dangling one) becomes a plain copy."""
     (tmp_path / "CLAUDE.md").write_text("v1\n")
-    (tmp_path / "AGENTS.md").symlink_to("SOMEWHERE_ELSE.md")
+    (tmp_path / "AGENTS.md").symlink_to("CLAUDE.md")
     _run_mirror_block(tmp_path)
-    assert (tmp_path / "AGENTS.md").readlink().as_posix() == "CLAUDE.md"
-
-
-def test_mirror_is_idempotent(tmp_path):
-    (tmp_path / "CLAUDE.md").write_text("v1\n")
-    first = _run_mirror_block(tmp_path)
-    second = _run_mirror_block(tmp_path)
-    assert "Linked AGENTS.md" in first
-    assert "Linked AGENTS.md" not in second  # already correct → no churn
-    assert (tmp_path / "AGENTS.md").is_symlink()
+    assert not (tmp_path / "AGENTS.md").is_symlink()
+    assert (tmp_path / "AGENTS.md").read_text() == "v1\n"
+    assert (tmp_path / "CLAUDE.md").read_text() == "v1\n"
 
 
 def test_mirror_noops_without_claude_md(tmp_path):
