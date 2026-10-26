@@ -4,12 +4,14 @@
 
 **Result:** 0 findings at or above the gate. No hypotheses. 2 coverage gaps open; a third (the runtime route census) closed after the audit.
 
+**After the audit (2026-10-26, review round):** merging `dev` added a 19th converted route, the Nevermined delegation read, which keeps its uniform 404 through `refusal=`, and a seventh MCP description (`get_agent_spending`). The hand-copy ratchet now also reads an agent name inside `or` / `and` / `… if … else …`. The counts below are as audited at `66a860094`.
+
 ## What changed on the attack surface
 - **No new endpoint.** 18 existing routes now refuse a sibling agent's key through one helper, `dependencies.assert_own_agent`, called as the handler's first statement. Each keeps the status and message it had before.
   - The routes: reminders ×3, seat decisions ×2, user memory, metric points, reports, canvas writes and deletes ×4, canon roles, objectives, shared files, voice reply, and the outbound A2A call and poll.
 - **User memory.** The self-gate now runs before the access check. An agent key naming an agent outside its reach gets the self message instead of "Not authorized". Both are 403, and the refusal now depends only on the principal, so the in-reach/out-of-reach difference is gone.
 - **Outbound A2A.** The kill switch is a route dependency, solved after the access dependency and before body validation. With the switch off, a schema-invalid or missing body answers 404 (was 422). Unparseable JSON is still FastAPI's 422.
-- **Census.** The route census recognises the self-gate AND requires an `AGENT_CALLABLE_SELF` entry with a use-not-grant reason. A self-scoped grant cannot classify itself.
+- **Census.** The route census recognises the self-gate AND requires an `AGENT_CALLABLE_SELF` entry with a use-not-grant reason. The gate alone never classifies a route; the reviewed reason is what keeps a self-scoped grant out, since a listed entry passes every check.
 - **Hand-copy ratchet.** `test_1310_auth_wiring.py` fails any hand-written copy of the gate under `src/backend/`.
 - **MCP.** Six tool descriptions changed: `write_user_memory`, `set_reminder`, `list_reminders`, `cancel_reminder`, `send_voice_reply` and `get_a2a_task`. Each now says the `agent_name` parameter is for a user-scoped key, and that an agent key may only name itself. These are static strings.
 
