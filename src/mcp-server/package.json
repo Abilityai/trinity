@@ -34,7 +34,7 @@
     "@modelcontextprotocol/sdk": "^1.26.0",
     "hono": ">=4.13.0",
     "axios": ">=1.15.2",
-    "fast-uri": "^3.1.7",
+    "fast-uri": "^3.1.9",
     "@hono/node-server": ">=1.19.13",
     "ip-address": ">=10.7.2",
     "qs": ">=6.15.2",
