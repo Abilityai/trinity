@@ -128,9 +128,26 @@ def test_unusable_required_identity_is_refused(value, why):
     assert why in exc.value.reason
 
 
-def test_a_chain_of_only_trusted_proxies_is_refused():
-    with pytest.raises(ci.IdentityRefused, match="only trusted"):
-        _resolve(FRONTEND, ("X-Forwarded-For", f"{FRONTEND}, {FRONTEND}"))
+def test_a_chain_of_only_trusted_proxies_falls_back_to_the_hop_that_forwarded_nothing():
+    # nginx appends every peer to X-Forwarded-For, so a listed proxy that adds
+    # no client identity arrives as a chain of trusted hops. Absent identity is
+    # not invalid identity: the request is attributed to that proxy, not refused.
+    ops = ci.load_config({"TRINITY_BUNDLED_PROXY_TRUST": "1", "TRINITY_PROXY_PREFIX": "172.30.0",
+                          "TRUSTED_PROXIES": "192.0.2.10,198.51.100.0/28"})
+    r = _resolve(FRONTEND, ("X-Forwarded-For", "192.0.2.10"), config=ops)
+    assert (r.address, r.provenance) == ("192.0.2.10", "proxy_fallback")
+    # A client inside a listed range calling port 80 directly is its own address.
+    r = _resolve(FRONTEND, ("X-Forwarded-For", "198.51.100.7"), config=ops)
+    assert (r.address, r.provenance) == ("198.51.100.7", "proxy_fallback")
+    # The left-most trusted hop is the one that forwarded nothing.
+    r = _resolve(FRONTEND, ("X-Forwarded-For", "198.51.100.3, 192.0.2.10"), config=ops)
+    assert (r.address, r.provenance) == ("198.51.100.3", "proxy_fallback")
+    # Only nginx in the chain: the peer itself, as without the header.
+    r = _resolve(FRONTEND, ("X-Forwarded-For", f"{FRONTEND}, {FRONTEND}"))
+    assert (r.address, r.provenance) == (FRONTEND, "proxy_fallback")
+    # An untrusted entry anywhere in the suffix is still the client.
+    r = _resolve(FRONTEND, ("X-Forwarded-For", f"{CLIENT}, 192.0.2.10"), config=ops)
+    assert (r.address, r.provenance) == (CLIENT, "xff")
 
 
 def test_an_oversized_unused_left_prefix_is_not_a_reason_to_refuse():

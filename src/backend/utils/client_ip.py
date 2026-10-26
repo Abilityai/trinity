@@ -31,10 +31,14 @@ never read. Headers are left untouched for the routes that read them.
 
 Absent identity is not invalid identity. A trusted proxy that forwards no
 identity leaves the request attributed to that proxy (provenance
-``proxy_fallback``, a shared bucket, logged at most once a minute); identity
-that is present but empty, malformed, duplicated where it must be single, made
-only of trusted hops, or longer than the parsing budget is refused — HTTP 400,
-or a WebSocket close 1008 before the handshake is accepted.
+``proxy_fallback``, a shared bucket, logged at most once a minute). The same
+holds when the suffix is exhausted without reaching an untrusted entry: the
+bundled nginx appends every peer to ``X-Forwarded-For``, so a listed proxy
+that forwards nothing, or a client inside a listed range, arrives as a chain
+of trusted hops; the request is attributed to the left-most of them, the hop
+that forwarded nothing. Identity that is present but empty, malformed,
+duplicated where it must be single, or longer than the parsing budget is
+refused — HTTP 400, or a WebSocket close 1008 before the handshake is accepted.
 
 Pure leaf: no routers, services, DNS, Docker, threads or background refresh.
 The configuration is read from the environment and validated as a whole; an
@@ -320,6 +324,7 @@ def resolve(config: ClientIPConfig, peer_text: str, headers) -> Optional[Resolut
     fields = _header_fields(headers, b"x-forwarded-for")
     if not fields:
         return Resolution(canonical, PROVENANCE_FALLBACK)
+    leftmost_trusted = canonical
     for raw in _xff_suffix(fields):
         token = raw.decode("latin-1").strip(" \t")
         if not token:
@@ -334,9 +339,12 @@ def resolve(config: ClientIPConfig, peer_text: str, headers) -> Optional[Resolut
             # guess from the unverified prefix.
             return _resolve_cf(config, headers, canonical)
         if config.is_trusted(hop):
+            leftmost_trusted = str(hop)
             continue
         return Resolution(str(hop), PROVENANCE_XFF)
-    raise IdentityRefused("X-Forwarded-For names only trusted proxies")
+    # Every entry was appended by a hop we trust and none of them named a
+    # client: the left-most one forwarded nothing. Absent, not invalid.
+    return Resolution(leftmost_trusted, PROVENANCE_FALLBACK)
 
 
 # ---------------------------------------------------------------------------
@@ -387,6 +395,8 @@ class ClientAddressMiddleware:
                 if result.provenance == PROVENANCE_FALLBACK:
                     _note_fallback(peer_text)
                 # In place, so uvicorn's access log reads the same address.
-                port = client[1] if result.provenance in (PROVENANCE_PEER, PROVENANCE_FALLBACK) else 0
+                # The socket port is meaningful only for the socket peer; a
+                # fallback onto a hop nginx appended is a different host.
+                port = client[1] if result.address == str(parse_literal(peer_text)) else 0
                 scope["client"] = (result.address, port)
         await self.app(scope, receive, send)
