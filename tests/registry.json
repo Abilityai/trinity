@@ -934,6 +934,18 @@
       "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
     },
     {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
