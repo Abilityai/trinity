@@ -291,7 +291,7 @@ class TestMigrationsConstant:
         whenever `init_schema` creates the table. This generalises
         `test_fan_out_id_migration_present` from one name to every name, in both
         directions: every `_migrate*` function defined in `db/migrations.py` is
-        registered, and every registered function is one of them.
+        registered exactly once, and every registered function is one of them.
 
         Rule: a helper in `db/migrations.py` that is deliberately not a
         migration must not use the `_migrate` prefix.
@@ -350,6 +350,18 @@ class TestMigrationsConstant:
             problems.append(
                 "MIGRATIONS entries whose function is not a _migrate* function "
                 f"defined in db/migrations.py: {foreign}"
+            )
+        entries_by_fn = {}
+        for name, fn in MIGRATIONS:
+            entries_by_fn.setdefault(fn, []).append(name)
+        repeated = sorted(
+            f"{fn.__name__} <- {names}"
+            for fn, names in entries_by_fn.items()
+            if len(names) > 1
+        )
+        if repeated:
+            problems.append(
+                f"functions registered under more than one MIGRATIONS entry: {repeated}"
             )
         assert not problems, "\n".join(problems)
 
