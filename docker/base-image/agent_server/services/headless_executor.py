@@ -662,7 +662,6 @@ class HeadlessRunContext:
     # the turn-limit 422 can name the cap that actually stopped the turn.
     max_turns_effective: Optional[int] = None
     max_turns_source: str = "guardrail"
-    max_turns_guardrail: Optional[int] = None
 
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
     response_parts: List[str] = field(default_factory=list)
@@ -866,7 +865,6 @@ def _setup_headless_command(
         claude_session_uuid=claude_session_uuid,
         max_turns_effective=effective_max_turns,
         max_turns_source=max_turns_source,
-        max_turns_guardrail=guardrail_max_turns,
         auth_override=auth_override,
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
@@ -1391,11 +1389,15 @@ def _finalize_headless_result(
         logger.warning(f"[Headless Task] Max turns reached: {error_msg}")
         if ctx.max_turns_source == "per_task":
             # #2328: the caller's own tighter cap stopped the turn — raising the
-            # guardrail would not have helped, so do not advise it.
+            # guardrail would not have helped, so do not advise it. The guardrail's
+            # value is deliberately NOT in the text: the backend substring-matches
+            # this detail for "401"/"403" (failure_classifier.AUTH_INDICATORS), so
+            # a guardrail of 401 or 403 would read as an auth failure and rotate
+            # subscriptions. The per-task value is already in error_msg.
             remedy = (
                 f"The caller's per-task max_turns ({ctx.max_turns_effective}) stopped this task, "
-                f"below the agent's guardrail of {ctx.max_turns_guardrail}. "
-                f"Send a larger max_turns (up to {ctx.max_turns_guardrail}) or break the work into smaller subtasks."
+                f"below the agent's max_turns_task guardrail. Send a larger per-task max_turns "
+                f"(it may not exceed the guardrail) or break the work into smaller subtasks."
             )
         else:
             remedy = "Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
@@ -1727,7 +1729,8 @@ async def execute_headless_task(
         allowed_tools: Optional list of allowed tools (restricts available tools)
         system_prompt: Optional additional system prompt
         timeout_seconds: Execution timeout (default 5 minutes)
-        max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
+        max_turns: Per-task turn cap; may only tighten the agent's
+            ``max_turns_task`` guardrail (#2328). None, 0 or negative = the guardrail.
         execution_id: Optional execution ID to use for process registry (enables termination tracking)
         resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
         persist_session: If True, omit ``--no-session-persistence`` so the

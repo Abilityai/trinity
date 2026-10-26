@@ -155,7 +155,6 @@ def test_a_turn_stopped_by_the_per_task_cap_says_so(monkeypatch, reader_may_be_l
     detail = _turn_limit_422(_setup(20), reader_may_be_live=reader_may_be_live)
 
     assert "per-task max_turns (20)" in detail
-    assert "guardrail of 50" in detail
     # Raising the guardrail is not the remedy when the caller's own cap bound.
     assert "increasing max_turns_task" not in detail
 
@@ -169,13 +168,16 @@ def test_a_turn_stopped_by_the_guardrail_keeps_the_guardrail_advice(monkeypatch,
     assert "per-task" not in detail
 
 
-def test_the_per_task_422_is_not_read_as_an_auth_failure(monkeypatch):
+@pytest.mark.parametrize("guardrail", [50, 401, 403])
+def test_the_per_task_422_is_not_read_as_an_auth_failure(monkeypatch, guardrail):
     """The 422 detail is substring-matched by the backend's SUB-003 classifier
-    (#1849); a wording that tripped it would rotate subscriptions on a turn that
-    simply hit the caller's cap."""
+    (#1849), whose indicators include bare "401" and "403". A wording that
+    tripped it would rotate subscriptions on a turn that simply hit the
+    caller's cap — so the guardrail's own value (1-500, owner-set) must not
+    appear in the per-task wording."""
     from services.failure_classifier import is_auth_failure
 
-    _with_guardrail(monkeypatch, 50)
+    _with_guardrail(monkeypatch, guardrail)
     detail = _turn_limit_422(_setup(20))
 
     assert not is_auth_failure(detail)
