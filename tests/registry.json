@@ -3955,6 +3955,19 @@
       "description": "A fan-out batch is joined from the DB instead of gathered in a coroutine (#2524 - #1081 Phase 4's async fan-out join + sync edge adapter). The sync aggregate is rebuilt from the batch's schedule_executions rows (fan_out_id + the caller's fan_out_task_id) rather than from execute_task return values, which a pull dispatch never fills. Pinned: the join wakes the caller only when no row is open, is idempotent under re-delivery, costs one PK read and no batch COUNT on non-fan-out terminals, and is reached from spawn_task_terminal_event with a guard independent of #2523's loop advance. A row is created at SLOT GRANT, never up front (#2524 review): a pre-created RUNNING row waiting behind the semaphore is bulk-FAILed by the #106 no-session sweep, and a QUEUED one is claimable by the backlog drain / pull workers while the service also dispatches it. The row carries the SUB-004 subscription snapshot. A QUEUED return leaves the batch open, and a sync call waits on the rows and answers with the worker's result. max_concurrency still paces push. execute_task's error_code reaches the aggregate (no column holds it). A deadline reports the undispatched tail as running, not failed, and never cancels the dispatch. The default wait budget covers ceil(N / min(max_concurrency, max_parallel_tasks)) waves. A raised dispatch is closed by a proper terminal writer (activity close + terminal event on a won CAS, nothing on a lost one). Also covers task_execution_service.dispatch_and_await_terminal, the sync edge adapter that unstranded a2a and operator_response: a push dispatch is returned untouched, a QUEUED one waits and rebuilds from the row, a timed-out wait returns FAILED/TIMEOUT without raising, and a vanished row falls back to the dispatch result."
     },
     {
+      "file": "unit/test_schema_parity.py",
+      "feature": "#713, #3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "unit",
+        "guard"
+      ],
+      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
       "file": "unit/test_2524_fanout_real_schema.py",
       "feature": "#2524",
       "added": "2026-09-15",
