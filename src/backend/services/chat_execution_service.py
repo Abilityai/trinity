@@ -453,7 +453,12 @@ async def _finalize_chat_success(
     tool_calls_json = sanitize_execution_log(tool_calls_json)
     sanitized_response = sanitize_response(response_data.get("response", ""))
 
-    assistant_message = db.add_chat_message(
+    # #3380: if the watchdog claimed this turn first, it already wrote the reply
+    # into the thread. Read before this dispatcher's own SUCCESS, which wins
+    # over a SUCCESS row and would overwrite the notice the check reads.
+    from services.cleanup_service import recovered_reply_written
+
+    assistant_message = None if recovered_reply_written(task_execution_id) else db.add_chat_message(
         session_id=session.id,
         agent_name=name,
         user_id=current_user.id,
@@ -475,7 +480,7 @@ async def _finalize_chat_success(
         activity_id=chat_activity_id,
         status=ActivityState.COMPLETED,
         details={
-            "related_chat_message_id": assistant_message.id,
+            "related_chat_message_id": assistant_message.id if assistant_message else None,
             "context_used": session_data.get("context_tokens"),
             "context_max": session_data.get("context_window"),
             "cost_usd": metadata.get("cost_usd"),
@@ -490,7 +495,7 @@ async def _finalize_chat_success(
             activity_id=collaboration_activity_id,
             status=ActivityState.COMPLETED,
             details={
-                "related_chat_message_id": assistant_message.id,
+                "related_chat_message_id": assistant_message.id if assistant_message else None,
                 "response_length": len(response_data.get("response", "")),
                 "execution_time_ms": execution_time_ms,
                 "execution_id": task_execution_id,
@@ -1474,6 +1479,7 @@ async def run_pulled_chat_turn(
 
         result = turn.result
         execution_id = result.execution_id or task_execution_id
+        adopted_row = False
         if (
             getattr(getattr(result, "error_code", None), "value", None)
             == TaskExecutionErrorCode.TIMEOUT.value
@@ -1485,6 +1491,7 @@ async def run_pulled_chat_turn(
             row_result = result_from_execution_row(execution_id)
             if row_result is not None and row_result.status in _SYNC_BACKLOG_TERMINAL:
                 result = row_result
+                adopted_row = True
             else:
                 receipt = {
                     "status": "queued_timeout",
@@ -1536,7 +1543,13 @@ async def run_pulled_chat_turn(
         if _staged:
             response_text = scrub_text(_staged, response_text)
 
-        assistant_message = db.add_chat_message(
+        # #3380: a row adopted after the wait ran out may be one the watchdog
+        # claimed, which already wrote this reply into the thread.
+        from services.cleanup_service import recovered_reply_written
+
+        assistant_message = None if (
+            adopted_row and recovered_reply_written(execution_id)
+        ) else db.add_chat_message(
             session_id=session.id,
             agent_name=name,
             user_id=current_user.id,
@@ -1557,7 +1570,7 @@ async def run_pulled_chat_turn(
             collaboration_activity_id,
             ActivityState.COMPLETED,
             details={
-                "related_chat_message_id": assistant_message.id,
+                "related_chat_message_id": assistant_message.id if assistant_message else None,
                 "execution_time_ms": execution_time_ms,
                 "execution_id": execution_id,
             },

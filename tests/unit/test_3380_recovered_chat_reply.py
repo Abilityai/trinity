@@ -200,6 +200,70 @@ class TestRecoveredReply:
             assert _claim(real_db, agent, execution_id, _record()) == "claimed"
 
 
+def _live_finalize(db, agent, execution_id, session_id):
+    """The sync /chat success finalizer on the real row, as a live dispatcher
+    that got the agent's answer runs it."""
+    from datetime import datetime as _dt
+    from unittest.mock import MagicMock
+    from services import chat_execution_service as ces
+
+    resp = MagicMock()
+    resp.json.return_value = {
+        "response": "the live answer", "execution_log": [], "metadata": {"cost_usd": 0.42},
+        "session": {"context_tokens": 10, "context_window": 200000},
+    }
+    with (
+        patch.object(ces, "db", db),
+        patch.object(ces, "get_staged_values", lambda: []),
+        patch.object(ces, "activity_service", MagicMock(complete_activity=AsyncMock())),
+        patch.object(ces.idempotency_service, "complete", lambda *a, **k: None),
+        patch.object(ces, "_spawn_chat_terminal_report", lambda *a, **k: None),
+    ):
+        asyncio.run(ces._finalize_chat_success(
+            name=agent, response=resp, start_time=_dt.utcnow(),
+            session=db.get_chat_session(session_id),
+            current_user=SimpleNamespace(id=7, email="u@example.com", username="u"),
+            chat_activity_id="ca", collaboration_activity_id=None,
+            task_execution_id=execution_id, _chat_subscription_id=None,
+            execution=SimpleNamespace(id="q-1"), queue_result="done", is_queued=False,
+            idem="idem-1",
+        ))
+
+
+class TestLiveWritersAfterTheWatchdog:
+    """Review follow-up: a live writer reaching a turn the watchdog already
+    claimed must not write the reply a second time."""
+
+    def test_a_dispatcher_reaching_a_watchdog_claimed_turn_writes_no_second_reply(self, real_db):
+        agent = _agent()
+        execution_id, session_id = _chat_turn(real_db, agent)
+        assert _claim(real_db, agent, execution_id, _record()) == "claimed"
+        _live_finalize(real_db, agent, execution_id, session_id)
+        replies = _assistant(real_db, session_id)
+        assert len(replies) == 1 and replies[0].content.startswith("> ℹ️ Recovered")
+
+    def test_a_dispatcher_that_won_writes_its_reply(self, real_db):
+        agent = _agent()
+        execution_id, session_id = _chat_turn(real_db, agent)
+        _live_finalize(real_db, agent, execution_id, session_id)
+        assert [m.content for m in _assistant(real_db, session_id)] == ["the live answer"]
+        assert real_db.get_execution(execution_id).status == "success"
+
+    def test_recovered_reply_written_only_for_the_watchdogs_claim(self, real_db):
+        cs = _cs()
+        agent = _agent()
+        claimed, _ = _chat_turn(real_db, agent)
+        assert _claim(real_db, agent, claimed, _record()) == "claimed"
+        assert cs.recovered_reply_written(claimed) is True
+        live, session_id = _chat_turn(real_db, agent)
+        _live_finalize(real_db, agent, live, session_id)
+        assert cs.recovered_reply_written(live) is False
+        unlinked, _ = _chat_turn(real_db, agent, linked=False)
+        assert _claim(real_db, agent, unlinked, _record()) == "claimed"
+        assert cs.recovered_reply_written(unlinked) is False
+        assert cs.recovered_reply_written(None) is False
+
+
 def test_the_notice_no_longer_says_the_thread_may_lack_the_reply():
     notice = _cs()._RECOVERED_NOTICE
     assert "may not show" not in notice

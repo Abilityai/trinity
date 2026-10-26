@@ -158,6 +158,33 @@ _RECOVERED_NOTICE = (
 )
 
 
+def recovered_reply_written(execution_id: Optional[str]) -> bool:
+    """Whether the watchdog claimed this /chat turn and wrote its reply (#3380).
+
+    True when the row is SUCCESS, names its thread, and carries the
+    ``_RECOVERED_NOTICE`` that only the watchdog's claim writes — the shape
+    `_write_recovered_chat_reply` writes a message for. A live writer that
+    reaches the turn afterwards (a sync dispatcher that lost the terminal CAS,
+    a pull waiter that adopted the row after its wait ran out) checks this so
+    the thread does not get the reply twice. Never raises; False on doubt, so
+    a reply is never dropped because a read failed.
+    """
+    if not execution_id:
+        return False
+    try:
+        if not db.get_execution_chat_session_id(execution_id):
+            return False
+        row = db.get_execution(execution_id)
+        return (
+            row is not None
+            and row.status == TaskExecutionStatus.SUCCESS
+            and (row.response or "").startswith(_RECOVERED_NOTICE)
+        )
+    except Exception as e:  # noqa: BLE001 — doubt writes the reply
+        logger.warning(f"[Watchdog] reading the recovered reply for {execution_id} failed: {e}")
+        return False
+
+
 def _write_recovered_chat_reply(agent_name: str, execution_id: str) -> bool:
     """Write a claimed /chat turn's reply into the thread it answers (#3380).
 
