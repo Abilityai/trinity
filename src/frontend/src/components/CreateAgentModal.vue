@@ -490,6 +490,29 @@ const parseGithubRepo = (input) => {
   return null
 }
 
+// trinity-enterprise#964: the name the picked source already carries — a
+// repository's own name without the owner, or the agent name a GitHub
+// template declares (its template.yaml `name:`, else its repo name). Blank and
+// local templates carry none. A candidate that sanitizes to nothing is none,
+// so the field stays empty and submit shows the usual error.
+const repoName = (repo) => (repo ? repo.split('/').pop() : '')
+const sourceName = computed(() => {
+  let candidate = ''
+  if (form.template === 'github-custom') {
+    candidate = repoName(parseGithubRepo(githubRepoUrl.value))
+  } else if (selectedTemplate.value?.source === 'github') {
+    candidate = selectedTemplate.value.agent_name || repoName(selectedTemplate.value.github_repo)
+  }
+  return sanitize(candidate) ? candidate : ''
+})
+// Prefill never clobbers the person: Name takes the source's name only while
+// it is empty or still the previous prefill. The ID override is never touched.
+let lastPrefill = ''
+watch(sourceName, (next) => {
+  if (form.name === '' || form.name === lastPrefill) form.name = next
+  lastPrefill = next
+})
+
 const fetchTemplates = async () => {
   templatesError.value = ''
   try {

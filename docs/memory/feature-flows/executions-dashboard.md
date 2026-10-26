@@ -2,6 +2,14 @@
 
 > Fleet-level view of all agent task runs — filtering, live stat cards, real-time updates.
 
+> **Updated 2026-10-23 (#3451):** the list keeps what the reader loaded. While the panel is
+> mounted, the 30 s poll and the WebSocket refresh re-read every row on screen (pages of ≤200,
+> the route's cap) instead of replacing it with page one; every read asks for one row past its
+> window so `hasMore` is read, not guessed; one read at a time — a refresh asked for during a
+> read runs once after it — and a filter change outranks an in-flight read. The list card is the tab's
+> `BoundedRegion` (it scrolls inside the window, never the page), and "N running now" moved
+> into the "N shown" row so a run starting no longer pushes the list down.
+
 > **Updated 2026-06-09 (#1109):** Frontend IA refactor only — backend unchanged. The
 > standalone `/executions` page was deleted; its content now lives in
 > `components/ExecutionsPanel.vue`, rendered as the **"Executions" tab** of
@@ -14,11 +22,12 @@
 /operations?tab=executions → Operations.vue → ExecutionsPanel.vue (v-if Executions tab)
   (legacy /executions redirects here; per-execution detail route unchanged)
   ├── onMounted → store.startPolling(30000)   [tears down onUnmounted / on tab leave]
-  │     └── refresh() → GET /api/executions + GET /api/executions/stats
+  │     ├── refresh({keepLoaded: false}) → page one (limit 51) + GET /api/executions/stats
+  │     └── every 30 s → refresh() → re-reads the loaded window (#3451; during a read: once, after it)
   ├── WS agent_activity event (schedule_start / schedule_end)
-  │     └── store.handleWebSocketEvent() → refresh() [guarded by loading flag]
-  ├── filter change → store.setFilter(key, value) → refresh()
-  └── load more → store.loadMore() → GET /api/executions?offset=N
+  │     └── store.handleWebSocketEvent() → refresh() [only while the panel is mounted; during a read: once, after it]
+  ├── filter change → store.setFilter(key, value) → refresh({keepLoaded: false}) + the list scrolls to its top
+  └── load more → store.loadMore() → GET /api/executions?offset=N&limit=51
 ```
 
 ## Backend
@@ -38,7 +47,7 @@ string `"stats"` as an execution ID path param.
 - Same access control pattern
 - Validates `status` against `_VALID_STATUSES`, `triggered_by` against `_VALID_TRIGGERS`
 - `limit` clamped 1–200, `offset` ≥ 0
-- Returns `List[FleetExecutionSummary]`; `hasMore = len(rows) == limit`
+- Returns `List[FleetExecutionSummary]`; the store asks for one row past its window and sets `hasMore` when that row comes back (#3451)
 
 ### DB: `db/schedules.py:ScheduleOperations`
 
@@ -74,17 +83,20 @@ string `"stats"` as an execution ID path param.
 
 | State | Type | Description |
 |-------|------|-------------|
-| `rows` | `ref([])` | Current page of execution rows |
+| `rows` | `ref([])` | The loaded window: page one plus every Load more, each row once |
 | `stats` | `ref(null)` | `FleetExecutionStats` object |
 | `loading` | `ref(false)` | `fetchExecutions` in flight |
 | `statsLoading` | `ref(false)` | `fetchStats` in flight |
-| `hasMore` | `ref(false)` | `len(rows) == LIMIT` |
+| `hasMore` | `ref(false)` | The last read got the extra row it asked for (#3451) |
 | `filters` | `ref({...})` | `{ agent, status, triggered_by, hours: 24, search }` |
 
 Key behaviours:
-- `refresh()` runs `fetchExecutions()` + `fetchStats()` in `Promise.all` (parallel)
-- `startPolling(30000)` immediately calls `refresh()` then sets 30s interval
-- `handleWebSocketEvent()` guards with `!loading.value` — skips if fetch in flight
+- `refresh({ keepLoaded = <panel mounted> })` runs `fetchExecutions({ keepLoaded })` + `fetchStats()` in `Promise.all` (parallel). `keepLoaded` re-reads `max(50, rows.length)` rows from the top via `_readTop` (pages of ≤200, de-duplicated by id — the route pages by offset with no tiebreak) and replaces `rows` only once the whole window has landed (#3451)
+- `startPolling(30000)` marks the list live, reads page one (a new mount opens at the top), then sets a 30 s interval of `refresh()`
+- `stopPolling()` marks the list not live, so WebSocket triggers stop reading it
+- `_listGen` (#3451): every replacing read takes a generation; a read or Load more that lands after a newer one began is dropped, so a filter change outranks a poll in flight. The list reads go through `utils/boundedHttp.js::http` (30 s): the poll, the WS refresh, Refresh and Load more all wait on `loading`, so an unbounded read that never settled would freeze the list
+- `refresh()` asked for while a read is in flight (the poll, a WS trigger, the panel's refresh after a Stop) sets `_refreshQueued` and runs ONCE when that read lands (`_readLanded`), on the window the reader has then — never racing a Load more, never dropped, a burst collapsing into one; a new query (`keepLoaded: false`) never waits. `stopPolling()` clears the queue
+- `handleWebSocketEvent()` refreshes only while the panel is mounted
 - `runningCount` computed from `stats.value?.running_count ?? 0`
 
 ### Component: `components/ExecutionsPanel.vue`
@@ -99,7 +111,8 @@ Key behaviours:
 - Live status dot uses `isConnected` from `useWebSocket()` — green when WS connected,
   yellow-pulse when polling fallback
 - Success rate card uses threshold ladder: ≥90% success, ≥75% warning, ≥50% urgent, <50% danger
-- Running strip appears when `store.runningCount > 0`
+- "N running now" (`data-testid="executions-running"`) appears in the "N shown" row when `store.runningCount > 0` — a fixed-height row, so it never moves the list (#3451; it was a strip above the list)
+- The list card is the tab's `BoundedRegion` (rows, their states and Load more scroll inside it); a `deep` watcher on `store.filters` scrolls it to the top on a new query
 - Status filter includes all 7 values: running, queued, success, failed, error, cancelled, skipped
 - Trigger filter includes all 10 values: schedule, manual, chat, session, agent, mcp, public, webhook, fan_out, loop (#1150 — must stay a subset of `_VALID_TRIGGERS`; drift-guarded by `tests/unit/test_fleet_executions.py`)
 - Search debounced 300ms
@@ -109,8 +122,8 @@ Key behaviours:
 
 - The dedicated Executions link + running-count badge were **removed** (#1109). NavBar no
   longer imports `useExecutionsStore` or seeds `fetchStats()` in `onMounted`.
-- The running-count signal now lives ONLY inside the Executions tab — the existing
-  "N running now" amber strip driven by `store.runningCount` (see `ExecutionsPanel.vue`).
+- The running-count signal now lives ONLY inside the Executions tab — the "N running now"
+  count in the "N shown" row, driven by `store.runningCount` (see `ExecutionsPanel.vue`).
 - The single NavBar "Operations" badge counts only operator-queue + notifications (urgency
   signal), not running executions.
 - The agent filter still uses `agentsStore`, now fetched once at the `Operations.vue`
@@ -125,7 +138,8 @@ if (data.type === 'agent_activity') {
 }
 ```
 
-Store handler refreshes on `schedule_start` / `schedule_end` activity types only,
+Store handler refreshes on `schedule_start` / `schedule_end` activity types only, only
+while the panel is mounted (the socket feeds this store on every operator page, #3451), and
 guarded by `!loading.value` to prevent concurrent fetches on burst events.
 
 ## Models
@@ -157,7 +171,7 @@ running_count, queued_count, total_cost, success_rate, hours.
 
 **Verify**:
 - [x] Total count in stat card matches row count across all agents — verified 2026-05-15 with seeded data (32 in 24h window, stats card matched list)
-- [x] "N running now" amber strip count matches `running_count` (#1109: NavBar running-count badge removed; signal now lives only in the tab)
+- [x] "N running now" count matches `running_count` (#1109: NavBar running-count badge removed; signal now lives only in the tab; #3451: shown in the "N shown" row)
 - [x] Live status dot is green when WebSocket connected — `isConnected` from `useWebSocket()`
 
 ### 2. Non-admin access control
@@ -188,10 +202,10 @@ running_count, queued_count, total_cost, success_rate, hours.
 **Action**:
 - Trigger a schedule manually while the Executions tab (`/operations?tab=executions`) is open
 
-**Expected**: "N running now" yellow strip appears; row for the running execution appears at top
+**Expected**: "N running now" appears in the "N shown" row without moving the list; row for the running execution appears at top
 
 **Verify**:
-- [ ] Strip disappears when execution completes (WS event fires refresh) — requires live schedule run to fully verify end-to-end; WS handler logic confirmed via code review
+- [ ] The count disappears when execution completes (WS event fires refresh) — requires live schedule run to fully verify end-to-end; WS handler logic confirmed via code review
 - [x] No manual refresh required — `handleWebSocketEvent` calls `refresh()` on `schedule_start`/`schedule_end` events
 
 ### 5. Load more pagination
@@ -203,7 +217,8 @@ running_count, queued_count, total_cost, success_rate, hours.
 **Verify**:
 - [x] First 50 rows loaded on mount — verified 2026-05-15 with 83 seeded rows in 24h window
 - [x] "Load more" appends without duplicating existing rows — `loadMore()` calls `fetchExecutions({ append: true })` with `offset = rows.length`
-- [x] Button disappears when all rows are loaded — `hasMore = (len(rows) == LIMIT)`; goes false on partial last page
+- [x] Button disappears when all rows are loaded — every read asks one row past its window; no extra row → `hasMore` false, also for a list of exactly 50 (#3451)
+- [x] Loaded rows survive the 30 s poll and the WS refresh, and the reader's row stays put (#3451 — `src/frontend/tests/unit/executionsStoreWindow3451.spec.js`, `src/frontend/e2e/operations-bounded-lists.spec.js`)
 
 ### 6. Search
 **Action**:
@@ -230,7 +245,7 @@ running_count, queued_count, total_cost, success_rate, hours.
 - [x] Invalid `?status=__bad__` silently ignored — router validates against `_VALID_STATUSES`, falls through to no filter
 - [x] Invalid `?hours=99` falls back to 24h window — router validates against `_VALID_HOURS = {0, 1, 6, 24, 168, 720}`
 - [x] `?limit=200` (max) returns up to 200 rows without error — `limit` clamped 1–200 in router
-- [x] Rapid filter changes do not stack concurrent fetches (loading guard) — store guards with `if (loading.value) return` and WS handler with `!loading.value`
+- [x] A filter change during a poll or Load more wins: the older read lands and is dropped (`_listGen`, #3451); a poll, WS trigger or Stop refresh during a read runs once after it (`_refreshQueued`)
 
 **Cleanup**:
 - [x] No cleanup needed — read-only dashboard

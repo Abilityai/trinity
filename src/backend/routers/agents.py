@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -1511,13 +1511,11 @@ async def send_voice_reply_endpoint(
     misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
     to text; an in-flight duplicate for the same turn returns 409.
     """
-    import config as app_config
-    from services import voice_reply_service, idempotency_service
-
     # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
     # as itself; a user-scoped key already passed AuthorizedAgentByName.
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(status_code=403, detail="Agent-scoped key may only speak as itself")
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only speak as itself")
+    import config as app_config
+    from services import voice_reply_service, idempotency_service
 
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
