@@ -414,6 +414,13 @@ _SELF_GATE_SPELLINGS = [
     "        pass\n"
     "    else:\n"
     "        raise HTTPException(status_code=403, detail='no')\n",
+    # the agent name as an operand of `or`, and of a conditional expression (review of #3929)
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if (current_user.agent_name or name) != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
+    "def h(name: str, current_user: User = Depends(get_current_user)):\n"
+    "    if (current_user.agent_name if current_user.agent_name else name) != name:\n"
+    "        raise HTTPException(status_code=403, detail='no')\n",
 ]
 
 _SELF_GATE_BENIGN = [

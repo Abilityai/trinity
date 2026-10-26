@@ -702,8 +702,10 @@ return 1'''),
             "assert_own_agent", "current_user", "name", False)
 
     def test_a_self_gated_route_with_no_entry_is_unclassified(self, tmp_path):
-        """The review the census exists to force: a self-scoped GRANT written
-        with the self-gate must not classify itself."""
+        """The review the census exists to force: the self-gate alone never
+        classifies a route, so a self-scoped GRANT written with it fails until
+        someone lists it with a reason (and the reviewer reading that reason is
+        what keeps it out)."""
         _, classes, failures = self._classes(
             tmp_path, _self_route("assert_own_agent(current_user, name)\nreturn 1"))
         msgs = _of(failures, rc.UNCLASSIFIED)

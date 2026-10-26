@@ -55,9 +55,10 @@ checked against the live app by the runtime test:
   ``CurrentUser`` parameter, ``<agent>`` the ``name`` / ``agent_name`` parameter
   named in the path of every route decorator — or the signature takes
   ``Depends(get_self_acting_agent)``. Each entry says why the route is a USE,
-  not a grant: a self-gated route with no entry fails (so a self-scoped grant
-  never classifies itself), and an entry whose route carries no recognised
-  gate fails.
+  not a grant: a self-gated route with no entry fails, and an entry whose route
+  carries no recognised gate fails. That forces the review; it does not do it.
+  A self-scoped grant that someone lists passes every check, so the reviewed
+  reason is the guard, as it was for the old ``AGENT_CALLABLE`` table.
 * ``agent_callable_any`` — a reviewed use an agent key may make WITHOUT a
   recognised self-gate, with a reason AND a written answer to "why may an agent
   other than the one in the path reach this".
@@ -520,9 +521,15 @@ def _principal_like_params(fn: ast.AST) -> Set[str]:
 def _agent_name_of(expr: ast.AST, principals: Set[str], aliases: Set[str]) -> bool:
     """Is `expr` a principal's agent name, in any of the spellings the hand
     copies used: `<p>.agent_name`, `getattr(<p>, "agent_name", ...)`,
-    `agent_principal_name(<p>)`, or a local bound from one of those."""
+    `agent_principal_name(<p>)`, or a local bound from one of those — also as
+    an operand of `or` / `and` or a branch of `… if … else …`, which can
+    evaluate to it (`(current_user.agent_name or name) != name`)."""
     if isinstance(expr, ast.Name):
         return expr.id in aliases
+    if isinstance(expr, ast.BoolOp):
+        return any(_agent_name_of(v, principals, aliases) for v in expr.values)
+    if isinstance(expr, ast.IfExp):
+        return any(_agent_name_of(v, principals, aliases) for v in (expr.body, expr.orelse))
     if isinstance(expr, ast.Attribute):
         return (
             expr.attr == "agent_name"
