@@ -6350,6 +6350,19 @@
       "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
     },
     {
+      "file": "unit/test_ent717_whitelist_session_only.py",
+      "feature": "trinity-enterprise#717",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "settings",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "POST /api/settings/email-whitelist is session-only, through the real composed settings router: every key scope (user, system, agent, connector, ops, portal_delegate, unknown) and a principal with no mcp_scope get 403 at every role and before the body is read, and no row is written; a vouched loopback is refused by the route gate and a real unvouched loopback JWT by the entry fence; a signed-in admin is unchanged at every role, a signed-in non-admin is still refused, no credentials stays 401. Mutation-proven (gate removed → 23 red + 2 census; assert_admin removed → 2 red); needs no Docker."
+    },
+    {
       "file": "unit/test_3390_module_split_guard.py",
       "feature": "#3390",
       "added": "2026-10-20",
@@ -6425,6 +6438,17 @@
         "unit"
       ],
       "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_3940_cron_dst_fold.py",
+      "feature": "#3940",
+      "added": "2026-10-26",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "A cron's next fire time never goes backwards at a DST transition: tests/requirements-test.txt pins the scheduler image's exact APScheduler and the installed version equals it (a floor let CI pass on a fixed release while the image ran 3.11.0), the pin is past the fold bug; the pinned CronTrigger strictly advances for */N crons across the 2026 EU and US fall-backs in Lisbon, London, Berlin, New York and Los Angeles with pytz and zoneinfo zones (spring-forward, hour-pinned and UTC controls); MonotonicCronTrigger matches CronTrigger when APScheduler is right, replaces a backwards answer with previous + 1 minute computed in UTC, compares instants rather than wall clocks (a fold=0 01:30 after a fold=1 01:00), logs once per trigger, passes a finished trigger's None through, and is what _add_job registers."
     }
   ]
 }

@@ -49,6 +49,7 @@ class TaskExecutionFields(ExecutionSource):
     source_channel_client: Optional[str] = None
     open_canvas_id: Optional[str] = None
     chain_depth: Optional[int] = None
+    a2a_caller_identity: Optional[str] = None
 
 
 @dataclass(frozen=True, kw_only=True)

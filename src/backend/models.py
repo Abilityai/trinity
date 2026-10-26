@@ -4194,6 +4194,10 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # RETRY-001: a scheduler retry links to its chain's original execution.
+    # The MCP server scopes a delegation's idempotency key to it (#3296), so a
+    # retried scheduled run replays attempt 1's children instead of re-running.
+    retry_of_execution_id: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001
@@ -4209,6 +4213,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
