@@ -5463,6 +5463,36 @@
       "description": "Pins the offset-mode order of GET /api/operator-queue that the operator-queue UI reads past its first page (#3302, src/frontend/src/utils/operatorQueueRead.js): every pending row precedes every ended row whatever their priorities and timestamps; the rows after the pending section are the ended rows, newest ending first; offset pages concatenate to the whole order; total counts the page's own WHERE (filters, not the page); the undelivered and closed-by-filer flags are the same whatever status/limit/offset the read carries. Real router in a small FastAPI app over a fresh SQLite file. Mutation-proven (pending sorted last fails two tests)."
     },
     {
+      "file": "../src/frontend/tests/unit/boundedRegion3451.mount.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "design-system"
+      ],
+      "description": "#3451 (mounted): BoundedRegion, the bounded viewport of design-system p28 — a named, keyboard-reachable region (role region, aria-label, tabindex 0); `fill` puts it in a flex column from a 0px basis with the 20rem floor and one-axis scroll, never `flex-1` (whose 0% basis falls back to content height in an auto-height column and regrows the page); without `fill` the consumer sets the cap; consumer test id and classes pass through to the region; scrollToTop() returns it to the first row. Mutation-proven (`grow basis-0` -> `flex-1` turns it red)."
+    },
+    {
+      "file": "../src/frontend/tests/unit/operationsBoundedLists3451.mount.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "operations"
+      ],
+      "description": "#3451 (mounted, Operations with the real Notifications and Executions panels over the real stores): each list tab renders one region holding its rows, states and Load more (last), with the stated total outside it; the chain from the region to the page root is unbroken (every link a flex column with `grow basis-0`, never `flex-1`, `w-full` wherever `mx-auto`); Health and Reports keep the plain page; a poll keeps the region node and its scrollTop while a filter change starts it at the top (Executions, Notifications); the Notifications bulk actions sit in the list header and the Executions running count in the count row, so neither moves the list; the Needs Response stale banner holds through an in-flight poll instead of blinking. Mutation-proven."
+    },
+    {
+      "file": "../src/frontend/tests/unit/executionsStoreWindow3451.spec.js",
+      "feature": "#3451",
+      "added": "2026-10-23",
+      "categories": [
+        "frontend",
+        "executions"
+      ],
+      "description": "#3451: the fleet executions store keeps the reader's loaded window — a refresh while the panel is mounted re-reads every row Load more added (pages of at most 200, the route's cap), one row past the window decides hasMore (no Load more on an exhausted or exactly-one-page list), rows that shift between pages are shown once, a filter change outranks a poll or Load more in flight (generation token), a poll tick, WebSocket trigger or Stop refresh asked for during a read runs once after it (never racing the append, never dropped, a burst coalesced), every list read carries the 30 s bound, a WebSocket schedule event reads nothing while no panel shows the list, and a panel that mounts again starts from page one. The walk reads on past rows repeated between its pages, so the window and hasMore stay whole. Real store against an in-memory GET /api/executions honouring limit/offset. Mutation-proven (each guard removed turns its case red)."
+    },
+    {
       "file": "mcp-server/src/operator_queue_list.test.ts",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
@@ -6427,34 +6457,15 @@
       "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
     },
     {
-      "file": "../src/frontend/tests/unit/boundedRegion3451.mount.spec.js",
-      "feature": "#3451",
-      "added": "2026-10-23",
+      "file": "unit/test_3940_cron_dst_fold.py",
+      "feature": "#3940",
+      "added": "2026-10-26",
       "categories": [
-        "frontend",
-        "design-system"
+        "scheduler",
+        "reliability",
+        "unit"
       ],
-      "description": "#3451 (mounted): BoundedRegion, the bounded viewport of design-system p28 — a named, keyboard-reachable region (role region, aria-label, tabindex 0); `fill` puts it in a flex column from a 0px basis with the 20rem floor and one-axis scroll, never `flex-1` (whose 0% basis falls back to content height in an auto-height column and regrows the page); without `fill` the consumer sets the cap; consumer test id and classes pass through to the region; scrollToTop() returns it to the first row. Mutation-proven (`grow basis-0` -> `flex-1` turns it red)."
-    },
-    {
-      "file": "../src/frontend/tests/unit/operationsBoundedLists3451.mount.spec.js",
-      "feature": "#3451",
-      "added": "2026-10-23",
-      "categories": [
-        "frontend",
-        "operations"
-      ],
-      "description": "#3451 (mounted, Operations with the real Notifications and Executions panels over the real stores): each list tab renders one region holding its rows, states and Load more (last), with the stated total outside it; the chain from the region to the page root is unbroken (every link a flex column with `grow basis-0`, never `flex-1`, `w-full` wherever `mx-auto`); Health and Reports keep the plain page; a poll keeps the region node and its scrollTop while a filter change starts it at the top (Executions, Notifications); the Notifications bulk actions sit in the list header and the Executions running count in the count row, so neither moves the list; the Needs Response stale banner holds through an in-flight poll instead of blinking. Mutation-proven."
-    },
-    {
-      "file": "../src/frontend/tests/unit/executionsStoreWindow3451.spec.js",
-      "feature": "#3451",
-      "added": "2026-10-23",
-      "categories": [
-        "frontend",
-        "executions"
-      ],
-      "description": "#3451: the fleet executions store keeps the reader's loaded window — a refresh while the panel is mounted re-reads every row Load more added (pages of at most 200, the route's cap), one row past the window decides hasMore (no Load more on an exhausted or exactly-one-page list), rows that shift between pages are shown once, a filter change outranks a poll or Load more in flight (generation token), a poll tick, WebSocket trigger or Stop refresh asked for during a read runs once after it (never racing the append, never dropped, a burst coalesced), every list read carries the 30 s bound, a WebSocket schedule event reads nothing while no panel shows the list, and a panel that mounts again starts from page one. The walk reads on past rows repeated between its pages, so the window and hasMore stay whole. Real store against an in-memory GET /api/executions honouring limit/offset. Mutation-proven (each guard removed turns its case red)."
+      "description": "A cron's next fire time never goes backwards at a DST transition: tests/requirements-test.txt pins the scheduler image's exact APScheduler and the installed version equals it (a floor let CI pass on a fixed release while the image ran 3.11.0), the pin is past the fold bug; the pinned CronTrigger strictly advances for */N crons across the 2026 EU and US fall-backs in Lisbon, London, Berlin, New York and Los Angeles with pytz and zoneinfo zones (spring-forward, hour-pinned and UTC controls); MonotonicCronTrigger matches CronTrigger when APScheduler is right, replaces a backwards answer with previous + 1 minute computed in UTC, compares instants rather than wall clocks (a fold=0 01:30 after a fold=1 01:00), logs once per trigger, passes a finished trigger's None through, and is what _add_job registers."
     }
   ]
 }
