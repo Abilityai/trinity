@@ -6560,6 +6560,20 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_sqlite_upgrade_parity_guard.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "ci",
+        "guard"
+      ],
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds) and a registered migration left unrecorded are gaps; no base/head, no repository and an unresolvable merge-base fail closed; main() end to end over a throwaway git repository."
     }
   ]
 }
