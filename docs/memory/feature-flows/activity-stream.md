@@ -262,7 +262,7 @@ the close.
 | watchdog `_recover_execution` | FAILED, before the WS watchdog event |
 | startup `_recover_execution` | FAILED — its CAS bool used to be **discarded** |
 | the two bulk sweeps | FAILED, batched |
-| lease reaper (park / **re-queue**) | FAILED / **CANCELLED** (a superseded attempt is not a failure) |
+| lease reaper (park / **re-queue**) | FAILED / **CANCELLED** (a superseded attempt is not a failure). The re-queue closes **by id**, read before the re-queue commits (`LeaseReapReport.requeued_activity_ids`, #3932): a lookup after the commit can hit the re-claimed attempt's new bar |
 | pull sink `apply_task_result` | its own terminal, via the sync spawn wrapper |
 | `terminate_execution` | CANCELLED, or the row's real terminal on a lost CAS |
 | #1083 result callback (`routers/agents.py`) | passes `include_failed=True` — it *is* the late-SUCCESS path, so a `started`-only lookup would hand `apply_result` a `None` id and strand the pair at `execution=success, activity=failed` |
@@ -475,6 +475,8 @@ execution's open collaboration / self-task companions from the persisted row
 1. The scheduler dispatches each run with `POST /api/internal/execute-task` (`src/backend/routers/internal.py`, `X-Internal-Secret` auth), carrying `triggered_by="schedule"` (cron) or `"manual"` plus the `execution_id`.
 2. The router hands the run to `TaskExecutionService.execute_task()` (`src/backend/services/task_execution_service.py`), which creates the activity row **in-process** via `activity_service.track_activity()` — `activity_type=chat_start`, `triggered_by` as passed, `related_execution_id=execution_id`.
 3. The same service closes that activity in-process via `activity_service.complete_activity()` when the run reaches a terminal state (completed / failed), so the start and completion rows always share one writer.
+
+**Pull pilots (#3932).** A pull-owned run is queued before step 2's activity write, so the claim opens it: `GET /api/internal/next-task` awaits `pull_coordination_service.open_claim_activity(execution_id)` after a successful claim, which calls the shared opener `task_execution_service.start_dispatch_activity` (`chat_start`, `triggered_by`/`source_agent`/`user_id` from the row, parent = `backlog_metadata.collaboration_activity_id`, details carry `pull_claimed` and `redelivery_count`). A first delivery reuses a bar already open for the execution (pulled `/chat` opens one before queueing); a re-delivery always opens its own. The pull sink and the reaper close it as in the table above. The open is fail-open: a claim never fails on the timeline.
 
 ### Agent Collaboration Tracking (`src/backend/routers/chat.py:194-206`)
 

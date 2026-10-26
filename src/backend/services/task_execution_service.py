@@ -956,6 +956,48 @@ async def dispatch_and_await_terminal(
     return result_from_execution_row(result.execution_id) or result
 
 
+async def start_dispatch_activity(
+    *,
+    agent_name: str,
+    message: str,
+    execution_id: Optional[str],
+    triggered_by: str,
+    source_agent_name: Optional[str],
+    source_user_id: Optional[int],
+    parent_activity_id: Optional[str],
+    extra_activity_details: Optional[dict],
+) -> Optional[str]:
+    """Open the CHAT_START dispatch activity. Shared by push dispatch
+    (``execute_task`` step 3) and the pull claim (#3932), so the two paths
+    write the same timeline bar.
+
+    Best-effort — a tracking failure logs and returns ``None`` (the
+    turn proceeds without a paired activity, as before).
+    """
+    activity_id: Optional[str] = None
+    activity_details = {
+        "message_preview": message[:100] if message else "",
+        "source_agent": source_agent_name,
+        "execution_id": execution_id,
+        "triggered_by": triggered_by,
+    }
+    if extra_activity_details:
+        activity_details.update(extra_activity_details)
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=agent_name,
+            activity_type=ActivityType.CHAT_START,
+            user_id=source_user_id,
+            triggered_by=triggered_by,
+            parent_activity_id=parent_activity_id,
+            related_execution_id=execution_id,
+            details=activity_details,
+        )
+    except Exception as e:
+        logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
+    return activity_id
+
+
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
@@ -1781,7 +1823,7 @@ class TaskExecutionService:
                 return admission_denied
 
             # ---- 3. Track activity start -------------------------------------
-            activity_id = await self._start_dispatch_activity(
+            activity_id = await start_dispatch_activity(
                 agent_name=agent_name,
                 message=message,
                 execution_id=execution_id,
@@ -2263,47 +2305,6 @@ class TaskExecutionService:
                 )
 
         return slot_acquired, None
-
-    async def _start_dispatch_activity(
-        self,
-        *,
-        agent_name: str,
-        message: str,
-        execution_id: Optional[str],
-        triggered_by: str,
-        source_agent_name: Optional[str],
-        source_user_id: Optional[int],
-        parent_activity_id: Optional[str],
-        extra_activity_details: Optional[dict],
-    ) -> Optional[str]:
-        """Step 3 of execute_task: open the CHAT_START dispatch activity.
-
-        Best-effort — a tracking failure logs and returns ``None`` (the
-        turn proceeds without a paired activity, as before).
-        """
-        activity_id: Optional[str] = None
-        # ---- 3. Track activity start -------------------------------------
-        activity_details = {
-            "message_preview": message[:100] if message else "",
-            "source_agent": source_agent_name,
-            "execution_id": execution_id,
-            "triggered_by": triggered_by,
-        }
-        if extra_activity_details:
-            activity_details.update(extra_activity_details)
-        try:
-            activity_id = await activity_service.track_activity(
-                agent_name=agent_name,
-                activity_type=ActivityType.CHAT_START,
-                user_id=source_user_id,
-                triggered_by=triggered_by,
-                parent_activity_id=parent_activity_id,
-                related_execution_id=execution_id,
-                details=activity_details,
-            )
-        except Exception as e:
-            logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-        return activity_id
 
     async def _breaker_fast_fail(
         self,
