@@ -912,11 +912,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the

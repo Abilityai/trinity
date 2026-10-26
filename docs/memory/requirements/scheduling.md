@@ -808,6 +808,19 @@ schedules:
   `tests/unit/test_1823_tz_capability_parity.py`. An unresolvable zone is a named 400 at the API and
   a **permanent** (bounded, non-retrying) `_add_job` failure in the scheduler — never a 500, and
   never the 60s retry storm that froze `next_run_at`.
+- **A fire time never goes backwards across a DST transition (#3940)**: APScheduler 3.11.0's
+  `CronTrigger` answered a fire time EARLIER than the previous one at every fall-back for a
+  minute-stepped cron with `hour='*'` in a zone leaving summer time (`*/30` in Europe/Lisbon:
+  01:00Z, 00:30Z, 01:00Z, ...), with pytz and `zoneinfo` zones alike. The job loop never advanced,
+  the scheduler grew without bound, and two hosts ran out of memory on 2026-10-25. The images pin
+  **APScheduler 3.11.3** (fixed since 3.11.1), and every user schedule registers
+  `src/scheduler/cron_trigger.py::MonotonicCronTrigger`, which replaces any answer not after the
+  previous fire time with `previous + 1 minute` and logs it once. It compares and adds on UTC
+  instants only: two datetimes sharing a zone compare by wall clock, and local arithmetic resets
+  `fold`, so either mistake lets a backwards time through inside the repeated hour. Guarded by
+  `tests/unit/test_3940_cron_dst_fold.py`, which also requires `tests/requirements-test.txt` to pin
+  the image's exact APScheduler, so CI cannot pass on a fixed release while the images ship a
+  broken one.
 - `MAX_DECLARED_SCHEDULES = 20` lives in the reader, so the catalog surface and the materializer
   inherit the same cap. (Verified: the platform has no other per-agent schedule cap.)
 
