@@ -563,6 +563,10 @@ AGENT_CALLABLE: Dict[str, Tuple[str, str]] = {
     "routers/agent_config.py::list_agent_capability_grants": ("GET /api/agents/{agent_name}/capability-grants", "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a permission-request (owner-level; granting is interactive-admin)"),
     "routers/agent_files.py::get_agent_peer_skills": ("GET /api/agents/{agent_name}/peer-skills", "abilityai/trinity-enterprise#662: a READ of what this agent's own edges expose — the library skills on its permitted targets and whether it may run each — so an agent can reason about a refusal before it is refused; targets filtered to what the viewer may open AND (for an agent key) reach; the grant itself is admin + interactive"),
     "routers/agent_files.py::get_agent_reach": ("GET /api/agents/{agent_name}/reach/{target}", "trinity-enterprise#629: the MCP agent-to-agent gate asks, with the CALLING agent's own key, whether it may call a target — the edge or the spawn record, a boolean; access as for GET .../permissions"),
+    "routers/nevermined_delegation.py::get_agent_delegation": (
+        "GET /api/nevermined/agents/{agent_name}/delegation",
+        "a READ of the agent's own spending budget (trinity-enterprise#966); agent keys self-gated — "
+        "any other agent is the same uniform 404 as a missing one; bind and revoke are person-only"),
     "routers/users.py::get_my_github_pat_status": (
         "GET /api/users/me/github-pat", "configured flags only, never the token (ent#162)"),
     # Skill sets (ent#530). The writes are the USE of the skills-manage capability, fenced like

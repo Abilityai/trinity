@@ -610,6 +610,82 @@
   **0** for a Nevermined *duration* plan (charged by time, not per call); a
   negative is still a named 422 (§32.6 FR-11).
 
+### 23.8 Card delegation binding (ent#965/#966)
+- **Status**: 🚧 In Progress
+- **Requirement ID**: NVM-DELEG-001
+- **Description**: The **buyer** side of Nevermined, beside the provider-side
+  paywall above. A person funds one agent with a card **mandate held by
+  Nevermined**: Nevermined stores the card, holds the mandate and settles every
+  purchase. Trinity stores only the delegation id it was handed, injects it into
+  the agent, reads the remaining budget back **live from Nevermined** and
+  revokes the mandate **at Nevermined** on request. No string, response or
+  document may say Trinity holds a card or settles money (ent#932).
+- **FR-1 Organization (admin)** — one Nevermined organization per instance
+  (singleton `nevermined_organization` row): `org_id`, `environment`
+  (`sandbox` | `live`), and two **write-only** secrets (widget secret, agent
+  API key) in one AES-256-GCM envelope (Invariant #12).
+  `GET/PUT/DELETE /api/nevermined/organization`, `require_admin`.
+  GET is always 200 with `configured: true|false` and never returns a secret.
+  PUT: first create needs both secrets (422 `secret_required`); an absent
+  secret on update keeps the stored one; a key carrying a `sandbox:`/`live:`
+  prefix that contradicts `environment` → 422 `environment_mismatch`; changing
+  `environment` or rotating the agent API key while any live agent holds an
+  active binding → 409 `delegations_active`. DELETE with active bindings →
+  409 `delegations_active`. Every write leaves a `configuration` audit row
+  naming which secrets changed, never their values.
+- **FR-2 Widget session** — `POST /api/nevermined/agents/{agent_name}/widget-session`
+  (`require_person` + owner tier, uniform 404). Mints a Nevermined widget
+  session for the **signed-in person's email** server-to-server and returns it
+  with `Cache-Control: no-store`. Its own concurrency gate, never the
+  paid-chat verify/settle gate. Errors: 409 `nevermined_not_configured`, 422
+  `email_required`, 503 `nevermined_busy` (+`Retry-After`), 503
+  `nevermined_unreachable`, 502 `nevermined_rejected` (upstream status only,
+  never the upstream body), 429 rate limit.
+- **FR-3 Binding** — `POST/GET/DELETE /api/nevermined/agents/{agent_name}/delegation`.
+  One active binding per agent, enforced by a partial unique index. A **second
+  bind while one is active is refused** (409 `delegation_active` — revoke the
+  current mandate first), so an explicit revoke is the only way a mandate
+  ends. Bind on a stopped agent → 409 `agent_not_running`. Rows are kept on
+  agent delete (stamped `agent_deleted_at`) as a financial record and never
+  block the organization or a later agent of the same name. Trinity never
+  overwrites or removes an `NVM_API_KEY` it did not write: a bind that finds
+  one in the agent's `.env` that is not the organization's agent key (any
+  line, parsed as the agent's reader parses it) is refused with 409
+  `agent_key_present` and writes nothing; the organization's own key left
+  behind by a revoke with the agent down passes, so `api_key_injected` is
+  always true on a real bind (the column stays as the record of older rows,
+  and revoke removes `NVM_API_KEY` only when it is set). After a key
+  rotation a stale organization key is refused the same way until removed.
+  If the agent is down at revoke, the delegation id left in `.env` is inert
+  but the organization's agent key stays live until the next bind rewrites
+  it or a person removes it — the `env_note` says so.
+  - **POST** (`require_person` + owner tier, 201): order is org configured
+    (409 `nevermined_not_configured`) → rate limit → active row (409
+    `delegation_active`, nothing upstream, no env read/write) → agent running
+    (409 `agent_not_running`) → ONE Nevermined verify (404 → 422
+    `delegation_not_found`; a present non-active status → 422
+    `delegation_inactive`; an absent status binds) → `.env` read → a
+    hand-set `NVM_API_KEY` (409 `agent_key_present`, no row, no write) → row insert
+    (a concurrent bind tripping the partial unique index → 409
+    `bind_in_progress`) → inject `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`
+    (failure deletes only the inserted row → 503 `agent_unreachable`). Response
+    is the GET shape plus `effective: "next_execution"` and `api_key_injected`.
+  - **GET** (read tier, uniform 404; an agent key reads only itself — a
+    sibling is the same 404): always 200 with `agent_name`, `configured`,
+    `funded`, `delegation`, `live`, `history` — `agent_name` is present in
+    every shape, including not-configured and unbound. `live` numbers are
+    copied from Nevermined, `null` when absent (never derived); Nevermined
+    unreachable/busy → `source: "unavailable"`, `status: "unknown"`.
+  - **DELETE** (`require_person` + owner tier): 404 `no_active_delegation`;
+    revokes at Nevermined first (2xx/404 = revoked; else 503/502, nothing local
+    changes), then the row, then best-effort env removal — agent down → 200
+    with `env_removed: false` and an `env_note`.
+  - **MCP**: `get_agent_spending` (GET pass-through) and
+    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+- **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
+  branches on `code`. Secrets, the session token, the agent's `.env` and any
+  upstream body never appear in a response or a log line.
+
 ---
 
 ## 27. Mobile Admin PWA (MOB-001)
