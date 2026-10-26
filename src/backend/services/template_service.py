@@ -1246,6 +1246,11 @@ def _catalog_credential_metadata(data, template_id: str, source_trust: str):
     return requirements, errors
 
 
+# trinity-enterprise#964: the cap on a catalog entry's `agent_name`. Bounds an
+# untrusted value in every catalog payload; a real agent name is far shorter.
+_AGENT_NAME_MAX_LEN = 128
+
+
 def _build_template(
     repo: str,
     metadata: dict,
@@ -1298,6 +1303,16 @@ def _build_template(
         or metadata.get("description", "")
     )
 
+    # trinity-enterprise#964: the agent name the template declares, for the
+    # Create Agent dialog to prefill. Not `display_name`, which is the admin's
+    # or the template's catalog title. `name:` is untrusted (#1900): anything
+    # but a non-blank string is None, and the dialog falls back to the repo.
+    _declared = metadata.get("name")
+    agent_name = (
+        _declared.strip()[:_AGENT_NAME_MAX_LEN] or None
+        if isinstance(_declared, str) else None
+    )
+
     # S4 (#383): import lazily to avoid any circular-import risk with
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
@@ -1334,6 +1349,7 @@ def _build_template(
     return {
         "id": f"github:{repo}",
         "display_name": display_name,
+        "agent_name": agent_name,
         "description": description,
         "github_repo": repo,
         "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,
