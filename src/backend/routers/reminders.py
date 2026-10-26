@@ -32,6 +32,7 @@ from fastapi.responses import JSONResponse
 from database import db
 from dependencies import (
     AuthorizedAgent,
+    assert_own_agent,
     get_current_user,
     _reject_connector_principal,
     resolve_source_agent,
@@ -50,14 +51,11 @@ REMINDER_RATE_LIMIT = int(os.getenv("REMINDER_RATE_LIMIT", "30"))
 REMINDER_RATE_WINDOW = 60  # seconds
 
 
-def _self_gate(current_user: User, name: str) -> None:
-    """AC #5 self-only auth + connector rejection (mirrors reports/heartbeat)."""
-    _reject_connector_principal(current_user)
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only manage its own reminders",
-        )
+# AC #5: every endpoint self-gates first (`assert_own_agent`, the census-recognised
+# spelling, trinity-enterprise#840), then refuses connector keys. The two never
+# refuse the same principal (`agent_name` is set only for an agent key,
+# `connector_agent` only for a connector key), so their order changes nothing.
+_OWN_REMINDERS = "Agent-scoped key may only manage its own reminders"
 
 
 # #1806: statuses the autonomy gate can still act on. A terminal reminder is
@@ -101,7 +99,8 @@ async def create_reminder_endpoint(
     x_source_agent: Optional[str] = Header(None),
 ):
     """Schedule a one-shot self-reminder (agent calls this via ``set_reminder``)."""
-    _self_gate(current_user, name)
+    assert_own_agent(current_user, name, detail=_OWN_REMINDERS)
+    _reject_connector_principal(current_user)
 
     # Flood guard (fail-open) — the durable pending/daily caps are enforced in
     # the service.
@@ -197,7 +196,8 @@ async def list_reminders_endpoint(
     ),
 ):
     """List one agent's reminders (WHERE agent_name=?), soonest fire first."""
-    _self_gate(current_user, name)
+    assert_own_agent(current_user, name, detail=_OWN_REMINDERS)
+    _reject_connector_principal(current_user)
     effective = None if status_filter in (None, "", "all") else status_filter
     rows = db.list_reminders(name, status=effective)
     # #1806: one autonomy lookup for the whole page — every row belongs to the
@@ -222,7 +222,8 @@ async def cancel_reminder_endpoint(
     already-cancelled → 200 no-op; firing/fired/failed → 409; foreign/unknown id
     → uniform 404.
     """
-    _self_gate(current_user, name)
+    assert_own_agent(current_user, name, detail=_OWN_REMINDERS)
+    _reject_connector_principal(current_user)
     outcome = db.cancel_reminder(name, reminder_id)
     if outcome == "not_found":
         raise HTTPException(

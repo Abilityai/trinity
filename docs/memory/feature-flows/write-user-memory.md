@@ -52,7 +52,7 @@ None in this flow: the agent writes through MCP. The person sees what an agent r
 ### Business Logic
 `src/backend/routers/public_memory.py:42-93`
 
-1. **Authorization check** — `assert_agent_access(current_user, agent_name)`, plus the agent-key self-gate: an agent-scoped key writes only its own agent's memory. Returns 403 if not.
+1. **Authorization check** — the agent-key self-gate first (`assert_own_agent`, trinity-enterprise#840: an agent-scoped key writes only its own agent's memory, so an agent key naming another agent — inside its reach or not — gets that refusal), then `assert_agent_access(current_user, agent_name)`. Returns 403 if not.
 2. **Execution lookup** — `db.get_execution(body.execution_id)`: the execution must exist. Returns 404 if not.
 3. **Execution ownership check** — `execution.agent_name != agent_name`: the execution must belong to the agent named in the path. Returns 403 if mismatch.
 4. **Whose memory** — never sent by the agent:
@@ -112,7 +112,7 @@ The MCP tool description names the four refusal codes and the margin to drop.
 
 | Check | Mechanism | Failure |
 |-------|-----------|---------|
-| Caller has access to agent | `assert_agent_access` + agent-key self-gate | 403 |
+| Caller has access to agent | agent-key self-gate (`assert_own_agent`), then `assert_agent_access` | 403 |
 | Execution exists | `db.get_execution(execution_id)` | 404 |
 | Execution belongs to this agent | `execution.agent_name == agent_name` | 403 |
 | Channel turn is one-to-one | `source_channel_client` set (ent#549) | 422 `memory_not_one_to_one` |
