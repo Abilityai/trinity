@@ -162,6 +162,10 @@ Yes: each agent can hold 100 canvases (`CANVAS_MAX_PER_AGENT` in `.env`, default
 
 Create an agent from it and pick an **import intent**. **Clone** (the default) keeps the agent wired to that remote; it pushes back on its own working branch when the repository is yours, and is pull-only otherwise. **Fork** forks it into your own GitHub account first, with `upstream` pointing at the original. **Copy** takes a one-time snapshot of the files, strips the git history, and gives the agent a standalone workspace with no remote, no token, and no sync. Copy is the right choice when you want to start *from* someone's repository without staying attached to it. After creation the dialog runs the compatibility check inline and shows the result before you leave. See [Creating Agents](../agents/creating-agents.md).
 
+## I already run several Claude Code agents on my own machine. How do I move them onto Trinity?
+
+Start with the `agent-dev` plugin from the abilities marketplace. `/agent-dev:agent-fleet-analysis` audits a folder of agents (Claude Code or other frameworks), scores how ready each one is and writes a report plus a work order. `/agent-dev:agent-fleet-migrate` then carries out that work order into a separate `fleet-migrated/` folder and leaves your original sources untouched. To deploy each agent, push it to a GitHub repository and run `/trinity:onboard` in its folder. Trinity creates the agent from that repository, so the same repo can still be run locally with Claude Code, and changes move between the two through git and `/trinity:sync`. See [agent-dev plugin](../abilities/agent-dev-plugin.md) and the [Advanced Features FAQ](advanced-features.md#how-do-i-deploy-an-agent-i-built-with-claude-code-to-trinity).
+
 ## Why was my new agent created pull-only instead of getting its own working branch?
 
 An agent gets a working branch, auto-sync, and paused schedules while sync fails only when the repository is yours: not a shared catalog template, owned by the GitHub account your token belongs to, reached with your own token rather than the platform-wide one, and a push check passes. An organization's repository stays pull-only by default, even when your token can write to it. The create response's `git_mode.reason` names which condition failed and how to fix it — usually "add your own GitHub token" or "fork it to your own repository". A `kind: "deployment"` create, including `trinity deploy --repo`, is always pull-only. See [GitHub Sync](../integrations/github-sync.md#creating-an-agent-with-sync).
@@ -225,6 +229,14 @@ Because the agent created a new canvas, and the panel follows a newly created ca
 ## How do I give every agent on my instance the same rules?
 
 Write them in the **Trinity Prompt** (Settings → General, admin only). Trinity adds it after the platform instructions on every chat and task turn, for every agent and every runtime, so a saved change reaches running agents from their next turn with no restart. Add fleet rules only, keep it short, and never copy the platform's own instructions into it. A system manifest with a top-level `prompt:` replaces it. See [Recommended Trinity Prompt](../agents/recommended-fleet-prompt.md).
+
+## Where should my fleet's shared knowledge, the "company brain", live?
+
+In git, in layers. Each agent's own instructions, skills and memory stay in its own repository. Rules that every agent must follow go in the **Trinity Prompt**. Knowledge that several agents read and cite (protocols, facts, cross-agent policies) fits a shared canon repository, which `/agent-dev:add-canon` sets up: each agent publishes to its own folder and reads the others' folders at a pinned version, with a lint pass that keeps the shared facts consistent. A second-brain agent such as Cornelius, which a fresh install seeds, is a separate layer: an agent you talk to that builds up a knowledge base. For handing files between running agents, use shared folders. See [agent-dev plugin → Fleet-scale skills](../abilities/agent-dev-plugin.md#fleet-scale-skills) and [Agent Network → Shared Folder Configuration](../collaboration/agent-network.md#shared-folder-configuration).
+
+## Should every agent get its own email address and accounts?
+
+It doesn't have to, and usually shouldn't. Trinity has no built-in email channel, so an agent reaches a mailbox through credentials and an MCP server you give it, one agent at a time. A simpler pattern is one entry-point agent that owns the outside mailbox and hands work to the others. Mail from outside is untrusted input, so have that agent sort and filter messages before passing their content on, and give it no more tools than it needs. Your own team doesn't need email to reach agents: they work with them in the Workspace. See [Agent Network](../collaboration/agent-network.md) and [Workspace](../sharing-and-access/workspace.md).
 
 ## My agent started a background task on itself and heard nothing back. Should it send the task again?
 
