@@ -3295,6 +3295,8 @@ export class TrinityClient {
   async getFleetHealth(): Promise<{
     enabled: boolean;
     last_check_at: string | null;
+    // #3950: a stored reading older than this reads `unknown`.
+    stale_after_seconds?: number | null;
     summary: {
       total_agents: number;
       healthy: number;
@@ -3338,6 +3340,7 @@ export class TrinityClient {
     agent_name: string;
     aggregate_status: string;
     last_check_at: string | null;
+    stale_after_seconds?: number | null; // #3950
     docker?: {
       agent_name: string;
       container_status: string;

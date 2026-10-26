@@ -257,7 +257,8 @@ class AgentHealthDetail(BaseModel):
 class FleetHealthStatus(BaseModel):
     enabled: bool = True
     last_check_at: Optional[str]
-    summary: FleetHealthSummary
+    summary: FleetHealthSummary          # counted from `agents` (#3950)
+    stale_after_seconds: Optional[int]   # older readings read "unknown" (#3950)
     agents: List[AgentHealthSummary] = []
 
 class MonitoringConfig(BaseModel):
@@ -424,16 +425,36 @@ async def get_fleet_status(current_user: User = Depends(get_current_user)):
 
     # 3. Get latest health checks from DB
     latest_checks = db.get_all_latest_health_checks(agent_names, "aggregate")
-    summary = db.get_health_summary(agent_names)
 
-    # 4. Build agent summaries
-    agents = [AgentHealthSummary(name=name, status=check["status"], ...) for ...]
+    # 4. Build agent summaries (no row -> "unknown", "No health check data"),
+    #    then expire any reading older than stale_after_seconds (#3950)
+    agents = [_build_agent_summary(name, latest_checks.get(name)) for ...]
+    _expire_stale_summaries(agents, stale_after=_stale_after_seconds(), ...)
 
-    # 5. Sort by severity (critical first)
-    agents.sort(key=lambda a: status_order.get(a.status, 3))
+    # 5. Sort by severity (critical first), then count the buckets FROM the list
+    agents.sort(key=_status_sort_key)
+    summary = _count_statuses(agents)
 
-    return FleetHealthStatus(enabled=..., summary=..., agents=agents)
+    return FleetHealthStatus(enabled=..., summary=summary,
+                             stale_after_seconds=..., agents=agents)
 ```
+
+**Every agent is counted, and no verdict outlives its reading (#3950).** The
+buckets are counted from the per-agent list, so they always total
+`total_agents`: an agent with no health row is `unknown` in the list *and* in
+the summary. (They used to come from `db.get_health_summary`, which aggregates
+only the rows that exist — a 45-agent fleet with 33 unmeasured agents read
+`healthy: 12, unknown: 0`.) A stored reading older than `stale_after_seconds` —
+3x `docker_check_interval`, the monitoring loop's leader-lease rule, 90s at the
+default — reads `unknown` and leads its `issues` with its age and what it last
+said, e.g. `Last health check 6d ago (reported healthy) — not a current
+reading; monitoring is off` (the suffix appears whenever the loop is stopped).
+`last_check_at` and the older issues are kept. A fresh reading, including a
+fresh fault, is untouched, so a manual check while monitoring is off still
+reads as current for three cycles. `GET /api/monitoring/agents/{name}` applies
+the same rule to `aggregate_status`, and both payloads carry
+`stale_after_seconds`; MCP `get_fleet_health` / `get_agent_health` pass it
+through. Pinned by `tests/unit/test_3950_fleet_health_current.py`.
 
 ### Monitoring Service (`src/backend/services/monitoring_service.py`)
 
