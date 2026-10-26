@@ -201,6 +201,11 @@
             <span class="ml-2 text-gray-900 dark:text-white font-medium">{{ execution.source_mcp_key_name }}</span>
             <span v-if="execution.source_mcp_key_id" class="ml-1 text-xs text-gray-500 dark:text-gray-400 font-mono">({{ execution.source_mcp_key_id.substring(0, 8) }}...)</span>
           </div>
+          <!-- AAuth peer caller (ent#862) -->
+          <div v-if="execution.a2a_caller_identity" class="md:col-span-full">
+            <span class="font-medium">AAuth Caller:</span>
+            <code class="ml-2 font-mono text-xs">{{ execution.a2a_caller_identity }}</code>
+          </div>
         </div>
         <ExecutionGateMarker
           class="mt-3"
@@ -481,7 +486,8 @@ const hasOriginInfo = computed(() => {
   if (!execution.value) return false
   return execution.value.source_user_email ||
          execution.value.source_agent_name ||
-         execution.value.source_mcp_key_name
+         execution.value.source_mcp_key_name ||
+         execution.value.a2a_caller_identity
 })
 
 const logEntries = computed(() => {

@@ -191,6 +191,8 @@ class TestTheRoutesThisChangeGates:
     ]
     INTERACTIVE = [
         "routers/agent_config.py::set_agent_capability_grant",
+        # trinity-enterprise#717: every whitelist role yields an interactive sign-in.
+        "routers/settings/whitelist.py::add_email_to_whitelist",
         "routers/users.py::update_my_email",
         "routers/users.py::set_my_github_pat",
         "routers/users.py::clear_my_github_pat",
