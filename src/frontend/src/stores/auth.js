@@ -452,6 +452,12 @@ export const useAuthStore = defineStore('auth', {
     // post-2FA). `seedUser` is an optimistic profile overwritten by
     // fetchUserProfile().
     async _finalizeLogin(token, seedUser = null) {
+      // #3922: a platform login supersedes a Workspace client sign-in left in
+      // this browser. The Workspace sends a held portal token before the
+      // platform JWT, so leaving it would keep this account in the client view.
+      // Imported here, not at the top: the Workspace store imports this one.
+      const { useClientPortalStore } = await import('./clientPortal')
+      useClientPortalStore().signOut()
       this.token = token
       if (seedUser) this.user = seedUser
       this.isAuthenticated = true
