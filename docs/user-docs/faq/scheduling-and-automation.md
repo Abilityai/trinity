@@ -60,7 +60,7 @@ Deleting a schedule is a soft delete: it stops firing immediately, but the sched
 
 ## Can my agent skip a scheduled run when there's nothing to do?
 
-Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
+Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. It runs before every cron schedule on the agent, and `TRINITY_SCHEDULE_ID`, `TRINITY_SCHEDULE_NAME` and `TRINITY_SCHEDULE_MESSAGE` in its environment say which one is firing — so a hook can gate one schedule and print the others' own message back. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
 
 ## Can an agent schedule itself to run again later?
 

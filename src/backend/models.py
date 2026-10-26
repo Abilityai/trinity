@@ -3326,6 +3326,14 @@ class InternalTaskExecutionRequest(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
 
 
+class InternalPreCheckRequest(BaseModel):
+    """The schedule a pre-check is gating (#3966). Every field is optional: a
+    bodyless request (an older scheduler) runs the hook exactly as before."""
+    schedule_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_message: Optional[str] = None
+
+
 class ValidateExecutionRequest(BaseModel):
     """Request model for triggering execution validation."""
     execution_id: str
