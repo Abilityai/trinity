@@ -657,6 +657,13 @@ class HeadlessRunContext:
     # the top env layer of THIS spawn only. None = the container's baseline.
     auth_override: Optional[object] = None
 
+    # #2328: the `--max-turns` value this spawn was given and which cap set it
+    # ("per_task" when the caller's tighter value bound, else "guardrail"), so
+    # the turn-limit 422 can name the cap that actually stopped the turn.
+    max_turns_effective: Optional[int] = None
+    max_turns_source: str = "guardrail"
+    max_turns_guardrail: Optional[int] = None
+
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
     response_parts: List[str] = field(default_factory=list)
     execution_log: List[ExecutionLogEntry] = field(default_factory=list)
@@ -693,6 +700,34 @@ class HeadlessRunContext:
                 pgid=self.process_pgid, execution_tag=self.task_session_id,
             )
             _safe_close_pipes(self.process)
+
+
+def _resolve_task_max_turns(per_task: Optional[int], guardrail: int) -> Tuple[int, str]:
+    """GUARD-003 (#2328): a per-task ``max_turns`` may only TIGHTEN the guardrail.
+
+    ``POST /task`` lets any caller who can reach the agent send a per-task cap,
+    while ``max_turns_task`` is the owner's guardrail. So the effective cap is
+    the lower of a valid per-task value and the guardrail; a missing or
+    non-positive per-task value leaves the guardrail in force. Returns
+    ``(cap, source)`` where source is ``"per_task"`` only when the caller's
+    value is strictly tighter (on a tie the guardrail is what binds).
+    """
+    if per_task is None:
+        return guardrail, "guardrail"
+    if per_task < 1:
+        logger.warning(
+            f"[Headless Task] Ignoring non-positive per-task max_turns={per_task}; "
+            f"using the guardrail ({guardrail})"
+        )
+        return guardrail, "guardrail"
+    if per_task < guardrail:
+        return per_task, "per_task"
+    if per_task > guardrail:
+        logger.info(
+            f"[Headless Task] Per-task max_turns={per_task} exceeds the guardrail "
+            f"({guardrail}); a per-task value may only tighten it"
+        )
+    return guardrail, "guardrail"
 
 
 def _setup_headless_command(
@@ -803,12 +838,13 @@ def _setup_headless_command(
         logger.info(f"[Headless Task] Appending system prompt ({len(system_prompt)} chars)")
 
     # GUARD-003: max-turns limit for runaway prevention.
-    # Caller value wins; otherwise fall back to guardrails config, then hardcoded default.
-    effective_max_turns = max_turns
-    if effective_max_turns is None:
-        effective_max_turns = int(guardrails.get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
+    guardrail_max_turns = int(guardrails.get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
+    effective_max_turns, max_turns_source = _resolve_task_max_turns(max_turns, guardrail_max_turns)
     cmd.extend(["--max-turns", str(effective_max_turns)])
-    logger.info(f"[Headless Task] Limiting to {effective_max_turns} agentic turns")
+    logger.info(
+        f"[Headless Task] Limiting to {effective_max_turns} agentic turns "
+        f"(set by the {'per-task value' if max_turns_source == 'per_task' else 'guardrail'})"
+    )
 
     # Use provided execution_id if available (enables termination tracking from backend)
     task_session_id = execution_id or str(uuid.uuid4())
@@ -828,6 +864,9 @@ def _setup_headless_command(
         images=images,
         prompt=prompt,
         claude_session_uuid=claude_session_uuid,
+        max_turns_effective=effective_max_turns,
+        max_turns_source=max_turns_source,
+        max_turns_guardrail=guardrail_max_turns,
         auth_override=auth_override,
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
@@ -1350,9 +1389,19 @@ def _finalize_headless_result(
     if ctx.metadata.error_type == "max_turns":
         error_msg = ctx.metadata.error_message or f"Task stopped after {ctx.metadata.num_turns} turns"
         logger.warning(f"[Headless Task] Max turns reached: {error_msg}")
+        if ctx.max_turns_source == "per_task":
+            # #2328: the caller's own tighter cap stopped the turn — raising the
+            # guardrail would not have helped, so do not advise it.
+            remedy = (
+                f"The caller's per-task max_turns ({ctx.max_turns_effective}) stopped this task, "
+                f"below the agent's guardrail of {ctx.max_turns_guardrail}. "
+                f"Send a larger max_turns (up to {ctx.max_turns_guardrail}) or break the work into smaller subtasks."
+            )
+        else:
+            remedy = "Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
         raise HTTPException(
             status_code=422,
-            detail=f"Task exceeded turn limit: {error_msg}. Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
+            detail=f"Task exceeded turn limit: {error_msg}. {remedy}"
         )
 
     # Stream parser sets ``metadata.error_type = "authentication_failed"`` from
