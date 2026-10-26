@@ -1949,6 +1949,19 @@
       "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots — multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
     },
     {
+      "file": "unit/test_migrations.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "guard"
+      ],
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered by introspection and cross-checked against the file's parsed source (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity. An unregistered function (including a data-only backfill no schema diff can see) is named; so is a registered function that is not a `_migrate*` of the module. A deliberately unregistered helper must not use the `_migrate` prefix."
+    },
+    {
       "file": "unit/test_compatibility_checks.py",
       "feature": "#668",
       "added": "2026-06-20",
