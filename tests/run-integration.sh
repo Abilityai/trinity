@@ -29,4 +29,9 @@ echo "  Requires: live Docker stack"
 echo "========================================="
 echo ""
 
-time python -m pytest -m integration -v --tb=short "$@"
+# #2891: deterministic order, pinned explicitly. pytest auto-discovers an installed
+# pytest-randomly and would silently shuffle this run; `-p no:randomly` is a
+# no-op when the plugin is absent and the tests/conftest guard refuses an
+# unannounced shuffle either way. Randomized runs are CI's seed matrix
+# (`-p randomly --randomly-seed=N`), never a local script default.
+time python -m pytest -p no:randomly -m integration -v --tb=short "$@"

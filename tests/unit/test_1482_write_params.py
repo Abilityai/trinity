@@ -161,6 +161,22 @@ class TestCreateExecution:
             "__manual__", "agent-a", "do it", "mcp")
         assert ex.chain_depth == 2 and ex.source_channel_client == "client@example.com"
 
+    def test_a2a_caller_identity_reads_back_through_the_execution_response(self, schedule_ops):
+        # ent#862: the column was written but never read back, so the execution
+        # detail route (`ExecutionResponse(**execution.model_dump())`) always
+        # returned null. Read it back the way that route does.
+        from db.write_params import TaskExecutionFields
+        from models import ExecutionResponse
+        ex = schedule_ops.create_task_execution(
+            "agent-a", "ping", "a2a",
+            TaskExecutionFields(a2a_caller_identity="aauth:echo@a.example"))
+        fetched = schedule_ops.get_execution(ex.id)
+        assert fetched.a2a_caller_identity == "aauth:echo@a.example"
+        assert ExecutionResponse(**fetched.model_dump()).a2a_caller_identity == (
+            "aauth:echo@a.example")
+        bare = schedule_ops.get_execution(schedule_ops.create_task_execution("agent-a", "hi").id)
+        assert ExecutionResponse(**bare.model_dump()).a2a_caller_identity is None
+
     def test_no_fields_is_a_bare_manual_row(self, schedule_ops):
         ex = schedule_ops.create_task_execution("agent-a", "hi")
         row = _row(ex.id)

@@ -44,7 +44,7 @@ from fastapi.routing import APIRoute
 from database import db
 from db.write_params import TaskExecutionFields
 from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
-from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
+from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, TaskExecutionStatus, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
@@ -78,6 +78,7 @@ from services.platform_prompt_service import build_public_channel_caller_prompt
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
+    _close_unclaimed_turn,
     dispatch_and_await_terminal,
     get_task_execution_service,
     terminate_execution_on_agent,
@@ -1367,6 +1368,10 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     if status == "queued":
         cancelled = bool(db.cancel_queued_execution(
             exec_id, reason="Cancelled by A2A caller"))
+        if cancelled:
+            # #3651: the cancel CAS winner owes the #1804 close + terminal event.
+            _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                  "Cancelled by A2A caller")
     else:
         cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
     if not cancelled:
@@ -1759,6 +1764,10 @@ async def _dispatch_jsonrpc(
             # CAS inside cancel_queued_execution is what makes a lost race honest.
             cancelled = bool(db.cancel_queued_execution(
                 exec_id, reason="Cancelled by A2A caller"))
+            if cancelled:
+                # #3651: same close + terminal event as _bound_task_rpc.
+                _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                      "Cancelled by A2A caller")
         else:
             cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
 

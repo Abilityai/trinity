@@ -2,11 +2,11 @@
 
 PostgreSQL half of the dual-track pair; SQLite half is db/migrations.py::a2a_caller_identity.
 
-Revision ID: 0102_a2a_caller_identity
-Revises: 0101_held_gate_turns
+Revision ID: 0103_a2a_caller_identity
+Revises: 0102_nevermined_delegations
 """
-revision = "0102_a2a_caller_identity"
-down_revision = "0101_held_gate_turns"
+revision = "0103_a2a_caller_identity"
+down_revision = "0102_nevermined_delegations"
 branch_labels = None
 depends_on = None
 

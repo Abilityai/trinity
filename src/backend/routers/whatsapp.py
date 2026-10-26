@@ -138,7 +138,7 @@ async def get_whatsapp_binding(
         return WhatsAppBindingResponse(agent_name=agent_name, configured=False)
 
     # Recompute webhook_url from current settings to stay in sync.
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
     webhook_url = compute_webhook_url(public_url, binding["webhook_secret"]) if public_url else None
 
     warning = None
@@ -200,7 +200,7 @@ async def configure_whatsapp_binding(
     )
 
     # Compute and persist webhook_url if a public URL is configured.
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
     warning = None
     webhook_url = None
     if public_url:

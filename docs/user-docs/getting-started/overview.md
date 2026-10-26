@@ -6,7 +6,7 @@ Trinity is **the operating system for the AI-native company** — open source, s
 
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 24, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
