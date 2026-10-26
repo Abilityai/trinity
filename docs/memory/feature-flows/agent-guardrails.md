@@ -247,7 +247,7 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 | Consumer | Lines | Applies |
 |----------|-------|---------|
 | `claude_code.py` (chat) | 209-222 | `--max-turns max_turns_chat`, `--disallowedTools`, wall-clock `execution_timeout_sec` |
-| `headless_executor.py` (task) | 323-344, 647 | `--disallowedTools`, `--max-turns max_turns_task`; turn-limit error suggests raising `max_turns_task` |
+| `headless_executor.py` (task) | `_setup_headless_command`, `_finalize_headless_result` | `--disallowedTools`, `--max-turns` = `max_turns_task`, or a lower per-task `max_turns` (a per-task value may only tighten it, #2328); the turn-limit 422 suggests raising `max_turns_task` only when the guardrail bound |
 
 ### Platform tool denials — `PLATFORM_DENIED_TOOLS` (#2454 → #2468)
 
