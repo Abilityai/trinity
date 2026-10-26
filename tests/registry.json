@@ -6449,6 +6449,43 @@
         "unit"
       ],
       "description": "A cron's next fire time never goes backwards at a DST transition: tests/requirements-test.txt pins the scheduler image's exact APScheduler and the installed version equals it (a floor let CI pass on a fixed release while the image ran 3.11.0), the pin is past the fold bug; the pinned CronTrigger strictly advances for */N crons across the 2026 EU and US fall-backs in Lisbon, London, Berlin, New York and Los Angeles with pytz and zoneinfo zones (spring-forward, hour-pinned and UTC controls); MonotonicCronTrigger matches CronTrigger when APScheduler is right, replaces a backwards answer with previous + 1 minute computed in UTC, compares instants rather than wall clocks (a fold=0 01:30 after a fold=1 01:00), logs once per trigger, passes a finished trigger's None through, and is what _add_job registers."
+    },
+    {
+      "file": "unit/test_937_projection.py",
+      "feature": "abilityai/trinity-enterprise#781",
+      "added": "2026-10-21",
+      "categories": [
+        "backend",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "Grader identity on an evaluation read (ent#781). The issue's failing test adopted verbatim and kept byte-identical with the evaluation integration branch's file of the same name: the real admin POST route stores admin:<email> for an email-login admin, and _to_response projects it as the kind 'admin' to the graded agent's key, to the system scope and to a shared non-operator human, while an operator (admin JWT, owner JWT, owner's own user key) reads the full value; redact_evaluator's allowlist table pinned directly. Red on clean dev: both machine cases and the non-operator case (the full grader address survives); the allowlist table fails on clean dev only by ImportError. Mutation: a service that reverts to the old two-prefix denylist turns 7 of the 10 allowlist rows red."
+    },
+    {
+      "file": "unit/test_937_ent781_census.py",
+      "feature": "abilityai/trinity-enterprise#781",
+      "added": "2026-10-21",
+      "categories": [
+        "backend",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "ent#781 writer census. An AST walk of src/backend (enterprise/tests/node_modules/__pycache__ excluded, unparseable or undecodable files raise) names every statically named call to create_agent_evaluation / upsert_workspace_rating / create_evaluation as path::qualified_function::method#ordinal, module-level and keyword-less calls included, and must equal the registered drivers exactly (missing and stale both reported). Each driver runs the real writer down to the ops-layer boundary (admin POST route + DatabaseManager facade; real submit_rating as client and as operator preview + facade) and the captured row is read back through _to_response by agent, system, connector and admin-owned agent keys carrying operator membership: only the kind may survive, no identity and no '@'. Red on clean dev: the 8 admin-writer cases. Negative controls pin that an unregistered site, a second call in a registered function, a removed site, an empty inventory and malformed or undecodable source all fail the census. Covers statically named calls to the three known APIs only, not dynamic dispatch or newly named writers."
+    },
+    {
+      "file": "unit/test_ent781_read_routes.py",
+      "feature": "abilityai/trinity-enterprise#781",
+      "added": "2026-10-21",
+      "categories": [
+        "backend",
+        "api",
+        "evaluations",
+        "security",
+        "unit"
+      ],
+      "description": "ent#781 on dev, supplemental to the adopted regression. The evaluator output contract through routers.evaluations._redact_for_agent_principal (admin/workspace/operator/future kinds, exact platform:tier0 and platform:tier0:pair pass-through, platform:tier0:other -> platform, platform:tier1:<model> -> platform:tier1, bare platform:tier1 -> platform, bare/empty/':detail'/non-string -> unknown, and a kind that is not an identity-free lowercase token - an address before the colon, '@', uppercase, whitespace, a dotted handle - -> unknown, through both the helper and _to_response), the stored row left unmodified and quality/completion/targets/checks/judge preserved; owner and admin by JWT and own user key keep the full grader via the real _operator_for while the same person's agent key with forced operator membership reads 'admin'; shared humans and agent/system/connector/unknown-scope/agent-identity-with-user-scope readers read only the kind; a raising ownership lookup fails closed to the kind. All three GET routes over HTTP on the real router (overrides keyed on the router-bound dependency objects): agent key, system and shared human get HTTP 200 with evaluator 'admin' and no address (9 cases), an owner's user key gets the full value (3 controls). Red on clean dev: 45 of the original 56 cases, including all 9 HTTP non-operator reads; reverting only the router turns the same 45 red. The 20 malformed-kind cases (round 2, security review) are 16 red without the service's dev-only kind-grammar guard, 4 controls green."
     }
   ]
 }
