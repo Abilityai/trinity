@@ -175,7 +175,7 @@ async def place_voip_call(
     doesn't place two calls.
     """
     _require_enabled()
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
 
     # Idempotency gate (#525): a duplicate trigger must not double-dial.
     # trinity-enterprise#830: a client-chosen key is scoped to its caller.

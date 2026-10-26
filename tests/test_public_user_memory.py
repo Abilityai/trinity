@@ -533,91 +533,13 @@ class TestSplitStorageWrites:
 
 
 # ============================================================================
-# Platform Prompt Service — format_user_memory_block (#895 multi-section)
+# Platform Prompt Service — format_user_memory_block
 # ============================================================================
-
-def _format_user_memory_block(memory_record):
-    """Inline mirror of services.platform_prompt_service.format_user_memory_block.
-
-    Kept in sync with the production implementation; isolated here so the
-    tests don't pull the full backend import chain.
-    """
-    if not isinstance(memory_record, dict):
-        return None
-    agent_notes = (memory_record.get("agent_notes") or "").strip()
-    summary = (memory_record.get("conversation_summary") or "").strip()
-    if not agent_notes and not summary:
-        return None
-    lines = ["## What you know about this user", ""]
-    if agent_notes:
-        lines.extend(["### Agent notes", "", agent_notes, ""])
-    if summary:
-        lines.extend(["### Conversation summary", "", summary, ""])
-    lines.append("---")
-    return "\n".join(lines)
-
-
-class TestFormatUserMemoryBlock:
-    """Output contract of the formatter — see #895 'Read path' section."""
-
-    @pytest.mark.smoke
-    def test_returns_none_for_empty_record(self):
-        assert _format_user_memory_block(None) is None
-        assert _format_user_memory_block({}) is None
-        assert _format_user_memory_block(
-            {"agent_notes": "", "conversation_summary": ""}
-        ) is None
-        # Whitespace-only sections also yield None so callers can skip
-        # the system-prompt injection entirely.
-        assert _format_user_memory_block(
-            {"agent_notes": "  ", "conversation_summary": "\n\n"}
-        ) is None
-
-    @pytest.mark.smoke
-    def test_block_contains_header(self):
-        block = _format_user_memory_block(
-            {"agent_notes": "- Name: Alice", "conversation_summary": ""}
-        )
-        assert "## What you know about this user" in block
-
-    @pytest.mark.smoke
-    def test_agent_notes_only_omits_summary_section(self):
-        block = _format_user_memory_block(
-            {"agent_notes": "- Name: Alice", "conversation_summary": ""}
-        )
-        assert "### Agent notes" in block
-        assert "- Name: Alice" in block
-        assert "### Conversation summary" not in block
-
-    @pytest.mark.smoke
-    def test_summary_only_omits_agent_notes_section(self):
-        block = _format_user_memory_block(
-            {"agent_notes": "", "conversation_summary": "Likes coffee"}
-        )
-        assert "### Conversation summary" in block
-        assert "Likes coffee" in block
-        assert "### Agent notes" not in block
-
-    @pytest.mark.smoke
-    def test_both_sections_render_with_agent_notes_first(self):
-        # Agent-deliberate notes are higher signal than the auto-summary,
-        # so they appear first in the system prompt.
-        block = _format_user_memory_block(
-            {
-                "agent_notes": "Name: Alice",
-                "conversation_summary": "Prefers Python",
-            }
-        )
-        assert "### Agent notes" in block
-        assert "### Conversation summary" in block
-        assert block.index("### Agent notes") < block.index("### Conversation summary")
-
-    @pytest.mark.smoke
-    def test_block_ends_with_separator(self):
-        block = _format_user_memory_block(
-            {"agent_notes": "X", "conversation_summary": ""}
-        )
-        assert block.strip().endswith("---")
+# The inline mirror that lived here asserted on a copy of the formatter, not
+# the formatter, and had already drifted from it (no seat decisions). The
+# block's contract — sections, the ent#419 trust envelope, `None` when empty —
+# is tested against the real function in
+# tests/unit/test_ent419_memory_poisoning_gates.py.
 
 
 # ============================================================================

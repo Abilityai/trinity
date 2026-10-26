@@ -16,7 +16,9 @@ Security model:
 
 This is the ONE write boundary for agent_notes: every write records a
 `public_user_memory_writes` row (ent#419 layer 3, built for ent#637's undo), and
-the ent#419 screening gate, when it lands, goes here and covers every trigger.
+the ent#419 screen runs here, before the write, on every trigger
+(`services/user_memory_guard.prepare_write`): a hit is a 422 naming the rule and
+the line, and nothing is stored.
 """
 
 import logging
@@ -28,7 +30,7 @@ from models import WriteUserMemoryRequest
 from database import db
 from dependencies import get_current_user, assert_agent_access
 from db_models import User
-from services import schedule_seat_memory
+from services import schedule_seat_memory, user_memory_guard
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,9 @@ router = APIRouter(prefix="/api/agents", tags=["user-memory"])
 
 # Channels where a human user identity (verified email) is present.
 _USER_FACING_TRIGGERS = {"public", "slack", "telegram", "whatsapp"}
+# ent#419 AC 4: on these, the person is ent#549's one-to-one stamp, never
+# `source_user_email` — in a group that is the unlocker's address.
+_CHANNEL_TRIGGERS = {"slack", "telegram", "whatsapp"}
 
 # Lightweight email sanity check — not RFC-exhaustive, just catches obvious garbage.
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -84,6 +89,26 @@ async def write_user_memory(
     seat = schedule_seat_memory.seat_for_execution(execution)
     if seat:
         user_email = seat
+    elif triggered_by in _CHANNEL_TRIGGERS:
+        # ent#419 AC 4: a channel turn writes only for the verified speaker of a
+        # one-to-one conversation — the router stamps `source_channel_client`
+        # for exactly that (ent#549, the rule `turn_audience` already reads). A
+        # group turn carries the UNLOCKER's address in `source_user_email`, is
+        # never shown that person's memory, and has other members' text in its
+        # prompt, so it writes no one's memory.
+        user_email = (getattr(execution, "source_channel_client", None) or "").strip().lower()
+        if not user_email:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "memory_not_one_to_one",
+                    "message": (
+                        "Memory is written only in a one-to-one conversation with a verified "
+                        "person. This channel turn is a group conversation or an unverified "
+                        "sender, so no one's memory can be written from it."
+                    ),
+                },
+            )
     elif triggered_by in _USER_FACING_TRIGGERS:
         user_email = execution.source_user_email
     else:
@@ -105,13 +130,31 @@ async def write_user_memory(
             detail="No verified user email associated with this execution.",
         )
 
+    # ent#419: keep only the agent-notes part of a copy-back (the platform's
+    # margin, headings and envelope lines go; a copied summary or decisions
+    # block is never merged in), then the screen. A hit the stored notes
+    # already produced is not counted again, so notes written before the screen
+    # never lock a person's memory. The log names the rule and the line, never
+    # the text.
+    stored_text, refusal = user_memory_guard.prepare_write(
+        body.memory_text,
+        previous=db.get_public_user_memory_agent_notes(agent_name, user_email),
+    )
+    if refusal is not None:
+        logger.info(
+            f"[UserMemory] Refused agent_notes write for {user_email} on {agent_name} "
+            f"(rule={refusal.code}, line={refusal.line}, execution={body.execution_id}, "
+            f"trigger={triggered_by})"
+        )
+        raise HTTPException(status_code=422, detail=refusal.as_detail())
+
     # #895: write only the agent_notes section so the background
     # conversation summarizer can't clobber deliberate agent writes (and
     # vice versa). The row is created on demand inside the helper. ent#637:
     # the write is recorded (previous + new, which run) so the person can see
     # it and undo it.
     written = db.write_public_user_memory_agent_notes(
-        agent_name, user_email, body.memory_text,
+        agent_name, user_email, stored_text,
         execution_id=body.execution_id,
         triggered_by=triggered_by,
         schedule_id=getattr(execution, "schedule_id", None) if seat else None,
@@ -119,7 +162,7 @@ async def write_user_memory(
 
     logger.info(
         f"[UserMemory] Updated agent_notes for {user_email} on {agent_name} "
-        f"({len(body.memory_text)} chars, execution={body.execution_id}, "
+        f"({len(stored_text)} chars, execution={body.execution_id}, "
         f"trigger={triggered_by}, write={written.get('write_id')})"
     )
     return {

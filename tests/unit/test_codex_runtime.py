@@ -18,6 +18,7 @@ The async subprocess itself is stubbed; these tests never spawn ``codex``.
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -392,9 +393,8 @@ def test_build_command_ends_with_end_of_options_separator():
         agent_home="/home/developer",
         resume_thread_id=None,
     )
-    # The positional prompt is appended by _execute_codex right after this list;
-    # "--" must be the final token so the prompt can never be read as options.
-    assert cmd[-1] == "--"
+    # The prompt is read from stdin for the `-` after the separator (#3838).
+    assert cmd[-2:] == ["--", "-"]
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +447,7 @@ def test_build_command_resume_still_ends_with_separator():
         resume_thread_id="thr_123",
     )
     assert "resume" in cmd and "thr_123" in cmd
-    assert cmd[-1] == "--"
+    assert cmd[-2:] == ["--", "-"]
     # Arg ORDER is load-bearing: the `resume` sub-subcommand (codex 0.139.0) has
     # a narrower option set and rejects exec-level flags that trail it
     # ("unexpected argument '-C' found", exit 2). They MUST precede `resume`, and
@@ -457,7 +457,7 @@ def test_build_command_resume_still_ends_with_separator():
     for exec_flag in ("--json", "-C", "--sandbox", "-o", "--skip-git-repo-check"):
         assert cmd.index(exec_flag) < resume_at, f"{exec_flag} must precede resume"
     assert cmd[resume_at + 1] == "thr_123"
-    assert cmd[-2:] == ["thr_123", "--"]
+    assert cmd[-3:] == ["thr_123", "--", "-"]
 
 
 # ---------------------------------------------------------------------------
@@ -1337,6 +1337,7 @@ def _install_fake_codex(
                 [json.dumps(e) + "\n" for e in stdout_events] + list(extra_raw_lines)
             )
             self.stderr = _FakePipe([])
+            self.stdin = io.StringIO()   # the prompt is written here (#3838)
 
         def wait(self, timeout=None):
             if wait_exc is not None:
@@ -1911,3 +1912,61 @@ def test_nonterminal_error_keeps_stderr_fallback():
         json.dumps({"type": "error", "message": "transport failed"}),
     ])
     assert codex_runtime._classify_codex_failure(1, "HTTP 429", metadata)[0] == 429
+
+
+# ---------------------------------------------------------------------------
+# #3838 — the prompt goes on stdin. Linux refuses one argv element over
+# 131,072 bytes (MAX_ARG_STRLEN), so a prompt passed as an argument failed to
+# spawn (E2BIG) once a room transcript or a long 1:1 message reached it.
+# ---------------------------------------------------------------------------
+
+class _StopAfterStdin(Exception):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [None, "thr_123"])
+async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, monkeypatch,
+                                                         tmp_path, resume):
+    import subprocess as sp
+
+    spawned, written, unregistered = {}, [], []
+
+    class _Stdin:
+        def write(self, data):
+            written.append(data)
+
+        def close(self):
+            raise _StopAfterStdin()
+
+    def _popen(cmd, **kwargs):
+        spawned["cmd"], spawned["stdin"] = cmd, kwargs.get("stdin")
+        if kwargs.get("stdin") is not sp.PIPE:
+            raise _StopAfterStdin()
+        return type("P", (), {"stdin": _Stdin(), "pid": 1})()
+
+    registry = type("R", (), {
+        "register": lambda self, *a, **k: None,
+        "unregister": lambda self, eid: unregistered.append(eid),
+    })()
+    monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: None)
+    monkeypatch.setattr(codex_runtime, "_ensure_codex_home", lambda: str(tmp_path))
+    monkeypatch.setattr(codex_runtime, "_has_subscription_auth", lambda _home: True)
+    monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda _p: None)
+    monkeypatch.setattr(codex_runtime, "get_process_registry", lambda: registry)
+    monkeypatch.setattr(codex_runtime.subprocess, "Popen", _popen)
+
+    prompt = "é" * 100_000   # 200,000 UTF-8 bytes
+    with pytest.raises(_StopAfterStdin):
+        await available_runtime._execute_codex(
+            prompt=prompt, model=None, system_prompt=None, resume_thread_id=resume,
+            timeout_seconds=30, allowed_tools=None, execution_id="ex_1",
+        )
+
+    cmd = spawned["cmd"]
+    assert max(len(a.encode()) for a in cmd) < 131_072
+    assert cmd[-2:] == ["--", "-"], "stdin is read for `-` after the separator"
+    assert spawned["stdin"] is sp.PIPE
+    assert prompt in "".join(written)
+    # A failed stdin write must not leak the registry entry (#2433).
+    assert unregistered == ["ex_1"]
