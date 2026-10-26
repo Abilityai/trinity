@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobExecutionEvent
 from croniter import croniter
@@ -36,6 +35,9 @@ from .locking import get_lock_manager, LockManager
 # unchanged. Source of truth: src/backend/services/failure_classifier.py,
 # mirrored byte-identically at src/scheduler/failure_classifier.py.
 from .failure_classifier import is_auth_failure as _is_auth_failure
+# #3940: every user schedule registers a trigger whose next fire time never
+# goes backwards, whatever APScheduler answers at a DST transition.
+from .cron_trigger import MonotonicCronTrigger
 from .utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -399,7 +401,7 @@ class SchedulerService:
 
             # Create timezone-aware trigger
             timezone = pytz.timezone(schedule.timezone) if schedule.timezone else pytz.UTC
-            trigger = CronTrigger(timezone=timezone, **trigger_kwargs)
+            trigger = MonotonicCronTrigger(timezone=timezone, **trigger_kwargs)
 
             # Add the job
             self.scheduler.add_job(
