@@ -40,9 +40,10 @@ column whose migration was never registered when its table is created only
 by ``init_schema``: on a fresh install that migration hits "no such table",
 is skipped, and ``init_schema`` then creates the table with the column, so
 both snapshots agree while every existing install never gets the column.
-That existing-install shape is covered by the merge-base upgrade guard, not
-here. Only names (and, forward, column types) are compared, not index or
-trigger SQL or column defaults / NOT NULL / primary keys.
+That existing-install shape needs a database built by older code, which
+neither fixture is, so it is out of reach here (#3395). Only names (and,
+forward, column types) are compared, not index or trigger SQL or column
+defaults / NOT NULL / primary keys.
 """
 
 import importlib.util
