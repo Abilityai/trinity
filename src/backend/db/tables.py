@@ -615,6 +615,7 @@ enterprise_room_participants = Table(
     Column("last_read_seq", Integer),
     Column("cached_session_id", Text),
     Column("consecutive_resume_failures", Integer),
+    Column("visible_from_seq", Integer),
 )
 
 enterprise_room_messages = Table(

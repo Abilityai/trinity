@@ -309,3 +309,13 @@ async def remove_participant(room_id: str, agent_name: str,
         return service.remove_participant(current_user, room_id, agent_name)
     except RoomError as e:
         _raise(e)
+
+
+@router.post("/{room_id}/leave")
+async def leave_room(room_id: str, current_user=Depends(get_room_principal)):
+    """A person leaves a room (trinity-enterprise#701). People only: an agent
+    is removed by the moderator, never by itself."""
+    try:
+        return service.leave_room(current_user, room_id)
+    except RoomError as e:
+        _raise(e)

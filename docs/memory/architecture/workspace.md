@@ -687,6 +687,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **People in a room (trinity-enterprise#701).** A room can hold more than one person. Each
+  person has a read floor (`visible_from_seq`: the first seq they may read, 0 = all) that
+  `get_room` applies, and leaving is real: `_require_membership` gives a person whose row has
+  `left_at` the uniform 404, `list_rooms` drops the room for them, and `db.seat_person` is the
+  people-only upsert that seats someone again (clearing `left_at`). Agents keep their own
+  rules: `add_participant` never clears `left_at`, which the #2610 keep set relies on. The
+  room payload carries `you`, `people` and `can_seat_people` (UI capability only — offered to
+  a platform moderator of an open room when seating is provided through the entitlement seam).
+  With two or more people present the turn prompt names them and what each may decide, and an
+  `@username` of a seated person becomes a tag through the #631 path, never a wake.
+  `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus

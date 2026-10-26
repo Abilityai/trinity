@@ -5362,6 +5362,23 @@ def _migrate_nevermined_delegations(cursor, conn):
     conn.commit()
 
 
+def _migrate_room_participant_visible_from(cursor, conn):
+    """trinity-enterprise#701 — a person seated in a room reads it from their
+    join point, not from the start.
+
+    ``enterprise_room_participants.visible_from_seq``: the first message seq
+    this participant may read. ``DEFAULT 0`` keeps every existing row reading
+    the whole transcript, which is what it read before. Additive. Idempotent.
+    Mirrored by Alembic 0103_room_participant_visible_from.
+    """
+    _safe_add_column(
+        cursor, "enterprise_room_participants", "visible_from_seq",
+        "ALTER TABLE enterprise_room_participants "
+        "ADD COLUMN visible_from_seq INTEGER NOT NULL DEFAULT 0",
+    )
+    conn.commit()
+
+
 # trinity-enterprise#966: shared by both tracks (`0102_nevermined_delegations`
 # imports it), so the SQLite and PostgreSQL tables cannot drift apart.
 NEVERMINED_DELEGATIONS_DDL = (
@@ -5862,4 +5879,5 @@ MIGRATIONS = [
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
     ("nevermined_delegations", _migrate_nevermined_delegations),
+    ("room_participant_visible_from", _migrate_room_participant_visible_from),
 ]

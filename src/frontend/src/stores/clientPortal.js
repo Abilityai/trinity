@@ -959,7 +959,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       try {
         const { data } = await portalHttp.post(
           '/api/rooms',
-          { name: name || 'New chat', agents: agentNames },
+          { name: name || 'New room', agents: agentNames },
           { headers: this.authHeader }
         )
         return data
@@ -1633,6 +1633,56 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } catch (err) {
         throw this._noteRoomsRefusal(err)
       }
+    },
+
+    // trinity-enterprise#701 — a person leaves a room. The room is gone for
+    // them afterwards (the server answers its uniform 404).
+    async leaveRoom(roomId) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.post(
+          `/api/rooms/${encodeURIComponent(roomId)}/leave`, {}, { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    // trinity-enterprise#701 — seating a colleague. Offered only when the room
+    // says `can_seat_people`; these calls do NOT go through
+    // `_noteRoomsRefusal`, because a refusal here is about seating, never a
+    // sign that rooms themselves are unavailable.
+    async fetchSeatablePeople(roomId, q) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/seatable`,
+        { headers: this.authHeader, params: { q } }
+      )
+      return Array.isArray(data?.people) ? data.people : []
+    },
+
+    async seatPerson(roomId, username, { showHistory = false } = {}) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people`,
+        { username, show_history: showHistory }, { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async removePerson(roomId, username) {
+      const { data } = await portalHttp.delete(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}`,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async showPersonHistory(roomId, username) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}/history`,
+        {}, { headers: this.authHeader }
+      )
+      return data
     },
 
     // The client's conversation threads with an agent (most-recent first) — the

@@ -32,9 +32,9 @@
         <!-- ent#473: the room's name, renameable in place by any human member. -->
         <PortalEditableTitle
           :value="room?.name || ''"
-          placeholder="Chat"
+          placeholder="Room"
           :rename="rename ? saveName : null"
-          label="Rename this chat"
+          label="Rename this room"
           text-class="font-semibold text-sm"
         />
         <div class="flex items-center gap-1 mt-0.5">
@@ -76,16 +76,33 @@
           :starred="starred"
           @toggle="$emit('toggle-star', { id: roomId, is_room: true, starred })"
         />
+        <!-- trinity-enterprise#701: who is in the room, one fixed-size control
+             whatever the count (principle 30); the list opens below. -->
+        <button
+          :class="HEADER_ACTION_CLASS"
+          :aria-expanded="peopleOpen ? 'true' : 'false'"
+          title="People in this room"
+          data-testid="room-people-toggle"
+          @click="peopleOpen = !peopleOpen; addOpen = false"
+        >People · {{ peopleCount }}</button>
         <button
           v-if="!isClosed"
-          class="px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+          :class="HEADER_ACTION_CLASS"
           title="Add another agent to this conversation"
-          @click="addOpen = !addOpen"
+          @click="addOpen = !addOpen; peopleOpen = false"
         >+ Add agent</button>
         <!-- ent#625: the theme switch, filled by the shell (see PortalConversation). -->
         <slot name="header-end" />
       </div>
     </header>
+
+    <PortalRoomPeople
+      v-if="peopleOpen"
+      :room-id="roomId"
+      :room="room"
+      @changed="load({ full: true })"
+      @left="(id) => emit('left-room', id)"
+    />
 
     <!-- Add-agent picker (AC#3) -->
     <div v-if="addOpen" class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 px-4 py-2">
@@ -398,6 +415,7 @@ import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
 import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalRoomPeople from './PortalRoomPeople.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -452,7 +470,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project', 'left-room'])
 
 const store = useClientPortalStore()
 
@@ -493,7 +511,12 @@ const {
   scrollToLatest,
   reset: resetFollowing,
 } = useStickToBottom(scrollEl)
+// The header's text actions (People, + Add agent) share one recipe.
+const HEADER_ACTION_CLASS = 'px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition'
 const addOpen = ref(false)
+// trinity-enterprise#701: the people panel, and how many people are present.
+const peopleOpen = ref(false)
+const peopleCount = computed(() => (room.value?.people || []).filter((p) => !p.left_at).length || 1)
 const adding = ref(false)
 const addError = ref(null)
 
@@ -897,9 +920,12 @@ function onDocClick(e) {
 }
 
 function isMine(m) {
-  // Anything not an agent and not the room itself is this client — the room is
-  // per-client here, so a human sender is the caller.
-  return m.sender_kind !== 'agent' && m.kind !== 'system'
+  if (m.sender_kind === 'agent' || m.kind === 'system') return false
+  // trinity-enterprise#701: a room can hold more than one person, so "a human
+  // sender" is no longer "the caller" — the server names who is reading.
+  const you = room.value?.you
+  if (you) return m.sender_kind === you.kind && m.sender_identity === you.identity
+  return true
 }
 
 // Only ONE load at a time. The 3s poll can otherwise overlap a send() or

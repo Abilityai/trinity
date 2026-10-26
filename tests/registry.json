@@ -6425,6 +6425,30 @@
         "unit"
       ],
       "description": "A scheduler retry runs with the cron fire's gates and delivery, through the real SchedulerService._execute_retry: it forwards the schedule's deliver_to_workspace_email (None without a seat); a retry of a cron fire is dropped with no row once autonomy is off and skipped with a triggered_by=retry row carrying the reason while a git-sync freeze holds; a retry of a manual run still runs under both; an unreadable original is gated; a gated retry never moves next_run_at. Display sites: work_kind maps retry to schedule, and on real SQLite a retry-only success counts as the first autonomous success. Seven of the ten fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_ent701_room_people.py",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace",
+        "rooms"
+      ],
+      "description": "The edition-agnostic half of a room holding more than one person, over a real SQLite built from the platform DDL: a person seated mid-conversation reads from their join point (visible_from_seq, incremental reads too) until a backscroll grant moves the floor to 0; seat_person refuses an agent; a person who left gets the uniform 404 on read and post and the room drops out of their list, the roster keeps who left and the room says so, and they can be seated again; a moderator cannot strand other people; an agent cannot leave; a non-member gets the 404; the payload names the reader (you) and offers seating (can_seat_people) only to a platform moderator of an open room on an entitled install, never to a collaborator or an outside-client moderator; the turn prompt names two or more people present and the collaborator's limits, a departed person is not counted, and a seated colleague keeps the room internal; an @mention of a seated person becomes a tag, never a wake, and a mention that cannot be tagged never fails the message."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalRoomPeople.mount.spec.js",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
     }
   ]
 }

@@ -217,6 +217,22 @@ WORKSPACE_KIND = "workspace_user"
 # person than a machine.
 FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
 
+# trinity-enterprise#701: the participant kinds that are PEOPLE. A person's seat
+# is personal: once they leave (or are removed) the room is gone for them, and a
+# person seated mid-conversation reads it from their join point
+# (`visible_from_seq`). Agents keep their own rules (see `db.seat_person`).
+PEOPLE_KINDS = frozenset({"user", WORKSPACE_KIND})
+
+# trinity-enterprise#701: the role of a person seated by a moderator. Reads and
+# talks; cannot approve, spend or reassign — approvals keep routing to the
+# agent's primary (#606). The creator stays `moderator`.
+COLLABORATOR_ROLE = "collaborator"
+
+# trinity-enterprise#701: seating a second person is an entitlement. The OSS
+# side is the edition-agnostic primitives (a person's read floor, leaving,
+# attribution); the module registering this id owns who may be seated.
+ROOM_SEATS_FEATURE_ID = "room_seats"
+
 
 def room_is_user_facing(participants: list[dict]) -> bool:
     """Is a CLIENT — someone outside the operator's own organisation — in this room?
@@ -340,6 +356,11 @@ def _require_membership(room_id: str, current_user) -> dict:
     if is_admin:
         return room
     if not participant:
+        raise RoomError(404, "room_not_found", "Room not found")
+    # trinity-enterprise#701: a person who left, or was removed, no longer sees
+    # the room — the same uniform 404 as never having been in it. Agents keep
+    # their own rules (a removed agent is simply never woken).
+    if kind in PEOPLE_KINDS and participant.get("left_at"):
         raise RoomError(404, "room_not_found", "Room not found")
     return room
 
@@ -596,10 +617,25 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
             logger.warning("room %s: gate holds unreadable for %s (%s)", room_id, identity, e)
             raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
         messages = [m for m in messages if m["seq"] not in held]
+    # trinity-enterprise#701: a person seated mid-conversation reads from their
+    # join point. The floor is on THEIR participant row (an admin who is not a
+    # participant reads everything, as before).
+    me = next((p for p in participants
+               if p.get("kind") == kind and p.get("identity") == identity), None)
+    history_from = int((me or {}).get("visible_from_seq") or 0) if kind in PEOPLE_KINDS else 0
+    if history_from:
+        messages = [m for m in messages if m["seq"] >= history_from]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
     return {
         **room,
         "participants": participants,
+        # trinity-enterprise#701: who is reading — so the Workspace can tell the
+        # caller's own messages from another person's — and the people in the
+        # room, departed ones included (the roster keeps who left).
+        "you": {"kind": kind, "identity": identity},
+        "people": _people(participants),
+        "history_from_seq": history_from,
+        "can_seat_people": _can_seat_people(room, current_user),
         "messages": messages,
         # trinity-enterprise#631: the caller's tags across the WHOLE room, so a
         # tag on an older message turns `read` without a full reload.
@@ -616,7 +652,8 @@ def list_rooms(current_user) -> dict:
     if kind == "user" and getattr(current_user, "role", None) == "admin":
         rooms = db.list_all_rooms()
     else:
-        rooms = db.list_rooms_for_participant(kind, identity)
+        rooms = db.list_rooms_for_participant(kind, identity,
+                                              active_only=kind in PEOPLE_KINDS)
     # ent#220 item 6: two batched reads for the whole page instead of two per
     # room. The Workspace sidebar renders every room the caller is in, so the
     # old shape was 2N round-trips on the one call that decides how fast the
@@ -712,6 +749,85 @@ def remove_participant(current_user, room_id: str, agent_name: str) -> dict:
     if removed:
         _post_system(room_id, f"{agent_name} left the room.")
     return {"room_id": room_id, "agent": agent_name, "removed": removed}
+
+
+# --- people (trinity-enterprise#701) ------------------------------------------
+
+def _people(participants: list[dict]) -> list[dict]:
+    """The people in a room for its roster: present first, then who left."""
+    rows = [{"kind": p.get("kind"), "identity": p.get("identity"), "role": p.get("role"),
+             "joined_at": p.get("joined_at"), "left_at": p.get("left_at"),
+             "sees_history": not int(p.get("visible_from_seq") or 0)}
+            for p in participants if p.get("kind") in PEOPLE_KINDS]
+    rows.sort(key=lambda r: (bool(r["left_at"]), r["joined_at"] or "", r["identity"] or ""))
+    return rows
+
+
+def is_room_moderator(room_id: str, current_user) -> bool:
+    """`_require_moderator` as a predicate (no membership error leaks)."""
+    try:
+        _require_moderator(room_id, current_user)
+    except RoomError:
+        return False
+    return True
+
+
+def room_seats_entitled() -> bool:
+    try:
+        from services.entitlement_service import entitlement_service
+        return bool(entitlement_service.is_entitled(ROOM_SEATS_FEATURE_ID))
+    except Exception:  # noqa: BLE001 — a capability fails closed
+        return False
+
+
+def _can_seat_people(room: dict, current_user) -> bool:
+    """Whether to OFFER seating in this room to this caller. A capability for
+    the UI, never the authorization: the seating route checks again."""
+    # A platform person only: an outside client who moderates their own room
+    # does not seat the operator's colleagues into it.
+    if room.get("status") != "open" or _caller(current_user)[0] != "user":
+        return False
+    return room_seats_entitled() and is_room_moderator(room["id"], current_user)
+
+
+def leave_room(current_user, room_id: str) -> dict:
+    """A person leaves a room (trinity-enterprise#701 AC5).
+
+    Soft: the row keeps `left_at`, so the roster shows who left and their
+    messages stay attributed. The room is gone for them afterwards
+    (`_require_membership`). A moderator with other people still seated cannot
+    leave — they would strand the room without anyone who can manage it; they
+    close the room, or remove the others, first.
+    """
+    _require_membership(room_id, current_user)
+    kind, identity = _caller(current_user)
+    if kind not in PEOPLE_KINDS:
+        raise RoomError(403, "not_a_person", "Only a person can leave a room")
+    me = db.get_participant(room_id, kind, identity)
+    if not me or me.get("left_at"):
+        raise RoomError(409, "not_a_participant", "You are not in this room")
+    if me.get("role") == "moderator":
+        others = [p for p in db.list_participants(room_id)
+                  if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")
+                  and (p.get("kind"), p.get("identity")) != (kind, identity)]
+        if others and not any(p.get("role") == "moderator" for p in others):
+            raise RoomError(409, "last_moderator",
+                            "You manage this room and others are still in it. Remove them "
+                            "or close the room before you leave.")
+    left = db.remove_participant(room_id, kind, identity, utc_now_iso())
+    if left:
+        _post_system(room_id, f"{identity} left the room.")
+        _broadcast("room_participants_changed", {"room_id": room_id})
+    return {"room_id": room_id, "left": left}
+
+
+def post_system_line(room_id: str, content: str) -> int:
+    """A system line in a room, for modules that manage its roster."""
+    return _post_system(room_id, content)
+
+
+def broadcast_participants_changed(room_id: str) -> None:
+    _broadcast("room_participants_changed", {"room_id": room_id})
 
 
 # --- budgets -----------------------------------------------------------------
@@ -926,6 +1042,51 @@ def resolve_mentions(content: str, participants: list[dict]) -> list[str]:
     return found
 
 
+def seated_people_mentioned(content: str, participants: list[dict],
+                            sender_identity: Optional[str] = None) -> list[str]:
+    """Usernames of people seated in this room (platform accounts, still
+    present) that `content` @mentions, in order, the sender excluded."""
+    names = {p["identity"] for p in participants
+             if p.get("kind") == "user" and not p.get("left_at")
+             and p.get("identity") != sender_identity}
+    found, seen = [], set()
+    for raw in _MENTION_RE.findall(content or ""):
+        if raw in names and raw not in seen:
+            seen.add(raw)
+            found.append(raw)
+    return found
+
+
+def _with_seated_mentions(current_user, content: str, participants: list[dict],
+                          sender_identity: Optional[str], tagger, tagged: list):
+    """Add a tag for each seated person the text @mentions (AC7).
+
+    Best-effort and per person, unlike the explicit tags: a mention is text, so
+    one that cannot be delivered stays plain text rather than refusing a
+    message the person meant to send. Returns `(tagger, tagged)`.
+    """
+    names = seated_people_mentioned(content, participants, sender_identity)
+    if not names:
+        return tagger, tagged
+    try:
+        tagger = tagger or person_mention_service.tagger_for(current_user)
+    except person_mention_service.TagError:
+        return tagger, tagged            # someone who cannot tag reaches no one
+    from database import db as platform_db
+    have = {p.email for p in tagged}
+    agents = _room_agents(participants)
+    for name in names:
+        try:
+            email = ((platform_db.get_user_by_username(name) or {}).get("email") or "").strip().lower()
+            if not email or email in have:
+                continue
+            tagged = tagged + person_mention_service.resolve_tags([email], agents, tagger)
+            have.add(email)
+        except Exception:  # noqa: BLE001 — a mention that cannot land stays text
+            logger.info("room: @%s is seated but could not be tagged", name, exc_info=True)
+    return tagger, tagged
+
+
 def _join_mentioned_newcomers(current_user, room_id: str, room: dict,
                               content: str, participants: list[dict]) -> list[str]:
     """Add @mentioned agents that are not yet in this room, and return them.
@@ -1113,8 +1274,31 @@ def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
     return fitted
 
 
+def _people_line(participants: Optional[list[dict]]) -> str:
+    """trinity-enterprise#701 AC4: when more than one person is in the room, say
+    so — who they are, and what each may decide. Empty with one person or none."""
+    people = [p for p in (participants or [])
+              if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")]
+    if len(people) < 2:
+        return ""
+    parts = []
+    for p in people:
+        role = p.get("role")
+        if role == COLLABORATOR_ROLE:
+            parts.append(f"{p['identity']} (collaborator: can read and talk here, but "
+                         "cannot approve, spend or reassign)")
+        elif role == "moderator":
+            parts.append(f"{p['identity']} (started this room)")
+        else:
+            parts.append(str(p["identity"]))
+    return (f" {len(people)} people are in this room: " + "; ".join(parts) + ". Every "
+            "message below names who wrote it — answer the person who asked. Approvals "
+            "and spending still go to your primary, whoever asks for them.")
+
+
 def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
-                       user_facing: bool = False) -> str:
+                       user_facing: bool = False,
+                       participants: Optional[list[dict]] = None) -> str:
     # The old header claimed "Other agents and people are in this room"
     # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
     # a customer to count as a disclosure (trinity-enterprise#363). It now says
@@ -1129,6 +1313,7 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
         + (f" — topic: {room['topic']}" if room.get("topic") else "")
         + ".\n\n"
         + who
+        + _people_line(participants)
         + " You were @mentioned, so it is "
         "your turn to reply. Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name. "
@@ -1272,6 +1457,11 @@ async def post_message(current_user, room_id: str, content: str,
             participants = db.list_participants(room_id)
 
     mentions = resolve_mentions(content, participants)
+    # trinity-enterprise#701 AC7: an @mention of a person SEATED here reaches
+    # them — as a tag (one Unread item in their Inbox), never as a wake.
+    if not is_agent_reply:
+        tagger, tagged = _with_seated_mentions(current_user, content, participants,
+                                               sender_identity, tagger, tagged)
 
     message_id = uuid.uuid4().hex
     seq = db.append_message(message_id, room_id, sender_kind, sender_identity,
@@ -1651,8 +1841,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # unreadable roster means we do not know who is watching, and a needless
     # caution in an agent-only room costs a slightly more careful answer while a
     # missed signal in front of a customer is the disclosure this prevents.
+    roster = None
     try:
-        user_facing = room_is_user_facing(db.list_participants(room_id))
+        roster = db.list_participants(room_id)
+        user_facing = room_is_user_facing(roster)
     except Exception as e:  # noqa: BLE001
         logger.warning("room %s: participant read for the user-facing signal "
                        "failed (%s) — assuming a person is reading", room_id, e)
@@ -1680,7 +1872,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # awaited here.
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
-            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing, roster),
             # trinity-enterprise#751: the skill gate reads what the participants
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.

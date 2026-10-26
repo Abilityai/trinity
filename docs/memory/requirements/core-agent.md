@@ -4179,3 +4179,41 @@ to localStorage in the clear.
   (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
   `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
   `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.
+### 5.44 People in a room — a read floor, leaving, and who is speaking (trinity-enterprise#701)
+- **Status**: ✅ Implemented (2026-10-26)
+- **Requirement ID**: WORKSPACE_ROOM_PEOPLE
+- **GitHub Issue**: abilityai/trinity-enterprise#701
+- **Description**: The edition-agnostic half of a room holding more than one
+  person. A room ("room" means many participants; a "chat" is one person and one
+  agent — the Workspace uses the two words by that rule) can hold several people,
+  each a `user` or `workspace_user` participant row.
+- **FR-1 — A person reads from their join point.** `enterprise_room_participants.visible_from_seq`
+  is the first message seq that person may read (0 = everything: the creator, every row
+  that predates this). `GET /api/rooms/{id}` leaves earlier messages out for that
+  person and reports `history_from_seq`. Moving the floor to 0 is a recorded backscroll
+  grant. Dual-track: SQLite migration `room_participant_visible_from` + Alembic
+  `0103_room_participant_visible_from`.
+- **FR-2 — Leaving ends access.** `POST /api/rooms/{id}/leave` (people only — an agent is
+  removed by the moderator, never by itself). A person who left, or was removed, gets the
+  room's uniform 404 and the room drops out of their list; the row keeps `left_at`, so the
+  roster shows who left and their messages stay attributed. A person can be seated again
+  (`db.seat_person` is an upsert that clears `left_at`; agents keep their own rule). A
+  moderator cannot leave while other people are seated without another moderator — they
+  remove them or close the room first.
+- **FR-3 — The room payload names the reader and the people.** `you` (`kind`, `identity`)
+  so the Workspace tells the caller's messages from another person's, `people` (present
+  first, then who left, with role and whether they see the earlier messages), and
+  `can_seat_people` — a capability for the UI, offered only to a platform moderator of an
+  open room when the install provides seating through the entitlement seam; never the
+  authorization.
+- **FR-4 — The agent is told who is present.** With two or more people present, the turn
+  prompt names each and what they may decide (a collaborator reads and talks but cannot
+  approve, spend or reassign; approvals and spending go to the agent's primary). Every
+  transcript line already names its sender.
+- **FR-5 — Mentioning a seated person reaches them.** An `@username` of a person seated in
+  the room becomes a tag (one Unread item in their Inbox), never a wake; a mention that
+  cannot be delivered stays plain text rather than failing the message.
+- **FR-6 — A colleague keeps the room internal.** A seated platform person is kind `user`,
+  which `room_is_user_facing` counts as internal (#363).
+- **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
+  words and always creates a room, even with one agent.

@@ -133,6 +133,7 @@
           :is-platform-session="store.isPlatformSession"
           :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
@@ -142,6 +143,7 @@
           :search-results="searchResults"
           :rename="renameChat"
           @new-chat="newChat"
+          @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
           @open-thread="openThread"
@@ -186,6 +188,7 @@
             :is-platform-session="store.isPlatformSession"
             :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
@@ -195,6 +198,7 @@
             :search-results="searchResults"
             :rename="renameChat"
             @new-chat="() => { mobileNav = false; newChat() }"
+            @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
@@ -302,6 +306,7 @@
           @open-menu="mobileNav = true"
           @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
+          @left-room="onLeftRoom"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
@@ -884,6 +889,7 @@
       v-if="pickerOpen"
       :agents="store.agents"
       :multi="store.multiAgentChatAvailable"
+      :mode="pickerMode"
       :busy="pickerBusy"
       :error="pickerError"
       @confirm="onPickerConfirm"
@@ -1620,8 +1626,20 @@ const startingNewChat = ref(false)
 // keyboard sliding up over a phone is exactly the "unprompted" the issue names.
 const composerFocusMode = ref('always')
 
+// trinity-enterprise#701: which door opened the picker — 'chat' or 'room'.
+const pickerMode = ref('chat')
+
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
+  pickerMode.value = 'chat'
+  pickerOpen.value = true
+}
+
+// trinity-enterprise#701: New room — always a room, even with one agent, so
+// colleagues can be seated in it.
+function newRoom() {
+  if (guardLeaveCall(() => newRoom())) return
+  pickerMode.value = 'room'
   pickerOpen.value = true
 }
 
@@ -1635,6 +1653,14 @@ function leaveRoomRoute() {
   activeRoomId.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
   router.push('/workspace')
+}
+
+// trinity-enterprise#701: the person left this room — it is gone for them, so
+// take them off its URL (the server now answers it with a 404) and refresh the
+// sidebar, which no longer lists it.
+async function onLeftRoom() {
+  leaveRoomRoute()
+  await refreshThreads()
 }
 
 // The one way to hand the stage back. #2158 reached the same conclusion
@@ -1661,14 +1687,14 @@ async function onPickerConfirm(agentNames) {
   // ONE agent stays a portal thread: that path resumes, streams and reattaches
   // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
   // several agents and @mention-waking.
-  if (agentNames.length === 1) {
+  if (agentNames.length === 1 && pickerMode.value !== 'room') {
     pickerOpen.value = false
     newChatWithAgent(agentNames[0])
     return
   }
   pickerBusy.value = true
   try {
-    const room = await store.createRoom(agentNames, `Chat with ${agentNames.join(', ')}`)
+    const room = await store.createRoom(agentNames, `Room with ${agentNames.join(', ')}`)
     pickerOpen.value = false
     await refreshThreads()
     openRoom(room.id || room.room_id)
