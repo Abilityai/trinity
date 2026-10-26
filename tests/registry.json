@@ -1696,6 +1696,18 @@
       "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
     },
     {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
+    },
+    {
       "file": "test_files_guardrail_bypass.py",
       "feature": "Issue #590 / AISEC-C2",
       "added": "2026-04-30",

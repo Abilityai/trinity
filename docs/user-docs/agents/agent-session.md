@@ -51,7 +51,7 @@ What you'll notice: the turn takes a couple of minutes longer than expected, the
 
 One turn can use up to 50 internal Claude agentic-loop iterations — read a file, edit it, run tests, retry — before failing with:
 
-> Task exceeded turn limit: Reached maximum number of turns (50). Consider increasing max_turns_task in guardrails or breaking into smaller subtasks.
+> Task exceeded turn limit: Reached maximum number of turns (200). Consider increasing max_turns_task in guardrails or breaking into smaller subtasks.
 
 This is **not** the number of messages in your conversation. It is the per-turn iteration budget for a single request, and a heavy twelve-step task with retries can exhaust it.
 
