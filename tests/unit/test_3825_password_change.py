@@ -329,6 +329,34 @@ class TestChangeRoute:
         assert e.value.status_code == 401
         assert asyncio.run(api.deps.resolve_platform_user_unfloored(request, fresh)).username == name
 
+    def test_the_old_session_is_refused_at_the_socket_door(self, api):
+        """`decode_token` authenticates `/ws` and the agent/system-agent terminals."""
+        name = _admin(api.db)
+        client, old_token = api.as_(name)
+        fresh = _put(client, OLD, NEW).json()["access_token"]
+        assert api.deps.decode_token(old_token) is None
+        assert api.deps.decode_token(fresh)["sub"] == name
+
+    def test_the_old_session_is_refused_at_validate(self, api, monkeypatch):
+        """`/api/auth/validate` is how the MCP server checks a platform token."""
+        from fastapi import HTTPException
+        from routers import auth as auth_router
+        monkeypatch.setitem(auth_router.session_predates_user_revoke.__globals__,
+                            "get_breaker_redis", lambda: api.redis)
+        name = _admin(api.db)
+        client, old_token = api.as_(name)
+        fresh = _put(client, OLD, NEW).json()["access_token"]
+
+        def validate(token):
+            request = SimpleNamespace(headers={"Authorization": f"Bearer {token}"},
+                                      cookies={}, query_params={})
+            return asyncio.run(auth_router.validate_token(request))
+
+        with pytest.raises(HTTPException) as e:
+            validate(old_token)
+        assert e.value.status_code == 401
+        assert validate(fresh) == {"status": "valid", "user": name}
+
     def test_a_wrong_current_password_is_refused_audited_and_capped(self, api):
         name = _admin(api.db)
         client, _ = api.as_(name)
