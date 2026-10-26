@@ -58,6 +58,7 @@ REDIS_PASSWORD="$(openssl rand -hex 16)"
 REDIS_BACKEND_PASSWORD="$(openssl rand -hex 16)"
 FAILS=0
 EVIDENCE="${ROOT}/.plan/issue-ent873-dind-evidence.txt"
+mkdir -p "$(dirname "$EVIDENCE")"
 : > "$EVIDENCE"
 
 log() { printf '%s\n' "$*" | tee -a "$EVIDENCE"; }
