@@ -9,9 +9,12 @@ Uses an in-memory SQLite database.
 """
 
 import ast
+import functools
 import importlib.util
 import inspect
 import sqlite3
+import types
+from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -296,13 +299,19 @@ class TestMigrationsConstant:
         Rule: a helper in `db/migrations.py` that is deliberately not a
         migration must not use the `_migrate` prefix.
 
-        The functions are discovered from the loaded module, never from a
-        hand-written list, and compared by object identity against the
-        `MIGRATIONS` captured at import (other tests `patch.object` the module
-        attribute). The non-vacuity floor keeps the test from passing on an
-        empty or partial discovery, e.g. after `db/migrations.py` is split into
-        a package: the discovered names must be non-empty and equal the
-        top-level `def _migrate*` names parsed from the file's source.
+        The functions are discovered from the file's source, never from a
+        hand-written list: every top-level `def` or `async def` named
+        `_migrate*`, decorated or not. Each name resolves to the object the
+        loaded module binds, compared by identity against the `MIGRATIONS`
+        captured at import (other tests `patch.object` the module attribute).
+        The non-vacuity floor keeps the test from passing on an empty or
+        partial discovery, e.g. after `db/migrations.py` is split into a
+        package: the discovered names must be non-empty and equal the
+        `_migrate*` callables the loaded module binds.
+
+        An `async def` migration is refused even when registered:
+        `run_all_migrations` calls it without awaiting it, so its body never
+        runs and the migration is still recorded as applied.
 
         Other shape: none of the delivery brief's six cases (fresh install,
         empty data, another origin, flag off, clock ahead, restricted
@@ -310,32 +319,47 @@ class TestMigrationsConstant:
         the converse direction (a registered function that is not a
         `_migrate*` function of this module).
         """
-        module_file = Path(_migrations_mod.__file__).resolve()
-        defined = {
-            fn
-            for name, fn in inspect.getmembers(_migrations_mod, inspect.isfunction)
-            if name.startswith("_migrate")
-            and Path(fn.__code__.co_filename).resolve() == module_file
-        }
-        registered = {fn for _, fn in MIGRATIONS}
+        self._assert_registry_bijection(_migrations_mod, MIGRATIONS)
 
-        # Non-vacuity: discovery is non-empty and agrees with a second,
-        # independent derivation from the same file, so an empty or partial
-        # discovery cannot make the bijection pass.
+    @staticmethod
+    def _assert_registry_bijection(
+        module: types.ModuleType,
+        migrations: Sequence[tuple[str, Callable[..., object]]],
+    ) -> None:
+        assert module.__file__ is not None, f"{module.__name__} has no source file"
+        module_file = Path(module.__file__).resolve()
+        # Read from the source, so a decorator or `async def` cannot hide one.
         source_names = {
             node.name
             for node in ast.parse(module_file.read_text(encoding="utf-8")).body
-            if isinstance(node, ast.FunctionDef) and node.name.startswith("_migrate")
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("_migrate")
         }
-        assert defined, f"no _migrate* functions discovered in {module_file}"
+        registered = {fn for _, fn in migrations}
+
+        # Non-vacuity: discovery is non-empty and agrees with a second,
+        # independent derivation from the loaded module, so an empty or
+        # partial discovery cannot make the bijection pass.
+        bound_names = {
+            name
+            for name, obj in vars(module).items()
+            if name.startswith("_migrate") and callable(obj)
+        }
+        assert source_names, f"no _migrate* functions defined in {module_file}"
         assert registered, "MIGRATIONS is empty"
-        assert {fn.__name__ for fn in defined} == source_names, (
-            f"introspection of {module_file} disagrees with its source: "
-            f"discovered {len(defined)}, source defines {len(source_names)}"
+        assert source_names == bound_names, (
+            f"the top-level _migrate* defs in {module_file} disagree with the "
+            "_migrate* callables the loaded module binds: only in source "
+            f"{sorted(source_names - bound_names)}, only bound "
+            f"{sorted(bound_names - source_names)}"
         )
+        # The bound object is the one MIGRATIONS holds (the wrapper, if decorated).
+        defined = {getattr(module, name): name for name in source_names}
 
         problems = []
-        unregistered = sorted(fn.__name__ for fn in defined - registered)
+        unregistered = sorted(
+            name for fn, name in defined.items() if fn not in registered
+        )
         if unregistered:
             problems.append(
                 "_migrate* functions defined in db/migrations.py but not registered "
@@ -343,7 +367,7 @@ class TestMigrationsConstant:
             )
         foreign = sorted(
             f"{name} -> {fn.__module__}.{fn.__qualname__}"
-            for name, fn in MIGRATIONS
+            for name, fn in migrations
             if fn not in defined
         )
         if foreign:
@@ -351,8 +375,8 @@ class TestMigrationsConstant:
                 "MIGRATIONS entries whose function is not a _migrate* function "
                 f"defined in db/migrations.py: {foreign}"
             )
-        entries_by_fn = {}
-        for name, fn in MIGRATIONS:
+        entries_by_fn: dict[Callable[..., object], list[str]] = {}
+        for name, fn in migrations:
             entries_by_fn.setdefault(fn, []).append(name)
         repeated = sorted(
             f"{fn.__name__} <- {names}"
@@ -363,7 +387,61 @@ class TestMigrationsConstant:
             problems.append(
                 f"functions registered under more than one MIGRATIONS entry: {repeated}"
             )
+        never_run = sorted(
+            name
+            for fn, name in defined.items()
+            if inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
+        )
+        if never_run:
+            problems.append(
+                "async _migrate* functions: run_all_migrations calls each migration "
+                "without awaiting it, so the body never runs and the migration is "
+                f"still recorded as applied: {never_run}"
+            )
         assert not problems, "\n".join(problems)
+
+    def test_registry_bijection_names_unregistered_decorated_and_async_migrations(
+        self, tmp_path: Path
+    ) -> None:
+        """An unregistered decorated or `async def` `_migrate*` is named as unregistered (#3395)."""
+        module = _load_synthetic_migrations(
+            tmp_path,
+            "def _migrate_plain(cursor, conn):\n    pass\n\n"
+            "@foreign_decorator\ndef _migrate_decorated(cursor, conn):\n    pass\n\n"
+            "async def _migrate_async(cursor, conn):\n    pass\n\n"
+            "MIGRATIONS = [('plain', _migrate_plain)]\n",
+        )
+        with pytest.raises(AssertionError) as raised:
+            self._assert_registry_bijection(module, module.MIGRATIONS)
+        message = str(raised.value)
+        assert (
+            "not registered in MIGRATIONS (existing installs never run them): "
+            "['_migrate_async', '_migrate_decorated']"
+        ) in message, message
+        assert "still recorded as applied: ['_migrate_async']" in message, message
+
+    def test_registry_bijection_accepts_a_registered_decorated_migration(
+        self, tmp_path: Path
+    ) -> None:
+        """A decorator from another module does not hide a registered migration."""
+        module = _load_synthetic_migrations(
+            tmp_path,
+            "@foreign_decorator\ndef _migrate_decorated(cursor, conn):\n    pass\n\n"
+            "MIGRATIONS = [('decorated', _migrate_decorated)]\n",
+        )
+        self._assert_registry_bijection(module, module.MIGRATIONS)
+
+    def test_registry_bijection_refuses_a_registered_async_migration(
+        self, tmp_path: Path
+    ) -> None:
+        """Registering an `async def` migration does not make it run."""
+        module = _load_synthetic_migrations(
+            tmp_path,
+            "async def _migrate_async(cursor, conn):\n    pass\n\n"
+            "MIGRATIONS = [('async', _migrate_async)]\n",
+        )
+        with pytest.raises(AssertionError, match=r"never runs.*\['_migrate_async'\]"):
+            self._assert_registry_bijection(module, module.MIGRATIONS)
 
 
 # --- helpers ---
@@ -373,3 +451,27 @@ def _make_tracking_fn(name, log, original_fn):
         log.append(name)
         return original_fn(cursor, conn)
     return wrapper
+
+
+def _foreign_decorator(
+    fn: Callable[[object, object], None],
+) -> Callable[[object, object], None]:
+    """A decorator defined outside the migrations module, as a shared helper would be."""
+
+    @functools.wraps(fn)
+    def wrapper(cursor: object, conn: object) -> None:
+        fn(cursor, conn)
+
+    return wrapper
+
+
+def _load_synthetic_migrations(tmp_path: Path, source: str) -> types.ModuleType:
+    """Load `source` as a stand-in `migrations.py`, with `foreign_decorator` in scope."""
+    path = tmp_path / "migrations.py"
+    path.write_text(source, encoding="utf-8")
+    spec = importlib.util.spec_from_file_location("synthetic_migrations", path)
+    assert spec is not None and spec.loader is not None, f"cannot load {path}"
+    module = importlib.util.module_from_spec(spec)
+    module.__dict__["foreign_decorator"] = _foreign_decorator
+    spec.loader.exec_module(module)
+    return module

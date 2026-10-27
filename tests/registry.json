@@ -1959,7 +1959,7 @@
         "migrations",
         "guard"
       ],
-      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered by introspection and cross-checked against the file's parsed source (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see) is named; so is a registered function that is not a `_migrate*` of the module. A deliberately unregistered helper must not use the `_migrate` prefix."
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
     },
     {
       "file": "unit/test_compatibility_checks.py",
