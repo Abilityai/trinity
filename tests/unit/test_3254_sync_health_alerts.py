@@ -605,3 +605,46 @@ async def test_a_sync_failing_precedence_never_raises_a_divergence_alert(
     assert len(_pending(db, "sync-failing-")) == 1
     assert _rows(db, "sync-diverged-") == []
 
+
+# --------------------------------------------------------------------------
+# R10: the absence of a failure is not a recovery
+# --------------------------------------------------------------------------
+
+_INCONCLUSIVE = [
+    ("sync_failing", "unreachable", None),
+    ("sync_failing", "git_disabled", {"git_enabled": False}),
+    ("sync_failing", "never_cycle", _payload(status="never")),
+    ("sync_failing", "no_status", _payload(status=None)),
+    ("sync_diverged", "unreachable", None),
+    ("sync_diverged", "git_disabled", {"git_enabled": False}),
+    ("sync_diverged", "unknown_tuple", _payload(ahead="lots", behind=None)),
+    ("git_bloat_size", "unreachable", None),
+    ("git_bloat_size", "size_absent", _payload()),
+    ("git_bloat_size", "size_garbage", _payload(git_dir_bytes="44 gigabytes")),
+    ("git_bloat_size", "size_negative", _payload(git_dir_bytes=-5)),
+    ("git_bloat_maintenance", "unreachable", None),
+    ("git_bloat_maintenance", "streak_absent", _payload()),
+    ("git_bloat_maintenance", "streak_garbage", _payload(maintenance_failures="many")),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind, shape, payload", _INCONCLUSIVE,
+                         ids=[f"{k}-{s}" for k, s, _p in _INCONCLUSIVE])
+async def test_an_inconclusive_poll_never_ends_the_alert(
+        kind, shape, payload, service, seed_agent, db, clock):
+    """An unreachable agent, git switched off, a cycle that did not run, or a
+    missing / malformed measurement says nothing about recovery; the row stays.
+    Control: the conclusive recovery that follows still ends it."""
+    sc = SCENARIOS[kind]
+    seed_agent()
+    await _raise(service, clock, sc)
+    (row,) = _pending(db, sc["prefix"])
+    for _ in range(3):
+        clock.advance(**_MIN)
+        await _poll(service, payload)
+    assert db.get_operator_queue_item(row["id"])["status"] == "pending"
+
+    clock.advance(**_MIN)
+    await _poll(service, sc["recover"])
+    assert db.get_operator_queue_item(row["id"])["status"] == "cancelled"
