@@ -218,10 +218,15 @@ def test_2973_loop_iterations_carry_the_starters_depth_after_its_turn_ends(clien
     # read 0 now, so only the persisted loop depth can carry the chain.
     _finish(starter)
     # #3317: dispatching run 2 is a claim on the loop row, so put the loop where
-    # its own advance would leave it: run 1 closed, `runs_completed = 1`.
+    # its own advance would leave it: run 1's turn finished, its run row closed,
+    # `runs_completed = 1`. With run 1's execution finished too, no running row
+    # of A carries a depth, so run 2's can only come from the loop row.
+    (run1,) = db.list_loop_runs(loop_id)
+    _finish(run1["execution_id"])
     _hrun("UPDATE agent_loop_runs SET status='completed', completed_at=started_at "
           "WHERE loop_id=:l AND run_number=1", l=loop_id)
     _hrun("UPDATE agent_loops SET runs_completed=1 WHERE id=:l", l=loop_id)
+    assert db.get_max_running_chain_depth(A) == 0
     svc = _LOOPSVC.get_loop_service()
     before = _execution_ids(A)
     assert asyncio.run(svc._dispatch_run(db.get_loop(loop_id), run_number=2)) is True
