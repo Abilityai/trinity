@@ -80,6 +80,17 @@ function teardownFailure(error: unknown): string {
 }
 
 /**
+ * trinity-enterprise#695: the scopes that may see `apply_system`. An
+ * ALLOW-list (#848: a null or unknown scope fails closed) of what the
+ * backend's `require_person` admits over MCP, a person's own user-scoped key.
+ * It refuses agent, connector and system keys, so those sessions are never
+ * shown a tool they cannot call (the #3435 / ent#966 shape).
+ */
+const APPLY_SYSTEM_SCOPES: ReadonlySet<string> = new Set(["user"]);
+export const applySystemAccess = (auth: any): boolean =>
+  APPLY_SYSTEM_SCOPES.has(auth?.scope ?? "");
+
+/**
  * Map an apply failure onto the result the caller reads (ent#695).
  *
  * Deliberately THIN, so a status-code change in the backend apply contract
@@ -99,12 +110,25 @@ function teardownFailure(error: unknown): string {
  * (types.ts). Anything else (a JSON scalar, array or null, or a non-JSON body)
  * comes back as `{success: false, http_status, detail}`.
  */
-function applyFailure(error: unknown, context: DenyCallContext | undefined): string {
+function applyFailure(
+  error: unknown,
+  context: DenyCallContext | undefined,
+  sentRealRun = false
+): string {
   if (!(error instanceof ApiError)) {
     // No HTTP status at all: a missing API key (client resolution) or a
-    // transport failure. Still an object, never a throw.
+    // transport failure. Still an object, never a throw. A REAL run whose
+    // request went out may have applied some writes before the answer was
+    // lost; apply is idempotent, so the honest next step is a dry run.
     const message = error instanceof Error ? error.message : String(error);
-    return JSON.stringify({ success: false, error: message }, null, 2);
+    const result: Record<string, unknown> = { success: false, error: message };
+    if (sentRealRun) {
+      result.note =
+        "No answer arrived for a real run: some writes may already have been applied. "
+        + "Apply is idempotent: run apply_system with dry_run: true to see where the "
+        + "system stands, then re-apply.";
+    }
+    return JSON.stringify(result, null, 2);
   }
 
   const status = error.status;
@@ -510,6 +534,7 @@ export function createSystemTools(
     // ========================================================================
     applySystem: {
       name: "apply_system",
+      canAccess: applySystemAccess,
       description:
         "Reconcile a live instance to a system manifest: the idempotent sibling of deploy_system, "
         + "same manifest format. Per declared member: absent → created; existing → its declared fields "
@@ -520,13 +545,15 @@ export function createSystemTools(
         + "(per-member verdicts create | update | unchanged | blocked, drift, blockers) and writes "
         + "nothing; pass dry_run: false only to apply a plan a human has reviewed. "
         + "Switch on `status`, never the HTTP code: 'valid' | 'invalid' on a dry run; 'applied' | "
-        + "'partial' | 'failed' | 'refused' on a real run (a refused run wrote nothing). Every entry in "
+        + "'partial' | 'failed' | 'refused' on a real run (a refused run wrote nothing). A result "
+        + "without `status` (a 400/422 manifest error, a 401, an unexpected 500) has `success: false` "
+        + "and a `detail`: read those. Every entry in "
         + "`blockers[]` names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
         + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
         + "remedy says which tag to add (tag_agent). "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
-        + "operator's own user-scoped key); agent, connector and system keys are refused "
-        + "(`not_permitted`). On a build without apply mode the result is `not_available: true`: "
+        + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
+        + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
         + "do NOT fall back to deploy_system there, it is create-only and would create suffixed "
         + "copies (`_2`) of members that already exist.",
       parameters: z.object({
@@ -552,17 +579,19 @@ export function createSystemTools(
         // teardown_system precedent): an unwanted preview costs a round trip,
         // an unwanted apply writes to existing agents.
         const preview = dry_run ?? true;
+        let sent = false;
         try {
           // Inside the try: getClient throws on a missing API key, and this
           // tool never throws.
           const apiClient = getClient(context?.session);
+          sent = true;
           const response = await apiClient.request<unknown>("POST", "/api/systems/apply", {
             manifest,
             dry_run: preview,
           });
           return JSON.stringify(response, null, 2);
         } catch (error) {
-          return applyFailure(error, context);
+          return applyFailure(error, context, sent && !preview);
         }
       },
     },

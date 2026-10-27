@@ -33,7 +33,7 @@
  * fire-and-forget audit row, and answers `/api/systems/apply` and
  * `/api/systems/deploy` with whatever the test sets (or drops the connection).
  * The backend sits on a random port of 127.0.0.1 — not the default
- * `localhost:8000` — which is the brief's "another origin" shape. Two cases go
+ * `localhost:8000` — a backend at another origin than the default. Two cases go
  * through the SAME registered tools in-process, via FastMCP's own
  * `server.connect(transport, auth)`: a session with no API key, which the HTTP
  * transport cannot produce (its `authenticate` refuses that request before any
@@ -153,15 +153,20 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         const url = req.url ?? "";
         const authorization = String(req.headers.authorization ?? "");
         if (url === "/api/mcp/validate") {
-          // A person's user-scoped key; the bearer is echoed back as key_name
-          // so every audit row carries which session made the call (#2952).
+          // A person's user-scoped key, unless the key's name says agent or
+          // system (the two non-person scopes the visibility case presents);
+          // the bearer is echoed back as key_name so every audit row carries
+          // which session made the call (#2952).
+          const scope = authorization.includes("_agentkey_") ? "agent"
+            : authorization.includes("_systemkey_") ? "system" : "user";
           return answer(jsonReply(200, {
             valid: true,
-            key_id: "key-user-1",
+            key_id: `key-${scope}-1`,
             user_id: "owner",
             user_email: "owner@example.com",
             key_name: authorization.replace(/^Bearer /, ""),
-            scope: "user",
+            scope,
+            ...(scope === "agent" ? { agent_name: "alpha" } : {}),
           }));
         }
         if (url === "/api/internal/audit" && req.method === "POST") {
@@ -543,6 +548,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         const out = parsed(text);
         assert.equal(out.success, false);
         assert.match(out.error, /MCP API key authentication required/);
+        assert.equal(out.note, undefined, "nothing was sent, so nothing can have been applied");
         assert.deepEqual(requests, [], "no backend request may be made without the caller's key");
         assert.equal(row.details.denied, undefined);
       } finally {
@@ -562,7 +568,57 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.equal(out.http_status, undefined);
       assert.deepEqual(requests.map((r) => r.path), ["/api/systems/apply"], "the request reached the backend and was dropped there");
       assert.equal(row.details.denied, undefined);
+      // A real run whose answer was lost may have applied writes: say so (fresh review #6).
+      assert.match(out.note, /some writes may already have been applied/);
+      assert.match(out.note, /dry_run: true/);
       await s.client.close();
+    });
+
+    it("a dropped DRY run carries no may-have-applied note (a dry run writes nothing)", async () => {
+      reset({ status: 0, body: "", disconnect: true });
+      const s = await session("dropped-dry");
+      const { text } = await s.call("apply_system", { manifest: MANIFEST });
+      const out = parsed(text);
+      assert.equal(out.success, false);
+      assert.equal(out.note, undefined);
+      await s.client.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("a person-only tool (the backend's require_person)", () => {
+    const asKey = async (key: string) => {
+      const client = new Client({ name: key, version: "1.0.0" });
+      await client.connect(
+        new StreamableHTTPClientTransport(mcpUrl, { requestInit: { headers: { Authorization: `Bearer ${key}` } } })
+      );
+      return client;
+    };
+
+    it("a user key lists it; an agent key and a system key neither list nor can call it", async () => {
+      reset();
+      const user = await asKey("trinity_mcp_695_userkey_vis");
+      try {
+        assert.ok((await user.listTools()).tools.some((t) => t.name === "apply_system"));
+      } finally {
+        await user.close();
+      }
+      for (const key of ["trinity_mcp_695_agentkey_vis", "trinity_mcp_695_systemkey_vis"]) {
+        const client = await asKey(key);
+        try {
+          const names = (await client.listTools()).tools.map((t) => t.name);
+          assert.ok(names.length > 0, `${key}: the session lists no tools at all`);
+          assert.ok(!names.includes("apply_system"), `${key}: apply_system is advertised to a session the backend refuses`);
+          await assert.rejects(
+            () => client.callTool({ name: "apply_system", arguments: { manifest: MANIFEST } }),
+            (err: unknown) => /not found|unknown tool|method not found/i.test(String((err as Error)?.message ?? err)),
+            `${key}: calling apply_system by name must be refused as an unknown tool`,
+          );
+        } finally {
+          await client.close();
+        }
+      }
+      assert.deepEqual(requests, [], "a hidden tool never reaches the backend");
     });
   });
 
@@ -648,15 +704,16 @@ describe("ent#695 apply_system's access row and description", () => {
   it("has an access.ts row (the server refuses to boot without one), and the row fits the tool's parameters", () => {
     assert.deepEqual(TOOL_ACCESS_POLICY.apply_system, {
       kind: "none",
-      why: "a system manifest; the backend enforces per-member manage checks and refuses agent keys",
+      why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
     });
     assert.deepEqual(policyFor(tools.applySystem), TOOL_ACCESS_POLICY.apply_system);
   });
 
-  it("tells the model what the code does", () => {
+  it("pins the description's claims (a description pin: the behaviour itself is tested above)", () => {
     const d: string = tools.applySystem.description;
     assert.match(d, /dry_run defaults to TRUE/);
     assert.match(d, /never the HTTP code/);
+    assert.match(d, /A result without `status`[^.]*has `success: false` and a `detail`/);
     assert.match(d, /never deletes, stops, restarts, renames or suffixes an existing agent/);
     assert.match(d, /person's credential/);
     assert.match(d, /not_available/);
