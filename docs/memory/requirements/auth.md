@@ -89,7 +89,7 @@
 
   | Rule | Admits | Refuses | Primitive |
   |---|---|---|---|
-  | **PERSON** | JWT session; the person's own `user`-scoped key | agent, system, connector, portal_delegate, ops, any future scope, a missing `mcp_scope`, a `user` principal carrying an agent/connector/delegate identity | `assert_person` / `Depends(require_person)` (predicate `is_person_principal`, ent#611) |
+  | **PERSON** | JWT session; the person's own `user`-scoped key | agent, system, connector, portal_delegate, ops, ops_write, any future scope, a missing `mcp_scope`, a `user` principal carrying an agent/connector/delegate identity | `assert_person` / `Depends(require_person)` (predicate `is_person_principal`, ent#611) |
   | **INTERACTIVE** | JWT session only | every key | `Depends(require_interactive)` (predicate `is_interactive_principal`, #1854) |
 
   They are **credential-class** rules, not proof of human origin: a `user` key is the person's delegated credential, and a JWT counts as interactive only because non-human JWTs are fenced at `get_current_user`.

@@ -472,11 +472,73 @@
   from `a2a:{agent}:{username}` to `a2a:{agent}:{key_id}`, so a `messageId`
   replayed across the deploy re-executes instead of replaying (bounded by the 24h
   TTL).
+- **`ops_write` scope — the bounded WRITE tier (#3180)**:
+  - **Shape**: a separate scope, not a per-key capability set (that would make
+    fence membership a stored value and need a column on both migration tracks)
+    and not a widening of `ops` (a non-goal). It does **not** include the `ops`
+    reads: observability consumers keep a read-only key, and a writer holds both
+    keys, so offboarding re-mints two.
+  - **Four routes**, measured from the ops toolkit's executed deploy records and
+    limited to uses, never grants: `POST /api/agents/{name}/circuit-breaker/reset`,
+    `POST /api/agents/{name}/start`, `POST /api/agents/{name}/stop`,
+    `POST /api/agents/{name}/executions/{id}/terminate`. Everything else is
+    refused, including fleet restart and stop, emergency stop, retention
+    acknowledge, schedule edit/toggle/trigger, system-agent restart, every ops
+    read, and every identity, credential, subscription, grant and configuration
+    write.
+  - **Admission at the single auth entry point, three predicates**: the
+    (method, routed path) full-matches `_OPS_WRITE_ALLOWED_ROUTES`; the routed
+    handler carries `@ops_write_route("<why it is a use>")` (read from
+    `scope["route"].endpoint`); and the key's owner row still has
+    `role == "admin"`. The path list and the mark are two independently
+    maintained declarations with one enforcement point: an overbroad path entry
+    is refused by every unmarked handler, a stray mark by the path list. Route
+    enforcement of its own exists only on reset (`require_admin_allowing
+    ("ops_write")`, an `ADMIN_WIDENED` census row; `role == "admin"` still runs)
+    and on start/stop (the target policy).
+  - **Target policy (start, stop)**: refused for the system agent (by name or
+    the `is_system` flag) and for an ephemeral agent, and refused when that
+    lookup fails or cannot be proven. Stopping and then starting the system
+    agent replaces its container, which is the human-only #1816 restart by
+    another spelling; a start with config drift recreates a ghost, which is
+    volume-less. Reset and terminate keep every agent the owner reaches.
+  - **Start's self-heal is a use, not a grant**: a start that finds the target's
+    baked-in MCP key missing or revoked runs the #1854 self-heal, which mints
+    *that agent's own* key into its container and prunes that agent's superseded
+    agent keys. No credential reaches the caller. Consequence: an agent stopped
+    and key-revoked for containment can be started again by this key; to contain
+    an agent, delete it or take it out of the key owner's reach.
+  - **Dies with its owner, on every route**: demotion below `admin` refuses the
+    key at the fence (`ops_write_owner_not_admin`), suspension refuses it one
+    line earlier (401), and a password change with "revoke keys" revokes it
+    (`PERSON_KEY_SCOPES` equals the mintable set, pinned). It applies to the next
+    request, not to an operation already running.
+  - **Mint**: `POST /api/mcp/keys` with `scope: "ops_write"`, from an
+    interactive admin session only (the `ops` ladder: `require_interactive`,
+    then `reject_non_interactive_principal`, `reject_agent_principal`,
+    `assert_admin`); `agent_name` is NULL on the row. Settings → MCP Keys offers
+    it to admins as **Ops (operational writes)** and badges it **Ops (writes)**.
+  - **Excluded by allowlists, unchanged**: no MCP tools (`OPERATOR_SCOPES`), no
+    `/ws/events` (`WS_EVENT_STREAM_SCOPES`), no `/ws` ticket (PERSON), no
+    heartbeat, result callback or pull seam (the agent's own key only).
+    `/api/mcp/validate` reports the key as valid: it is introspection and grants
+    nothing.
+  - **Attribution**: every audit row the key causes carries its `mcp_key_id` and
+    `mcp_scope=ops_write`, derived from the principal (#2389); start and stop
+    already write one.
+  - **Survives enforced two-factor** for the same reason `ops` does: key
+    validation never passes through the second-factor flow.
+  - Guards: `tests/unit/test_3180_ops_write_scope.py` (pass paths, target policy,
+    owner binding, mint matrix) and `tests/unit/test_3180_ops_write_route_census.py`
+    (the mark census, and a sweep of every live OSS route with a real key).
 - **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
-  `expires_at`); narrowing the existing `user` scope (would break the fleet); a
-  **write-capable** ops tier — the human-driven ops toolkit's 24 writes stay on
-  password auth or a `user`-scoped key. The read fence does not retire the admin
-  password.
+  `expires_at`); narrowing the existing `user` scope (would break the fleet). The
+  write tier covers the four routes above only (#3180); the rest of the
+  human-driven ops toolkit's writes stay on password auth or a `user`-scoped
+  key, and neither fence retires the admin password. Terminate's admission for
+  `ops_write`, and the refusal of key revoke/delete, credential
+  inject/export/import and subscription assignment to it, rely on the route
+  fence alone (those routes have no gate of their own that reads the scope).
 - **Two costs inherited, not introduced** (flagged in review; stated so they are
   not discovered): key validation writes `last_used_at`/`usage_count` on **every**
   request, so a 10s poll takes a write lock every 10s; and
