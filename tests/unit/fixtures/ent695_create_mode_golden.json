@@ -573,6 +573,228 @@
         }
       }
     },
+    "empty_agents_400": {
+      "status_code": 400,
+      "content_type": "application/json",
+      "body": "{\"detail\":\"Missing required field: agents (must have at least 1)\"}",
+      "create_calls": [],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "deployed_by_creator_over_foreign_name": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead_2\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
+      "create_calls": [
+        {
+          "name": "gold-lead_2",
+          "template": "local:default",
+          "resources": {
+            "cpu": "4",
+            "memory": "8g"
+          },
+          "kind": "agent",
+          "as_user": "maker",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "gold-helper",
+          "template": "local:scout",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": "deployment",
+          "as_user": "maker",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "gold-watcher",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "maker",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [
+        "gold-lead_2",
+        "gold-helper",
+        "gold-watcher"
+      ],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [
+            {
+              "created_by": "maker",
+              "source_agent": "gold-helper",
+              "target_agent": "gold-lead_2"
+            },
+            {
+              "created_by": "maker",
+              "source_agent": "gold-lead_2",
+              "target_agent": "gold-helper"
+            },
+            {
+              "created_by": "maker",
+              "source_agent": "gold-lead_2",
+              "target_agent": "gold-watcher"
+            }
+          ],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [
+            {
+              "agent_name": "gold-helper",
+              "consume_enabled": 1,
+              "expose_enabled": 0
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "consume_enabled": 0,
+              "expose_enabled": 1
+            }
+          ],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [
+            {
+              "agent_name": "gold-helper",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-helper",
+              "tag": "gold-team"
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "tag": "gold-team"
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "tag": "lead-only"
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "tag": "research"
+            },
+            {
+              "agent_name": "gold-watcher",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-watcher",
+              "tag": "gold-team"
+            }
+          ],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [
+            {
+              "agent_name": "gold-lead_2",
+              "cron_expression": "0 9 * * *",
+              "deleted_at": null,
+              "description": null,
+              "enabled": 1,
+              "id": "<generated agent_schedules.id: gold-lead_2/daily-report>",
+              "message": "Write the daily report",
+              "name": "daily-report",
+              "owner_id": 2,
+              "timezone": "UTC"
+            },
+            {
+              "agent_name": "gold-lead_2",
+              "cron_expression": "30 8 * * 1",
+              "deleted_at": null,
+              "description": "Monday sync",
+              "enabled": 0,
+              "id": "<generated agent_schedules.id: gold-lead_2/weekly-sync>",
+              "message": "Run the weekly sync",
+              "name": "weekly-sync",
+              "owner_id": 2,
+              "timezone": "Europe/Berlin"
+            }
+          ],
+          "removed": []
+        },
+        "system_views": {
+          "added": [
+            {
+              "color": "#d4af37",
+              "description": "Auto-created for gold system deployment",
+              "filter_tags": [
+                "gold",
+                "gold-team"
+              ],
+              "icon": "G",
+              "id": "<generated system_views.id: Gold System>",
+              "is_shared": 0,
+              "name": "Gold System",
+              "owner_id": "2"
+            }
+          ],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [
+            {
+              "key": "trinity_prompt",
+              "value": "You are part of the gold system."
+            }
+          ],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
     "openapi": {
       "operation": {
         "tags": [

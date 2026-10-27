@@ -16,9 +16,11 @@ What is pinned (fixture: `fixtures/ent695_create_mode_golden.json`)
 * `POST /api/systems/deploy`, the raw response bytes, status code and content
   type, for: dry run `valid`; dry run `invalid` (an absent `local:` template and
   an unusable cpu value); the `_2` conflict preview against a seeded agent;
-  `deployed`; `partial`; `failed` (the 500 body); and the `strict` abort
-  (status + detail). For each, also the fleet-state rows the request wrote, the
-  `AgentConfig` fields handed to create and the start calls, in order.
+  `deployed`; `partial`; `failed` (the 500 body); the `strict` abort (status +
+  detail); the named 400 for an empty `agents: {}`; and a non-admin creator's
+  deploy over a base name another user's agent holds. For each, also the
+  fleet-state rows the request wrote, the `AgentConfig` fields handed to create
+  and the start calls, in order.
 * The route's OpenAPI operation and the `SystemDeployRequest`,
   `SystemDeployResponse`, `SystemDeployFailure` and `SystemSchedulePreview`
   component schemas, in their rendered key order, minus their free-text
@@ -33,7 +35,9 @@ What is pinned (fixture: `fixtures/ent695_create_mode_golden.json`)
 
 What is real and what is a seam
 -------------------------------
-Real: the router (`require_role` + `capability_fence`), `deploy_manifest` and
+Real: the router (`require_role` + `capability_fence`, mounted on a bare FastAPI
+app: `main.py`'s middleware and exception handlers are not in the path, and
+none of the pinned cases reaches them), `deploy_manifest` and
 every function it calls (`parse_manifest`, `validate_manifest`, name
 resolution against the real `db`, the dry-run preflight through the create
 path's own `_resolve_local_template` over the in-repo template catalog,
@@ -137,11 +141,16 @@ CASES = (
     "partial",
     "failed",
     "strict_abort",
+    "empty_agents_400",
+    "deployed_by_creator_over_foreign_name",
     "openapi",
     "first_run_seed_fresh_install",
 )
 
 ADMIN = User(id=1, username="admin", email=None, role="admin")
+# A non-admin creator, and the other user whose agent already holds a base name.
+CREATOR = User(id=2, username="maker", email=None, role="creator")
+OTHER_OWNER_ID, OTHER_OWNER = 3, "someone-else"
 
 
 # --- manifests --------------------------------------------------------------
@@ -250,6 +259,13 @@ agents:
     template: local:default
 system_view:
   name: Doomed
+"""
+
+# The shape a desired-state file has before anything is declared in it.
+EMPTY_MANIFEST = """
+name: blank
+prompt: ""
+agents: {}
 """
 
 STRICT_MANIFEST = """
@@ -442,20 +458,22 @@ def _wire(monkeypatch, seams: _Seams) -> None:
     monkeypatch.setattr(agents_router, "start_agent_internal", seams.start)
 
 
-def _client() -> TestClient:
+def _client(principal: User = ADMIN) -> TestClient:
     app = FastAPI()
     app.include_router(systems.router)
     # The route's own binding, so the override keys the exact function object
     # its `require_role` / `capability_fence` dependencies close over.
-    app.dependency_overrides[systems.get_current_user] = lambda: ADMIN
+    app.dependency_overrides[systems.get_current_user] = lambda: principal
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _deploy_case(monkeypatch, body: dict, seams: _Seams | None = None) -> dict:
+def _deploy_case(
+    monkeypatch, body: dict, seams: _Seams | None = None, principal: User = ADMIN
+) -> dict:
     seams = seams or _Seams()
     _wire(monkeypatch, seams)
     before = _fleet_snapshot()
-    resp = _client().post("/api/systems/deploy", json=body)
+    resp = _client(principal).post("/api/systems/deploy", json=body)
     after = _fleet_snapshot()
     ids = _generated_ids(after)
     raw = resp.content.decode("utf-8")
@@ -560,7 +578,11 @@ def test_dry_run_invalid(install):
 
 
 def test_dry_run_name_conflict(install):
-    """The `_2` preview: a base name owned by an existing agent is suffixed."""
+    """The `_2` preview: a base name owned by an existing agent is suffixed.
+
+    The existing agent carries no tags, the shape of a member deployed before
+    systems were tagged: create mode reads no membership and suffixes anyway.
+    """
     seed_agent("gold-lead", owner_id=ADMIN.id)
     _check(
         "dry_run_name_conflict",
@@ -638,6 +660,28 @@ def _without_prose(node, in_properties=False):
     if isinstance(node, list):
         return [_without_prose(item) for item in node]
     return node
+
+
+def test_empty_agents_is_a_named_400(install):
+    """`agents: {}` is refused by the parser, before any write or name lookup."""
+    _check("empty_agents_400", _deploy_case(install, {"manifest": EMPTY_MANIFEST}))
+
+
+def test_deployed_by_creator_over_foreign_name(install):
+    """A non-admin creator deploys over a base name another user's agent holds.
+
+    Create mode suffixes it (`gold-lead_2`), names the existing agent but never
+    its owner, makes the caller the owner of everything it writes, and lets a
+    creator overwrite the platform-wide `trinity_prompt`: a known gap, pinned
+    here so that a change to it is a decision with its own issue.
+    """
+    seed_user(user_id=CREATOR.id, username=CREATOR.username, role=CREATOR.role)
+    seed_user(user_id=OTHER_OWNER_ID, username=OTHER_OWNER, role="creator")
+    seed_agent("gold-lead", owner_id=OTHER_OWNER_ID)
+    _check(
+        "deployed_by_creator_over_foreign_name",
+        _deploy_case(install, {"manifest": GOLD_MANIFEST}, principal=CREATOR),
+    )
 
 
 def test_openapi_contract():
