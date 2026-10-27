@@ -287,3 +287,17 @@ def test_only_the_seam_calls_the_platform_accessors():
             if name in _SEAM_ONLY and rel not in _SEAM_ONLY[name]:
                 offenders.append((rel, qual, name, call.lineno))
     assert not offenders, f"platform-alert accessors called outside the seam: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Must-act kinds (#3254 AC 4)
+# ---------------------------------------------------------------------------
+
+def test_no_clear_site_names_a_person_kind():
+    """A kind a person must act on is never ended by the platform: no
+    `platform_alerts.clear` / `reconcile` call outside the seam names one."""
+    from services import platform_alerts as pa
+    person = {k.name for k in pa.KINDS.values() if k.clears == pa.CLEARS_PERSON}
+    assert {"poison", "portal_inbox_collision"} <= person, "the guard lost its subjects"
+    named = person & _seam_kind_calls()
+    assert not named, f"the platform would end a must-act kind: {sorted(named)}"
