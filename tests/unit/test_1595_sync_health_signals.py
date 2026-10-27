@@ -317,7 +317,12 @@ class TestGitBloatAlerts:
         from database import db
         seed_agent("alpha")
         _sync_once(service, _payload(maintenance_failures=3))
-        _sync_once(service, _payload(maintenance_failures=0))  # repack succeeded
+        # #3254 re-pin (fixture shape): a repack that succeeded reports the
+        # agent's own "repacked …" outcome with the reset streak; a bare zero
+        # is the agent server's default for an unreadable state file and no
+        # longer ends the alert. Outcome unchanged: two alerts.
+        _sync_once(service, _payload(maintenance_failures=0,
+                                     maintenance_status="repacked 12->1"))  # repack succeeded
         _sync_once(service, _payload(maintenance_failures=3))  # new episode
         assert len(_bloat_items(db)) == 2
 

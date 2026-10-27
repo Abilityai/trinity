@@ -235,6 +235,13 @@ _OK = _payload()
 _MIN = {"minutes": 1}
 _AHEAD = _payload(ahead=7)
 _BIG, _SMALL = 2**40, 2**20  # either side of the 10 GiB GIT_DIR_ALERT_BYTES default
+_REPACKED = "repacked 12->1"  # the agent's own success outcome, the only thing that resets its streak
+# What the agent server reports when its sync-state.json is missing, oversized or
+# corrupt (agent_server routers/git.py `_SYNC_STATE_DEFAULT`): a zero streak that
+# is no reading at all.
+_AGENT_DEFAULTS = _payload(status="never", last_sync_at=None, maintenance_failures=0,
+                           maintenance_status=None, git_dir_bytes=None,
+                           pack_count=None, loose_objects=None)
 
 # How each condition is raised, kept, and recovered through the real poller:
 # `raise_` is (time to wait before, payload) per poll.
@@ -259,7 +266,8 @@ SCENARIOS = {
     "git_bloat_maintenance": {
         "prefix": "git-bloat-", "row_type": "git_bloat",
         "raise_": [({}, _payload(maintenance_failures=3))],
-        "persist": _payload(maintenance_failures=4), "recover": _payload(maintenance_failures=0),
+        "persist": _payload(maintenance_failures=4),
+        "recover": _payload(maintenance_failures=0, maintenance_status=_REPACKED),
     },
 }
 
@@ -330,7 +338,7 @@ async def test_two_readings_are_one_pending_row(kind, service, seed_agent, db, c
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", sorted(SCENARIOS))
-async def test_a_persons_ending_stands(kind, service, seed_agent, db, clock):
+async def test_a_persons_ending_stands(kind, service, seed_agent, db, clock, monkeypatch):
     """Acknowledged through the answer sink, the row lands `acknowledged`
     (#2372); a re-reading inside the 7-day snooze files nothing, and the
     platform's clear on recovery never overwrites the person's ending."""
@@ -341,8 +349,15 @@ async def test_a_persons_ending_stands(kind, service, seed_agent, db, clock):
     _person_ends(db, row)
     assert db.get_operator_queue_item(row["id"])["status"] == "acknowledged"
 
+    # The module object the poller's own methods read (R6), so the recorder sees
+    # every reading it makes.
+    seam = type(service)._sync_agent.__globals__["platform_alerts"]
+    real, readings = seam.observe, []
+    monkeypatch.setattr(seam, "observe", lambda *a, **k: readings.append(
+        (a[1], real(*a, **k))) or readings[-1][1])
     clock.advance(hours=6, minutes=1)  # due for a re-read: it is snoozed
     await _poll(service, sc["persist"])
+    assert [out for k, out in readings if k == kind] == ["snoozed"]  # a reading, held by the snooze
     assert _pending(db, sc["prefix"]) == []
 
     clock.advance(**_MIN)
@@ -512,7 +527,8 @@ async def test_ac5_size_and_maintenance_are_two_subjects(service, seed_agent, db
     assert {r["type"] for r in rows.values()} == {"git_bloat"}
 
     clock.advance(**_MIN)  # the repack succeeds while .git stays over the ceiling
-    await _poll(service, _payload(git_dir_bytes=_BIG, maintenance_failures=0))
+    await _poll(service, _payload(git_dir_bytes=_BIG, maintenance_failures=0,
+                                  maintenance_status=_REPACKED))
     size = db.get_operator_queue_item(rows["git_bloat_size:alpha"]["id"])
     maintenance = db.get_operator_queue_item(rows["git_bloat_maintenance:alpha"]["id"])
     assert (maintenance["status"], maintenance["disposed_by"]) == ("cancelled", "platform")
@@ -560,6 +576,23 @@ async def test_an_oversized_agent_error_cannot_keep_the_sync_failing_alert_out(
     assert row["title"] == "Git token can't push"
     assert row["context"]["last_error_summary"] == huge[:240]
     assert db.get_sync_state("alpha")["last_error_summary"] == huge
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_last_sync_at_cannot_keep_the_sync_failing_alert_out(
+        service, seed_agent, db, clock):
+    """`last_sync_at` is agent-written too. 30,000 non-ASCII characters fit the
+    agent server's 64 KiB file bound but JSON-escape to ~180 KB, past the queue's
+    context belt; the alert carries the first 64 characters, like the pull
+    timestamps."""
+    seed_agent()
+    wide = "\u00e9" * 30_000
+    failing = _payload(status="failed", error="boom", last_sync_at=wide)
+    for _ in range(3):
+        await _poll(service, failing)
+        clock.advance(**_MIN)
+    (row,) = _pending(db, "sync-failing-")
+    assert row["context"]["last_sync_at"] == wide[:64]
 
 
 @pytest.mark.asyncio
@@ -709,6 +742,11 @@ _INCONCLUSIVE = [
     ("git_bloat_maintenance", "unreachable", None),
     ("git_bloat_maintenance", "streak_absent", _payload()),
     ("git_bloat_maintenance", "streak_garbage", _payload(maintenance_failures="many")),
+    # The agent server's defaults for an unreadable sync-state.json: a zero
+    # streak with no "repacked" outcome is not a repack.
+    ("sync_failing", "agent_defaults", _AGENT_DEFAULTS),
+    ("git_bloat_size", "agent_defaults", _AGENT_DEFAULTS),
+    ("git_bloat_maintenance", "agent_defaults", _AGENT_DEFAULTS),
 ]
 
 

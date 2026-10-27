@@ -387,6 +387,13 @@ class SyncHealthService:
         # A miss is trusted for ALERT_REFRESH_SECONDS, not for the episode:
         # another worker may raise the row while this one is not the leader.
         self._divergence_looked_up: Dict[str, Tuple[str, float]] = {}
+        # #3254 (R10): agents whose maintenance streak fell under the threshold
+        # without the agent's own "repacked …" outcome. Its server reports a
+        # zero streak whenever sync-state.json is missing, oversized or corrupt,
+        # so such a drop is no evidence; the alert ends on a later reading that
+        # carries the outcome. In-process only: a restart leaves the row to its
+        # lifetime.
+        self._maintenance_drop_unconfirmed: set = set()
 
     @property
     def poll_interval(self) -> int:
@@ -723,6 +730,7 @@ class SyncHealthService:
             self._forget_reading("git_bloat_size", agent_name)
         new_maintenance_failures = updated.get("maintenance_failures") or 0
         if new_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD:
+            self._maintenance_drop_unconfirmed.discard(agent_name)
             if self._reading_due(
                 "git_bloat_maintenance", agent_name,
                 edge=prior_maintenance_failures < MAINTENANCE_FAILURES_ALERT_THRESHOLD,
@@ -735,9 +743,17 @@ class SyncHealthService:
                         "within its budget"
                     ),
                 )
-        elif prior_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD:
-            platform_alerts.clear(agent_name, "git_bloat_maintenance", agent_name)
-            self._forget_reading("git_bloat_maintenance", agent_name)
+        elif (prior_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD
+              or agent_name in self._maintenance_drop_unconfirmed):
+            # Only a repack the agent itself reports resets its streak
+            # (agent_server routers/git.py); a zero without that outcome is its
+            # server's default for an unreadable state file, not a recovery.
+            if str(sync_state.get("maintenance_status") or "").startswith("repacked"):
+                platform_alerts.clear(agent_name, "git_bloat_maintenance", agent_name)
+                self._forget_reading("git_bloat_maintenance", agent_name)
+                self._maintenance_drop_unconfirmed.discard(agent_name)
+            else:
+                self._maintenance_drop_unconfirmed.add(agent_name)
 
     async def _fetch_git_status(self, agent_name: str) -> Optional[Dict]:
         """Fetch /api/git/status from the agent. None on unreachable."""
@@ -817,7 +833,9 @@ class SyncHealthService:
         One pending row per agent (subject `sync_failing:<agent>`), updated in
         place with the latest reading, so a re-read re-states the count.
         """
-        last_sync_at = state.get("last_sync_at") or utc_now_iso()
+        # Both agent-written (sync-state.json): bounded like the pull fields, so
+        # an oversized value cannot push the row past the queue's context belt.
+        last_sync_at = _pull_text(state.get("last_sync_at"), 64) or utc_now_iso()
         error = state.get("last_error_summary") or ""
         failures = state["consecutive_failures"]
         context = {
