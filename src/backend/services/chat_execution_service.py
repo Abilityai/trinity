@@ -206,6 +206,9 @@ async def prepare_chat_execution(
             # #2806: from admission — None for a non-agent principal (a root).
             chain_depth=chain_depth,
         ),
+        # #3989: the row takes the admission id, which is also the capacity
+        # slot member, so canary S-01 and the slot views resolve to this row.
+        execution_id=chat_execution_id,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -214,8 +217,7 @@ async def prepare_chat_execution(
     )
 
     # trinity-enterprise#752: the self-approval is recorded on THIS row — the
-    # id `build_chat_payload` sends — never on the admission's capacity-slot
-    # id, which no agent ever sees. Such a turn also runs in its own session.
+    # id `build_chat_payload` sends. Such a turn also runs in its own session.
     isolated_session = bool(gate is not None and not gate.ungated and gate.self_approved_by)
     if gate is not None:
         await skill_gate_service.record_self_approval(
@@ -529,8 +531,8 @@ async def _finalize_chat_success(
 
     # Add execution metadata to response
     response_data["execution"] = {
-        "id": execution.id,  # Queue ID (transient)
-        "task_execution_id": task_execution_id,  # Database ID (permanent)
+        "id": execution.id,  # Same as task_execution_id (#3989); kept for clients
+        "task_execution_id": task_execution_id,  # Database ID
         "queue_status": queue_result,
         "was_queued": is_queued,
         # #2958 AC3: None, or {events, trigger, pre_tokens, post_tokens, duration_ms}.
