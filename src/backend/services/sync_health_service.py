@@ -108,11 +108,6 @@ def _poll_interval_seconds() -> int:
 GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
 MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
 
-# trinity-enterprise#706: id prefix of the one-per-episode divergence-freeze
-# item. Platform-reserved in operator_queue_service._RESERVED_ID_PREFIXES, so an
-# agent cannot pre-create the id and silence the alarm about itself.
-SYNC_DIVERGED_ALERT_PREFIX = "sync-diverged-"
-
 
 # PostgreSQL column ceilings. `Integer` is int4 there (SQLite's INTEGER is 64-bit
 # either way, which is how #2800 shipped): a value the boundary admits but the
@@ -365,11 +360,6 @@ class SyncHealthService:
         # far-future `at` would flood the log for the life of the process.
         self._last_lock_recovery: Dict[str, Dict] = {}
         self._lock_stuck_agents: set = set()
-        # trinity-enterprise#706: the last sync_diverged item id this process
-        # raised per agent — only to skip a redundant INSERT every poll while a
-        # freeze lasts. The DB's (agent_name, request_id) conflict target is
-        # what makes it one item per episode across restarts and workers.
-        self._diverged_alerted: Dict[str, str] = {}
         # #3254: when this process last reported each live condition to the
         # platform-alert seam, `(kind, agent) -> (episode, monotonic seconds)`.
         # A crossing is reported at once and a persisting condition at most
@@ -633,12 +623,20 @@ class SyncHealthService:
             platform_alerts.clear(agent_name, "sync_failing", agent_name)
             self._forget_reading("sync_failing", agent_name)
 
-        # trinity-enterprise#706: a divergence freeze is in force → one
-        # sync_diverged item for the episode. Rule 2 (sync_failing) already
-        # has its own item above, so only the divergence cause raises this.
+        # trinity-enterprise#706: a divergence freeze in force is one condition
+        # per agent, reported once per episode and re-read while it lasts (#3254
+        # R9). Rule 2 (sync_failing) takes precedence over divergence as the
+        # freeze cause, so the cause moving away is not the divergence ending:
+        # the platform ends the row only when the `diverged_since` episode
+        # itself ends (R10).
         verdict = sync_view(updated, config)
+        episode = updated.get("diverged_since")
         if verdict["freeze_cause"] == "divergence":
-            self._emit_sync_diverged_alert(agent_name, updated, verdict)
+            if self._reading_due("sync_diverged", agent_name, episode=episode):
+                self._observe_sync_diverged(agent_name, updated, verdict)
+        if (prior or {}).get("diverged_since") and not episode:
+            platform_alerts.clear(agent_name, "sync_diverged", agent_name)
+            self._forget_reading("sync_diverged", agent_name)
 
         # #2742: a self-healed wedge, announced once. No operator-queue item
         # and no DB column — the boot reap already fixed it, so this is a log
@@ -777,33 +775,26 @@ class SyncHealthService:
         self._note_reading("sync_failing", agent_name, outcome)
         logger.warning("sync_failing for %s (failures=%s): %s", agent_name, failures, outcome)
 
-    def _emit_sync_diverged_alert(self, agent_name: str, state: Dict, verdict: Dict) -> None:
-        """trinity-enterprise#706: one operator-queue item per divergence episode.
+    def _observe_sync_diverged(self, agent_name: str, state: Dict, verdict: Dict) -> None:
+        """trinity-enterprise#706: report the divergence freeze through the seam.
 
-        The id is deterministic per episode (`diverged_since` is set once), so
-        every repeat poll, a restart and a fail-open double leader converge on
-        ONE row via create_item's `(agent_name, request_id)` conflict target —
-        the `alert-budget-` precedent, with no new column. Not auto-resolved
-        when the episode ends; a new episode has a new id. The context carries
-        counts and the recommendation, never agent-authored error text.
+        One pending row per agent (subject `sync_diverged:<agent>`, #3254), so a
+        repeat poll, a restart and a fail-open double leader all land on it; a
+        new episode after the platform ended the last one files a fresh row.
+        The context carries counts and the recommendation, never agent-authored
+        error text.
         """
         diverged_since = state.get("diverged_since")
-        item_id = f"{SYNC_DIVERGED_ALERT_PREFIX}{agent_name}-{diverged_since}"
-        if self._diverged_alerted.get(agent_name) == item_id:
-            return
         age = sync_freeze_policy.format_age(verdict["divergence_age_s"] or 0)
-        item = {
-            "id": item_id,
-            "agent_name": agent_name,
-            "type": "sync_diverged",
-            "status": "pending",
-            "priority": "high",
-            "title": f"Agent diverged from GitHub for {age} — schedules paused",
-            "question": (
+        outcome = platform_alerts.observe(
+            agent_name, "sync_diverged", agent_name,
+            priority="high",
+            title=f"Agent diverged from GitHub for {age} — schedules paused",
+            question=(
                 f"{agent_name}: {verdict['freeze_reason']}. Its scheduled runs are "
                 "paused until it is back in step with its repository."
             ),
-            "context": {
+            context={
                 "ahead": state.get("ahead_working") or 0,
                 "behind": state.get("behind_working") or 0,
                 "dirty_files": state.get("dirty_files"),
@@ -811,16 +802,10 @@ class SyncHealthService:
                 "divergence_age_s": verdict["divergence_age_s"],
                 "recommendation": verdict["recommendation"],
             },
-            "created_at": utc_now_iso(),
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            self._diverged_alerted[agent_name] = item_id
-            logger.warning(
-                "sync_diverged raised for %s (%s)", agent_name, verdict["freeze_reason"]
-            )
-        except Exception:
-            logger.exception("failed to emit sync_diverged alert")
+        )
+        self._note_reading("sync_diverged", agent_name, outcome, episode=diverged_since)
+        logger.warning("sync_diverged for %s (%s): %s",
+                       agent_name, verdict["freeze_reason"], outcome)
 
     def _emit_git_bloat_alert(self, agent_name: str, state: Dict, *, reason: str) -> None:
         """#1595: operator-queue entry for repo bloat / failing maintenance.

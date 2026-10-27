@@ -214,6 +214,7 @@ def _person_ends(db, row):
 _FAIL = _payload(status="failed", error="boom")
 _OK = _payload()
 _MIN = {"minutes": 1}
+_AHEAD = _payload(ahead=7)
 
 # How each condition is raised, kept, and recovered through the real poller:
 # `raise_` is (time to wait before, payload) per poll.
@@ -222,6 +223,12 @@ SCENARIOS = {
         "prefix": "sync-failing-", "row_type": "sync_failing",
         "raise_": [({}, _FAIL), (_MIN, _FAIL), (_MIN, _FAIL)],
         "persist": _FAIL, "recover": _OK,
+    },
+    # A divergence freezes schedules once the episode is over 24 h old (#706).
+    "sync_diverged": {
+        "prefix": "sync-diverged-", "row_type": "sync_diverged",
+        "raise_": [({}, _AHEAD), ({"hours": 25}, _AHEAD)],
+        "persist": _AHEAD, "recover": _OK,
     },
 }
 
@@ -396,3 +403,59 @@ def test_r1_a_pre_move_sync_failing_row_derives_the_seam_subject(pa, agent):
     match = pa.derive_legacy_subject(old_id, {"consecutive_failures": 3})
     assert match.kind == "sync_failing"
     assert match.subject == pa.subject_for("sync_failing", agent)
+
+
+@pytest.mark.parametrize("agent", ["alpha", "my-agent-2"])
+def test_r1_a_pre_move_sync_diverged_row_derives_the_seam_subject(pa, agent):
+    # The pre-move id, one per episode: f"sync-diverged-{agent}-{diverged_since}".
+    old_id = f"sync-diverged-{agent}-2026-10-19T07:00:00.000000Z"
+    match = pa.derive_legacy_subject(old_id, {"diverged_since": "2026-10-19T07:00:00.000000Z"})
+    assert match.kind == "sync_diverged"
+    assert match.subject == pa.subject_for("sync_diverged", agent)
+
+
+# --------------------------------------------------------------------------
+# Divergence: the freeze cause moving is not the episode ending
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_divergence_outlives_a_sync_failing_precedence_and_ends_with_its_episode(
+        service, seed_agent, db, clock):
+    """Sync failing takes precedence over divergence as the freeze cause
+    (sync_freeze_policy). While it does, the divergence episode still holds:
+    its row is neither ended nor duplicated, and when divergence is the cause
+    again the same row is re-read. Only `diverged_since` clearing ends it."""
+    import services.sync_health_service as shs
+    seed_agent()
+    await _poll(service, _AHEAD)
+    clock.advance(hours=25)
+    await _poll(service, _AHEAD)
+    (row,) = _rows(db, "sync-diverged-")
+    episode = db.get_sync_state("alpha")["diverged_since"]
+
+    failing = _payload(status="failed", error="boom", ahead=7)
+    for _ in range(3):
+        clock.advance(**_MIN)
+        await _poll(service, failing)
+    clock.advance(hours=7)  # past the re-read window, sync failing still the cause
+    await _poll(service, failing)
+    (config,) = db.list_git_enabled_agents()
+    assert shs.sync_view(db.get_sync_state("alpha"), config)["freeze_cause"] == "sync_failing"
+    assert db.get_sync_state("alpha")["diverged_since"] == episode
+    assert len(_pending(db, "sync-failing-")) == 1
+    held = db.get_operator_queue_item(row["id"])
+    assert held["status"] == "pending" and held["context"]["seen_count"] == 1
+
+    clock.advance(**_MIN)
+    await _poll(service, _AHEAD)  # the sync recovers; divergence is the cause again
+    assert _pending(db, "sync-failing-") == []
+    (again,) = _rows(db, "sync-diverged-")
+    assert again["id"] == row["id"] and again["status"] == "pending"
+    assert again["context"]["seen_count"] == 2
+
+    clock.advance(**_MIN)
+    await _poll(service, _OK)  # the episode ends
+    assert db.get_sync_state("alpha")["diverged_since"] is None
+    ended = db.get_operator_queue_item(row["id"])
+    assert (ended["status"], ended["disposed_by"]) == ("cancelled", "platform")
+    assert len(_rows(db, "sync-diverged-")) == 1

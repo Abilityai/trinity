@@ -48,8 +48,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
         ("skills-reconcile-", _PR2),
     ("services/skills_sync_service.py", "SkillsLibrarySyncService._announce_fleet_failures"):
         ("skills-fleet-reinject-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        ("sync-diverged-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         ("git-bloat-", _PR2),
     ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
