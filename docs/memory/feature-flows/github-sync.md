@@ -387,8 +387,8 @@ both directions, and the addition is the worse half (a removal is recoverable
 from the working tree; a newly un-ignored path is already in the remote's
 history and may need a credential rotated). `shadowed` is not in the gate — it
 is standing advice about the file, not a change this Push made. The entry is
-filed through the #1677 **budget seam** (`create_bounded_alert`), not as a
-direct create like its `git_bloat`/`sync_failing` siblings, because those fire
+filed through the #1677 **budget** (`platform_alerts.observe`, kind
+`gitignore_untracked`), unlike its unbudgeted `git_bloat`/`sync_failing` siblings, because those fire
 on the 60-second platform poller's cadence while this one fires from
 `sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
 The last surface is the point: both field incidents were unattended

@@ -2244,8 +2244,9 @@ lifespan (safety-net, gated on `setup_completed`, strong task ref) both call
    - Honest status: partial / failed / seed-path error (e.g. parse-broken
      override) / unreadable-override / crash-interrupted partial fleet (the
      converge backstop finding only SOME names reserved) each raise ONE
-     operator-queue alert (direct DB create on `trinity-system`,
-     deterministic `system-seed-<kind>` id — a #1632 reserved prefix, so an
+     operator-queue alert (`platform_alerts.observe` on `trinity-system`,
+     subject `system_seed:<kind>`, ended by the platform when a later seed
+     succeeds; the id carries the #1632 reserved prefix `system-seed-`, so an
      agent cannot pre-create-and-silence it; best-effort).
 
 **Manifest resolution**: `TRINITY_DEFAULT_SYSTEM_MANIFEST` env, read at call

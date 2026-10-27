@@ -60,8 +60,8 @@ diverged from origin for more than 24 h. See §2b and §5.
 | **API** | `GET/PUT /api/agents/{name}/git/auto-sync` | Toggle the per-agent auto-sync flag |
 | **API** | `GET/PUT /api/agents/{name}/git/freeze-schedules-if-failing` | Toggle the freeze-schedules-on-sync-failure flag |
 | **API** | `GET /api/fleet/sync-audit` | Fleet-wide audit including `duplicate_binding` flag (admins see all; non-admins filtered) |
-| **Operator Queue** | type=`sync_failing` | Inserted by `SyncHealthService` when `consecutive_failures` crosses 3 |
-| **Operator Queue** | type=`sync_diverged` | ent#706: one per divergence episode, only while a divergence freeze is in force (id `sync-diverged-{agent}-{diverged_since}`) |
+| **Operator Queue** | type=`sync_failing` | Observed by `SyncHealthService` through `platform_alerts.observe` (subject `sync_failing:<agent>`) on the crossing of `consecutive_failures` ≥ 3 and while it lasts (re-read at most every 6 h); ended by the platform on recovery (#3254) |
+| **Operator Queue** | type=`sync_diverged` | ent#706: one pending row per divergence episode (subject `sync_diverged:<agent>`), only while a divergence freeze is in force; ended by the platform when the episode ends (#3254) |
 | **Scheduler** | `SchedulerDatabase.sync_freeze_reason` | ent#706: the cron gate's reason, written into the skipped row as `Git sync frozen: <reason>` |
 
 ## Data Model
@@ -551,22 +551,25 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     │     #3011 heartbeat field, agent_git_config.last_sync_at, stored)
     │     │     — agent timestamps need an offset and must not be future
     │     ├── db.upsert_sync_state(...)
-    │     ├── if consecutive_failures crossed 3:
-    │     │     └── db.create_operator_queue_item(
-    │     │           type='sync_failing', priority='high', …)
+    │     ├── if consecutive_failures crossed 3 (or is still ≥ 3, re-read ≤ once per 6 h):
+    │     │     └── platform_alerts.observe(agent, 'sync_failing', agent,
+    │     │           priority='high', …) — row type 'sync_failing' kept;
+    │     │         the falling edge prior ≥ 3 > new → platform_alerts.clear
     │     │         #2107: when last_error_summary is a refused push
     │     │         (git_service.is_push_denied) the item is titled
     │     │         "Git token can't push", says it will not recover on
     │     │         its own, and carries context.cause='push_denied' +
     │     │         context.remediation (grant Contents: write / `repo`)
     │     ├── ent#706: sync_view(updated, config) → if the freeze cause is
-    │     │     divergence: db.create_operator_queue_item(type='sync_diverged',
-    │     │     id='sync-diverged-{agent}-{diverged_since}') — the conflict
-    │     │     target makes it ONE row per episode across polls, restarts
-    │     │     and a fail-open double leader; counts + recommendation only
-    │     ├── #1595 git_bloat alerts (same edge-trigger pattern):
-    │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB)
-    │     │     └── maintenance_failures crossed 3
+    │     │     divergence: platform_alerts.observe(agent, 'sync_diverged',
+    │     │     agent) — row type 'sync_diverged' kept; the subject makes it
+    │     │     ONE row per episode across polls, restarts and a fail-open
+    │     │     double leader; the episode ending (diverged_since cleared)
+    │     │     → platform_alerts.clear; counts + recommendation only
+    │     ├── #1595 git_bloat alerts (same edge-trigger pattern; two kinds,
+    │     │   row type 'git_bloat' on both, cleared on the falling edge):
+    │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB) → git_bloat_size
+    │     │     └── maintenance_failures crossed 3 → git_bloat_maintenance
     │     └── #2742 WARNING on a newly observed lock_recovery / index_lock_stuck
     │           (log line only — no operator-queue item, no DB column)
 ```

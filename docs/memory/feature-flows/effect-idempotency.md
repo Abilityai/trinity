@@ -169,8 +169,9 @@ Codex omits the header when `TRINITY_EXECUTION_ID` is unset, so a person running
 Codex in a pull-mode agent's terminal reaches `absent` and is refused; so is a
 user-scoped key acting for a pull-mode agent from outside a turn.
 
-The alarm goes through `create_bounded_alert` (type `effect_unguarded`, id prefix
-`effect-unguarded-` reserved); at the budget cap the effect is still refused.
+The alarm goes through `platform_alerts.observe` (kind `effect_unguarded`, subject
+`effect_unguarded:<effect_type>:<reason>`, budgeted as type `effect_unguarded`, id prefix
+`effect-unguarded-` reserved; no clear site, so its 14-day lifetime ends it); at the budget cap the effect is still refused.
 The header is not a trust boundary: an agent owns its `.mcp.json` and can cite
 any of its own executions. The guard stops omission, not a hostile agent.
 
