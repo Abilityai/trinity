@@ -58,9 +58,24 @@ class FakeDB:
     def set_setting(self, key, value):
         self.settings[key] = str(value)
 
-    def create_operator_queue_item(self, agent_name, item):
+    # #3254 re-pin (write-observation point): the two alarms report through
+    # `platform_alerts.observe`, which writes with the seam's accessors, not
+    # `create_operator_queue_item`. The fake holds no pending row and no
+    # person's ending, so every alarm reading reaches the seam's create and is
+    # recorded there: `queue_items` still counts alarm readings, and every
+    # count below is unchanged. One row per subject, the platform's clear and
+    # the snooze are asserted on the real DB in
+    # tests/unit/test_3254_backup_archive_alerts.py.
+    def find_pending_operator_queue_by_subject(self, agent_name, subject):
+        return None
+
+    def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
+        return None
+
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
         self.queue_items.append((agent_name, item))
-        return item["id"]
+        return {"outcome": "created", "row": item, "changed": False}
 
 
 class FakeRedis:

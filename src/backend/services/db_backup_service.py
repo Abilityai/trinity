@@ -124,13 +124,16 @@ _PREFLIGHT_HEADROOM = 1.2
 _STALENESS_ALARM_DAYS = 3       # ≈ 3 missed dailies
 _STALENESS_REALARM_DAYS = 7     # while stale, re-alarm at most weekly
 
-# Alarm plumbing: platform-created directly via db.create_operator_queue_item
-# (bypasses the #1632 agent-ingestion caps by construction). The sentinel host
-# is uncreatable as an agent (sanitize_agent_name strips the leading '_') and
-# is excluded from canary L-03's orphan scan — parity-tested against
-# canary/snapshot.py (_PLATFORM_ALARM_SENTINELS). The id prefix is registered
-# in operator_queue_service._RESERVED_ID_PREFIXES so an agent cannot
-# pre-create (and via on_conflict_do_nothing, silence) the backup alarm.
+# Alarm plumbing (#3254): the two alarms are platform alert conditions
+# reported through services.platform_alerts — `db_backup_failure` (the edge
+# alarm) and `db_backup_stale` (the staleness re-alarm), two subjects keyed by
+# the backup directory, each one pending row updated in place and ended by the
+# platform when a backup succeeds. The sentinel host is uncreatable as an
+# agent (sanitize_agent_name strips the leading '_') and is excluded from
+# canary L-03's orphan scan — parity-tested against canary/snapshot.py
+# (_PLATFORM_ALARM_SENTINELS). The id prefix is both kinds' registered prefix
+# and is reserved in operator_queue_service._RESERVED_ID_PREFIXES, so an agent
+# cannot mint a row into it.
 ALARM_AGENT_NAME = "_db-backup"
 ALARM_ID_PREFIX = "db-backup-"
 
@@ -341,6 +344,10 @@ class DBBackupService:
         or absent — exactly once per failure episode, re-armed only by an
         intervening success. Continued failure is the staleness re-alarm's
         job, not the edge's.
+
+        An ``ok`` is a verified recovery point, so it ends both alarm
+        conditions as the platform (#3254). A person's ending is never
+        overwritten: ``clear`` is a compare-and-set on a pending row.
         """
         from database import db
         from utils.helpers import utc_now_iso
@@ -372,57 +379,52 @@ class DBBackupService:
             logger.exception("[DBBackup] could not persist status")
             return
 
-        if status in ("failed", "skipped_no_space") and prior in (None, "ok"):
-            self._emit_alarm(
-                title=(
-                    "Database backup skipped: not enough disk space"
-                    if status == "skipped_no_space"
-                    else "Database backup failed"
-                ),
+        from services import platform_alerts
+
+        backup_dir = self.backup_dir()  # both alarms' key
+        if status == "ok":
+            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
+            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
+        elif status in ("failed", "skipped_no_space") and prior in (None, "ok"):
+            title = (
+                "Database backup skipped: not enough disk space"
+                if status == "skipped_no_space"
+                else "Database backup failed"
+            )
+            # Context carries status/paths/sizes only — never row data
+            # (canary G-04 rule). `alert_type` also tells the upgrade sweep
+            # which of the two `db-backup-` kinds a row is.
+            outcome = platform_alerts.observe(
+                ALARM_AGENT_NAME, "db_backup_failure", backup_dir,
+                title=title,
                 question=(
                     f"The nightly database backup reported '{status}': "
                     f"{(error or 'no detail')[:500]} — the platform has no "
                     f"fresh recovery point until this is resolved. Backups "
-                    f"land in {self.backup_dir()}."
+                    f"land in {backup_dir}."
                 ),
                 context={
                     "alert_type": "db_backup_failure",
                     "status": status,
                     "trigger": trigger,
-                    "backup_dir": self.backup_dir(),
+                    "backup_dir": backup_dir,
                 },
             )
-
-    def _emit_alarm(self, *, title: str, question: str, context: Dict) -> None:
-        """Direct platform create on the sentinel host. Context carries
-        status/paths/sizes only — never row data (canary G-04 rule)."""
-        from database import db
-        from utils.helpers import utc_now_iso
-
-        now = utc_now_iso()
-        item = {
-            "id": f"{ALARM_ID_PREFIX}{now}",
-            "type": "alert",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": context,
-            "created_at": now,
-            # Must stay NULL: mark_operator_queue_expired flips any pending
-            # row past expires_at to expired fleet-wide every 5s.
-            "expires_at": None,
-        }
-        try:
-            db.create_operator_queue_item(ALARM_AGENT_NAME, item)
-            logger.warning("[DBBackup] operator alarm emitted: %s", title)
-        except Exception:
-            logger.exception("[DBBackup] failed to emit operator alarm")
+            logger.warning("[DBBackup] operator alarm %s: %s", outcome, title)
 
     async def _staleness_check(self) -> None:
         """BKUP-013b: while the last success is older than 3 days, re-alarm at
-        most once per 7 days. Never fires while fresh; never raises."""
+        most once per 7 days. Never fires while fresh; never raises.
+
+        Each re-alarm is a new reading of the one ``db_backup_stale`` row,
+        which moves its lifetime (#3254). A success inside the threshold ends
+        that row as the platform — the boot pre-migration backup records its
+        success in the settings without passing through ``_record_outcome``,
+        so this is where it is seen. With no success on record the reference
+        is the first attempt, and a young one is not evidence that a backup
+        works, so it ends nothing."""
         from database import db
+        from services import platform_alerts
         from utils.helpers import utc_now_iso
 
         def _read() -> Dict[str, Optional[str]]:
@@ -442,7 +444,10 @@ class DBBackupService:
                 return
             now = datetime.now(timezone.utc)
             age_days = (now - _parse_iso(reference)).total_seconds() / 86400.0
+            backup_dir = self.backup_dir()  # the alarm's key
             if age_days <= _STALENESS_ALARM_DAYS:
+                if state["last_success_at"]:
+                    platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
                 return
             last_alarm = state["last_staleness_alarm_at"]
             if last_alarm is not None:
@@ -453,21 +458,23 @@ class DBBackupService:
                 db.set_setting, "db_backup_last_staleness_alarm_at",
                 utc_now_iso(),
             )
-            self._emit_alarm(
+            outcome = platform_alerts.observe(
+                ALARM_AGENT_NAME, "db_backup_stale", backup_dir,
                 title="Database backups are stale",
                 question=(
                     f"The newest successful database backup is "
                     f"{age_days:.1f} days old (threshold "
                     f"{_STALENESS_ALARM_DAYS}d). Silence over time is also a "
                     f"failure — check db_backup_last_error and the backend "
-                    f"logs. Backups land in {self.backup_dir()}."
+                    f"logs. Backups land in {backup_dir}."
                 ),
                 context={
                     "alert_type": "db_backup_stale",
                     "last_success_age_days": round(age_days, 1),
-                    "backup_dir": self.backup_dir(),
+                    "backup_dir": backup_dir,
                 },
             )
+            logger.warning("[DBBackup] staleness alarm %s", outcome)
         except Exception:
             logger.exception("[DBBackup] staleness check failed")
 

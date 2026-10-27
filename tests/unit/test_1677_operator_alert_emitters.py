@@ -76,10 +76,6 @@ _ALLOWED_CALLERS = {
         "archival RUN (daily maintenance cadence), and the id is bucketed per path "
         "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
         "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
-        "platform-only: edge-triggered on the durable prior-status transition "
-        "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
-        "bound by the daily job cadence and no agent input reaches it (#2216)",
     ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
         "platform-only: the ent#615 sweep refused to strip a credential URL it "
         "could not replace. Raised from a start hook / boot one-shot, so the "
