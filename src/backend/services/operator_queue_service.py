@@ -373,7 +373,14 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # and what they wrote — the facts `evaluations.py` already withholds from a
 # shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
-OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+#
+# trinity-enterprise#980: `gate-owner-only-` is a gate ask whose content belongs
+# to its addressee and the agent's owner — a steward's proposed change to a
+# project names people and tasks that someone the agent is merely shared with may
+# not be allowed to see. The addressee answers it from their Workspace Inbox,
+# which lists by addressee, so hiding it here hides it from nobody it is for.
+# Under `gate-`, so it stays about-a-person and reserved (no agent can mint it).
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-", "gate-owner-only-")
 
 
 def is_owner_only(item: dict) -> bool:

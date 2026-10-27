@@ -99,7 +99,7 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, and for a steward agent `get_steward_digest`, `set_project_health` and `propose_project_changes`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ## Limitations
 
@@ -107,6 +107,7 @@ Agents reach a project through the MCP tools the platform exposes to them — `l
 - **Chats are private.** A project links chats; it does not share them. Other members' chats are a count.
 - **One steward.** A project has one steward, a person or an agent; the creator stewards it until someone else is named.
 - **Agents do not finish tasks, set priority, or change the project itself.** Done, priority, status, members and visibility are a person's.
+- **A steward agent can propose the people part; the creator approves it.** With the project-management permission, the steward can propose members to add (work emails, or a canon role written `role:<id>` — the people who hold it when you approve), other agents, a new steward, who can open the project, and an owner for each task. It reaches the project's creator as one decision in their **Inbox**, showing the whole change. **Approve** applies exactly that, once, and the log records who proposed it and who approved it; **Decline** applies nothing, and the reason you give is what the steward reads next. One proposal waits at a time, and the **Steward** card says who it is waiting on. Adding an agent someone else owns still asks that agent's owner.
 - **The platform does not run the steward.** An agent steward moves a project only through its own schedule.
 - **Import is one-way.** A folder project imported from an agent is managed on the platform from then on; nothing syncs back to the folder.
 

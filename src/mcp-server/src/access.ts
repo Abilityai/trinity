@@ -470,6 +470,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
   import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  // `agents` are never acted on by the caller: the backend checks each against the project
+  // CREATOR's roster, nothing happens until the creator approves, and adding one someone else
+  // owns still raises that owner's consent ask (R39). The steward gate is projects.manage.
+  propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#980: projects/proposals.py — creator approval + the agent owner's consent ask" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---

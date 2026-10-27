@@ -154,7 +154,11 @@ def _for_principal(items: List[Dict[str, Any]], current_user: User) -> List[Dict
                      run_viewer=current_user.username, name_approvers=True),
                  # trinity-enterprise#901: which ending the agent authored
                  # (replaced | withdrawn | None), derived once server-side.
-                 "agent_ending": ask_service.agent_ending_kind(item)}
+                 "agent_ending": ask_service.agent_ending_kind(item),
+                 # trinity-enterprise#980: a gate approval addressed to someone
+                 # else reads as theirs, with no controls — not as a refusal.
+                 "addressed": ask_service.addressed_view(
+                     item, ask_service.Actor(email=current_user.email or "", user=current_user))}
                 for item in items]
     # #715: the platform's heads-ups ABOUT a person (a client's complaint, the
     # client addresses behind a shared inbox) are the operator's, not a machine's.
