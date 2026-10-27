@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -884,6 +884,10 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 # ============================================================================
 
 @router.post("/{agent_name}/start")
+@ops_write_route(
+    "#3180: starts one agent; the target policy refuses the system agent and "
+    "ephemeral agents, and no credential reaches the caller"
+)
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
@@ -973,6 +977,10 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 
 
 @router.post("/{agent_name}/stop")
+@ops_write_route(
+    "#3180: stops one agent; the target policy refuses the system agent and "
+    "ephemeral agents"
+)
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
@@ -1108,6 +1116,10 @@ async def force_release_agent(
 
 
 @router.post("/{agent_name}/circuit-breaker/reset")
+@ops_write_route(
+    "#3180: re-closes one agent's breakers, which re-open on the next failure; "
+    "the admin gate still runs"
+)
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
@@ -1123,7 +1135,10 @@ async def reset_circuit_breaker_endpoint(
     # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
     # agent principals. Swapping this ONE call site is the fix; adding the
     # rejection to `require_role` itself would break ghost spawning.
-    current_user: User = Depends(require_admin),
+    #
+    # #3180: `require_admin_allowing("ops_write")` is the same gate with that one
+    # bounded scope opted in (census ADMIN_WIDENED); `role == "admin"` still runs.
+    current_user: User = Depends(require_admin_allowing("ops_write")),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 

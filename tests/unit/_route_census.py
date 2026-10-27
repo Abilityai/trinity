@@ -816,6 +816,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
     "routers/ops.py::get_auth_report": ("GET /api/ops/auth-report", ("ops",), "#2323 ops read fence: an ops key reads fleet state; role == admin still enforced"),
     "routers/subscriptions.py::get_subscription_usage": (
         "GET /api/subscriptions/{subscription_id}/usage", ("ops",), "#2323 ops read fence: an ops key reads fleet state; role == admin still enforced (subscription pressure, #2389)"),
+    "routers/agents.py::reset_circuit_breaker_endpoint": (
+        "POST /api/agents/{agent_name}/circuit-breaker/reset", ("ops_write",),
+        "#3180 ops_write fence: a USE — re-closes one agent's breakers, which re-open on the next failure; "
+        "listed route + handler mark + admin owner at the resolver, and role == admin still enforced here"),
 }
 
 # Agent-callable routes fenced to the calling agent (trinity-enterprise#840).
