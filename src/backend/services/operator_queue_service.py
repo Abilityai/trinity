@@ -2731,7 +2731,8 @@ class OperatorQueueSyncService:
         holds. The refresh time per (agent, reason) lives in a dict this method
         creates on the instance for itself (`_flood_refreshed_at`).
 
-        The cooldown and the episode are stamped BEFORE the reading. Outcomes:
+        The cooldown and the episode are stamped BEFORE every reading (a re-read
+        included). Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
             episode; a snoozed reading is a person's ending, which stands);
           * failed → the episode is RELEASED so the alarm is retried, and the
@@ -2765,8 +2766,10 @@ class OperatorQueueSyncService:
             last = self._flood_alert_cooldown.get(agent_name)
             if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
                 return  # too soon after the last episode — the next cycle retries
-            self._flood_alert_cooldown[agent_name] = now
             self._flood_episodes.add(key)
+        # Stamped before every reading, a re-read included, so a failed one —
+        # released below — is retried no sooner than the cooldown (I1).
+        self._flood_alert_cooldown[agent_name] = now
         refreshed[key] = now
 
         if reason == "oversize_file":

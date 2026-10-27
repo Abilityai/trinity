@@ -189,20 +189,26 @@ def test_a_comment_that_loses_the_race_to_the_bare_create_still_lands(db_backend
     the comment's write then finds the click's row and writes its words."""
     from database import db
     real_create = db.create_platform_operator_queue_item
-    state = {"raced": False}
+    state = {"raced": False, "click": None, "row_before": None}
 
     def bare_click_wins(agent_name, item, **kw):
         if not state["raced"]:
             state["raced"] = True
             import threading
-            click = threading.Thread(target=_rate, args=(None,))   # its own request
+            click = threading.Thread(          # its own request
+                target=lambda: state.update(click=_rate(None)))
             click.start()
             click.join()
+            state["row_before"] = _only_alert()
         return real_create(agent_name, item, **kw)
 
     monkeypatch.setattr(db, "create_platform_operator_queue_item", bare_click_wins)
     _rate("words that lost the race")
-    assert state["raced"]
+    # The bare click really did land first: its own pending, comment-free row
+    # was there when the comment's locked create ran.
+    assert state["click"] is True
+    assert state["row_before"]["status"] == "pending"
+    assert "They left no comment." in state["row_before"]["question"]
     item = _only_alert()
     assert "words that lost the race" in item["question"]
     assert _context(item)["has_comment"] is True

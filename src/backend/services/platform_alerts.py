@@ -639,7 +639,10 @@ def observe(
             cap = oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE
         out = db.create_platform_operator_queue_item(
             agent_name, item, subject=subject, max_pending_for_type=cap,
-            keep_text=keep_text)
+            keep_text=keep_text,
+            # #3254: the snooze decided again under the create's lock, on its own cutoff
+            snooze_since=_iso_z(now - snooze_window()),
+            snoozed=lambda ended: _snoozed_by(k, ended, priority, ctx))
         if out["outcome"] == OBSERVED_REFUSED_AT_BUDGET:
             from services import operator_queue_service as oqs
             _spawn(lambda: oqs._maybe_emit_alert_budget_episode(

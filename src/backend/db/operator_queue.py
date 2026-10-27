@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Optional, List, Dict, Set, Tuple
+from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
@@ -802,7 +802,12 @@ class OperatorQueueOperations:
         """The newest row for `(agent, subject)` a PERSON ended at or after
         `since` (ISO-Z text, Invariant #16), any terminal status — the seam's
         snooze read (#3246). Served by `idx_operator_queue_agent_subject`."""
-        stmt = (
+        with get_engine().connect() as conn:
+            row = self._find_person_ended_by_subject(conn, agent_name, subject, since)
+        return self._row_to_item(row) if row else None
+
+    def _find_person_ended_by_subject(self, conn, agent_name: str, subject: str, since: str):
+        return conn.execute(
             select(*self._SELECT_COLS)
             .where(and_(
                 operator_queue.c.agent_name == agent_name,
@@ -814,10 +819,7 @@ class OperatorQueueOperations:
             ))
             .order_by(operator_queue.c.disposed_at.desc(), operator_queue.c.id.desc())
             .limit(1)
-        )
-        with get_engine().connect() as conn:
-            row = conn.execute(stmt).mappings().first()
-        return self._row_to_item(row) if row else None
+        ).mappings().first()
 
     def create_platform_item(
         self,
@@ -827,6 +829,8 @@ class OperatorQueueOperations:
         subject: Optional[str],
         max_pending_for_type: Optional[int] = None,
         keep_text: bool = False,
+        snooze_since: Optional[str] = None,
+        snoozed: Optional[Callable[[Dict], bool]] = None,
     ) -> Dict:
         """Record a platform reading: find → touch → count → insert, in ONE
         locked transaction (#3246).
@@ -845,8 +849,17 @@ class OperatorQueueOperations:
         under the lock, so two readings that race (a Workspace thumbs-down and its
         comment) end the same way in either order.
 
-        Returns `{"outcome": "created" | "updated" | "refused_at_budget",
-        "row", "changed"}`; `changed` is whether a RENDERED field (title /
+        The snooze is decided here too (#3254): when the find misses or the
+        touch's compare-and-set loses, the newest row a person ended for the
+        subject at or after `snooze_since` is read through THIS transaction's
+        connection, and if `snoozed(ended)` says so nothing is inserted
+        (`{"outcome": "snoozed"}`). The caller's own check runs before the lock,
+        so without this a person's ending that lands after that check — before
+        the locked find, or between the find and the compare-and-set — let a
+        fresh row through at once.
+
+        Returns `{"outcome": "created" | "updated" | "snoozed" |
+        "refused_at_budget", "row", "changed"}`; `changed` is whether a RENDERED field (title /
         question / priority / context minus `seen_count`) moved, so a bare
         repeat reading sends no broadcast. The partial unique index
         `uq_operator_queue_pending_subject` is the backstop for a lock that
@@ -869,6 +882,11 @@ class OperatorQueueOperations:
                         # The index said a pending row existed and it is gone
                         # (ended between the two transactions): fall through.
                         pass
+                    if subject is not None and snoozed is not None and snooze_since:
+                        ended = self._find_person_ended_by_subject(
+                            conn, agent_name, subject, snooze_since)
+                        if ended is not None and snoozed(self._row_to_item(ended)):
+                            return {"outcome": "snoozed", "row": None, "changed": False}
                     if max_pending_for_type is not None:
                         pending = conn.execute(
                             select(func.count()).where(and_(

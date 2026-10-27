@@ -16,8 +16,11 @@ Rule: every call site of ``create_operator_queue_item`` (any receiver spelling �
 facade-bypass spelling) must be listed in ``_ALLOWED_CALLERS`` keyed by
 ``(relative path, enclosing qualname)`` with a one-line justification —
 either "platform-only" (with the cadence bound that makes it so) or the
-budget seam itself. An agent-influenceable emitter must instead route through
-``operator_queue_service.create_bounded_alert``.
+budget seam itself. An agent-influenceable emitter must instead report through
+``services.platform_alerts.observe`` with a kind whose ``budgeted_type`` is
+registered (#3254: the seam composes the #1677 budget; ``create_bounded_alert``
+is a thin delegate kept for compatibility, and the #3246 ratchet counts a new
+call to it as off the seam).
 
 Scope: the OSS tree only. ``src/backend/enterprise/**`` (a private submodule,
 unmounted on public CI and differing per clone) is deliberately excluded —
@@ -53,7 +56,7 @@ _EXCLUDE_DIRS = ("enterprise/",)
 # ---------------------------------------------------------------------------
 # The classified caller inventory. Adding a create call site REQUIRES an entry
 # here (platform-only, with the cadence bound that justifies it) OR routing the
-# emitter through create_bounded_alert. This dict is also the living caller
+# emitter through platform_alerts.observe (#3254). This dict is also the living caller
 # inventory the operating-room feature flow points at.
 # ---------------------------------------------------------------------------
 _ALLOWED_CALLERS = {
@@ -227,9 +230,9 @@ def test_every_emitter_call_site_is_classified():
         "_ALLOWED_CALLERS with a one-line platform-only justification (the "
         "emitter's volume must be platform-cadence-bound: edge-triggered, "
         "idempotent id, leader-locked, or operator-driven), OR — if an agent "
-        "can drive its volume — route it through "
-        "operator_queue_service.create_bounded_alert and register its type in "
-        "_BUDGETED_ALERT_TYPES:\n  "
+        "can drive its volume — report it through "
+        "services.platform_alerts.observe with a kind whose budgeted_type is "
+        "registered (and in _BUDGETED_ALERT_TYPES):\n  "
         + "\n  ".join(f"{p} :: {q}" for p, q in sorted(unlisted))
     )
 

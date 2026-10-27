@@ -283,6 +283,10 @@ async def _emit_gitignore_untracked_alert(
     try:
         from services import platform_alerts
 
+        # The change as the platform sees it. The probe's `removed` list is
+        # capped at _SWEEP_PROBE_LINE_CAP lines, so past the cap the key is the
+        # capped list plus the exact total: two Pushes past the cap that agree
+        # on both read as one change, and their alerts carry the same text.
         change = json.dumps(
             {"removed": sorted(sweep.removed), "removed_count": sweep.removed_count,
              "unignored": sorted(sweep.unignored)},

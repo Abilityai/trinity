@@ -70,6 +70,7 @@ def clock(monkeypatch):
             return c.now if tz is not None else c.now.replace(tzinfo=None)
 
     monkeypatch.setattr(pa, "datetime", _FrozenDatetime)
+    monkeypatch.setattr(dbq, "datetime", _FrozenDatetime)   # the ent#815 commit-lag check
     monkeypatch.setattr(helpers, "utc_now_iso", c.iso)
     monkeypatch.setattr(dbq, "utc_now_iso", c.iso)
     monkeypatch.setattr(portal, "utc_now_iso", c.iso)
@@ -653,6 +654,36 @@ def test_a_failed_flood_reading_is_retried_after_the_cooldown(seam, monkeypatch)
     assert len(_flood_rows(seam)) == 1 and calls["n"] == 2
 
 
+def test_a_failed_reread_is_retried_no_sooner_than_the_cooldown(seam, monkeypatch):
+    """#3130 I1 on R9's re-read: a re-read whose write fails releases the
+    episode, and the retry waits out the cooldown like any other attempt."""
+    from services import operator_queue_service as oqs
+
+    real = seam.db.create_platform_operator_queue_item
+    attempts = []
+
+    def _flaky(*a, **k):
+        attempts.append(seam.clock.now)
+        if len(attempts) == 2:                     # the 6-hourly re-read fails
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", _flaky)
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()                                   # the alert files
+    seam.clock.advance(hours=6, seconds=1)
+    loop.cycle()                                   # the re-read fails
+    assert len(attempts) == 2
+    seam.clock.advance(seconds=5)
+    loop.cycle()                                   # inside the cooldown: no retry yet
+    assert len(attempts) == 2
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+    loop.cycle()                                   # after it: the re-read lands
+    assert len(attempts) == 3
+    (row,) = _flood_rows(seam)
+    assert row["context"]["seen_count"] == 2
+
+
 def test_a_person_ending_of_the_flood_stands_through_the_reread_and_the_clear(seam, monkeypatch):
     loop = _sync_loop(monkeypatch)
     loop.cycle()
@@ -1021,3 +1052,117 @@ def test_the_clock_30_days_ahead(seam, notifications):
     (fresh,) = [r for r in rows(seam, status="pending") if r["type"] == "skill_not_found"]
     assert fresh["context"]["command"] == "/a-new-command"
     assert len(notifications) == sent + 1
+
+
+# ---------------------------------------------------------------------------
+# A person's ending that lands while a reading is in flight (D17)
+#
+# `observe` checks the snooze BEFORE the create's lock. Two moments let a
+# person's acknowledgement (through the real `ask_service.answer`) slip past
+# that check: (a) after `observe` read the pending row and before the locked
+# create runs — the locked find then misses; (b) after the locked find and
+# before `_touch`'s compare-and-set — the CAS then loses. Either way the create
+# falls through to an insert, and the seam must decide the snooze there, under
+# the lock, or the alert a person just ended is back at once.
+#
+# Moment (b) cannot be produced with a second connection in one process on
+# SQLite (BEGIN IMMEDIATE holds every other writer until COMMIT), so the
+# ending is landed first through `ask_service.answer` and both finds are handed
+# the row as it stood just before it — the snapshot a find taken at that
+# instant holds, which is exactly what the CAS then meets.
+# ---------------------------------------------------------------------------
+
+def _problem_report_case(seam, monkeypatch):
+    _rate(None)
+    return lambda: _rate("words typed after the operator looked")
+
+
+def _inbox_collision_case(seam, monkeypatch):
+    """`portal_inbox_collision` as registered on dev (a must-act kind, no
+    material keys), read through `observe` directly."""
+    from services import platform_alerts as pa
+
+    def read():
+        return pa.observe(AGENT, "portal_inbox_collision", "legacy_inbox",
+                          title="Two clients share one inbox folder",
+                          question="q", priority="high")
+    read()
+    return read
+
+
+def _flood_refresh_case(seam, monkeypatch):
+    """A hook kind read through `observe` in the R9 refresh shape: the flood
+    episode persists and is re-read 6 hours on."""
+    from services import operator_queue_service as oqs
+    svc = oqs.OperatorQueueSyncService()
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))
+
+    def read():
+        seam.clock.advance(hours=7)
+        asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))
+    return read
+
+
+_CASES = {"problem_report": _problem_report_case,
+          "inbox_collision": _inbox_collision_case,
+          "flood_refresh": _flood_refresh_case}
+
+
+def _end_before_the_locked_create(seam, monkeypatch, subject):
+    """(a): the ending lands between `observe`'s read and the locked create."""
+    real = seam.db.create_platform_operator_queue_item
+    done = []
+
+    def create(agent, item, **kw):
+        if kw.get("subject") == subject and not done:
+            done.append(person_ends(seam, seam.db.find_pending_operator_queue_by_subject(agent, subject)))
+        return real(agent, item, **kw)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", create)
+    return done
+
+
+def _end_between_the_find_and_the_cas(seam, monkeypatch, subject):
+    """(b): the ending lands after the locked find and before `_touch`'s CAS."""
+    from db.engine import get_engine
+
+    ops = seam.db._operator_queue_ops
+    real_find = ops._find_pending_by_subject
+    with get_engine().connect() as conn:
+        before = real_find(conn, AGENT, subject)
+    done = [person_ends(seam, seam.db.find_pending_operator_queue_by_subject(AGENT, subject))]
+    monkeypatch.setattr(ops, "_find_pending_by_subject",
+                        lambda conn, agent, subj: before if subj == subject
+                        else real_find(conn, agent, subj))
+    return done
+
+
+@pytest.mark.parametrize("case", sorted(_CASES))
+@pytest.mark.parametrize("moment", ["before_the_locked_create", "between_the_find_and_the_cas"])
+def test_a_person_ending_that_lands_mid_reading_snoozes_it(seam, monkeypatch, case, moment):
+    from services import platform_alerts as pa
+
+    outcomes = []
+    real_observe = pa.observe
+
+    def recording(*a, **k):
+        out = real_observe(*a, **k)
+        outcomes.append(out)
+        return out
+
+    monkeypatch.setattr(pa, "observe", recording)
+    read = _CASES[case](seam, monkeypatch)
+    (row,) = rows(seam)
+    subject = row["subject"]
+    inject = {"before_the_locked_create": _end_before_the_locked_create,
+              "between_the_find_and_the_cas": _end_between_the_find_and_the_cas}[moment]
+    ended = inject(seam, monkeypatch, subject)
+
+    read()
+
+    assert len(ended) == 1                                  # the ending did land mid-reading
+    assert outcomes[-1] == pa.OBSERVED_SNOOZED
+    (after,) = rows(seam)                                   # no new row
+    assert after["id"] == row["id"]
+    assert (after["status"], after["disposed_by"]) == ("acknowledged", "person")
+    assert after["question"] == row["question"]             # and nothing rewrote it

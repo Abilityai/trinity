@@ -4150,11 +4150,12 @@ class DatabaseManager:
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
 
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None, keep_text=False):
-        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+                                            max_pending_for_type=None, keep_text=False,
+                                            snooze_since=None, snoozed=None):
+        # Returns {"outcome": created|updated|snoozed|refused_at_budget, "row", "changed"}.
         return self._operator_queue_ops.create_platform_item(
             agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
-            keep_text=keep_text,
+            keep_text=keep_text, snooze_since=snooze_since, snoozed=snoozed,
         )
 
     def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):
