@@ -124,6 +124,9 @@ _PREFLIGHT_HEADROOM = 1.2
 _STALENESS_ALARM_DAYS = 3       # ≈ 3 missed dailies
 _STALENESS_REALARM_DAYS = 7     # while stale, re-alarm at most weekly
 
+# The outcomes that raise the edge alarm (BKUP-013a).
+_FAILURE_STATUSES = ("failed", "skipped_no_space")
+
 # Alarm plumbing (#3254): the two alarms are platform alert conditions
 # reported through services.platform_alerts — `db_backup_failure` (the edge
 # alarm) and `db_backup_stale` (the staleness re-alarm), two subjects keyed by
@@ -348,13 +351,22 @@ class DBBackupService:
         An ``ok`` is a verified recovery point, so it ends both alarm
         conditions as the platform (#3254). A person's ending is never
         overwritten: ``clear`` is a compare-and-set on a pending row.
+
+        Two workers run this job when the Redis lease fails open, and each
+        records its own outcome. The status is read back as the write's last
+        step, and the failure alarm follows the status that stands: an ``ok``
+        that another worker's failure has since replaced ends nothing, and a
+        failure that another worker's ``ok`` has since replaced files nothing.
+        So a durable ``failed`` always has its alarm, which the next run's edge
+        check relies on. The residual is a sibling's write landing between
+        that read-back and the alarm call, a few statements apart.
         """
         from database import db
         from utils.helpers import utc_now_iso
 
         now = utc_now_iso()
 
-        def _write() -> Optional[str]:
+        def _write() -> Tuple[Optional[str], Optional[str]]:
             prior = db.get_setting_value("db_backup_last_status", None)
             db.set_setting("db_backup_last_status", status)
             db.set_setting("db_backup_last_error", (error or "")[:_STDERR_CAP])
@@ -371,10 +383,10 @@ class DBBackupService:
                     db.set_setting("db_backup_last_size_bytes", str(size_bytes))
                 if duration_ms is not None:
                     db.set_setting("db_backup_last_duration_ms", str(duration_ms))
-            return prior
+            return prior, db.get_setting_value("db_backup_last_status", None)
 
         try:
-            prior = await asyncio.to_thread(_write)
+            prior, standing = await asyncio.to_thread(_write)
         except Exception:
             logger.exception("[DBBackup] could not persist status")
             return
@@ -383,9 +395,11 @@ class DBBackupService:
 
         backup_dir = self.backup_dir()  # both alarms' key
         if status == "ok":
-            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
+            if standing == "ok":
+                platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
+            # This success is fresh whatever a sibling recorded since.
             platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
-        elif status in ("failed", "skipped_no_space") and prior in (None, "ok"):
+        elif status in _FAILURE_STATUSES and prior in (None, "ok") and standing in _FAILURE_STATUSES:
             title = (
                 "Database backup skipped: not enough disk space"
                 if status == "skipped_no_space"

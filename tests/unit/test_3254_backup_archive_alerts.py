@@ -153,10 +153,14 @@ def outcomes(monkeypatch):
 def backup(db, clock, monkeypatch, tmp_path):
     """The real backup service on the real queue, with its `db_backup_*`
     status keys held in a dict (they are process-wide settings rows) and its
-    backup directory, which is the alarms' key, under tmp_path."""
+    backup directory, which is the alarms' key, under tmp_path.
+
+    `hooks[key]` runs once, right after the service writes that status key:
+    the seam a test uses to land the sibling worker's outcome in the middle of
+    this one's."""
     import services.db_backup_service as svc_mod
 
-    settings = {}
+    settings, hooks = {}, {}
     real_get, real_set = db.get_setting_value, db.set_setting
 
     def _get(key, default=None):
@@ -165,6 +169,9 @@ def backup(db, clock, monkeypatch, tmp_path):
     def _set(key, value):
         if key.startswith("db_backup_"):
             settings[key] = str(value)
+            hook = hooks.pop(key, None)
+            if hook is not None:
+                hook()
         else:
             real_set(key, value)
 
@@ -172,8 +179,8 @@ def backup(db, clock, monkeypatch, tmp_path):
     monkeypatch.setattr(db, "set_setting", _set)
     backup_dir = str(tmp_path / "backups")
     monkeypatch.setattr(svc_mod.DBBackupService, "backup_dir", staticmethod(lambda: backup_dir))
-    return SimpleNamespace(svc=svc_mod.DBBackupService(), settings=settings, dir=backup_dir,
-                           host=svc_mod.ALARM_AGENT_NAME)
+    return SimpleNamespace(svc=svc_mod.DBBackupService(), settings=settings, hooks=hooks,
+                           dir=backup_dir, host=svc_mod.ALARM_AGENT_NAME)
 
 
 @pytest.fixture
@@ -305,6 +312,38 @@ class TestBackupFailure:
         assert pa.derive_legacy_subject(legacy_id, legacy_ctx).subject == row["subject"]
         assert pa.derive_legacy_subject(row["request_id"], row["context"]) == \
             pa.LegacyMatch("db_backup_failure", row["subject"])
+
+
+class TestTwoWorkers:
+    """With Redis down the lease fails open and both uvicorn workers run the
+    nightly job. Each records its own outcome; the alarms must follow the
+    status that stands once both have written, never the one each wrote."""
+
+    @staticmethod
+    def _sibling(status, **kw):
+        import services.db_backup_service as svc_mod
+        sibling = svc_mod.DBBackupService()
+        return lambda: asyncio.run(sibling._record_outcome(status, trigger="scheduled", **kw))
+
+    def test_a_failure_recorded_after_this_workers_success_keeps_its_alarm(self, db, backup):
+        backup.settings["db_backup_last_status"] = "ok"
+        # The sibling's failure lands after this worker wrote `ok` and before
+        # it reached its clear: the sibling saw `ok` as the prior status, so it
+        # raised the edge alarm.
+        backup.hooks["db_backup_last_success_at"] = self._sibling("failed", error="ENOSPC on its tmp")
+        _ok(backup)
+        assert backup.settings["db_backup_last_status"] == "failed"
+        assert len(_pending(db, backup.host, "db_backup_failure")) == 1
+
+    def test_a_success_recorded_after_this_workers_failure_files_no_alarm(self, db, backup):
+        backup.settings["db_backup_last_status"] = "ok"
+        # The sibling's success lands after this worker wrote `failed` and
+        # before it filed the edge alarm.
+        backup.hooks["db_backup_last_trigger"] = self._sibling(
+            "ok", path=os.path.join(backup.dir, "trinity-backup-x.db"), size_bytes=1, duration_ms=1)
+        _record(backup, "failed", error="ENOSPC on its tmp")
+        assert backup.settings["db_backup_last_status"] == "ok"
+        assert _pending(db, backup.host) == []
 
 
 # ---------------------------------------------------------------------------
