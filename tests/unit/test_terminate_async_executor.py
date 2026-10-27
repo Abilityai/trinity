@@ -15,6 +15,7 @@ Module under test:
 from __future__ import annotations
 
 import asyncio
+import signal
 import subprocess
 import sys
 import threading
@@ -217,6 +218,64 @@ async def test_signal_error_keeps_the_generic_500_with_its_text(
     assert exc_info.value.detail == "denied"
     assert live_child.poll() is None, "control: nothing stopped the child"
     assert real_registry.is_execution_running("signal-error-exec")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
+    real_registry, live_child, monkeypatch
+):
+    """#3408 AC 4: a child that outlives SIGINT and SIGKILL is reported by name.
+
+    The status stays outside 2xx and is never 404 (either frees capacity for a
+    child that is still alive); only the detail changes, to a string that
+    starts with the reason. The entry stays registered and a second stop still
+    works, which is what the detail promises."""
+    from fastapi import HTTPException
+
+    real_registry.register("unconfirmed-exec", live_child)
+    sent = []
+    deliver = False
+
+    def signal_tree(process, sig, pgid=None):
+        sent.append(sig)
+        assert process is live_child, "only this test's own child is ever signalled"
+        if deliver:
+            process.send_signal(sig)  # pid only, never a process group
+
+    monkeypatch.setattr(registry_module, "_signal_process_tree", signal_tree)
+    # Both of the registry's waits really run and really time out (the signals
+    # are not delivered); cap them so the test does not sit out 5 s + 2 s.
+    real_wait = live_child.wait
+    monkeypatch.setattr(
+        live_child, "wait", lambda timeout=None: real_wait(timeout=0.05)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await terminate_execution("unconfirmed-exec")
+
+    assert sent == [signal.SIGINT, signal.SIGKILL], "control: both stops were tried"
+    assert live_child.poll() is None, "control: the child survived both waits"
+    status = exc_info.value.status_code
+    assert not 200 <= status < 300, "an unconfirmed stop must never read as stopped"
+    assert status != 404, "404 reads as gone and would free a live child's capacity"
+    assert status == 500
+    detail = exc_info.value.detail
+    assert isinstance(detail, str), "the UI renders the detail as text"
+    assert detail.startswith("termination_unconfirmed"), detail
+    assert "unconfirmed-exec" in detail
+    assert real_registry.is_execution_running("unconfirmed-exec")
+    assert live_child.pid in real_registry.active_execution_pids()
+    assert "unconfirmed-exec" not in real_registry.list_recently_completed_ids()
+
+    # The kept entry can be stopped again once the child does respond.
+    monkeypatch.setattr(live_child, "wait", real_wait)
+    deliver = True
+    result = await terminate_execution("unconfirmed-exec")
+
+    assert result == {"status": "terminated", "execution_id": "unconfirmed-exec"}
+    assert live_child.poll() is not None
+    assert not real_registry.is_execution_running("unconfirmed-exec")
 
 
 @pytest.mark.unit
