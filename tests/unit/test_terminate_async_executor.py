@@ -154,8 +154,10 @@ async def test_terminate_passes_through_already_finished():
 # ---------------------------------------------------------------------------
 # #3408: the router's failure replies, driven through a REAL ProcessRegistry.
 #
-# The backend reads a 2xx as stopped and a 404 as already gone; both free the
-# execution's capacity. Every other status reads as "not terminated". The
+# The backend reads a 2xx as stopped (the watchdog and the user-facing stop
+# then free the execution's capacity) and a 404 as already gone (the task
+# service returns True, so an A2A cancel answers "canceled"). Every other
+# status reads as "not terminated". The
 # tests below run the real registry.terminate() behind the real route, with a
 # real disposable child, in the style of test_runtime_process_ownership.py.
 # ---------------------------------------------------------------------------
@@ -177,15 +179,21 @@ def real_registry(monkeypatch):
 def live_child():
     """A real disposable child in its own session (so its group is never the
     test's). Each test replaces the registry's signal helper, so no signal is
-    ever sent to a process group."""
+    ever sent to a process group. The child restores SIGINT's default action
+    before it reports ready, so a delivered SIGINT ends it even when the test
+    runner was started with SIGINT ignored (an ignored signal stays ignored
+    across exec)."""
     process = subprocess.Popen(
-        [sys.executable, "-c", "import sys,time; sys.stdin.read(); time.sleep(60)"],
+        [sys.executable, "-c",
+         "import signal,sys,time; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+         "print('ready', flush=True); sys.stdin.read(); time.sleep(60)"],
         stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
     try:
+        assert process.stdout.readline() == b"ready\n", "control: the child set its SIGINT action"
         yield process
     finally:
         if process.poll() is None:
@@ -193,6 +201,7 @@ def live_child():
         # The class method, not the instance attribute a test may have capped.
         subprocess.Popen.wait(process, timeout=5)
         process.stdin.close()
+        process.stdout.close()
 
 
 @pytest.mark.unit
@@ -227,8 +236,8 @@ async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
 ):
     """#3408 AC 4: a child that outlives SIGINT and SIGKILL is reported by name.
 
-    The status stays outside 2xx and is never 404 (either frees capacity for a
-    child that is still alive); only the detail changes, to a string that
+    The status stays outside 2xx (read as stopped, which frees capacity) and is
+    never 404 (read as already gone); only the detail changes, to a string that
     starts with the reason. The entry stays registered, so termination can be
     retried, and a retry the child does respond to succeeds."""
     from fastapi import HTTPException
@@ -258,7 +267,7 @@ async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
     assert live_child.poll() is None, "control: the child survived both waits"
     status = exc_info.value.status_code
     assert not 200 <= status < 300, "an unconfirmed stop must never read as stopped"
-    assert status != 404, "404 reads as gone and would free a live child's capacity"
+    assert status != 404, "404 reads as already gone while the child is alive"
     assert status == 500
     detail = exc_info.value.detail
     assert isinstance(detail, str), "the UI renders the detail as text"
@@ -275,6 +284,8 @@ async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
 
     assert result == {"status": "terminated", "execution_id": "unconfirmed-exec"}
     assert live_child.poll() is not None
+    assert sent == [signal.SIGINT, signal.SIGKILL, signal.SIGINT], "the retry's SIGINT sufficed"
+    assert live_child.returncode == -signal.SIGINT, "the retry's SIGINT, not a SIGKILL, ended the child"
     assert not real_registry.is_execution_running("unconfirmed-exec")
 
 
