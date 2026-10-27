@@ -2582,6 +2582,7 @@ print(json.dumps(out))
 
             orphans = sorted(set(managed) - assigned)
             if not orphans:
+                self._clear_reconcile_refusal(agent_name)
                 return {"status": "clean", "removed": 0}
 
             cap = _reconcile_max_removals()
@@ -2602,6 +2603,7 @@ print(json.dumps(out))
             await self._audit_removal(
                 agent_name, orphans, result, trigger="reconcile"
             )
+            self._clear_reconcile_refusal(agent_name)
             return {
                 "status": "reconciled",
                 "removed": result.get("skills_removed", 0),
@@ -2624,7 +2626,19 @@ print(json.dumps(out))
         operator-visible state, and G-04's lesson is that the "show them what
         would be deleted" instinct is how that state starts carrying content it
         shouldn't. The names are already available via the skills API.
+
+        #3254: one platform condition per refused agent,
+        `skills_reconcile_refused:<agent>` on the `_skills-sync` host. A repeat
+        refusal (each start of that agent, whatever its orphan count) updates
+        the one pending row in place — latest count, seen count, last-seen
+        time — where the old `skills-reconcile-{agent}-{count}` id filed a new
+        row whenever the count moved. The kind's 30-day net lifetime is the
+        fallback for a clear lost to a crash; the clear itself is
+        `_clear_reconcile_refusal`. `observe` never raises and logs its own
+        failure, and nothing here retries: the next start re-reads it.
         """
+        from services import platform_alerts
+
         message = (
             f"[Skills] REFUSED reconcile for agent '{agent_name}': {orphan_count} "
             f"orphaned skill package(s) exceeds the per-agent cap of {cap}. Nothing "
@@ -2632,28 +2646,28 @@ print(json.dumps(out))
             f"in smaller batches or raise SKILLS_RECONCILE_MAX_REMOVALS (ent#236)."
         )
         logger.error(message)
-        try:
-            db.create_operator_queue_item(
-                RECONCILE_ALARM_AGENT_NAME,
-                {
-                    "id": f"skills-reconcile-{agent_name}-{orphan_count}",
-                    "type": "alert",
-                    "priority": "high",
-                    "title": f"Skill reconcile refused: {agent_name}",
-                    "question": message,
-                    "context": {
-                        "alert_type": "skills_reconcile_blast_radius",
-                        "agent_name": agent_name,
-                        "orphan_count": orphan_count,
-                        "cap": cap,
-                    },
-                    # Must stay NULL: `mark_operator_queue_expired` flips any
-                    # pending row past `expires_at` to `expired` every 5s.
-                    "expires_at": None,
-                },
-            )
-        except Exception as e:  # noqa: BLE001 — the alarm is decorative
-            logger.warning(f"could not raise skills reconcile alarm: {e}")
+        platform_alerts.observe(
+            RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused", agent_name,
+            priority="high",
+            title=f"Skill reconcile refused: {agent_name}",
+            question=message,
+            context={
+                "alert_type": "skills_reconcile_blast_radius",
+                "agent_name": agent_name,
+                "orphan_count": orphan_count,
+                "cap": cap,
+            },
+        )
+
+    def _clear_reconcile_refusal(self, agent_name: str) -> None:
+        """The agent's orphan set is back under the cap — a "clean" or
+        "reconciled" pass — so the refusal no longer holds and the platform
+        ends its row (#3254). Only those two outcomes call this: a skipped pass
+        (unreadable inventory, a busy lock, an error) looked at nothing and is
+        not evidence of recovery (R10). On an install that never raised the
+        alarm this is one indexed read and no write. Never raises."""
+        from services import platform_alerts
+        platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused", agent_name)
 
     def _record_adoption_failure(
         self, url: str, message: str, *, steady_state: bool = False

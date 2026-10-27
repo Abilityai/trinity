@@ -599,21 +599,50 @@ class TestReconcile:
 
     def test_refusal_alarm_carries_counts_not_skill_names(self, service):
         """G-04's lesson: durable operator-visible state must not accumulate
-        content just to be helpful."""
+        content just to be helpful.
+
+        #3254 re-pin (write-observation point + deadline): the alarm now reaches
+        the queue through the platform-alert seam, so the item is read where the
+        seam writes it (`create_platform_operator_queue_item` on the db the seam
+        resolves at call time), with the clock pinned. Its `expires_at` is the
+        kind's 30-day net deadline instead of NULL: `skills_reconcile_refused`
+        is `LIFETIME_NET`, and the platform ends the row on a clean or
+        reconciled pass. The counts-not-names assertions are unchanged.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from services import operator_resume_service, platform_alerts
+
+        pinned = datetime(2026, 10, 1, 9, 0, tzinfo=timezone.utc)
+
+        class _Pinned(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return pinned if tz is not None else pinned.replace(tzinfo=None)
+
         orphans = [f"secret-skill-{i}" for i in range(25)]
         captured = {}
 
-        def _create(agent_name, item):
-            captured["agent"] = agent_name
-            captured["item"] = item
+        def _create(agent_name, item, *, subject, max_pending_for_type=None):
+            captured.update(agent=agent_name, item=item, subject=subject)
+            return {"outcome": "created", "row": None, "changed": True}
 
-        with patch.object(skill_service_module.db, "create_operator_queue_item", _create):
+        seam_db = sys.modules["database"].db
+        with patch.object(platform_alerts, "datetime", _Pinned), \
+                patch.object(seam_db, "find_pending_operator_queue_by_subject",
+                             lambda agent, subject: None), \
+                patch.object(seam_db, "find_person_ended_operator_queue_by_subject",
+                             lambda agent, subject, since: None), \
+                patch.object(seam_db, "create_platform_operator_queue_item", _create), \
+                patch.object(operator_resume_service, "spawn_on_loop", lambda factory: None):
             service._announce_reconcile_refusal("a1", len(orphans), 10)
 
         blob = json.dumps(captured["item"])
         assert "secret-skill" not in blob
         assert captured["item"]["context"]["orphan_count"] == 25
-        assert captured["item"]["expires_at"] is None
+        assert captured["subject"] == "skills_reconcile_refused:a1"
+        deadline = datetime.fromisoformat(captured["item"]["expires_at"].replace("Z", "+00:00"))
+        assert deadline == pinned + timedelta(days=30)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
