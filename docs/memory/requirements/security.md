@@ -54,7 +54,7 @@
   - `credentials`: oauth_complete (`slack.py` OAuth callback)
 - **Event Categories** (actions tracked):
   - `AGENT_LIFECYCLE`: create, start, stop, delete, rename (recreate — no endpoint)
-  - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written only when work was ended — cancelled while queued or parked, or terminated in the container)
+  - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written only when this call ended the turn — a queued, parked or container cancel that won its CANCELLED CAS)
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set
   - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle, circuit_breaker_reset (#3180: written after both breakers are reset, whatever the breaker feature flags say)

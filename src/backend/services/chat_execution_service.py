@@ -3150,6 +3150,13 @@ async def _proxy_terminate_and_finalize(
         # the agent's own terminal already ran its own release, and firing an
         # emergency clear on a no-op branch was the part with no defensible
         # reading at all.
+        # #3180: set only by the CANCELLED CAS below, and the audit hook reads
+        # it rather than the agent's answer. The agent answers `terminated`
+        # again for a turn it accepted but has not started (its pending entry
+        # is kept), and two terminates of a live process may both get it, so
+        # only the call that wins the CAS ended the turn. Cost, accepted: a kill
+        # of a process whose row is already terminal writes no row.
+        cancel_won = False
         if result.get("status") == "terminated" and task_execution_id:
             try:
                 capacity = get_capacity_manager()
@@ -3203,7 +3210,7 @@ async def _proxy_terminate_and_finalize(
                 "actor_kind": actor_kind,
             },
         )
-        if result.get("status") == "terminated" and on_ended is not None:
+        if cancel_won and on_ended is not None:
             await on_ended("terminated")
         return result
 
@@ -3236,8 +3243,9 @@ async def terminate_execution(
 
     #3180: `on_ended`, when given, is awaited once with the arm's status, and
     only when THIS call ended work: the queued cancel won its CAS, the parked
-    cancel won its CAS, or the agent answered `terminated`. A repeat terminate of
-    a still-parked turn answers `cancelled_while_parked` again but does not call
+    cancel won its CAS, or the agent answered `terminated` and the CANCELLED CAS
+    that follows was won. A repeat terminate (of a still-parked turn, or one the
+    agent answers `terminated` again) gives the same answer but does not call
     it, and neither does `already_finished` or any error arm. The response is
     unchanged either way.
     """

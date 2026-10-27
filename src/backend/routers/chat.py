@@ -1010,9 +1010,9 @@ async def terminate_agent_execution(
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
     # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
     # #3180: a terminate had no audit row. The service calls this once, and
-    # only when THIS request ended work (queued or parked cancel that won its
-    # CAS, or the agent answered `terminated`); a repeat, `already_finished` and
-    # every error arm write nothing. `log` derives the key fields from the
+    # only when THIS request ended work (a queued, parked or container cancel
+    # that won its CANCELLED CAS); a repeat, `already_finished` and every error
+    # arm write nothing. `log` derives the key fields from the
     # principal (#2389), so a key's terminate names the key.
     async def _audit_terminate(outcome: str) -> None:
         await platform_audit_service.log(

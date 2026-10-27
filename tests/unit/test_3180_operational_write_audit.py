@@ -479,6 +479,75 @@ class TestExecutionTerminate:
         assert len(rows) == 1
         _assert_terminate_row(rows[0], key_id, eid, "terminated")
 
+    def test_a_repeated_container_terminate_writes_one_row_for_the_call_that_ended_it(
+        self, world
+    ):
+        """The agent answers `terminated` again for a turn it accepted but has
+        not started (its pending entry is kept), so its answer cannot say which
+        call ended the turn; only the call that wins the CANCELLED CAS did. A
+        repeat by another credential must not write a second row crediting
+        itself."""
+        eid = _seed("s2-3180-running-twice", "running")
+        repeat_headers, repeat_key_id = _owner_user_key()
+
+        first = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+        second = world.client.post(_terminate_path(eid), headers=repeat_headers)
+
+        assert first.status_code == second.status_code == 200, (first.text, second.text)
+        assert first.json()["status"] == second.json()["status"] == "terminated"
+        assert len(world.agent.calls) == 2
+        assert _status_of(eid) == "cancelled"
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], None, eid, "terminated")
+        assert rows[0]["mcp_key_id"] != repeat_key_id
+
+    def test_a_container_terminate_of_a_turn_already_terminal_writes_no_row(
+        self, world
+    ):
+        """The agent kills a process whose row is already FAILED (a watchdog's
+        terminal): the CANCELLED CAS loses and the FAILED terminal stands, so
+        this call did not end the turn and writes no row. This is the accepted
+        cost of gating the row on the CAS rather than on the agent's answer."""
+        eid = _seed("s2-3180-already-failed", "failed")
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "terminated"
+        assert len(world.agent.calls) == 1
+        assert _status_of(eid) == "failed"
+        assert _rows(TERMINATE) == []
+
+    def test_a_queued_cancel_that_loses_its_cas_writes_only_the_row_of_the_arm_that_ended_it(
+        self, world, monkeypatch
+    ):
+        """The backlog drain claims the turn between the queued arm's read and
+        its CAS (the real `claim_next_queued`, fired at that point): the queued
+        cancel loses, nothing was cancelled while queued, and the call falls
+        through to the container, whose terminate ends the turn. Exactly one
+        row, labelled `terminated`."""
+        eid = _seed("s2-3180-queued-raced", "queued")
+        real_cancel = db.cancel_queued_execution
+        claims: list = []
+
+        def _drain_claims_first(execution_id, *args, **kwargs):
+            claims.append(db.claim_next_queued(AGENT))
+            return real_cancel(execution_id, *args, **kwargs)
+
+        monkeypatch.setattr(db, "cancel_queued_execution", _drain_claims_first)
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == 200, res.text
+        assert [c["id"] for c in claims] == [eid]
+        assert res.json()["status"] == "terminated"
+        assert len(world.agent.calls) == 1
+        assert _status_of(eid) == "cancelled"
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], None, eid, "terminated")
+
     def test_a_parked_cancel_writes_one_row(self, world):
         """The third arm the service can take (#2433): the turn is parked in
         the backend agent-call queue of another worker. Never reaches the agent."""
@@ -504,7 +573,7 @@ class TestExecutionTerminate:
         """While the dispatcher stays parked, every terminate answers
         `cancelled_while_parked`, but only the call that wins the CANCELLED CAS
         ended anything. A repeat by another credential must not write a second
-        row crediting itself (found in review)."""
+        row crediting itself."""
         eid = _seed("s2-3180-parked-twice", "running")
         limiter = chat_router.chat_execution_service.agent_call_limiter
         world.redis.set(
