@@ -181,8 +181,10 @@ class TestSubject:
             pa.subject_for("circuit_dormant", bad)
 
     def test_event_kind_has_no_subject(self):
-        assert pa.subject_for("gitignore_untracked", None) is None
+        # #3254 re-pin: gitignore_untracked is a condition now (keyed by the
+        # change-set digest), so it no longer serves as the event example.
         assert pa.subject_for("workspace_problem_report", "anything") is None
+        assert pa.subject_for("gitignore_untracked", "a" * 32) == "gitignore_untracked:" + "a" * 32
 
     def test_unregistered_kind_raises(self):
         with pytest.raises(KeyError):

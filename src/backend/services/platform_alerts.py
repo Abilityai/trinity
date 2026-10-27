@@ -162,7 +162,7 @@ _BUILTIN_KINDS = (
     Kind("poison", "poison-", None, CLEARS_PERSON),
     Kind("portal_inbox_collision", "portal-inbox-collision-", None, CLEARS_PERSON),
     Kind("gitignore_untracked", "gitignore-untracked-", None, CLEARS_PERSON,
-         budgeted_type="gitignore_untracked", event=True),
+         budgeted_type="gitignore_untracked"),
     Kind("workspace_problem_report", "workspace-problem-", None, CLEARS_PERSON,
          budgeted_type="workspace_problem_report", event=True),
 )

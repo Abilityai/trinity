@@ -13,6 +13,8 @@ against a captured blob. `gitignore.py` reaches these through the module object
 (`gitignore_sweep.<name>`), never a from-import — a from-import freezes the
 binding and quietly detaches a test that patches the owning module.
 """
+import hashlib
+import json
 import re
 import logging
 from datetime import datetime
@@ -255,29 +257,38 @@ async def _emit_gitignore_untracked_alert(
     cycles whose damage surfaced two months later. `sync_health_service`'s
     `git_bloat` entry (#1595) is the precedent for exactly this reasoning.
 
-    Routed through the #1677 BUDGET seam, not `db.create_operator_queue_item`.
-    The sibling `git_bloat`/`sync_failing` emitters are direct creates because
-    their cadence is the 60-second platform poller's; this one fires from
-    `sync_to_github`, which an AGENT can drive — `git_sync` is an MCP tool an
-    agent-scoped key may call on itself. A repeated `git add -f <ignored>` +
-    sync loop yields a fresh `removed` set every time, and the id is timestamped
-    rather than idempotent, so nothing upstream bounds the volume. That is the
-    `_alert_skill_not_found` shape (#1410) the budget seam exists for, and
-    `gitignore-untracked-` joins `_RESERVED_ID_PREFIXES` so an agent cannot
-    pre-create the id and silently suppress its own alert via the sink's
-    `on_conflict_do_nothing` (the C2 class).
+    Reported through the platform-alert seam (#3254), budgeted there (#1677).
+    The sibling `git_bloat`/`sync_failing` emitters are paced by the 60-second
+    platform poller; this one fires from `sync_to_github`, which an AGENT can
+    drive — `git_sync` is an MCP tool an agent-scoped key may call on itself. A
+    repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set
+    every time, so nothing upstream bounds the volume. That is the
+    `_alert_skill_not_found` shape (#1410) the budget exists for, and
+    `gitignore-untracked-` is in `_RESERVED_ID_PREFIXES` so an agent cannot
+    pre-create a row of this kind (the C2 class).
 
-    Best-effort by construction: `create_bounded_alert` never raises and returns
-    False when refused, and this still swallows, because an alerting failure
-    must not fail a Push either.
+    A person must act on it, so it never expires and the platform never ends
+    it. It is keyed by the CHANGE: a digest of the canonical, direction-tagged
+    set of paths this Push untracked and newly un-ignored. A repeat of the same
+    set collapses onto one row; a different set is a different row, because a
+    later Push must never overwrite an earlier one's path list on a pending
+    must-act alert. The two directions are tagged apart because they need
+    different action.
+
+    Best-effort by construction: `observe` never raises, and an alerting
+    failure must not fail a Push either.
     """
     if not sweep.changed_tracking:
         return
     try:
-        from services.operator_queue_service import create_bounded_alert
-        from utils.helpers import utc_now_iso
+        from services import platform_alerts
 
-        now = utc_now_iso()
+        change = json.dumps(
+            {"removed": sorted(sweep.removed), "removed_count": sweep.removed_count,
+             "unignored": sorted(sweep.unignored)},
+            sort_keys=True, separators=(",", ":"),
+        )
+        key = hashlib.sha256(change.encode("utf-8")).hexdigest()[:32]
         shown = list(sweep.removed[:20])
         gained = list(sweep.unignored[:20])
 
@@ -317,30 +328,23 @@ async def _emit_gitignore_untracked_alert(
         # #1677 budget seam.
         priority = "high" if sweep.removed else "medium"
 
-        await create_bounded_alert(
-            agent_name,
-            {
-                "id": f"gitignore-untracked-{agent_name}-{now}",
-                "agent_name": agent_name,
-                "type": "gitignore_untracked",
-                "status": "pending",
-                "priority": priority,
-                "title": title,
-                "question": f"{agent_name}: this Push " + "; and it ".join(parts) + ".",
-                "context": {
-                    "removed_paths": shown,
-                    "removed_count": sweep.removed_count,
-                    "shadowed_negations": list(sweep.shadowed[:20]),
-                    "unignored_paths": gained,
-                    "unignored_count": len(sweep.unignored),
-                },
-                "created_at": now,
+        outcome = platform_alerts.observe(
+            agent_name, "gitignore_untracked", key,
+            title=title,
+            question=f"{agent_name}: this Push " + "; and it ".join(parts) + ".",
+            priority=priority,
+            context={
+                "removed_paths": shown,
+                "removed_count": sweep.removed_count,
+                "shadowed_negations": list(sweep.shadowed[:20]),
+                "unignored_paths": gained,
+                "unignored_count": len(sweep.unignored),
             },
         )
         logger.warning(
-            "gitignore_untracked emitted for %s: %s untracked (%s); "
+            "gitignore_untracked %s for %s: %s untracked (%s); "
             "%s newly un-ignored (%s)",
-            agent_name, sweep.removed_count, ", ".join(shown) or "-",
+            outcome, agent_name, sweep.removed_count, ", ".join(shown) or "-",
             len(sweep.unignored), ", ".join(gained) or "-",
         )
     except Exception:

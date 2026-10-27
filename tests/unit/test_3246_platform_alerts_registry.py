@@ -66,8 +66,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
     ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
-    ("services/git_service/gitignore_sweep.py", "_emit_gitignore_untracked_alert"):
-        ("gitignore-untracked-", _PR2),
     ("client_portal/service.py", "raise_problem_report"): ("workspace-problem-", _PR2),
 }
 

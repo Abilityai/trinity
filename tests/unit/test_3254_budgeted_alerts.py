@@ -820,15 +820,80 @@ def test_legacy_skill_rows_derive_the_subject_observe_uses():
 
 
 # ---------------------------------------------------------------------------
+# The gitignore sweep's alert (`gitignore_untracked`, must-act, D1)
+# ---------------------------------------------------------------------------
+
+def _push(removed=(), unignored=(), removed_total=0, agent=AGENT):
+    from services.git_service import gitignore_sweep as sw
+    sweep = sw.GitignoreSweep(removed=tuple(removed), unignored=tuple(unignored),
+                              removed_total=removed_total)
+    asyncio.run(sw._emit_gitignore_untracked_alert(agent, sweep))
+
+
+def _gitignore_rows(seam, status=None):
+    return [r for r in rows(seam, status=status) if r["type"] == "gitignore_untracked"]
+
+
+def test_a_repeated_change_set_is_one_row_that_never_expires(seam):
+    """The seam properties of a must-act kind: the subject is the change-set
+    digest, a repeat bumps `seen_count` and `last_seen_at`, and the deadline
+    stays NULL."""
+    _push(removed=("b.key", "a.env"))
+    (first,) = _gitignore_rows(seam)
+    assert first["subject"].startswith("gitignore_untracked:")
+    assert len(first["subject"].split(":", 1)[1]) == 32
+    assert first["expires_at"] is None and first["priority"] == "high"
+    assert first["context"]["removed_paths"] == ["b.key", "a.env"]
+
+    seam.clock.advance(hours=1)
+    _push(removed=("a.env", "b.key"))                  # the same set, in another order
+    (again,) = _gitignore_rows(seam)
+    assert again["id"] == first["id"] and again["context"]["seen_count"] == 2
+    assert again["last_seen_at"] > first["last_seen_at"]
+    assert again["expires_at"] is None
+
+
+def test_a_different_change_set_is_a_different_row(seam):
+    """A later Push never overwrites an earlier Push's path list on a pending
+    must-act alert (#2529: THE surface that outlives the session)."""
+    _push(removed=("a.env",))
+    _push(removed=("a.env", "c.pem"))
+    _push(removed=("a.env",), removed_total=2500)       # a capped list, another total
+    paths = sorted(tuple(r["context"]["removed_paths"]) for r in _gitignore_rows(seam))
+    assert paths == [("a.env",), ("a.env",), ("a.env", "c.pem")]
+    assert len({r["subject"] for r in _gitignore_rows(seam)}) == 3
+
+
+def test_the_direction_tag_keeps_an_untracked_path_apart_from_an_unignored_one(seam):
+    _push(removed=("secret.env",))
+    _push(unignored=("secret.env",))
+    by_direction = {(r["context"]["removed_count"], r["context"]["unignored_count"]): r
+                    for r in _gitignore_rows(seam)}
+    assert set(by_direction) == {(1, 0), (0, 1)}
+    assert by_direction[(1, 0)]["subject"] != by_direction[(0, 1)]["subject"]
+    assert by_direction[(0, 1)]["priority"] == "medium"
+
+
+def test_a_person_ending_of_a_change_set_stands(seam):
+    _push(removed=("a.env",))
+    person_ends(seam, _gitignore_rows(seam)[0])
+    seam.clock.advance(days=2)
+    _push(removed=("a.env",))
+    assert [r["status"] for r in _gitignore_rows(seam)] == ["acknowledged"]
+
+
+# ---------------------------------------------------------------------------
 # The other shape: the clock 30 days ahead
 # ---------------------------------------------------------------------------
 
 def test_the_clock_30_days_ahead(seam, notifications):
-    """A full `skill_not_found` budget frees itself: its rows pass their 14-day
-    lifetime and the real expiry sweep ends them, so a new distinct command
-    files (with its notification)."""
+    """A must-act gitignore row is still pending after the real expiry sweep;
+    a full `skill_not_found` budget frees itself: its rows pass their 14-day
+    lifetime and the sweep ends them, so a new distinct command files (with
+    its notification)."""
     from services import operator_queue_service as oqs
 
+    _push(removed=("a.env",))
     for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
         _missing_skill(seam, f"/cmd-{i}")
     _missing_skill(seam, "/refused-today")
@@ -839,8 +904,11 @@ def test_the_clock_30_days_ahead(seam, notifications):
     skill_rows = [r for r in rows(seam) if r["type"] == "skill_not_found"]
     assert {r["status"] for r in skill_rows} == {"expired"}
 
+    (must_act,) = _gitignore_rows(seam)
+    assert must_act["status"] == "pending" and must_act["expires_at"] is None
+
     sent = len(notifications)
     _missing_skill(seam, "/a-new-command")
-    (fresh,) = rows(seam, status="pending")
+    (fresh,) = [r for r in rows(seam, status="pending") if r["type"] == "skill_not_found"]
     assert fresh["context"]["command"] == "/a-new-command"
     assert len(notifications) == sent + 1
