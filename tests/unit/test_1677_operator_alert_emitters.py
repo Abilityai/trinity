@@ -92,9 +92,6 @@ _ALLOWED_CALLERS = {
         "day bucketed id, no agent input reaches it — a SEPARATE id family "
         "because the two need different operator action and sharing one would "
         "let whichever fired first suppress the other all day",
-    ("services/lease_reaper_service.py", "_create_park_item"):
-        "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
-        "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
     ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
