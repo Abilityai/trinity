@@ -17,11 +17,14 @@ and a static check cannot tell those apart.
 """
 from __future__ import annotations
 
+import re
 import stat
 import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[2]
 _START = _ROOT / "scripts" / "deploy" / "start.sh"
@@ -107,7 +110,7 @@ def test_unset_renders_no_rule_at_all() -> None:
 # The rendered file
 # ---------------------------------------------------------------------------
 
-def _render(cidrs: str, provenance: str = "do-marketplace") -> str:
+def _render(cidrs: str, provenance: str = "do-marketplace", probe_ok: bool = False) -> str:
     """Run the real renderer against a temp path, with the host stubbed out.
 
     The private-network block is built in one heredoc and interpolated into
@@ -126,16 +129,19 @@ def _render(cidrs: str, provenance: str = "do-marketplace") -> str:
         harness = (
             body.replace("/etc/caddy/Caddyfile", str(out))
             + "\n"
-            + "env_value() { printf '%s' \"$CIDRS\"; }\n"
+            + "env_value() { [ \"$1\" = PRIVATE_NETWORK_CIDRS ] && printf '%s' \"$CIDRS\"; return 0; }\n"
             + "systemctl() { :; }\n"
             + "caddy() { :; }\n"
+            # ent#873: the live listener probe, made an explicit input.
+            + "provision_proxy_listener_ready() { return $PROBE_RC; }\n"
             + 'provision_caddyfile "203.0.113.10" "$PROV"\n'
         )
         proc = subprocess.run(
             ["bash", "-c", harness],
             capture_output=True,
             text=True,
-            env={"PATH": "/usr/bin:/bin", "CIDRS": cidrs, "PROV": provenance},
+            env={"PATH": "/usr/bin:/bin", "CIDRS": cidrs, "PROV": provenance,
+                 "PROBE_RC": "0" if probe_ok else "1"},
         )
         assert proc.returncode == 0, proc.stderr
         return out.read_text()
@@ -148,6 +154,28 @@ def test_the_private_block_renders_as_valid_looking_config() -> None:
     # The fallback still redirects everyone else, inside the same site block.
     assert "redir https://{host}{uri} 308" in rendered
     # Braces balance — the nested heredoc is where that would break.
+    assert rendered.count("{") == rendered.count("}"), rendered
+
+
+@pytest.mark.parametrize("probe_ok", [True, False], ids=["protected-listener", "ordinary-listener"])
+def test_the_private_block_proxies_to_the_listener_the_probe_chose(probe_ok) -> None:
+    """trinity-enterprise#873: a VPN visitor's address must reach nginx exactly
+    like a public visitor's, so the private handle gets the same upstream and
+    transport as the public sites — and the same fallback."""
+    rendered = _render("100.64.0.0/10", probe_ok=probe_ok)
+    private = rendered[rendered.index("handle @private {"):]
+    private = private[: private.index("\n    }\n")]
+    if probe_ok:
+        assert "reverse_proxy 127.0.0.1:18082 {" in private
+        assert "proxy_protocol v2" in private and "keepalive off" in private
+    else:
+        assert "reverse_proxy 127.0.0.1:8081 {\n            flush_interval -1\n        }" in private
+        assert "proxy_protocol" not in rendered
+    # The source-address rule and the redirect for other sources are kept. The
+    # redirect's status is #3833's to choose (`permanent` before it, `308`
+    # after), so either spelling is accepted; this test owns only the upstream.
+    assert "@private remote_ip 100.64.0.0/10" in rendered
+    assert re.search(r"redir https://\{host\}\{uri\} (permanent|308)\n", rendered), rendered
     assert rendered.count("{") == rendered.count("}"), rendered
 
 
