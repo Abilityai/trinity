@@ -506,8 +506,10 @@
     baked-in MCP key missing or revoked runs the #1854 self-heal, which mints
     *that agent's own* key into its container and prunes that agent's superseded
     agent keys. No credential reaches the caller. Consequence: an agent stopped
-    and key-revoked for containment can be started again by this key; to contain
-    an agent, delete it or take it out of the key owner's reach.
+    and key-revoked for containment can be started again by this key. Taking the
+    agent out of the key owner's reach is not a remedy (the key works only while
+    its owner is an admin, and an admin reaches every agent); to contain an
+    agent, delete it, revoke the `ops_write` keys, or demote their owner.
   - **Dies with its owner, on every route the resolver protects**: demotion
     below `admin` refuses the key at the fence (`ops_write_owner_not_admin`),
     suspension refuses it one line earlier (401), and a password change with
@@ -525,9 +527,12 @@
     heartbeat, result callback or pull seam (the agent's own key only).
     `/api/mcp/validate` reports the key as valid: it is introspection and grants
     nothing.
-  - **Attribution**: every audit row the key causes carries its `mcp_key_id` and
-    `mcp_scope=ops_write`, derived from the principal (#2389); start and stop
-    already write one.
+  - **Attribution**: every audit row written as the caller carries the key's
+    `mcp_key_id` and `mcp_scope=ops_write`, derived from the principal (#2389);
+    start and stop already write one. One row the key causes is not written as
+    the caller: the #1854 self-heal a start may run (a key minted, the agent's
+    superseded keys deleted) writes its `agent_key_self_heal` row as `system`,
+    without the key, so a filter on the key's `mcp_key_id` does not find it.
   - **Survives enforced two-factor** for the same reason `ops` does: key
     validation never passes through the second-factor flow.
   - Guards: `tests/unit/test_3180_ops_write_scope.py` (pass paths, target policy,
