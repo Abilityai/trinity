@@ -310,6 +310,11 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 "human operator through the tags API"
             )
 
+    # The system name is a tag writer too: `configure_tags` applies it to every
+    # agent the manifest creates, so it meets the same reserved-prefix rule as
+    # the manifest's own tags (trinity-enterprise#719).
+    _reject_org_tag(manifest.name, "System name")
+
     # Validate default_tags
     if manifest.default_tags:
         for tag in manifest.default_tags:

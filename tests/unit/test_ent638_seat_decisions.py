@@ -527,7 +527,10 @@ class TestPortalRoutes:
         return pr, calls
 
     def _principal(self):
-        return SimpleNamespace(email=SEAT, is_platform=False)
+        # What the door resolves a Workspace session to: a person, not a platform
+        # principal (`portal_auth.get_portal_principal`).
+        from client_portal.portal_auth import PortalPrincipal
+        return PortalPrincipal(SEAT, is_platform=False, is_person=True)
 
     def test_record_is_roster_gated_and_a_refusal_is_the_receipt_as_http(self, wired, monkeypatch):
         pr, calls = wired

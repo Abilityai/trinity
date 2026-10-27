@@ -1112,6 +1112,36 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
 DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#719: a room's moderator acts. Same principal as the
+    # picker below (`get_room_principal`), so no dependency gate fits. The check
+    # is `_require_moderator`: membership first (the uniform 404 for a
+    # non-member; the admin account sees every room), then a caller acting as
+    # a platform account (kind `user`) must be a PERSON on both of its branches
+    # (the admin bypass and the `user` moderator row), else 403 `not_a_person`;
+    # a Workspace client keeps its own moderator row; an agent key is never a
+    # moderator (403 `not_moderator`).
+    "shared_sessions/router.py::close_room": (
+        "POST /api/rooms/{room_id}/close",
+        "shared_sessions.service.close_room -> _require_moderator",
+        "tests/unit/test_ent719_room_moderator_person.py::test_the_system_key_cannot_moderate_a_room_its_admin_owner_created"),
+    "shared_sessions/router.py::add_participant": (
+        "POST /api/rooms/{room_id}/participants",
+        "shared_sessions.service.add_participant -> _require_moderator",
+        "tests/unit/test_ent719_room_moderator_person.py::test_the_system_key_cannot_moderate_a_room_its_admin_owner_created"),
+    "shared_sessions/router.py::remove_participant": (
+        "DELETE /api/rooms/{room_id}/participants/{agent_name}",
+        "shared_sessions.service.remove_participant -> _require_moderator",
+        "tests/unit/test_ent719_room_moderator_person.py::test_the_system_key_cannot_moderate_a_room_its_admin_owner_created"),
+    # trinity-enterprise#719: a room post. Its principal is `get_room_principal`
+    # (a platform user, an agent key or a Workspace client), so no dependency
+    # gate fits. The router checks membership before the idempotency claim, so
+    # a non-member gets the uniform 404 on every answer to a well-formed post, a
+    # stored replay and the in-flight 409 included (a malformed body gets the
+    # same 422 from request validation, member or not).
+    "shared_sessions/router.py::post_message": (
+        "POST /api/rooms/{room_id}/messages",
+        "shared_sessions.service._require_membership, before idempotency_service.begin",
+        "tests/unit/test_ent719_room_post_membership_first.py::test_a_non_member_never_gets_a_stored_replay"),
     # trinity-enterprise#631: the people picker of a room. Its principal is
     # `get_room_principal` (a platform user OR a Workspace client), so no
     # dependency gate fits; the refusal of agents, system keys and external
@@ -1134,7 +1164,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 330
+FROZEN_BASELINE_COUNT = 326
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

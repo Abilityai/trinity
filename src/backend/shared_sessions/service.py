@@ -344,6 +344,24 @@ def _require_membership(room_id: str, current_user) -> dict:
     return room
 
 
+def _is_room_person(current_user) -> bool:
+    """May this caller change who is in a room? Only a PERSON may
+    (trinity-enterprise#719) — by moderating it or by recruiting with a mention.
+
+    A Workspace client is a verified email, a person by construction. A
+    platform principal is one only as `is_person_principal` says: a JWT session
+    or the person's own `user` key. A key resolves to its owner's account, role
+    and participant identity alike, so the participant kind alone cannot say.
+    An agent never is.
+    """
+    from dependencies import is_person_principal
+
+    kind, _identity = _caller(current_user)
+    if kind == WORKSPACE_KIND:
+        return True
+    return kind == "user" and is_person_principal(current_user)
+
+
 def _require_moderator(room_id: str, current_user) -> dict:
     """Lifecycle + membership mutations (close, add/remove participant) are
     restricted to a human **moderator** (the room creator) or a platform admin.
@@ -354,20 +372,34 @@ def _require_moderator(room_id: str, current_user) -> dict:
     managing the room (ent#220). Membership is checked first, so a non-member
     still gets the uniform 404; a non-moderator *member* (an agent) gets a 403,
     which discloses nothing it can't already see (access-first, Invariant #8).
+
+    trinity-enterprise#719: both branches below ask `_is_room_person` — the
+    admin bypass and the moderator row alike — so a platform principal
+    moderates only as a person. A caller that acts as a platform account
+    (participant kind `user`) but is not a person (the system key, an unknown
+    key scope, the event loopback) gets 403 `not_a_person`, the rename's
+    shape: it may resolve to the very account that holds the moderator row, so
+    `not_moderator` would name the wrong rule. Past membership, that code
+    depends only on the principal, never on the roster. An agent key acts as
+    its agent, not as the account, and keeps `not_moderator`. The admin
+    account sees every room, so its kind-`user` non-person keys get the 403 on
+    any room that exists and the uniform 404 on one that does not.
     """
     room = _require_membership(room_id, current_user)
     kind, identity = _caller(current_user)
-    if getattr(current_user, "role", None) == "admin" and kind == "user":
+    person = _is_room_person(current_user)
+    if person and kind == "user" and getattr(current_user, "role", None) == "admin":
         return room
     participant = db.get_participant(room_id, kind, identity)
     # ent#362: a workspace client moderates the room it created — otherwise it
     # could not add an agent mid-chat (ent#361 AC#3) or close its own room.
-    # The kind check still excludes AGENTS, which is what this gate is for: an
+    # The person check still excludes AGENTS, which is what this gate is for: an
     # agent is reachable via its own MCP key and is a prompt-injection surface,
     # so it must never rewrite a roster (ent#220).
-    if (kind in ("user", WORKSPACE_KIND) and participant
-            and participant.get("role") == "moderator"):
+    if person and participant and participant.get("role") == "moderator":
         return room
+    if kind == "user" and not person:
+        raise RoomError(403, "not_a_person", "Only a person can manage this room")
     raise RoomError(403, "not_moderator", "Only a room moderator can manage this room")
 
 
@@ -1267,9 +1299,13 @@ async def post_message(current_user, room_id: str, content: str,
     # every agent its operator can reach. A human's mention is a decision; an
     # agent's is text it generated.
     if not is_agent_reply:
-        joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
-        if joined:
-            participants = db.list_participants(room_id)
+        # trinity-enterprise#719: `is_agent_reply` covers only the engine's own
+        # post of a turn. An agent posting through the API, or any other
+        # platform principal that is not a person, recruits nobody either.
+        if _is_room_person(current_user):
+            joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
+            if joined:
+                participants = db.list_participants(room_id)
 
     mentions = resolve_mentions(content, participants)
 

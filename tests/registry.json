@@ -1,6 +1,59 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_org_tags_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "The org-chart tags (dept-*, reports-to-*) take a person on the three tag-write routes, through the real tags router: the system key, agent keys (own, and on an agent it spawned) and every non-person scope are refused by the guard; a session and a user key pass; plain tags and the PUT delta rule still work on the own key and the system key; an agent with no tags; through the real systems router, a system name under a reserved prefix is refused for a person, the system key and an agent key holding agents.manage alike (dry run and deploy), while a plain system name still deploys and tags its agents."
+    },
+    {
+      "file": "unit/test_ent719_workspace_grants_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "client-portal",
+        "security",
+        "unit"
+      ],
+      "description": "The Workspace's readiness flip, canvas pin and seat-decision record and actions take a person, through the real portal router and door: the system key and every non-person scope get 403 person_required before the roster (recording for another seat included); agent keys stay refused at the door; the owner on a session or a user key passes; a shared person and a Workspace client keep the owner-only, canvas-manager and own-seat answers; fresh install (never flipped, no decisions)."
+    },
+    {
+      "file": "unit/test_ent719_room_post_membership_first.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "POST /api/rooms/{room_id}/messages decides membership before the Idempotency-Key claim, through the real rooms router, service and idempotency service on a temp DB: a non-member (an unseated agent key of the same owner, another owner's agent key, an unseated agent key whose owner is an admin and which carries that role, a person's session, a person's user key, a Workspace client) gets the same 404 a missing room gets on a stored replay, on the in-flight 409, with a fresh key and with none, and never reaches the key claim (a spy on the real claim); a malformed body gets the same 422 member or not; a member's replay and 409 are unchanged; the system key, which holds no seat, is still admitted by the admin view (pinned as today's answer); a real loopback JWT is refused by the entry fence. Edge case: clock pinned, then 30 days ahead past the key window, a non-member is still refused and the member's repeat is a new post. Mutation: the check reverted (dev order) or moved to just after begin() turns 19 of 31 red."
+    },
+    {
+      "file": "unit/test_ent719_room_moderator_person.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "A room's moderator acts (close, add and remove an agent participant) take a person. Through the real rooms router with signed JWTs, a real Workspace session token and MCP keys whose row lookup alone is stubbed; two principals that no credential can present (a vouched loopback and one with no mcp_scope) are handed in by a dependency override of the door, and the Workspace cases stub the portal's block check and roster lookup. The system-scoped key gets 403 not_a_person on all three, both on a room its admin owner created (the account holds the moderator row) and on a room it holds no seat in, and the uniform 404 only on a room that does not exist; an unknown key scope, the vouched loopback and the principal with no mcp_scope get not_a_person too; a member agent gets 403 not_moderator and a non-member agent the uniform 404; connector, ops and portal-delegate keys and a real unvouched loopback JWT are refused at the door; a person admin (session and own user key), the room's creator as a person (session and own user key) and a Workspace moderator still moderate. Fresh install (one admin with no email, its own two agents): the system key, which resolves by username, cannot moderate a room the admin or the key started, and the signed-in admin can. The same roster grant through a post: a mention of an agent outside the room recruits it only for a person (session, own user key, or a Workspace client with the agent on its roster), never for the system key or an agent key that can reach the agent, nor for a woken agent's reply posted under the waking person's principal; the post still lands. With the fix reverted, 19 fail and 28 pass (kept-path guards, and refusals dev already makes). Mutation-proven (admin branch without the person check: 17 red; moderator-row branch without it: 14 red; the not_a_person refusal removed: 17 red; the mention recruit without the person check: 2 red; the recruit without its agent-reply check: 1 red; the person predicate refusing everyone: 10 red; a DELEGATED entry dropped: census rule 1 red); needs no Docker."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
