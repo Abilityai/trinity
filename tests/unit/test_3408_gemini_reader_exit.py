@@ -33,8 +33,11 @@ pytestmark = pytest.mark.unit
 
 _REAL_POPEN = subprocess.Popen
 
-# Reads the prompt, then prints one line only after the reader has started its
-# clock, so a zero-second budget has always elapsed when the line arrives.
+# Reads the prompt, waits 0.1 s, prints one line and stays alive. Run with a
+# zero-second budget, so the reader's per-line check finds the budget spent on
+# that first line. The delay does not order anything: if the reader starts
+# late, the elapsed time is only the line's read, which on a microsecond wall
+# clock still exceeds zero.
 _LINE_AFTER_THE_BUDGET = (
     "import sys, time; sys.stdin.read(); time.sleep(0.1); "
     "print('{\"type\": \"init\", \"session_id\": \"late\"}', flush=True); "
