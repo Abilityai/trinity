@@ -209,7 +209,16 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
     }
   });
 
+  /**
+   * Every in-process session opened below. FastMCP's `stop()` does not close a
+   * `connect()`ed session and its ping interval keeps the process alive, so a
+   * test that fails before its own close would hang the run instead of
+   * reporting red: close them all here as well.
+   */
+  const openInProcess: Array<() => Promise<void>> = [];
+
   after(async () => {
+    for (const close of openInProcess.splice(0)) await close().catch(() => {});
     await mcpServer?.stop();
     await new Promise<void>((r) => backend.close(() => r()));
   });
@@ -280,10 +289,14 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
     ]);
     // The caller owns a connect()ed session: close it, or its ping interval
     // keeps the process alive after the last test.
+    let closed = false;
     const close = async () => {
+      if (closed) return;
+      closed = true;
       await client.close();
       await serverSession.close();
     };
+    openInProcess.push(close);
     return { client, close, call: callerFor(client, auth.keyName) };
   };
 
@@ -522,15 +535,18 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
     it("a session with no API key gets a RETURNED refusal from the registered tool, and nothing reaches the backend", async () => {
       reset();
       const s = await inProcess({ scope: "user", userId: "owner", keyName: "keyless-695" });
-      const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST });
+      try {
+        const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST });
 
-      assert.equal(isError, false, `the registered tool threw: ${text}`);
-      const out = parsed(text);
-      assert.equal(out.success, false);
-      assert.match(out.error, /MCP API key authentication required/);
-      assert.deepEqual(requests, [], "no backend request may be made without the caller's key");
-      assert.equal(row.details.denied, undefined);
-      await s.close();
+        assert.equal(isError, false, `the registered tool threw: ${text}`);
+        const out = parsed(text);
+        assert.equal(out.success, false);
+        assert.match(out.error, /MCP API key authentication required/);
+        assert.deepEqual(requests, [], "no backend request may be made without the caller's key");
+        assert.equal(row.details.denied, undefined);
+      } finally {
+        await s.close();
+      }
     });
 
     it("a dropped connection (no HTTP status) through the registered HTTP tool is still an object", async () => {
@@ -602,13 +618,19 @@ describe("ent#695 the other shape: another HOSTNAME (https, non-default port), r
       (server as any).connect(serverTransport, { scope: "user", userId: "u2", keyName: "kb", mcpApiKey: "trinity_mcp_caller_b" }),
       client.connect(clientTransport),
     ]);
-    const r: any = await client.callTool({ name: "apply_system", arguments: { manifest: MANIFEST } });
-    // The audit POST is fire-and-forget: wait for it so it never lands on the real fetch.
-    for (const deadline = Date.now() + 5000; audited === 0 && Date.now() < deadline; ) {
-      await new Promise((res) => setTimeout(res, 25));
+    let r: any;
+    try {
+      r = await client.callTool({ name: "apply_system", arguments: { manifest: MANIFEST } });
+      // The audit POST is fire-and-forget: wait for it so it never lands on the real fetch.
+      for (const deadline = Date.now() + 5000; audited === 0 && Date.now() < deadline; ) {
+        await new Promise((res) => setTimeout(res, 25));
+      }
+    } finally {
+      // The caller owns a connect()ed session; its ping interval would keep the
+      // process alive (a red run would hang instead of reporting).
+      await client.close();
+      await serverSession.close();
     }
-    await client.close();
-    await serverSession.close(); // the caller owns a connect()ed session (its ping interval)
 
     assert.equal(r.isError === true, false);
     assert.equal(r.content.map((c: any) => c.text).join("\n"), JSON.stringify(PLAN, null, 2));
