@@ -26,10 +26,10 @@ Pinned here, for `db_backup_failure`, `db_backup_stale` and
   day 30; the one-off failure reading has expired; a person's ending of the
   stale row silences one weekly re-alarm, not more.
 
-The clock is frozen, at a pinned date, for every module the asserted path reads
-it from (the seam, the DB layer, the backup service, `utils.helpers`), by
-patching each running function's own globals. No literal is compared to the
-real clock.
+The clock is frozen, at a pinned date in the past (see DAY0), for every module
+the asserted path reads it from (the seam, the DB layer, the backup service,
+`utils.helpers`), by patching each running function's own globals. No literal is
+compared to the real clock.
 """
 import asyncio
 import os
@@ -45,8 +45,13 @@ from services import platform_alerts as pa
 
 pytestmark = pytest.mark.unit
 
-# A pinned Monday, 03:30 UTC: the nightly backup's default slot.
-DAY0 = datetime(2026, 11, 2, 3, 30, tzinfo=timezone.utc)
+# A pinned Monday, 03:30 UTC: the nightly backup's default slot. Pinned in
+# the past on purpose. The 30-day tests run the queue's real expiry sweep,
+# which is fleet-wide over the unit tier's shared per-process DB. A sweep at a
+# frozen instant before the real clock can only end rows whose deadline is
+# already past in real time, which any other test's real-time sweep would end
+# too, so it never ends another test's live row.
+DAY0 = datetime(2026, 1, 5, 3, 30, tzinfo=timezone.utc)
 _REAL_DATETIME = datetime
 
 
