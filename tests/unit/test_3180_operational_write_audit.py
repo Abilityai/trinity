@@ -36,6 +36,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import fakeredis
+import httpx
 import pytest
 
 os.environ.setdefault("REDIS_URL", "redis://u:p@localhost:6379")
@@ -391,3 +392,185 @@ class TestCircuitBreakerReset:
             "prior_transport_state": "open",
             "prior_dispatch_state": "closed",
         }
+
+
+# =========================================================================== #
+# Execution terminate
+# =========================================================================== #
+
+
+def _seed(execution_id: str, status: str, agent: str = AGENT) -> str:
+    return seed_execution(
+        "__manual__",
+        agent,
+        exec_id=execution_id,
+        status=status,
+        started_at=STARTED_AT,
+        duration_ms=None,
+        cost=None,
+        triggered_by="manual",
+    )
+
+
+def _status_of(execution_id: str) -> str:
+    return db.get_execution(execution_id).status
+
+
+def _owner_session() -> tuple[dict, None]:
+    return _session(OWNER), None
+
+
+def _owner_user_key() -> tuple[dict, str]:
+    return _user_key(OWNER, OWNER_KEY_NAME)
+
+
+CALLERS = [
+    pytest.param(_owner_session, id="owner-session"),
+    pytest.param(_owner_user_key, id="owner-user-key"),
+]
+
+
+def _assert_terminate_row(row: dict, key_id, execution_id: str, outcome: str) -> None:
+    if key_id is None:
+        _assert_person_row(row, OWNER, OWNER_EMAIL)
+    else:
+        _assert_key_row(row, OWNER, OWNER_EMAIL, key_id, OWNER_KEY_NAME)
+    assert row["event_type"] == "execution"
+    assert row["source"] == "api"
+    assert (row["target_type"], row["target_id"]) == ("agent", AGENT)
+    assert json.loads(row["details"]) == {
+        "execution_id": execution_id,
+        "task_execution_id": execution_id,
+        "status": outcome,
+    }
+
+
+class TestExecutionTerminate:
+    @pytest.mark.parametrize("caller", CALLERS)
+    def test_a_queued_cancel_writes_one_row(self, world, caller):
+        eid = _seed("s2-3180-queued", "queued")
+        headers, key_id = caller()
+
+        res = world.client.post(_terminate_path(eid), headers=headers)
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "cancelled_while_queued"
+        assert _status_of(eid) == "cancelled"
+        assert world.agent.calls == []  # the queued arm never asks the agent
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], key_id, eid, "cancelled_while_queued")
+
+    @pytest.mark.parametrize("caller", CALLERS)
+    def test_a_container_terminate_writes_one_row(self, world, caller):
+        eid = _seed("s2-3180-running", "running")
+        headers, key_id = caller()
+
+        res = world.client.post(_terminate_path(eid), headers=headers)
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "terminated"
+        assert world.agent.calls == [
+            (AGENT, f"http://agent-{AGENT}:8000/api/executions/{eid}/terminate")
+        ]
+        assert world.capacity.released == [(AGENT, eid)]
+        assert _status_of(eid) == "cancelled"
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], key_id, eid, "terminated")
+
+    def test_a_parked_cancel_writes_one_row(self, world):
+        """The third arm the service can take (#2433): the turn is parked in
+        the backend agent-call queue of another worker. Never reaches the agent."""
+        eid = _seed("s2-3180-parked", "running")
+        limiter = chat_router.chat_execution_service.agent_call_limiter
+        world.redis.set(
+            limiter._marker_key(eid), json.dumps({"agent": AGENT, "phase": "parked"})
+        )
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "cancelled_while_parked"
+        assert world.agent.calls == []
+        assert _status_of(eid) == "cancelled"
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], None, eid, "cancelled_while_parked")
+
+    @pytest.mark.parametrize(
+        "credential, status",
+        [
+            pytest.param(lambda: _session(OUTSIDER), 404, id="outsider-session"),
+            pytest.param(_ops_key, 403, id="admin-owned-ops-key"),
+            pytest.param(
+                lambda: _agent_key(ADMIN_AGENT, ADMIN),
+                404,
+                id="admin-owned-sibling-agent-key",
+            ),
+            pytest.param(dict, 401, id="no-credential"),
+        ],
+    )
+    @pytest.mark.parametrize("seeded", ["queued", "running"])
+    def test_a_refused_terminate_writes_no_row(self, world, credential, status, seeded):
+        eid = _seed(f"s2-3180-refused-{seeded}", seeded)
+
+        res = world.client.post(_terminate_path(eid), headers=credential())
+
+        assert res.status_code == status, res.text
+        assert _status_of(eid) == seeded
+        assert world.agent.calls == []
+        assert _rows(TERMINATE) == []
+
+    @pytest.mark.parametrize(
+        "agent_side, status",
+        [
+            pytest.param(
+                {"status_code": 500, "payload": {"detail": "kill failed"}},
+                500,
+                id="agent-500",
+            ),
+            pytest.param(
+                {"status_code": 404, "payload": {"detail": "Execution not found"}},
+                404,
+                id="agent-404",
+            ),
+            pytest.param(
+                {"exc": httpx.ConnectError("refused")}, 502, id="agent-unreachable"
+            ),
+            pytest.param({"exc": httpx.ReadTimeout("slow")}, 504, id="agent-timeout"),
+            pytest.param(
+                {"container": SimpleNamespace(status="exited")},
+                503,
+                id="container-stopped",
+            ),
+            pytest.param({"container": None}, 404, id="container-missing"),
+        ],
+    )
+    def test_a_failed_terminate_writes_no_row(self, world, agent_side, status):
+        eid = _seed("s2-3180-failed", "running")
+        if "container" in agent_side:
+            world.container["value"] = agent_side["container"]
+        world.agent.status_code = agent_side.get("status_code", 200)
+        world.agent.payload = agent_side.get("payload", {})
+        world.agent.exc = agent_side.get("exc")
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == status, res.text
+        assert _status_of(eid) == "running"
+        assert _rows(TERMINATE) == []
+
+    def test_terminating_an_already_finished_turn_writes_no_row(self, world):
+        """The agent answers 200 `already_finished`: nothing was ended, the
+        turn's own terminal stands (#679), so there is no write to attribute."""
+        eid = _seed("s2-3180-finished", "running")
+        world.agent.payload = {"status": "already_finished", "returncode": 0}
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "already_finished"
+        assert len(world.agent.calls) == 1
+        assert _status_of(eid) == "running"
+        assert _rows(TERMINATE) == []
