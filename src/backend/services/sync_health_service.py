@@ -267,6 +267,13 @@ def _coerce_agent_timestamp(value) -> Optional[datetime]:
     return parsed
 
 
+def _alert_log(outcome: str):
+    """WARNING for a newly filed alert, INFO for a re-read of one (#3254 R9
+    re-reads every 6 h, so WARNING each time would multiply the old one line
+    per crossing). A failed write is already an ERROR from the seam itself."""
+    return logger.warning if outcome == platform_alerts.OBSERVED_CREATED else logger.info
+
+
 def _config_value(config, key: str):
     """Read a git-config field from the model the poller gets, or a dict."""
     if isinstance(config, dict):
@@ -786,7 +793,7 @@ class SyncHealthService:
             priority="high", title=title, question=question, context=context,
         )
         self._note_reading("sync_failing", agent_name, outcome)
-        logger.warning("sync_failing for %s (failures=%s): %s", agent_name, failures, outcome)
+        _alert_log(outcome)("sync_failing for %s (failures=%s): %s", agent_name, failures, outcome)
 
     def _observe_sync_diverged(self, agent_name: str, state: Dict, verdict: Dict) -> None:
         """trinity-enterprise#706: report the divergence freeze through the seam.
@@ -817,8 +824,8 @@ class SyncHealthService:
             },
         )
         self._note_reading("sync_diverged", agent_name, outcome, episode=diverged_since)
-        logger.warning("sync_diverged for %s (%s): %s",
-                       agent_name, verdict["freeze_reason"], outcome)
+        _alert_log(outcome)("sync_diverged for %s (%s): %s",
+                            agent_name, verdict["freeze_reason"], outcome)
 
     def _observe_git_bloat(self, agent_name: str, kind: str, state: Dict, *, reason: str) -> None:
         """#1595: report repo bloat or failing maintenance through the seam.
@@ -839,7 +846,7 @@ class SyncHealthService:
             },
         )
         self._note_reading(kind, agent_name, outcome)
-        logger.warning("%s for %s: %s (%s)", kind, agent_name, reason, outcome)
+        _alert_log(outcome)("%s for %s: %s (%s)", kind, agent_name, reason, outcome)
 
 
 # Module-level singleton mirrors operator_queue_service.
