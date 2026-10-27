@@ -794,6 +794,18 @@
       "description": "#3246 C2: the upgrade sweep, driven as the registered SQLite migration (`platform_alert_subjects`) against the real schema.py operator_queue DDL with the two new columns and indexes stripped (a pre-upgrade install holding duplicates). Ordered columns → sweep → index: `subject` / `last_seen_at` added PRAGMA-guarded; the newest pending row per derived subject survives stamped (subject, last_seen_at, context.seen_count=1, expires_at only where NULL — opt-out kinds keep NULL) and the rest end as ONE batch (cancelled / platform / superseded / NULL email / one batch_id); known kinds without a derivable subject get a lifetime stamp only (never merged on a guess); person-ended rows inside the 7-day snooze window get subject only; agent-raised, gate- and external-prefix rows untouched; a second run changes nothing; the partial unique index exists only after the run, bites on a second pending row, and matches schema.py's DDL; both tracks registered after the #3130 flood sweep, tables.py declares columns and both indexes. No Docker."
     },
     {
+      "file": "unit/test_3254_second_sweep.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#3254: the #3246 upgrade sweep run a second time, data only, on both tracks (SQLite `platform_alert_subjects_resweep`, Alembic `0104_platform_alert_resweep`), against the real post-#3246 operator_queue DDL (subject columns and partial unique index present). Registered on both tracks after the first sweep, no DDL in either half; per derivable moved kind (18 families) exactly one pending row per subject survives: the existing holder (seam row or first-sweep stamp) keeps the slot whatever its age, otherwise the newest subject-less row survives stamped; the rest end as ONE batch (cancelled / platform / superseded); must-act survivors keep expires_at NULL; person-ended legacy rows inside the snooze window get subject only; gitignore and problem-report legacy rows, agent-raised and gate rows untouched; git-bloat legacy rows a lifetime stamp only; idempotent (a second run changes and plans nothing); fresh install (no rows: one SELECT, no writes; the real three-pass lifecycle records it); the Alembic revision's own upgrade() on SQLite via an operations context and on PostgreSQL (`requires_postgres`, runs only with TEST_POSTGRES_URL). No Docker."
+    },
+    {
       "file": "unit/test_3246_platform_alerts_db.py",
       "feature": "#3246",
       "added": "2026-10-05",
