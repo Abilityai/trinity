@@ -16,8 +16,9 @@ explaining why — a silently stalled sweep, which is exactly the observability 
 
 WHY RETRYING IS SAFE (the issue asked us to confirm this before changing it)
 ---------------------------------------------------------------------------
-* `create_item` is `INSERT ... ON CONFLICT DO NOTHING` and `_alarm_id()` is the
-  natural key, so a re-attempt is idempotent.
+* A re-attempt is idempotent. At #1834 that was `create_item`'s `INSERT ... ON
+  CONFLICT DO NOTHING` on a natural-key id; since #3254 it is the seam's one
+  pending row per subject, which a repeat reading updates.
 * The queue item AUTHORIZES NOTHING. The only thing that flips `allowed` is
   `is_acknowledged()` reading a `system_settings` row under the blocklisted
   `retention_ack_` prefix, written only by an admin-and-human-only endpoint. A
@@ -47,7 +48,7 @@ outcome below is unchanged; each changed test says which class its re-pin is:
 * write-observation point: the double used to stand in for
   `create_operator_queue_item` on `_RG.db`. The guard's settings stay on that
   double; the alarm's write is observed at the seam's create, passed through to
-  the unit island's real SQLite, with the fault injection moved there (R5);
+  a real database of the test's own, with the fault injection moved there (R5);
 * id shape: the old id `retention-guard-<setting>-<window>` made a new window a
   second row. The subject is the setting, so a new window rewrites the one row;
 * fixture shape: "delivered" is now an outcome of the seam (created / updated /
@@ -71,6 +72,7 @@ _BACKEND_STR = str(_BACKEND)
 while _BACKEND_STR in sys.path:
     sys.path.remove(_BACKEND_STR)
 sys.path.insert(0, _BACKEND_STR)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import services.retention_guard as _RG  # noqa: E402
 from services.cleanup_service import CleanupService  # noqa: E402
@@ -97,7 +99,7 @@ class _DbDouble:
     create, whose REAL contract the retry logic now depends on: one pending row
     per subject, a repeat reading updates it (`updated`, delivered), and only a
     raise inside the seam (`failed`) is undelivered. `seam_create` wraps that
-    call against the unit island's real SQLite, so the fault injection
+    call against a real database of this file's own (`_own_db`), so the fault injection
     (`fail_next`, `raise_always`) and the attempt count move to the seam, and
     `queue_items` reads the alarm's rows back from the table."""
 
@@ -138,7 +140,28 @@ def _alarm_rows(key, status=None):
     return sorted(rows, key=lambda r: r["created_at"])
 
 
-def _purge_alarm_host():
+@pytest.fixture(scope="module")
+def _own_db(tmp_path_factory):
+    """A SQLite database of this file's own, for the whole module (#3254).
+
+    The unit tier's default file is shared by every xdist worker (they inherit
+    the controller's `TRINITY_DB_PATH`), and the cleanup cycles other files drive
+    now end real `retention_refused` rows through `note_allowed`. Built with the
+    real schema (`db_harness.bootstrap_schema`) once per module rather than once
+    per test; the tests clear the alarm host's rows between them."""
+    from db.engine import dispose_engines
+    from db_harness import bootstrap_schema
+    mp = pytest.MonkeyPatch()
+    mp.setenv("TRINITY_DB_PATH", str(tmp_path_factory.mktemp("retention-alarm") / "trinity.db"))
+    mp.delenv("DATABASE_URL", raising=False)
+    dispose_engines()
+    bootstrap_schema()
+    yield
+    mp.undo()
+    dispose_engines()
+
+
+def _clear_alarm_host():
     from sqlalchemy import text
     from db.engine import get_engine
     with get_engine().begin() as conn:
@@ -160,20 +183,21 @@ def _route_seam(monkeypatch, wrap):
 @pytest.fixture(autouse=True)
 def _reset_episodes():
     _RG.reset_transition_memo()
-    _purge_alarm_host()
     yield
     _RG.reset_transition_memo()
-    _purge_alarm_host()
 
 
 @pytest.fixture
-def guard_db(monkeypatch):
+def guard_db(monkeypatch, _own_db):
     """Patch `db` BY OBJECT on the guard module (learnings.md:99); the alarm's
-    write is observed at the seam (#3254 re-pin, see `_DbDouble`)."""
+    write is observed at the seam (#3254 re-pin, see `_DbDouble`), on this file's
+    own database (`_own_db`), with the alarm host empty before and after."""
     double = _DbDouble()
     monkeypatch.setattr(_RG, "db", double)
     _route_seam(monkeypatch, double.seam_create)
-    return double
+    _clear_alarm_host()
+    yield double
+    _clear_alarm_host()
 
 
 @pytest.fixture
@@ -573,7 +597,7 @@ def _run_cycle(svc):
     return asyncio.run(svc._run_cleanup_inner())
 
 
-def test_a_later_cleanup_cycle_actually_re_attempts(monkeypatch):
+def test_a_later_cleanup_cycle_actually_re_attempts(monkeypatch, _own_db):
     """T-B9 — the bug is literally "no later CYCLE retries it".
 
     Every other test in this file calls `announce_refusal` directly, so it asserts
@@ -605,6 +629,7 @@ def test_a_later_cleanup_cycle_actually_re_attempts(monkeypatch):
         return create
 
     _route_seam(monkeypatch, sink)
+    _clear_alarm_host()
 
     svc = _make_service()
     capacity = MagicMock()

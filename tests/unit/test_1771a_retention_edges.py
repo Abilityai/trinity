@@ -8,7 +8,7 @@ surfaces #1644's suite executes but never asserts:
   suite only probes 12-vs-1000 and 1001-vs-1000, so the one comparison that decides
   whether a prune runs is never tested at its own boundary;
 * the refusal-episode transition memo, the alarm's log LEVEL, its COUNT, and its
-  PAYLOAD — `announce_refusal`/`note_allowed`/`_alarm_id` all run today
+  PAYLOAD — `announce_refusal`/`note_allowed` and the alarm's natural key all ran
   (`test_1644:177`, `test_cleanup_inner_sweeps:105`) but nothing asserts what they
   did, which is precisely the state in which a mutant survives;
 * `_read_retention_settings`, whose body never executes anywhere in the suite —
@@ -383,7 +383,7 @@ class TestAckLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# C — announce_refusal / _refusal_episodes / note_allowed / _alarm_id
+# C — announce_refusal / _refusal_episodes / note_allowed / the natural key
 # ---------------------------------------------------------------------------
 
 

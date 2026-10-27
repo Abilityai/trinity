@@ -27,11 +27,16 @@ Every clock the path reads is driven from one simulated instant pinned to a
 fixed date: the guard's `_clock`, the seam's `datetime`, and `utc_now_iso` as
 both the seam and `db/operator_queue.py` bind it (patched through the running
 method's globals, R6). No assertion compares a literal to the real `now`.
+
+The file runs on a SQLite database of its own (`_own_db`). The unit tier's
+default file is shared by every xdist worker (they inherit the controller's
+`TRINITY_DB_PATH`), and these tests run the real expiry sweep at a simulated
+day 30 and write and end real alarm rows: on the shared file they would expire
+or end other workers' rows, and other workers' cleanup cycles would end theirs.
 """
 import logging
 import os
 import sys
-import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -39,6 +44,7 @@ import pytest
 _BACKEND = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "src", "backend"))
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 pytestmark = pytest.mark.unit
 
@@ -80,10 +86,43 @@ class _Clocks:
         return self.wall.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
+@pytest.fixture(scope="module")
+def _own_db(tmp_path_factory):
+    """A SQLite database of this file's own, for the whole module (#3254).
+
+    The unit tier's default file is shared by every xdist worker (they inherit
+    the controller's `TRINITY_DB_PATH`), and the cleanup cycles other files drive
+    now end real `retention_refused` rows through `note_allowed`. Built with the
+    real schema (`db_harness.bootstrap_schema`) once per module rather than once
+    per test; the tests clear the alarm host's rows between them."""
+    from db.engine import dispose_engines
+    from db_harness import bootstrap_schema
+    mp = pytest.MonkeyPatch()
+    mp.setenv("TRINITY_DB_PATH", str(tmp_path_factory.mktemp("retention-alarm") / "trinity.db"))
+    mp.delenv("DATABASE_URL", raising=False)
+    dispose_engines()
+    bootstrap_schema()
+    yield
+    mp.undo()
+    dispose_engines()
+
+
+def _clear_alarm_host():
+    from sqlalchemy import text
+    from db.engine import get_engine
+    with get_engine().begin() as conn:
+        conn.execute(text("DELETE FROM operator_queue WHERE agent_name = :a"),
+                     {"a": _RG.ALARM_AGENT_NAME})
+
+
 @pytest.fixture
-def db():
+def db(_own_db):
+    """The facade the seam writes through, on this file's own database, with the
+    alarm host empty before and after the test."""
     from database import db
-    return db
+    _clear_alarm_host()
+    yield db
+    _clear_alarm_host()
 
 
 @pytest.fixture(autouse=True)
@@ -97,18 +136,9 @@ def _isolation(monkeypatch):
 
 
 @pytest.fixture
-def key():
-    """A setting key of this test's own: the subject is `retention_refused:<key>`
-    on one shared host, so no other test's row can update or snooze this one."""
-    k = f"execution_row_retention_days_{uuid.uuid4().hex[:8]}"
-    yield k
-    from sqlalchemy import text
-    from db.engine import get_engine
-    with get_engine().begin() as conn:
-        conn.execute(
-            text("DELETE FROM operator_queue WHERE agent_name = :a AND request_id LIKE :p"),
-            {"a": _RG.ALARM_AGENT_NAME, "p": f"retention-guard-{k}-%"},
-        )
+def key(db):
+    """A real guarded setting; the database is this file's own (`db`)."""
+    return "execution_row_retention_days"
 
 
 @pytest.fixture
