@@ -1728,8 +1728,11 @@ def _refuse_ops_write_protected_target(target_agent: str) -> None:
     try:
         system = target_agent == SYSTEM_AGENT_NAME or db.is_system_agent(target_agent)
         info = None if system else db.get_agent_ephemeral_info(target_agent)
-    except Exception:
-        info = None  # an unreadable answer is not a durable agent
+    except Exception as exc:
+        # An unreadable answer is not a durable agent: refuse, and say why here,
+        # because the caller only sees the protected-target refusal.
+        logger.warning("ops_write target lookup failed for %s; refusing: %s", target_agent, exc)
+        info = None
     if not (isinstance(info, dict) and "is_ephemeral" in info and not info["is_ephemeral"]):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_PROTECTED_TARGET_DETAIL))
 
