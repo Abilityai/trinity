@@ -31,10 +31,13 @@ Pinned here, against the unit island's real SQLite, by reading the rows
 * the other shape, the clock 30 days ahead: poison and collision rows are
   still pending with `expires_at` NULL; the validation row has expired.
 
-The clock is frozen at a pinned date and moved by hand: the seam's
-`datetime`, `utils.helpers.utc_now_iso` (the seam's function-local import)
-and the `db/operator_queue.py` module globals (R6: the running method's
-globals), so every stamp the flow writes and compares is on the one clock.
+The clock is frozen at a pinned date and moved by hand, by replacing the
+`datetime` class the seam and `utils.helpers` read: every `utc_now_iso()` in
+the flow (the seam's, the DB layer's, the reaper's) and the seam's own
+`datetime.now` then read the one clock. The function `utc_now_iso` itself is
+never replaced, so a module first imported during a test cannot keep a
+frozen clock after it (the leak a patched function leaves in any
+`from utils.helpers import utc_now_iso` it was copied into).
 """
 import asyncio
 import json
@@ -95,10 +98,13 @@ def clock(monkeypatch, db, pa):
         def now(cls, tz=None):
             return state["now"] if tz is not None else state["now"].replace(tzinfo=None)
 
+    # The helper the seam imports, and the one the DB layer bound at import
+    # (R6: the running function's globals, should the two ever differ).
+    db_now = type(db._operator_queue_ops).create_platform_item.__globals__["utc_now_iso"]
     monkeypatch.setattr(pa, "datetime", _Frozen)
-    monkeypatch.setattr(helpers, "utc_now_iso", now_iso)
-    monkeypatch.setitem(type(db._operator_queue_ops).create_platform_item.__globals__,
-                        "utc_now_iso", now_iso)
+    for module_globals in {id(g): g for g in (vars(helpers), db_now.__globals__)}.values():
+        monkeypatch.setitem(module_globals, "datetime", _Frozen)
+    assert helpers.utc_now_iso() == db_now() == now_iso()
 
     def advance(**delta):
         state["now"] += timedelta(**delta)
