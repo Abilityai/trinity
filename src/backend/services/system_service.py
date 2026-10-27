@@ -3375,6 +3375,7 @@ class ApplyOutcome:
     created: List[str] = field(default_factory=list)
     started: List[str] = field(default_factory=list)
     succeeded: int = 0
+    writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
     tags_written: List[str] = field(default_factory=list)
     member_failed: set = field(default_factory=set)
     extra_changes: Dict[str, List] = field(default_factory=dict)
@@ -3454,6 +3455,7 @@ async def execute_apply_plan(
             fail(name, short, step, "the write was refused or stored nothing")
             return False
         out.succeeded += 1
+        out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
         return True
 
     # 1. Create absent members; tag each with the system tag first.
@@ -3697,6 +3699,8 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
     )
     if outcome is not None:
         response._tags_written = list(outcome.tags_written)
+        response._created = list(outcome.created)
+        response._writes_ok = dict(outcome.writes_ok)
     return response
 
 

@@ -247,6 +247,19 @@ class TestStatusMapping:
                                headers=_jwt(W.ALICE))
         assert res.status_code == 500
         assert res.json()["status"] == "failed" and res.json()["failed"][0]["step"] == "create"
+        # The audit row records what happened (Codex pass 1 #7): nothing.
+        (audit,) = http.audits
+        assert audit["details"]["created"] == [] and audit["details"]["writes"] == {}
+
+    def test_a_partial_runs_audit_counts_only_the_writes_that_landed(self, http):
+        http.fail_create.add("acme-b")
+        res = http.client.post(APPLY, json={"manifest": _manifest("a", "b"), "dry_run": False},
+                               headers=_jwt(W.ALICE))
+        assert res.json()["status"] == "partial"
+        (audit,) = http.audits
+        assert audit["details"]["created"] == ["acme-a"]
+        assert set(audit["details"]["writes"]) == {"acme-a"}  # create, tag, start
+        assert audit["details"]["writes"]["acme-a"] == 3
 
     def test_a_parse_error_is_creates_named_400(self, http):
         res = http.client.post(APPLY, json={"manifest": f"name: {SYSTEM}\nagents: {{}}\n"},

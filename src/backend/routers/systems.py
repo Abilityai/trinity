@@ -144,12 +144,11 @@ async def apply_system(
                 endpoint=request.scope["path"],
                 request_id=getattr(request.state, "request_id", None),
                 details={
+                    # What happened, never the plan: a create that failed is
+                    # not a create, a refused write is not a write.
                     "status": result.status,
-                    "writes": {
-                        m.name: sum(1 for c in m.changes if c.action == "write")
-                        for m in result.members
-                    },
-                    "created": [m.name for m in result.members if m.verdict == "create"],
+                    "created": result._created,
+                    "writes": result._writes_ok,
                     "failed": len(result.failed),
                 },
             )

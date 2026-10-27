@@ -1549,9 +1549,12 @@ class SystemApplyResponse(BaseModel):
     system_view: SystemApplyViewVerdict
     failed: List[SystemApplyFailure] = []
     warnings: List[str] = []
-    # The members whose tags this run wrote, so the router can emit the thin
-    # `agent_tags_changed` trigger for each. Private: never serialized.
+    # What a real run actually did, for the router's audit row and its thin
+    # `agent_tags_changed` triggers (never the plan: a create that failed is
+    # not a create). Private: never serialized.
     _tags_written: List[str] = PrivateAttr(default_factory=list)
+    _created: List[str] = PrivateAttr(default_factory=list)
+    _writes_ok: Dict[str, int] = PrivateAttr(default_factory=dict)
 
 
 # ============================================================================
