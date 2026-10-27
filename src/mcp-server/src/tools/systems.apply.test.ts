@@ -542,7 +542,8 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       reset();
       const s = await inProcess({ scope: "user", userId: "owner", keyName: "keyless-695" });
       try {
-        const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST });
+        // A REAL run, so the no-note assertion below is not vacuous (a dry run never carries one).
+        const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
 
         assert.equal(isError, false, `the registered tool threw: ${text}`);
         const out = parsed(text);
