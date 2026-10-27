@@ -75,8 +75,8 @@ _NOT_EMITTERS = {
     ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"),
     ("database.py", "DatabaseManager.create_native_operator_queue_item"),
     ("services/ask_service.py", "raise_ask"),
-    ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"),
-    ("services/operator_queue_service.py", "create_bounded_alert"),
+    ("services/operator_queue_service/__init__.py", "OperatorQueueSyncService._sync_agent"),
+    ("services/operator_queue_service/__init__.py", "create_bounded_alert"),
 }
 
 # A hook kind on the seam whose emitter has no place that knows the condition

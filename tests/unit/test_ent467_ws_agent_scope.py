@@ -459,7 +459,7 @@ FLEET_LEVEL_ALLOWLIST = {
     # state changed. Carries NO payload (#918); listeners refetch
     # GET /api/operator-queue, which scopes rows to the caller's accessible
     # agents — the same footing as `operator_queue_cleared` above.
-    ("services/operator_queue_service.py", "operator_queue_sync"),
+    ("services/operator_queue_service/__init__.py", "operator_queue_sync"),
     # ent#170 room triggers are ids only (`room_id` + `seq`). `identity` on
     # `room_participant_state` IS an agent name, but the column is polymorphic
     # (agent name / user id / client email), so keying on it would drop the
