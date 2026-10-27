@@ -1437,8 +1437,9 @@ Policy row in `access.ts`: `kind: "none"` (a manifest, not an agent target; the 
 the per-member manage checks and refuses every non-person key). With API-key auth on, each call
 builds a client on the server's configured backend URL carrying the calling session's own key.
 Tests: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered,
-audit-wrapped tool: over the real MCP transport, and in-process through FastMCP's own session
-for the two shapes that transport cannot produce (a keyless session, another hostname).
+audit-wrapped tool: over the real MCP transport; a keyless session (which that transport's
+authentication refuses first) in-process through FastMCP's own session; and the other-hostname
+case in-process by choice, so its https DNS origin needs no network (`fetch` stubbed).
 
 #### list_systems (Lines 105-133)
 ```typescript

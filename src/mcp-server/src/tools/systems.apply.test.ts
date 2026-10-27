@@ -33,11 +33,12 @@
  * fire-and-forget audit row, and answers `/api/systems/apply` and
  * `/api/systems/deploy` with whatever the test sets (or drops the connection).
  * The backend sits on a random port of 127.0.0.1 — not the default
- * `localhost:8000` — which is the brief's "another origin" shape. Two cases the
- * HTTP transport cannot reach go through the SAME registered tools in-process,
- * via FastMCP's own `server.connect(transport, auth)`: a session with no API key
- * (the transport's `authenticate` refuses that request before any tool runs),
- * and another HOSTNAME (a second, unstarted server on
+ * `localhost:8000` — which is the brief's "another origin" shape. Two cases go
+ * through the SAME registered tools in-process, via FastMCP's own
+ * `server.connect(transport, auth)`: a session with no API key, which the HTTP
+ * transport cannot produce (its `authenticate` refuses that request before any
+ * tool runs); and another HOSTNAME, in-process by choice so an https DNS origin
+ * needs no DNS or TLS (a second, unstarted server on
  * `https://trinity-b.example.test:8443`, `fetch` stubbed). Pattern:
  * `access-wiring.test.ts` (#2952 row draining).
  *
