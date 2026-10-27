@@ -28,7 +28,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -278,7 +278,7 @@ class SkillsLibrarySyncService:
         if failures:
             self._announce_fleet_failures(report)
         elif self._sweep_reached_every_agent(agents, results):
-            self._clear_fleet_failures(started_at)
+            self._clear_fleet_failures(started_at, set(agents))
         logger.info(
             "Skills fleet re-inject: %s agents, %s injected, %s skipped, %s failed",
             report["agents_total"], report["agents_injected"],
@@ -465,16 +465,24 @@ class SkillsLibrarySyncService:
         return bool(agents) and all(_current(results.get(name)) for name in agents)
 
     @staticmethod
-    def _clear_fleet_failures(sweep_started_at: str) -> None:
+    def _clear_fleet_failures(sweep_started_at: str, reached: Set[str]) -> None:
         """A sweep reached every running agent and saw each one current: the
         platform ends the fleet alarm's row (#3254). Sweeps overlap, so a
         failure read after this sweep started — a newer sweep's — is newer
         than this sweep's evidence and stays for the next sweep
-        (`skills_alarm_last_read_before`). On an install that never raised it
+        (`skills_alarm_last_read_before`). Every agent the row names must be
+        among those this sweep `reached`: an agent that failed and then
+        stopped is not enumerated, and a sweep that never looked at it is no
+        evidence that it recovered (R10). On an install that never raised it
         this is one read and no write. Never raises."""
         from services import platform_alerts
+
+        def _names_reached(row: Dict[str, Any]) -> bool:
+            named = (row.get("context") or {}).get("agents") or ()
+            return set(named) <= reached
+
         if skills_alarm_last_read_before("skills_fleet_reinject", FLEET_ALERT_KEY,
-                                         sweep_started_at):
+                                         sweep_started_at, row_reached=_names_reached):
             platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_fleet_reinject",
                                   FLEET_ALERT_KEY)
 

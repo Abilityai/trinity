@@ -33,7 +33,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
@@ -214,10 +214,14 @@ def _scrub_pat(text: str) -> str:
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
 
 
-def skills_alarm_last_read_before(kind: str, key: str, since: str) -> bool:
+def skills_alarm_last_read_before(kind: str, key: str, since: str, *,
+                                  row_reached: Optional[Callable[[Dict[str, Any]], bool]] = None,
+                                  ) -> bool:
     """True when the `_skills-sync` host holds a pending `<kind>:<key>` row
     whose LAST reading is older than `since` (ISO-8601 UTC) — the only kind of
-    row a recovery observed from `since` on may end (#3254, R10).
+    row a recovery observed from `since` on may end (#3254, R10). With
+    `row_reached`, the row must also pass it: the caller's evidence must cover
+    what the row reports (the fleet sweep's agents).
 
     The two skills alarms are raised and cleared by passes that can overlap: a
     reconcile pass on one agent (the start path, a fleet sweep's prune, the
@@ -242,7 +246,8 @@ def skills_alarm_last_read_before(kind: str, key: str, since: str) -> bool:
         # a page of the host's queue, which orders by priority before its limit
         # and could leave this row off the page.
         row = db.find_pending_operator_queue_by_subject(RECONCILE_ALARM_AGENT_NAME, subject)
-        return row is not None and parse_iso_timestamp(row["last_seen_at"]) < cutoff
+        return (row is not None and parse_iso_timestamp(row["last_seen_at"]) < cutoff
+                and (row_reached is None or bool(row_reached(row))))
     except Exception as e:  # noqa: BLE001 — unreadable: leave the alarm standing
         logger.warning(f"could not read the {kind} alarm; leaving it standing: {e}")
         return False
@@ -2652,6 +2657,13 @@ print(json.dumps(out))
 
             managed = await self._list_managed_skills(agent_name)
             if managed is None:
+                # Not silent (#3254 fresh review): one entry that cannot be
+                # listed or stat'ed blocks every pass on this agent — no prune,
+                # no gate drop, no refusal clear — until someone fixes it.
+                logger.warning(
+                    f"skill reconcile skipped for {agent_name}: its skills inventory "
+                    f"could not be inspected (an entry under ~/.claude/skills could not "
+                    f"be listed or stat'ed); nothing is pruned and an open refusal alarm stays")
                 return {"status": "skipped", "reason": "inventory_unavailable"}
 
             orphans = sorted(set(managed) - assigned)

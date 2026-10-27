@@ -290,6 +290,19 @@ class TestReconcileRefusal:
         assert [(r["id"], r["context"]["seen_count"]) for r in _pending(db, self.SUBJECT)] == [
             (first["id"], 1)]                                 # untouched, not ended
 
+    def test_an_uninspectable_inventory_is_skipped_with_a_warning(self, db, svc, caplog):
+        """Not silent: an inventory the agent could not inspect skips the whole
+        pass (no prune, no gate drop, no clear), and the skip names the agent
+        at WARNING so the operator can find the entry that blocks it."""
+        import logging
+        svc._list_managed_skills = AsyncMock(return_value=None)
+        with caplog.at_level(logging.WARNING, logger="services.skill_service"):
+            result = asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))
+        assert result == {"status": "skipped", "reason": "inventory_unavailable"}
+        assert [r.getMessage() for r in caplog.records
+                if r.levelno == logging.WARNING and r.name == "services.skill_service"
+                and self.AGENT in r.getMessage() and "could not be inspected" in r.getMessage()]
+
     def test_entries_that_can_never_be_skills_never_block_the_inventory(
             self, db, svc, agent_home):
         """Only a name that could be a platform skill (`SKILL_NAME_RE`) is
@@ -346,7 +359,8 @@ class TestReconcileRefusal:
 
         clock.advance(days=1)
         assert self._reconcile(svc, 25)["status"] == "refused"
-        assert _pending(db, self.SUBJECT) == []
+        assert [(r["id"], r["status"], r["disposed_by"]) for r in _rows(db, self.SUBJECT)] == [
+            (row["id"], "acknowledged", "person")]       # snoozed: no new row in any status
 
     def test_an_older_pass_that_finishes_last_never_ends_a_newer_refusal(self, db, svc, clock):
         """Passes on one agent overlap: the start path, the fleet sweep's prune
@@ -448,6 +462,20 @@ class TestFleetReinject:
         [row] = _pending(db, self.SUBJECT)
         report = sweep(outcomes)
         assert report["agents_total"] == 2 and report["agents_failed"] == 0
+        assert _pending(db, self.SUBJECT) == []
+        _assert_ended_by_platform(db, row)
+
+    def test_a_sweep_that_never_reached_the_failed_agent_ends_nothing(self, db, sweep):
+        """R10: a1 failed and then stopped, so the next sweep enumerates only a2
+        and sees it current. That sweep never looked at a1, so it is no
+        evidence that a1 recovered: the row stays until a sweep reaches every
+        agent it names."""
+        sweep({"a1": self.BAD, "a2": self.OK})
+        [row] = _pending(db, self.SUBJECT)
+        assert row["context"]["agents"] == ["a1"]
+        sweep({"a2": self.OK})
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
+        sweep({"a1": self.OK, "a2": self.OK})
         assert _pending(db, self.SUBJECT) == []
         _assert_ended_by_platform(db, row)
 
@@ -569,7 +597,8 @@ class TestFleetReinject:
 
         clock.advance(days=1)
         sweep({"a1": self.BAD})
-        assert _pending(db, self.SUBJECT) == []
+        assert [(r["id"], r["status"], r["disposed_by"]) for r in _rows(db, self.SUBJECT)] == [
+            (row["id"], "acknowledged", "person")]       # snoozed: no new row in any status
 
     def test_r1_the_legacy_row_derives_the_subject_the_seam_files(self, db, sweep):
         from services import platform_alerts as pa
