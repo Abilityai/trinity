@@ -178,9 +178,9 @@ def make_world(monkeypatch, tmp_path=None) -> World:
 # ---------------------------------------------------------------------------
 
 class LockRedis:
-    """The apply lock's Redis: SET NX EX / GET / EXPIRE / DELETE and an
-    EXECUTING `register_script` (fakeredis here has no Lua; the
-    `test_1881_canary_leader_lease.py` pattern). Every command is recorded."""
+    """The apply lock's Redis: SET NX EX / GET / EXPIRE / DELETE and a
+    `register_script` that executes the script TEXT (fakeredis here has no
+    Lua). Every command is recorded."""
 
     def __init__(self) -> None:
         self.store: Dict[str, str] = {}
@@ -189,21 +189,19 @@ class LockRedis:
         self.on_refresh = None  # a hook a test uses to lose the lease mid-run
 
     def register_script(self, src: str):
+        """EXECUTES the production script text (`_ent695_lua`), so the lock's
+        ownership compare is the script's own, not a re-implementation."""
+        import _ent695_lua as lua
+
         is_delete = "'del'" in src
 
         def _run(keys=None, args=None, client=None):
             target = client if client is not None else self
-            key, token = args[0], args[1]
+            key = (args or [None])[0]
             target.commands.append(("script", "release" if is_delete else "refresh", key))
             if not is_delete and target.on_refresh is not None:
                 target.on_refresh(target, key)
-            if target.store.get(key) != token:
-                return 0
-            if is_delete:
-                target.store.pop(key, None)
-                return 1
-            target.ttls[key] = int(args[2])
-            return 1
+            return lua.run(src, target.store, target.ttls, keys, args)
 
         return _run
 

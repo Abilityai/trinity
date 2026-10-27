@@ -8,8 +8,8 @@ then write over each other. The atomic pair does the compare and the mutation
 in one Lua call.
 
 The suite's fakeredis has no Lua, so this emulator honours `register_script`
-and EXECUTES the compare semantics (the `test_1881_canary_leader_lease.py`
-pattern). `race_on_get` injects a successor between a client-side GET and the
+and EXECUTES the production script TEXT through `_ent695_lua`, so a mutated
+script turns these red. `race_on_get` injects a successor between a client-side GET and the
 next command — the window the non-atomic methods have and a script does not
 (a script's body runs inside Redis, so nothing can interleave with it).
 """
@@ -26,6 +26,9 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 import redis_breaker_util as rbu  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 from redis_breaker_util import LeaseState, SingleFlightLock  # noqa: E402
 
 pytestmark = pytest.mark.unit
@@ -51,23 +54,21 @@ class LuaFakeRedis:
         self.fail = False
 
     def register_script(self, src: str):
-        is_delete = "'del'" in src
+        """Return a redis-py `Script`-shaped callable that EXECUTES `src`.
+
+        The script's own text decides the outcome (`_ent695_lua.run`); this
+        wrapper only records the call and honours `fail`. The target comes
+        from the `client=` kwarg at call time: `ScriptCache` memoises
+        registered scripts process-wide, so closing over the first fake would
+        leak between tests."""
+        kind = "release" if "'del'" in src else "refresh"
 
         def _run(keys=None, args=None, client=None):
             target = client if client is not None else self
             if target.fail:
                 raise ConnectionError("redis down")
-            key, token = args[0], args[1]
-            target.commands.append(("script", "release" if is_delete else "refresh", key))
-            # Atomic: read the store directly, no client-side GET, no race hook.
-            if target.store.get(key) != token:
-                return 0
-            if is_delete:
-                target.store.pop(key, None)
-                target.ttls.pop(key, None)
-                return 1
-            target.ttls[key] = int(args[2])
-            return 1
+            target.commands.append(("script", kind, (args or [None])[0]))
+            return lua.run(src, target.store, target.ttls, keys, args)
 
         return _run
 
@@ -234,3 +235,39 @@ def test_the_existing_methods_are_untouched():
     release = inspect.getsource(SingleFlightLock.release_if_owned)
     assert "self._client.get(self._key)" in refresh and "_ATOMIC" not in refresh
     assert "self._client.get(self._key)" in release and "_ATOMIC" not in release
+
+
+# ---------------------------------------------------------------------------
+# The evaluator executes the text: a mutated script changes the outcome
+# ---------------------------------------------------------------------------
+
+def _stale_and_successor():
+    store, ttls = {KEY: "successor"}, {KEY: 17}
+    return store, ttls
+
+
+@pytest.mark.parametrize("script,args", [
+    (rbu._ATOMIC_REFRESH_LUA, [KEY, "stale", TTL]),
+    (rbu._ATOMIC_RELEASE_LUA, [KEY, "stale"]),
+])
+def test_the_production_scripts_leave_a_successors_lease_alone(script, args):
+    store, ttls = _stale_and_successor()
+    assert lua.run(script, store, ttls, [], args) == 0
+    assert store == {KEY: "successor"} and ttls == {KEY: 17}
+
+
+@pytest.mark.parametrize("mutated", [
+    "return redis.call('expire', ARGV[1], ARGV[3])",                         # compare dropped
+    "if redis.call('get', ARGV[1]) ~= ARGV[2] then\n    return redis.call('expire', ARGV[1], ARGV[3])\nend\nreturn 0",
+])
+def test_a_script_without_its_token_compare_would_renew_a_successor(mutated):
+    """The evaluator is not a second implementation: change the text and the
+    outcome changes. (Sanity for the harness, the reason it exists.)"""
+    store, ttls = _stale_and_successor()
+    assert lua.run(mutated, store, ttls, [], [KEY, "stale", TTL]) == 1
+    assert ttls[KEY] == TTL
+
+
+def test_a_construct_outside_the_subset_is_refused_not_skipped():
+    with pytest.raises(lua.UnsupportedLua):
+        lua.run("local v = redis.call('get', ARGV[1])\nreturn v", {}, {}, [], [KEY])
