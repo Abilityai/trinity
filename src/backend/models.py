@@ -566,7 +566,12 @@ class ParallelTaskRequest(BaseModel):
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
     timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
-    max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
+    # Maximum agentic turns (--max-turns) for runaway prevention. #2328: bounded to the
+    # owner guardrail's own legal range (routers/agent_config.py
+    # `_GUARDRAILS_NUMBER_BOUNDS["max_turns_task"]`, parity-tested), so 0, a negative
+    # or an unbounded value is a 422 here whatever image the agent runs; the /task
+    # route then clamps it to the owner's configured `max_turns_task`.
+    max_turns: Optional[int] = Field(None, ge=1, le=500)
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
     user_message: Optional[str] = None  # Original user message (without context), used when save_to_session=True
@@ -3324,6 +3329,14 @@ class InternalTaskExecutionRequest(BaseModel):
     # (#2426). `execute_task_internal` resolves and stamps the pre-created row
     # before dispatch.
     deliver_to_workspace_email: Optional[str] = None
+
+
+class InternalPreCheckRequest(BaseModel):
+    """The schedule a pre-check is gating (#3966). Every field is optional: a
+    bodyless request (an older scheduler) runs the hook exactly as before."""
+    schedule_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_message: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
