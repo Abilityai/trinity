@@ -3655,6 +3655,16 @@
       "description": "#2433: Gemini registers/unregisters its subprocess with the process registry (it never did)."
     },
     {
+      "file": "unit/test_3408_gemini_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#3408: a cancelled Gemini chat or headless waiter keeps a live child owned and on the sweep allowlist (AC 3), and its shielded reader (running or still queued on the shared worker) releases the entry and sends stream_end once the child exits; worker-finishes-first ordering and an empty-output child covered; own-group signals refused. Disposable Python children only; no Gemini CLI, model or live-agent calls."
+    },
+    {
       "file": "unit/test_2433_limiter_inflight.py",
       "feature": "#2433",
       "added": "2026-08-28",
