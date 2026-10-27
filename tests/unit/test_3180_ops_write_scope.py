@@ -515,7 +515,7 @@ class TestMint:
         res = world.client.post("/api/mcp/keys", json={"name": "x", "scope": "ops_write"})
         assert res.status_code == 403 and res.json()["detail"] == "Admin access required", res.text
 
-    def test_the_db_layer_refuses_what_it_cannot_mint(self):
+    def test_the_db_layer_lists_it_as_creatable(self):
         from db.mcp_keys import McpKeyOperations
         assert "ops_write" in McpKeyOperations._USER_CREATABLE_SCOPES
 
@@ -581,14 +581,21 @@ class TestNegatives:
 # =========================================================================== #
 
 def test_an_ops_write_key_in_an_agents_config_reports_its_own_verdict(world):
+    """Through the probe path: the container reports the digest of the bearer
+    token in its `.mcp.json` entry, the backend looks the digest up by hash and
+    names the key's kind. The digest is the stored `key_hash`, not a recomputed
+    copy of the hashing scheme, so a drift between mint and lookup goes red."""
     from services import agent_mcp_key_service as svc
     key = world.mint("ops_write")
-    row = _q("SELECT id, scope, agent_name, is_active, key_prefix FROM mcp_api_keys WHERE id = :i", i=key.id)
-    verdict = svc._entry_verdict(row[0], TARGET)
-    assert verdict == "foreign_ops_write_key"
-    entry = SimpleNamespace(verdict=verdict, key_prefix=key.secret[:20], key_agent_name=None)
-    message = svc._verdict_message(entry)
-    assert "ops-write key" in message and "personal" not in message
+    digest = _q("SELECT key_hash FROM mcp_api_keys WHERE id = :i", i=key.id)[0]["key_hash"]
+    result = svc.interpret_probe_payload(
+        {"schema": 1, "present": True,
+         "entries": [{"name": "trinity", "is_trinity": True, "digest": digest}]},
+        TARGET,
+    )
+    assert result.verdict == "foreign_ops_write_key", result
+    assert [(e.verdict, e.key_scope) for e in result.entries] == [("foreign_ops_write_key", "ops_write")]
+    assert "ops-write key" in result.message and "personal" not in result.message
 
 
 # =========================================================================== #

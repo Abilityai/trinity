@@ -343,7 +343,6 @@ def ws_close(path):
 
 
 out["ws_events"] = ws_close(f"/ws/events?token={OW.api_key}")
-out["ws_main"] = ws_close(f"/ws?token={OW.api_key}")
 sys.stdout.write("\n__OPS_WRITE_SWEEP__" + json.dumps(out))
 '''
 

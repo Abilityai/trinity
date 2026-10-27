@@ -658,6 +658,8 @@ class TestNeverGrantableFamilies:
             assert (canvas[who]["status"], canvas[who]["body"]) == (anon["status"], anon["body"]), (who, canvas[who])
         assert live["canvas_no_fence"]["status"] == 200, live["canvas_no_fence"]
 
-    def test_neither_event_socket_opens(self, live):
+    def test_the_event_stream_socket_refuses_the_key(self, live):
+        """`/ws/events` is the one socket that takes an MCP key. The browser's
+        `/ws` takes only a ticket from `POST /api/ws/ticket`, which the families
+        sweep shows refused for this key, so it has no key door to probe."""
         assert live["ws_events"] == {"closed": 4003}, live["ws_events"]
-        assert live["ws_main"].get("closed") in (4001, 4003, 1008), live["ws_main"]
