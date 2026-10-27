@@ -510,6 +510,26 @@ class TestFleetReinject:
         newer = asyncio.run(scenario())
         assert [r["id"] for r in _pending(db, self.SUBJECT)] == [newer["id"]]   # not ended
 
+    def test_the_row_is_found_behind_a_thousand_other_pending_rows(self, db, sweep):
+        """The evidence floor reads the subject's own row, not a page of the
+        host's queue: 1,001 higher-priority pending rows on `_skills-sync` (the
+        list orders by priority, then age, before its limit) must not hide the
+        fleet row from a sweep that reached every agent."""
+        from sqlalchemy import text
+        from db.engine import get_engine
+        sweep({"a1": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+        with get_engine().begin() as conn:
+            conn.execute(text(
+                "INSERT INTO operator_queue (id, agent_name, request_id, type, status, priority,"
+                " title, question, created_at, subject, last_seen_at) VALUES (:id, :agent, :rid,"
+                " 'alert', 'pending', 'critical', 't', 'q', :at, :subject, :at)"),
+                [{"id": f"seed-{i:04d}", "agent": HOST, "rid": f"skills-reconcile-seed-{i:04d}-30",
+                  "at": "2026-09-01T00:00:00.000000Z",
+                  "subject": f"skills_reconcile_refused:seed-{i:04d}"} for i in range(1001)])
+        sweep({"a1": self.OK})
+        _assert_ended_by_platform(db, row)
+
     def test_a_persons_ending_stands_and_snoozes_the_next_failure(self, db, sweep, clock):
         sweep({"a1": self.BAD})
         [row] = _pending(db, self.SUBJECT)

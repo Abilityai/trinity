@@ -238,14 +238,11 @@ def skills_alarm_last_read_before(kind: str, key: str, since: str) -> bool:
     try:
         subject = platform_alerts.subject_for(kind, key)
         cutoff = parse_iso_timestamp(since)
-        # include_cleared: read what `platform_alerts.clear` finds, which never
-        # filters on `cleared_at` (Clear All, #1017, hides only ended rows today).
-        rows = db.list_operator_queue_items(
-            agent_name=RECONCILE_ALARM_AGENT_NAME, status="pending", limit=1000,
-            include_cleared=True)
-        seen = [parse_iso_timestamp(r["last_seen_at"])
-                for r in rows if r.get("subject") == subject]
-        return bool(seen) and all(t < cutoff for t in seen)
+        # The same indexed one-row lookup `platform_alerts.clear` makes — never
+        # a page of the host's queue, which orders by priority before its limit
+        # and could leave this row off the page.
+        row = db.find_pending_operator_queue_by_subject(RECONCILE_ALARM_AGENT_NAME, subject)
+        return row is not None and parse_iso_timestamp(row["last_seen_at"]) < cutoff
     except Exception as e:  # noqa: BLE001 — unreadable: leave the alarm standing
         logger.warning(f"could not read the {kind} alarm; leaving it standing: {e}")
         return False
