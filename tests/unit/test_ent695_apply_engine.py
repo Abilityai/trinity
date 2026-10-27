@@ -34,8 +34,8 @@ SYSTEM = W.SYSTEM
 
 
 @pytest.fixture
-def world(db_backend, monkeypatch):
-    return W.make_world(monkeypatch)
+def world(db_backend, monkeypatch, tmp_path):
+    return W.make_world(monkeypatch, tmp_path)
 
 
 def _manifest(*shorts: str, extra: str = "") -> str:
@@ -334,3 +334,263 @@ class TestScheduleMatcher:
         actions = self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily", "id": "x"}],
                                [_row("daily", sid="y")], match=by_declared_id)
         assert _kinds(actions) == [("unlinked", "daily")]
+
+
+# ===========================================================================
+# 3. The plan: field reconcilers, drift, prompt, view, census
+# ===========================================================================
+
+def _plan(world, manifest_yaml, username=W.ALICE):
+    manifest = system_service.parse_manifest(manifest_yaml)
+    system_service.validate_manifest(manifest)
+    snap = world.snapshot(manifest_yaml, username=username)
+    return system_service.resolve_apply_plan(manifest, snap)
+
+
+def _member(plan, short):
+    return plan.members[short]
+
+
+def _ops(mp, kind=None):
+    return [(op.kind, op.args) for op in mp.ops if kind is None or op.kind == kind]
+
+
+def _change_codes(mp):
+    return [(c.field, c.action, c.code) for c in mp.changes]
+
+
+def _one_member(world, entry: str, **seed):
+    world.seed_agent("acme-a", **seed)
+    return f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n{entry}"
+
+
+class TestTagsAndEdges:
+    def test_tags_are_added_never_replaced_and_compared_as_stored(self, world):
+        """`Prod` declared, `prod` stored: equal (AC1). An operator tag stays
+        and is not reported (H2)."""
+        world.seed_agent("acme-a", tags=(SYSTEM, "prod", "operator-pick"))
+        plan = _plan(world, f"name: {SYSTEM}\ndefault_tags: [Prod]\nagents:\n"
+                            "  a:\n    template: local:plain\n    tags: [team-x]\n")
+        mp = _member(plan, "a")
+        assert _ops(mp) == [("tag", {"tag": "team-x"})]
+        assert mp.verdict == "update" and not plan.blockers
+        assert "operator-pick" not in str([c.desired for c in mp.changes])
+
+    def test_missing_edges_are_added_and_extras_reported_never_removed(self, world):
+        """`none` would CLEAR every edge in create mode; apply adds nothing and
+        reports the intra-system edge, and never reads an edge to a non-member."""
+        world.seed_agent("acme-a")
+        world.seed_agent("acme-b")
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        db.add_agent_permission("acme-a", "outsider", W.ALICE)
+        plan = _plan(world, _manifest("a", "b", extra="permissions:\n  preset: none\n"))
+        mp = _member(plan, "a")
+        assert _ops(mp, "edge") == []
+        assert [(c.code, c.current) for c in mp.changes] == [("permission_extra", ["acme-b"])]
+        assert mp.verdict == "unchanged"
+
+    def test_an_explicit_self_edge_is_dropped_like_set_permissions_drops_it(self, world):
+        world.seed_agent("acme-a")
+        world.seed_agent("acme-b")
+        plan = _plan(world, _manifest("a", "b", extra="permissions:\n  explicit:\n    a: [a, b]\n"))
+        assert _ops(_member(plan, "a"), "edge") == [("edge", {"target": "acme-b"})]
+
+    def test_full_mesh_adds_only_what_is_missing(self, world):
+        world.seed_agent("acme-a")
+        world.seed_agent("acme-b")
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        plan = _plan(world, _manifest("a", "b", extra="permissions:\n  preset: full-mesh\n"))
+        assert _ops(_member(plan, "a"), "edge") == []
+        assert _ops(_member(plan, "b"), "edge") == [("edge", {"target": "acme-a"})]
+
+
+class TestFolders:
+    def test_only_the_declared_key_is_compared_and_written(self, world):
+        mf = _one_member(world, "    folders:\n      expose: true\n")
+        db.upsert_shared_folder_config("acme-a", expose_enabled=False, consume_enabled=True)
+        mp = _member(_plan(world, mf), "a")
+        assert _ops(mp, "folders") == [("folders", {"expose_enabled": True, "consume_enabled": None})]
+        assert mp.restart_required is True  # the mounts no longer match the config
+
+    @pytest.mark.parametrize("folders", ["{expose: null}", "{expose: 'yes'}", "{share: true}"])
+    def test_invalid_folders_are_refused(self, world, folders):
+        mf = _one_member(world, f"    folders: {folders}\n")
+        plan = _plan(world, mf)
+        assert [(b.code, b.member) for b in plan.blockers] == [("folders_invalid", "acme-a")]
+        assert _member(plan, "a").verdict == "blocked"
+
+
+class TestResources:
+    def test_a_changed_cpu_is_an_override_keeping_the_stored_memory(self, world):
+        mf = _one_member(world, "    resources:\n      cpu: '4'\n")
+        db.set_resource_limits("acme-a", memory="8g", cpu=None)
+        mp = _member(_plan(world, mf), "a")
+        assert _ops(mp, "resources") == [("resources", {"cpu": "4", "memory": "8g"})]
+        assert mp.restart_required is True and mp.verdict == "update"
+
+    def test_the_effective_value_is_override_then_label_then_default(self, world):
+        mf = _one_member(world, "    resources:\n      cpu: '4'\n", cpu="4")
+        assert _ops(_member(_plan(world, mf), "a")) == []
+
+    def test_a_stored_override_not_yet_applied_keeps_reporting_restart_required(self, world):
+        """Codex pass 3: computed from the platform's predicates over the
+        container every run, never from this run's writes."""
+        mf = _one_member(world, "    resources:\n      cpu: '4'\n", cpu="2")
+        db.set_resource_limits("acme-a", memory=None, cpu="4")
+        mp = _member(_plan(world, mf), "a")
+        assert _ops(mp) == [] and mp.verdict == "unchanged" and mp.restart_required is True
+        world.docker.containers["acme-a"].labels["trinity.cpu"] = "4"  # restarted
+        assert _member(_plan(world, mf), "a").restart_required is False
+
+    @pytest.mark.parametrize("value", ["1.0", "'0.5'", "'512Mi'"])
+    def test_an_unusable_value_is_refused_with_creates_own_validator(self, world, value):
+        key = "memory" if "Mi" in value else "cpu"
+        plan = _plan(world, _one_member(world, f"    resources:\n      {key}: {value}\n"))
+        assert [b.code for b in plan.blockers] == ["resources_invalid"]
+
+
+class TestTemplate:
+    def test_a_different_template_is_reported_never_recreated(self, world):
+        world.seed_agent("acme-a", template="local:old")
+        mp = _member(_plan(world, _manifest("a")), "a")
+        assert _change_codes(mp) == [("template", "report", "template_differs")]
+        assert mp.verdict == "unchanged" and mp.ops == []
+
+
+class TestSchedulesInThePlan:
+    def test_a_row_apply_creates_on_an_existing_member_is_owned_by_the_agent_owner(self, world):
+        """H3b: an admin applying to Alice's agent must not lock her out of the
+        row (`update_schedule` is owner-or-admin)."""
+        mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '0 9 * * *', message: /d}\n")
+        mp = _member(_plan(world, mf, username=W.ADMIN), "a")
+        (op,) = [op for op in mp.ops if op.kind == "schedule_create"]
+        assert op.args["owner_username"] == W.ALICE
+
+    def test_a_row_the_caller_cannot_update_is_refused_up_front(self, world):
+        mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '0 10 * * *', message: /d}\n")
+        db.create_schedule("acme-a", W.ADMIN, system_service._build_schedule_create(
+            {"name": "daily", "cron": "0 9 * * *", "message": "/d"}))
+        plan = _plan(world, mf)
+        assert [(b.code, b.member) for b in plan.blockers] == [
+            ("schedule_not_updatable_by_caller", "acme-a")]
+
+    @pytest.mark.parametrize("entry,code", [
+        ("{name: d, cron: '99 99 * * *', message: /d}", "schedule_cron_invalid"),
+        ("{name: d, cron: '@daily', message: /d}", "schedule_cron_invalid"),
+        ("{name: d, cron: '0 9 * * *', message: /d, timezone: Mars/Olympus}", "schedule_timezone_invalid"),
+        ("{name: d, cron: '0 9 * * *', message: [not, a, string]}", "schedule_definition_invalid"),
+    ])
+    def test_an_invalid_schedule_is_refused_before_any_write(self, world, entry, code):
+        plan = _plan(world, _one_member(world, f"    schedules:\n      - {entry}\n"))
+        assert [b.code for b in plan.blockers] == [code]
+
+    def test_an_invalid_cron_on_an_update_is_refused(self, world):
+        mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '61 9 * * *', message: /d}\n")
+        db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
+            {"name": "daily", "cron": "0 9 * * *", "message": "/d"}))
+        assert [b.code for b in _plan(world, mf).blockers] == ["schedule_cron_invalid"]
+
+    def test_two_live_rows_with_one_name_refuse(self, world):
+        mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '0 9 * * *', message: /d}\n")
+        for _ in range(2):
+            db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
+                {"name": "daily", "cron": "0 9 * * *", "message": "/d"}))
+        assert [b.code for b in _plan(world, mf).blockers] == ["schedule_name_ambiguous"]
+
+
+class TestCreatedMemberPlan:
+    def test_a_member_to_create_marks_its_template_dependent_fields_pending(self, world):
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:sched\n"
+              "    resources: {cpu: '2'}\n"
+              "    schedules:\n      - {name: daily, cron: '0 7 * * *', message: /m}\n")
+        mp = _member(_plan(world, mf), "a")
+        assert mp.verdict == "create" and mp.creating
+        pending = [c.field for c in mp.changes if c.code == "pending_template_resolution"]
+        assert pending == ["resources", "schedule:daily"]
+
+    def test_an_unresolvable_local_template_is_refused(self, world):
+        plan = _plan(world, f"name: {SYSTEM}\nagents:\n  a:\n    template: local:nope\n")
+        assert [b.code for b in plan.blockers] == ["template_unresolvable"]
+
+
+class TestDrift:
+    def test_undeclared_tagged_members_are_drift_with_the_suffix_note(self, world):
+        world.seed_agent("acme-a")
+        world.seed_agent("acme-old")
+        world.seed_agent("acme-a_2")
+        world.seed_agent("acme-restored", container=False)
+        plan = _plan(world, _manifest("a"))
+        drift = {d.name: d for d in plan.drift}
+        assert sorted(drift) == ["acme-a_2", "acme-old", "acme-restored"]
+        assert "suffixed copy" in drift["acme-a_2"].note and drift["acme-old"].note is None
+        assert not plan.blockers
+
+
+class TestPromptAndView:
+    def test_prompt_verdicts(self, world):
+        db.set_setting("trinity_prompt", "current")
+        base = _manifest("a")
+        assert _plan(world, base).prompt.verdict == "not_declared"
+        assert _plan(world, base + 'prompt: ""\n').prompt.verdict == "not_declared"
+        assert _plan(world, base + "prompt: current\n").prompt.verdict == "unchanged"
+        creator = _plan(world, base + "prompt: new\n")
+        assert creator.prompt.verdict == "requires_admin" and creator.prompt_op is None
+        assert not creator.blockers  # a report, never a blocker
+        admin = _plan(world, base + "prompt: new\n", username=W.ADMIN)
+        assert admin.prompt.verdict == "update" and admin.prompt_op.args == {"prompt": "new"}
+
+    def _view(self, owner, *, shared, name="Acme"):
+        from db_models import SystemViewCreate
+        user_id = str(db.get_user_by_username(owner)["id"])
+        return db.create_system_view(user_id, SystemViewCreate(
+            name=name, description=system_service.SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=SYSTEM),
+            filter_tags=[SYSTEM], is_shared=shared))
+
+    def test_view_create_unchanged_and_ambiguous(self, world):
+        mf = _manifest("a", extra="system_view:\n  name: Acme\n  shared: false\n")
+        assert _plan(world, mf).system_view.verdict == "create"
+        own = self._view(W.ALICE, shared=True, name="Old name")
+        plan = _plan(world, mf)
+        assert plan.system_view.verdict == "unchanged" and plan.system_view.id == own.id
+        assert [c.field for c in plan.system_view.changes] == ["system_view.name", "system_view.shared"]
+        assert plan.view_op is None
+        self._view(W.ALICE, shared=False)
+        plan = _plan(world, mf)
+        assert plan.system_view.verdict == "ambiguous" and plan.view_op is None and plan.warnings
+
+    def test_another_users_private_view_is_never_matched(self, world):
+        """Engineering F8: the lookup is over the caller's own or shared views."""
+        self._view(W.BOB, shared=False)
+        assert _plan(world, _manifest("a", extra="system_view:\n  name: Acme\n")).system_view.verdict == "create"
+
+
+class TestFieldCoverageCensus:
+    """Strategy F4: a new manifest key fails CI until it is classified."""
+
+    @staticmethod
+    def _schedule_keys():
+        import ast
+        import inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(inspect.getsource(system_service._build_schedule_create)))
+        keys = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+                keys.add(node.slice.value)
+            if (isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "get"
+                    and node.args and isinstance(node.args[0], ast.Constant)):
+                keys.add(node.args[0].value)
+        return keys
+
+    def test_every_field_is_classified_exactly_once(self):
+        from models import SystemAgentConfig, SystemManifest
+        expected = (
+            {f"SystemManifest.{f}" for f in SystemManifest.model_fields}
+            | {f"SystemAgentConfig.{f}" for f in SystemAgentConfig.model_fields}
+            | {f"schedule.{k}" for k in self._schedule_keys()}
+        )
+        table = system_service.APPLY_FIELD_CLASSIFICATION
+        assert set(table) == expected
+        assert {cls for cls, _why in table.values()} <= system_service.APPLY_FIELD_CLASSES
+        assert table["SystemAgentConfig.kind"][0] == "create-only"
+        assert self._schedule_keys() == {"name", "cron", "message", "enabled", "timezone", "description"}

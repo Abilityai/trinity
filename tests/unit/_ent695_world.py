@@ -119,7 +119,32 @@ def _raise_fast(*_a, **_k):
     raise AssertionError("apply must never read the roster through list_all_agents_fast")
 
 
-def make_world(monkeypatch) -> World:
+# `local:` templates the fake create resolves through the REAL
+# `crud._resolve_local_template` (so the template's own resources, shared
+# folders and `schedules:` reach the member exactly as create applies them).
+TEMPLATES = {
+    "plain": "name: plain\n",
+    # Declares a schedule a manifest re-declares (H3, P-F exception 1).
+    "sched": (
+        "name: sched\n"
+        "schedules:\n"
+        "  - name: daily\n"
+        "    cron: '0 9 * * *'\n"
+        "    message: /template-daily\n"
+        "    description: from the template\n"
+    ),
+    # Overrides a declared resource (H4, P-F exception 2).
+    "heavy": "name: heavy\nresources:\n  cpu: '4'\n  memory: '8g'\n",
+}
+
+
+def write_templates(root) -> None:
+    for name, body in TEMPLATES.items():
+        (root / name).mkdir(parents=True, exist_ok=True)
+        (root / name / "template.yaml").write_text(body)
+
+
+def make_world(monkeypatch, tmp_path=None) -> World:
     """Users, the Docker fakes and the seams. Call inside a `db_backend` test."""
     for username, role in ((ADMIN, "admin"), (ALICE, "creator"), (BOB, "creator"), (CAROL, "user")):
         db.create_user(UserCreate(username=username, role=role, email=f"{username}@example.com"))
@@ -134,4 +159,10 @@ def make_world(monkeypatch) -> World:
     monkeypatch.setattr(crud, "get_agent_by_name",
                         lambda n: SimpleNamespace(name=n) if n in docker.containers else None)
     monkeypatch.setattr(docker_service, "list_all_agents_fast", _raise_fast)
+    if tmp_path is not None:
+        curated, deployed = tmp_path / "templates-curated", tmp_path / "templates-deployed"
+        deployed.mkdir(parents=True, exist_ok=True)
+        write_templates(curated)
+        monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (curated.resolve(), deployed.resolve()))
+        world.templates_root = curated
     return world

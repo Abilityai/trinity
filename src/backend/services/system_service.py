@@ -31,6 +31,10 @@ from models import (
     BundledManifestSummary,
     MANIFEST_MAX_BYTES,
     SystemApplyBlocker,
+    SystemApplyChange,
+    SystemApplyDrift,
+    SystemApplyPromptVerdict,
+    SystemApplyViewVerdict,
     SystemDeployFailure,
     SystemDeployResponse,
     SystemSchedulePreview,
@@ -2678,3 +2682,530 @@ def resolve_declared_schedule_actions(
         if getattr(row, "name", None) not in named:
             actions.append(ScheduleAction("undeclared", row.name, row=row))
     return actions
+
+
+# ----------------------------------------------------------------------------
+# The plan: pure over the manifest and the snapshot (P-D: the dry run and the
+# real run compute it with the same functions).
+# ----------------------------------------------------------------------------
+
+# Field coverage census (strategy F4). Every `SystemManifest` /
+# `SystemAgentConfig` field and every schedule key `_build_schedule_create`
+# reads appears here exactly once, so a new manifest key fails CI
+# (`test_ent695_apply_engine.py`) until someone decides what apply does with
+# it. `inert`: neither mode writes it anywhere.
+APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "inert"})
+APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
+    "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
+    "SystemManifest.description": ("inert", "neither mode stores it"),
+    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
+    "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
+    "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
+    "SystemManifest.system_view": ("reconciled", "created when absent; differences reported"),
+    "SystemManifest.unknown_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemManifest.unknown_agent_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemAgentConfig.template": ("report-only", "template_differs; used to create"),
+    "SystemAgentConfig.resources": ("reconciled", "declared keys win as overrides (P-F exception 2)"),
+    "SystemAgentConfig.folders": ("reconciled", "declared keys only on an existing member"),
+    "SystemAgentConfig.schedules": ("reconciled", "matched by name; see schedule.*"),
+    "SystemAgentConfig.tags": ("reconciled", "added, never replaced"),
+    "SystemAgentConfig.kind": ("create-only", "nothing readable stores it"),
+    "schedule.name": ("reconciled", "the match key"),
+    "schedule.cron": ("reconciled", "updated in place"),
+    "schedule.message": ("reconciled", "updated in place"),
+    "schedule.enabled": ("create-only", "never written on a matched row; enabled_differs"),
+    "schedule.timezone": ("reconciled", "only when declared"),
+    "schedule.description": ("reconciled", "only when declared"),
+}
+
+# The order the executor writes in, by kind (phase-major, as create mode does).
+_APPLY_OP_PHASES = (
+    "tag", "edge", "folders", "resources", "created_resources",
+    "schedule_create", "schedule_update", "created_schedules",
+)
+
+
+@dataclass
+class ApplyOp:
+    """One write the executor makes. `member` is the agent it names."""
+
+    kind: str
+    member: Optional[str]
+    short_name: str
+    args: Dict = field(default_factory=dict)
+
+
+@dataclass
+class ApplyMemberPlan:
+    name: str
+    short_name: str
+    verdict: str  # "create" | "update" | "unchanged" | "blocked"
+    config: SystemAgentConfig
+    creating: bool = False
+    changes: List["SystemApplyChange"] = field(default_factory=list)
+    ops: List[ApplyOp] = field(default_factory=list)
+    restart_required: bool = False
+
+
+@dataclass
+class ApplyPlan:
+    system_name: str
+    agent_names: Dict[str, str]  # short -> final, the full declared map
+    members: Dict[str, ApplyMemberPlan]
+    drift: List["SystemApplyDrift"]
+    blockers: List["SystemApplyBlocker"]
+    prompt: "SystemApplyPromptVerdict"
+    system_view: "SystemApplyViewVerdict"
+    prompt_op: Optional[ApplyOp] = None
+    view_op: Optional[ApplyOp] = None
+    warnings: List[str] = field(default_factory=list)
+
+
+def _apply_change(field_name: str, action: str, code: str, *, current=None,
+                  desired=None, note: Optional[str] = None) -> "SystemApplyChange":
+    return SystemApplyChange(field=field_name, action=action, code=code,
+                             current=current, desired=desired, note=note)
+
+
+def _normalized_tags(tags) -> List[str]:
+    """Lower/stripped, deduplicated, in declaration order: what `add_tag`
+    stores, so a declared `Prod` compares equal to a stored `prod` (AC1)."""
+    out: List[str] = []
+    for tag in tags:
+        normalized = str(tag).lower().strip()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _desired_tags(system_name: str, default_tags, agent_tags) -> List[str]:
+    return _normalized_tags([system_name, *(default_tags or []), *(agent_tags or [])])
+
+
+def _desired_edges(agent_names: Dict[str, str], permissions) -> Dict[str, List[str]]:
+    """The edges the manifest wants, per source: what `set_permissions` would
+    STORE after create mode's writes — the last write per source wins (it is a
+    full replacement), self-edges dropped (it never stores one, Codex 9),
+    duplicates removed."""
+    write_set, _count = resolve_permission_edges(agent_names, permissions)
+    final: Dict[str, List[str]] = {}
+    for source, targets in write_set:
+        final[source] = list(targets)
+    return {
+        source: sorted({t for t in targets if t != source})
+        for source, targets in final.items()
+    }
+
+
+def _folders_error(folders) -> Optional[str]:
+    """`folders` must map `expose` / `consume` to booleans. Create mode does
+    not check (and stays as it is); apply must, or a `null` would compare
+    unequal on every run and break AC1 (Codex 8)."""
+    if folders is None:
+        return None
+    if not isinstance(folders, dict):
+        return "folders must be a mapping of expose / consume to true or false"
+    unknown = sorted(str(k) for k in folders if k not in ("expose", "consume"))
+    if unknown:
+        return f"unknown folders key(s): {', '.join(unknown)} (expected expose, consume)"
+    bad = sorted(str(k) for k, v in folders.items() if not isinstance(v, bool))
+    if bad:
+        return f"folders value(s) for {', '.join(bad)} must be true or false"
+    return None
+
+
+def _normalized_resources(resources) -> Tuple[Dict[str, str], Optional[str]]:
+    """The declared `cpu` / `memory`, through create's own validators."""
+    from services.agent_service.capabilities import normalize_cpu, normalize_memory
+    from services.agent_service.crud import _get_default_resource
+
+    if resources is None:
+        return {}, None
+    if not isinstance(resources, dict):
+        return {}, "resources must be a mapping of cpu / memory"
+    out: Dict[str, str] = {}
+    try:
+        if resources.get("cpu") not in (None, ""):
+            out["cpu"] = normalize_cpu(resources["cpu"], _get_default_resource("cpu"))
+        if resources.get("memory") not in (None, ""):
+            out["memory"] = normalize_memory(resources["memory"], _get_default_resource("memory"))
+    except ValueError as e:
+        return {}, str(e)
+    return out, None
+
+
+def _schedule_entry_error(entry: dict, *, cron: Optional[str] = None,
+                          timezone: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """(code, detail) when a row apply would create or update is invalid.
+
+    The scheduler's own parser (#1472, #1823), so a row apply writes can
+    always be armed. Create mode's gap (#2992: a manifest cron is never
+    parsed) is left alone (AC6).
+    """
+    from services.schedule_validation import validate_cron_expression, validate_timezone
+
+    try:
+        _build_schedule_create(entry)
+    except Exception as e:  # noqa: BLE001 — the writer's own model rejected it
+        return "schedule_definition_invalid", _failure_reason(e)[0]
+    cron = cron if cron is not None else entry.get("cron")
+    tz = timezone if timezone is not None else entry.get("timezone", "UTC")
+    try:
+        validate_timezone(tz)
+    except Exception as e:  # noqa: BLE001
+        return "schedule_timezone_invalid", str(e)
+    try:
+        validate_cron_expression(cron, tz or "UTC")
+    except Exception as e:  # noqa: BLE001
+        return "schedule_cron_invalid", str(e)
+    return None
+
+
+def _schedule_view(entry_or_row) -> Dict:
+    """The schedule fields a report shows. Never webhook tokens or secrets."""
+    if isinstance(entry_or_row, dict):
+        return {k: entry_or_row.get(k) for k in
+                ("name", "cron", "message", "enabled", "timezone", "description")
+                if k in entry_or_row}
+    row = entry_or_row
+    return {
+        "name": row.name, "cron": row.cron_expression, "message": row.message,
+        "enabled": bool(row.enabled), "timezone": row.timezone,
+        "description": row.description,
+    }
+
+
+def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest: SystemManifest,
+                          snapshot: ApplySnapshot, desired_edges: Dict[str, List[str]],
+                          declared_final: set, normalized_resources: Dict[str, str],
+                          blockers: List) -> None:
+    """Changes and writes for a live member the caller may manage."""
+    from services.agent_service.crud import _get_default_resource
+
+    cfg, name, short = mp.config, mp.name, mp.short_name
+    labels = state.labels or {}
+
+    # Tags: additive. Extra tags are not drift and are not reported (H2).
+    live_tags = set(_normalized_tags(state.tags))
+    missing = [t for t in _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+               if t not in live_tags]
+    if missing:
+        mp.changes.append(_apply_change("tags", "write", "tag_missing",
+                                        current=sorted(live_tags), desired=missing))
+        mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in missing)
+
+    # Edges: missing ones added; a live edge between two declared members that
+    # the manifest does not want is reported, never removed (H2).
+    live_edges = set(state.edges)
+    wanted = desired_edges.get(name, [])
+    add = [t for t in wanted if t not in live_edges]
+    if add:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=sorted(live_edges & declared_final),
+                                        desired=add))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in add)
+    extra = sorted((live_edges & declared_final) - set(wanted) - {name})
+    if extra:
+        mp.changes.append(_apply_change(
+            "permissions", "report", "permission_extra", current=extra,
+            note="apply never removes an edge; remove it by hand if it is unwanted"))
+
+    # Folders: only the declared keys (H4b).
+    folder_write: Dict[str, bool] = {}
+    if isinstance(cfg.folders, dict):
+        live = {
+            "expose": bool(getattr(state.folders, "expose_enabled", False)),
+            "consume": bool(getattr(state.folders, "consume_enabled", False)),
+        }
+        for key in ("expose", "consume"):
+            if key in cfg.folders and cfg.folders[key] != live[key]:
+                folder_write[key] = cfg.folders[key]
+                mp.changes.append(_apply_change(f"folders.{key}", "write", "folder_differs",
+                                                current=live[key], desired=cfg.folders[key]))
+    if folder_write:
+        mp.ops.append(ApplyOp("folders", name, short, {
+            "expose_enabled": folder_write.get("expose"),
+            "consume_enabled": folder_write.get("consume"),
+        }))
+
+    # Resources: declared keys win as a per-agent override (H4, P-F exception 2).
+    stored = dict(state.resource_limits or {})
+    resource_write: Dict[str, str] = {}
+    label_mismatch = False
+    for key, desired in normalized_resources.items():
+        effective = (stored.get(key) or labels.get(f"trinity.{key}")
+                     or _get_default_resource(key))
+        if desired != effective:
+            resource_write[key] = desired
+            mp.changes.append(_apply_change(f"resources.{key}", "write", "resource_differs",
+                                            current=effective, desired=desired,
+                                            note="takes effect at the member's next restart"))
+            if desired != labels.get(f"trinity.{key}"):
+                label_mismatch = True
+    if resource_write:
+        # The omitted key keeps its stored value: `set_resource_limits` writes
+        # both columns, and None would clear it (engineering F2).
+        mp.ops.append(ApplyOp("resources", name, short, {
+            "cpu": resource_write.get("cpu", stored.get("cpu")),
+            "memory": resource_write.get("memory", stored.get("memory")),
+        }))
+
+    # Template: reported, never recreated (H5). `kind` is create-only.
+    live_template = labels.get("trinity.template") or ""
+    if live_template != cfg.template:
+        mp.changes.append(_apply_change(
+            "template", "report", "template_differs", current=live_template or None,
+            desired=cfg.template, note="apply never recreates an agent"))
+
+    # Schedules (H3, H3b).
+    for action in resolve_declared_schedule_actions(cfg.schedules or [], state.schedules):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            error = _schedule_entry_error(action.entry)
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_create",
+                                            desired=_schedule_view(action.entry)))
+            # Created as the AGENT OWNER, like a template-materialized row, so
+            # the owner can still edit and delete it (H3b).
+            mp.ops.append(ApplyOp("schedule_create", name, short, {
+                "entry": action.entry, "owner_username": state.owner_username}))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC",
+            )
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            # `update_schedule` is owner-or-admin and returns None otherwise —
+            # silently. Refuse up front instead (H3b).
+            if not (snapshot.caller_role == "admin" or action.row.owner_id == snapshot.caller_id):
+                blockers.append(_apply_blocker(
+                    "schedule_not_updatable_by_caller", name,
+                    f"Schedule '{action.name}' on '{name}' belongs to another user; "
+                    "only its owner or an admin can change it.",
+                    "Ask the schedule's owner or an admin to run apply, or leave the "
+                    "schedule's declared fields as they are."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_update",
+                                            current=action.current, desired=action.fields))
+            mp.ops.append(ApplyOp("schedule_update", name, short, {
+                "schedule_id": action.row.id, "fields": dict(action.fields)}))
+        elif action.kind == "enabled_differs":
+            mp.changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="apply never arms or disarms a schedule; toggle it by hand"))
+        elif action.kind == "undeclared":
+            mp.changes.append(_apply_change(
+                field_name, "report", "schedule_undeclared",
+                current=_schedule_view(action.row),
+                note="not in the manifest; left as it is"))
+        elif action.kind == "unlinked":
+            mp.changes.append(_apply_change(field_name, "report", "schedule_unlinked",
+                                            current=_schedule_view(action.row)))
+        elif action.kind == "ambiguous":
+            blockers.append(_apply_blocker(
+                "schedule_name_ambiguous", name,
+                f"'{name}' has more than one schedule named '{action.name}'.",
+                "Delete or rename the duplicate rows, then re-apply."))
+        elif action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+
+    # `restart_required`: the platform's own predicates over the container,
+    # plus what this run's writes would leave the container out of step with.
+    mp.restart_required = bool(state.restart_pending or label_mismatch or folder_write)
+
+
+def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
+                         desired_edges: Dict[str, List[str]],
+                         normalized_resources: Dict[str, str], blockers: List) -> None:
+    """Changes and writes for a member apply will create.
+
+    Create mode's semantics wherever create mode defines them (P-F), so a fresh
+    install comes out as create mode would build it, but for the two stated
+    differences, which need the post-create state and so are resolved by the
+    executor: a template's same-named schedule, and a template resource that
+    overrides a declared one.
+    """
+    cfg, name, short = mp.config, mp.name, mp.short_name
+
+    failure = _preflight_template(name, short, cfg.template, None)
+    if failure is not None:
+        blockers.append(_apply_blocker(
+            "template_unresolvable", name, f"Template '{cfg.template}': {failure.reason}",
+            "Fix the template reference in the manifest."))
+
+    tags = _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+    mp.changes.append(_apply_change("tags", "write", "tag_missing", current=[], desired=tags))
+    # The system tag is written by the executor right after create (H11b).
+    mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in tags if t != manifest.name)
+
+    wanted = desired_edges.get(name, [])
+    if wanted:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=[], desired=wanted))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in wanted)
+
+    if isinstance(cfg.folders, dict) and _folders_error(cfg.folders) is None:
+        # Both keys, an omitted one False: create's `configure_folders` (Codex 7).
+        expose = cfg.folders.get("expose", False)
+        consume = cfg.folders.get("consume", False)
+        mp.changes.append(_apply_change("folders", "write", "folder_differs",
+                                        desired={"expose": expose, "consume": consume}))
+        mp.ops.append(ApplyOp("folders", name, short,
+                              {"expose_enabled": expose, "consume_enabled": consume}))
+
+    if normalized_resources:
+        mp.changes.append(_apply_change(
+            "resources", "report", "pending_template_resolution", desired=normalized_resources,
+            note="compared with the template's resources once the member is created; a "
+                 "template value that differs is overridden before its first start"))
+        mp.ops.append(ApplyOp("created_resources", name, short,
+                              {"declared": dict(normalized_resources)}))
+
+    entries = list(cfg.schedules or [])
+    for action in resolve_declared_schedule_actions(entries, []):
+        if action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+            continue
+        error = _schedule_entry_error(action.entry)
+        if error:
+            blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                           "Fix the schedule in the manifest."))
+            continue
+        mp.changes.append(_apply_change(
+            f"schedule:{action.name}", "write", "pending_template_resolution",
+            desired=_schedule_view(action.entry),
+            note="created, or a same-named schedule from the template updated to these "
+                 "fields, after the member is created"))
+    if entries:
+        mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
+
+
+def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> ApplyPlan:
+    """The per-member verdicts, the drift, every blocker, and the write-set.
+
+    Pure over `manifest` and `snapshot` (the template preflight reads a local
+    template file, as create's dry run does). A member whose only differences
+    are reports is `unchanged`: AC1 counts writes.
+    """
+    system = manifest.name
+    agent_names = {short: f"{system}-{short}" for short in manifest.agents}
+    declared_final = set(agent_names.values())
+    blockers: List[SystemApplyBlocker] = list(snapshot.blockers)
+    desired_edges = _desired_edges(agent_names, manifest.permissions)
+    warnings: List[str] = []
+
+    members: Dict[str, ApplyMemberPlan] = {}
+    for short, cfg in manifest.agents.items():
+        name = agent_names[short]
+        state = snapshot.members.get(short) or ApplyMemberState(short_name=short, name=name)
+        mp = ApplyMemberPlan(name=name, short_name=short, verdict="unchanged", config=cfg)
+        members[short] = mp
+        before = len(blockers)
+
+        folders_error = _folders_error(cfg.folders)
+        if folders_error:
+            blockers.append(_apply_blocker("folders_invalid", name, folders_error,
+                                           "Use `folders: {expose: true|false, consume: true|false}`."))
+        normalized_resources, resources_error = _normalized_resources(cfg.resources)
+        if resources_error:
+            blockers.append(_apply_blocker("resources_invalid", name, resources_error,
+                                           "Use a supported cpu / memory value, quoted."))
+
+        if state.status == "absent" and not state.blocked:
+            mp.creating = True
+            _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            mp.verdict = "create"
+        elif state.status == "managed" and not state.blocked:
+            _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
+                                  declared_final, normalized_resources, blockers)
+            mp.verdict = "update" if mp.ops else "unchanged"
+        else:
+            mp.verdict = "blocked"
+        if len(blockers) > before or state.blocked:
+            mp.verdict = "blocked"
+
+    # Drift: tagged members the manifest does not declare (AC3). Reported,
+    # never touched. A prefix-only one never gets here: it blocks (H11).
+    drift: List[SystemApplyDrift] = []
+    if snapshot.membership.tags_readable:
+        for member in snapshot.membership.members:
+            if member in declared_final:
+                continue
+            evidence = snapshot.membership.evidence.get(member)
+            if evidence not in ("tag", "both"):
+                continue
+            note = None
+            if any(re.fullmatch(re.escape(d) + r"_\d+", member) for d in declared_final):
+                note = ("suffixed copy from an earlier create-mode deploy; apply never "
+                        "removes it")
+            drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
+
+    # The platform prompt (H6, P-F exception 3).
+    prompt_op = None
+    if not manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="not_declared")
+    elif snapshot.stored_prompt == manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="unchanged")
+    elif snapshot.caller_is_admin:
+        prompt = SystemApplyPromptVerdict(
+            verdict="update",
+            note="running agents pick up the new prompt at their next start")
+        prompt_op = ApplyOp("prompt", None, "", {"prompt": manifest.prompt})
+    else:
+        prompt = SystemApplyPromptVerdict(
+            verdict="requires_admin",
+            note="prompt_requires_admin: the platform-wide prompt changes every agent's "
+                 "instructions, so only an admin may change it; nothing was written")
+
+    # The auto-created system view (H7).
+    view_op = None
+    if not manifest.system_view:
+        view = SystemApplyViewVerdict(verdict="not_requested")
+    else:
+        marker = SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=system)
+        matches = [
+            v for v in snapshot.views
+            if getattr(v, "description", None) == marker
+            and system in [str(t).lower().strip() for t in (getattr(v, "filter_tags", None) or [])]
+        ]
+        if not matches:
+            view = SystemApplyViewVerdict(verdict="create")
+            view_op = ApplyOp("view", None, "", {})
+        elif len(matches) == 1:
+            found, wanted_view = matches[0], manifest.system_view
+            changes = [
+                _apply_change(f"system_view.{attr}", "report", "view_differs",
+                              current=getattr(found, live_attr, None), desired=value)
+                for attr, live_attr, value in (
+                    ("name", "name", wanted_view.name), ("icon", "icon", wanted_view.icon),
+                    ("color", "color", wanted_view.color),
+                    ("shared", "is_shared", wanted_view.shared))
+                if getattr(found, live_attr, None) != value
+            ]
+            view = SystemApplyViewVerdict(verdict="unchanged", id=found.id, changes=changes)
+        else:
+            view = SystemApplyViewVerdict(verdict="ambiguous")
+            warnings.append(
+                f"More than one system view is marked as {system}'s auto-created view; "
+                "apply created none and changed none.")
+
+    return ApplyPlan(
+        system_name=system, agent_names=agent_names, members=members, drift=drift,
+        blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
+        view_op=view_op, warnings=warnings,
+    )
