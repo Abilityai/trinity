@@ -2657,13 +2657,14 @@ print(json.dumps(out))
 
             managed = await self._list_managed_skills(agent_name)
             if managed is None:
-                # Not silent (#3254 fresh review): one entry that cannot be
-                # listed or stat'ed blocks every pass on this agent — no prune,
-                # no gate drop, no refusal clear — until someone fixes it.
+                # Not silent (#3254 fresh review): an inventory that cannot be
+                # taken (one skill-named entry that cannot be listed or stat'ed,
+                # or a failed probe) blocks every pass on this agent — no prune,
+                # no gate drop, no refusal clear — until it can be taken again.
                 logger.warning(
                     f"skill reconcile skipped for {agent_name}: its skills inventory "
-                    f"could not be inspected (an entry under ~/.claude/skills could not "
-                    f"be listed or stat'ed); nothing is pruned and an open refusal alarm stays")
+                    f"could not be inspected; nothing is pruned and an open refusal "
+                    f"alarm stays")
                 return {"status": "skipped", "reason": "inventory_unavailable"}
 
             orphans = sorted(set(managed) - assigned)

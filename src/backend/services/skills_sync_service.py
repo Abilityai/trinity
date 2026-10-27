@@ -473,12 +473,22 @@ class SkillsLibrarySyncService:
         (`skills_alarm_last_read_before`). Every agent the row names must be
         among those this sweep `reached`: an agent that failed and then
         stopped is not enumerated, and a sweep that never looked at it is no
-        evidence that it recovered (R10). On an install that never raised it
+        evidence that it recovered (R10). The row's list must name every failed
+        agent: the report keeps at most 25 names, so a row whose failure count
+        exceeds its list, or whose list is missing or malformed, is unknown
+        evidence and is left to its lifetime. On an install that never raised it
         this is one read and no write. Never raises."""
         from services import platform_alerts
 
         def _names_reached(row: Dict[str, Any]) -> bool:
-            named = (row.get("context") or {}).get("agents") or ()
+            context = row.get("context") or {}
+            named = context.get("agents")
+            if not (isinstance(named, list) and named
+                    and all(isinstance(n, str) and n for n in named)):
+                return False
+            failed = context.get("agents_failed")
+            if not isinstance(failed, int) or isinstance(failed, bool) or failed > len(named):
+                return False
             return set(named) <= reached
 
         if skills_alarm_last_read_before("skills_fleet_reinject", FLEET_ALERT_KEY,

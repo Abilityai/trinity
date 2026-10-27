@@ -479,6 +479,35 @@ class TestFleetReinject:
         assert _pending(db, self.SUBJECT) == []
         _assert_ended_by_platform(db, row)
 
+    def test_a_failed_agent_past_the_reports_25_names_is_still_required(self, db, sweep):
+        """The report (and so the row) names at most 25 failed agents. With 26
+        failures the list cannot show that the 26th recovered, so a sweep that
+        no longer enumerates it ends nothing (the row is left to its lifetime)."""
+        bad = {f"a{i:02d}": self.BAD for i in range(26)}
+        sweep(bad)
+        [row] = _pending(db, self.SUBJECT)
+        assert row["context"]["agents_failed"] == 26 and len(row["context"]["agents"]) == 25
+        sweep({f"a{i:02d}": self.OK for i in range(25)})       # a25 stopped meanwhile
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
+
+    @pytest.mark.parametrize("agents", [
+        "absent", None, "", {}, "a1", ["a1", 3], [],
+    ], ids=["absent", "none", "empty-str", "dict", "str", "non-str-name", "empty-list"])
+    def test_a_row_whose_agent_list_is_missing_or_malformed_is_not_evidence(
+            self, db, sweep, agents):
+        """Unknown evidence never ends the row, whatever shape it has."""
+        from services import platform_alerts as pa
+        context = {"alert_type": "skills_fleet_reinject_failed", "agents_total": 1,
+                   "agents_failed": 1, "commit_sha": "c0"}
+        if agents != "absent":
+            context["agents"] = agents
+        assert pa.observe(HOST, "skills_fleet_reinject", "fleet", priority="medium",
+                          title="Skills fleet re-inject partially failed",
+                          question="Affected: a1.", context=context) == pa.OBSERVED_CREATED
+        [row] = _pending(db, self.SUBJECT)
+        sweep({"a1": self.OK})
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
+
     def test_a_docker_error_enumerates_nothing_and_ends_nothing(
             self, db, sweep, monkeypatch, clock):
         """R10 (the #2196 class): `_eligible_agents` returns [] when Docker is
