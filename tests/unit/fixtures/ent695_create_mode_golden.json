@@ -1,0 +1,1042 @@
+{
+  "_meta": {
+    "issue": "abilityai/trinity-enterprise#695 (AC6)",
+    "base_commit": "f754dfb02",
+    "clock": "2026-10-27T09:00:00.000000Z",
+    "generated_with": {
+      "python": "3.14.4",
+      "fastapi": "0.115.14",
+      "pydantic": "2.13.2"
+    },
+    "rule": "Never regenerate to make a red run green: a difference is a create-mode behaviour change and needs its own issue. See the test module docstring."
+  },
+  "cases": {
+    "dry_run_valid": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead\":[\"gold-helper\",\"gold-watcher\",\"gold-lead\"],\"gold-helper\":[\"gold-lead\"]},\"schedules_preview\":[{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
+      "create_calls": [],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "dry_run_invalid": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"invalid\",\"system_name\":\"broken\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\"},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\"},{\"name\":\"broken-fine\",\"short_name\":\"fine\",\"template\":\"local:default\"}],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\",\"reason\":\"Local template 'no-such-template-ent695' was not found. Check the id against GET /api/templates — note that hidden templates are omitted from that listing but remain creatable by id. To create an agent with no template at all, omit the 'template' field.\",\"status_code\":404},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\",\"reason\":\"Invalid cpu '1.0': must be one of 1, 2, 4, 8, 16 (integer processor count — not a fractional or Kubernetes-style value)\",\"status_code\":null}],\"permission_edges\":{},\"schedules_preview\":[],\"system_view_requested\":false}",
+      "create_calls": [],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "dry_run_name_conflict": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead_2\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead_2\":[\"gold-helper\",\"gold-watcher\",\"gold-lead_2\"],\"gold-helper\":[\"gold-lead_2\"]},\"schedules_preview\":[{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
+      "create_calls": [],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "deployed": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
+      "create_calls": [
+        {
+          "name": "gold-lead",
+          "template": "local:default",
+          "resources": {
+            "cpu": "4",
+            "memory": "8g"
+          },
+          "kind": "agent",
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "gold-helper",
+          "template": "local:scout",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": "deployment",
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "gold-watcher",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [
+        "gold-lead",
+        "gold-helper",
+        "gold-watcher"
+      ],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [
+            {
+              "created_by": "admin",
+              "source_agent": "gold-helper",
+              "target_agent": "gold-lead"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "gold-lead",
+              "target_agent": "gold-helper"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "gold-lead",
+              "target_agent": "gold-watcher"
+            }
+          ],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [
+            {
+              "agent_name": "gold-helper",
+              "consume_enabled": 1,
+              "expose_enabled": 0
+            },
+            {
+              "agent_name": "gold-lead",
+              "consume_enabled": 0,
+              "expose_enabled": 1
+            }
+          ],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [
+            {
+              "agent_name": "gold-helper",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-helper",
+              "tag": "gold-team"
+            },
+            {
+              "agent_name": "gold-lead",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-lead",
+              "tag": "gold-team"
+            },
+            {
+              "agent_name": "gold-lead",
+              "tag": "lead-only"
+            },
+            {
+              "agent_name": "gold-lead",
+              "tag": "research"
+            },
+            {
+              "agent_name": "gold-watcher",
+              "tag": "gold"
+            },
+            {
+              "agent_name": "gold-watcher",
+              "tag": "gold-team"
+            }
+          ],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [
+            {
+              "agent_name": "gold-lead",
+              "cron_expression": "0 9 * * *",
+              "deleted_at": null,
+              "description": null,
+              "enabled": 1,
+              "id": "<generated agent_schedules.id: gold-lead/daily-report>",
+              "message": "Write the daily report",
+              "name": "daily-report",
+              "owner_id": 1,
+              "timezone": "UTC"
+            },
+            {
+              "agent_name": "gold-lead",
+              "cron_expression": "30 8 * * 1",
+              "deleted_at": null,
+              "description": "Monday sync",
+              "enabled": 0,
+              "id": "<generated agent_schedules.id: gold-lead/weekly-sync>",
+              "message": "Run the weekly sync",
+              "name": "weekly-sync",
+              "owner_id": 1,
+              "timezone": "Europe/Berlin"
+            }
+          ],
+          "removed": []
+        },
+        "system_views": {
+          "added": [
+            {
+              "color": "#d4af37",
+              "description": "Auto-created for gold system deployment",
+              "filter_tags": [
+                "gold",
+                "gold-team"
+              ],
+              "icon": "G",
+              "id": "<generated system_views.id: Gold System>",
+              "is_shared": 0,
+              "name": "Gold System",
+              "owner_id": "1"
+            }
+          ],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [
+            {
+              "key": "trinity_prompt",
+              "value": "You are part of the gold system."
+            }
+          ],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "partial": {
+      "status_code": 200,
+      "content_type": "application/json",
+      "body": "{\"status\":\"partial\",\"system_name\":\"part\",\"agents_created\":[\"part-worker-a\",\"part-worker-b\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":1,\"tags_configured\":5,\"system_view_created\":null,\"warnings\":[\"Partial deploy: 1 agent(s) failed to create: ['part-orchestrator']. Re-deploying this manifest will create suffixed duplicates of the already-created agents — fix the cause and create the missing agents individually.\",\"Orchestrator agent failed to create; the deployed workers have no inter-agent permissions — the system may be non-functional.\",\"Failed to start 1 agents: ['part-worker-a']\"],\"failed\":[{\"name\":\"part-orchestrator\",\"short_name\":\"orchestrator\",\"template\":\"local:default\",\"reason\":\"Template could not be cloned\",\"status_code\":400}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
+      "create_calls": [
+        {
+          "name": "part-orchestrator",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "part-worker-a",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "part-worker-b",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [
+        "part-worker-a",
+        "part-worker-b"
+      ],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [
+            {
+              "agent_name": "part-worker-a",
+              "consume_enabled": 1,
+              "expose_enabled": 1
+            }
+          ],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [
+            {
+              "agent_name": "part-worker-a",
+              "tag": "fleet"
+            },
+            {
+              "agent_name": "part-worker-a",
+              "tag": "part"
+            },
+            {
+              "agent_name": "part-worker-b",
+              "tag": "fleet"
+            },
+            {
+              "agent_name": "part-worker-b",
+              "tag": "ops"
+            },
+            {
+              "agent_name": "part-worker-b",
+              "tag": "part"
+            }
+          ],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [
+            {
+              "agent_name": "part-worker-a",
+              "cron_expression": "0 2 * * *",
+              "deleted_at": null,
+              "description": null,
+              "enabled": 1,
+              "id": "<generated agent_schedules.id: part-worker-a/nightly>",
+              "message": "Run the nightly job",
+              "name": "nightly",
+              "owner_id": 1,
+              "timezone": "UTC"
+            }
+          ],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [
+            {
+              "key": "trinity_prompt",
+              "value": "Partial-deploy prompt."
+            }
+          ],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "failed": {
+      "status_code": 500,
+      "content_type": "application/json",
+      "body": "{\"status\":\"failed\",\"system_name\":\"doomed\",\"agents_created\":[],\"agents_to_create\":null,\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"doomed-one\",\"short_name\":\"one\",\"template\":\"local:default\",\"reason\":\"git clone failed: https://***@git.example.com/org/agent.git\",\"status_code\":null},{\"name\":\"doomed-two\",\"short_name\":\"two\",\"template\":\"github:example-org/missing-repo\",\"reason\":\"Template repository not found\",\"status_code\":404},{\"name\":\"doomed-three\",\"short_name\":\"three\",\"template\":\"local:default\",\"reason\":\"quota exceeded: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"status_code\":null}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
+      "create_calls": [
+        {
+          "name": "doomed-one",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "doomed-two",
+          "template": "github:example-org/missing-repo",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "doomed-three",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "strict_abort": {
+      "status_code": 409,
+      "content_type": "application/json",
+      "body": "{\"detail\":{\"error\":\"Deployment failed\",\"failed_at\":\"strict-second\",\"created\":[\"strict-first\"],\"reason\":\"Agent name already taken\"}}",
+      "create_calls": [
+        {
+          "name": "strict-first",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        },
+        {
+          "name": "strict-second",
+          "template": "local:default",
+          "resources": {
+            "cpu": "2",
+            "memory": "4g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": true,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    },
+    "openapi": {
+      "operation": {
+        "tags": [
+          "systems"
+        ],
+        "summary": "Deploy System",
+        "operationId": "deploy_system_api_systems_deploy_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SystemDeployRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemDeployResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      },
+      "schemas": {
+        "SystemDeployRequest": {
+          "properties": {
+            "manifest": {
+              "type": "string",
+              "title": "Manifest"
+            },
+            "dry_run": {
+              "type": "boolean",
+              "title": "Dry Run",
+              "default": false
+            },
+            "strict": {
+              "type": "boolean",
+              "title": "Strict",
+              "default": false
+            }
+          },
+          "type": "object",
+          "required": [
+            "manifest"
+          ],
+          "title": "SystemDeployRequest"
+        },
+        "SystemDeployResponse": {
+          "properties": {
+            "status": {
+              "type": "string",
+              "title": "Status"
+            },
+            "system_name": {
+              "type": "string",
+              "title": "System Name"
+            },
+            "agents_created": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "title": "Agents Created"
+            },
+            "agents_to_create": {
+              "anyOf": [
+                {
+                  "items": {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Agents To Create"
+            },
+            "prompt_updated": {
+              "type": "boolean",
+              "title": "Prompt Updated"
+            },
+            "permissions_configured": {
+              "type": "integer",
+              "title": "Permissions Configured",
+              "default": 0
+            },
+            "schedules_created": {
+              "type": "integer",
+              "title": "Schedules Created",
+              "default": 0
+            },
+            "tags_configured": {
+              "type": "integer",
+              "title": "Tags Configured",
+              "default": 0
+            },
+            "system_view_created": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "System View Created"
+            },
+            "warnings": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "title": "Warnings",
+              "default": []
+            },
+            "failed": {
+              "items": {
+                "$ref": "#/components/schemas/SystemDeployFailure"
+              },
+              "type": "array",
+              "title": "Failed",
+              "default": []
+            },
+            "permission_edges": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Permission Edges"
+            },
+            "schedules_preview": {
+              "anyOf": [
+                {
+                  "items": {
+                    "$ref": "#/components/schemas/SystemSchedulePreview"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Schedules Preview"
+            },
+            "system_view_requested": {
+              "type": "boolean",
+              "title": "System View Requested",
+              "default": false
+            }
+          },
+          "type": "object",
+          "required": [
+            "status",
+            "system_name",
+            "agents_created",
+            "prompt_updated"
+          ],
+          "title": "SystemDeployResponse"
+        },
+        "SystemDeployFailure": {
+          "properties": {
+            "name": {
+              "type": "string",
+              "title": "Name"
+            },
+            "short_name": {
+              "type": "string",
+              "title": "Short Name"
+            },
+            "template": {
+              "type": "string",
+              "title": "Template"
+            },
+            "reason": {
+              "type": "string",
+              "title": "Reason"
+            },
+            "status_code": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status Code"
+            }
+          },
+          "type": "object",
+          "required": [
+            "name",
+            "short_name",
+            "template",
+            "reason"
+          ],
+          "title": "SystemDeployFailure"
+        },
+        "SystemSchedulePreview": {
+          "properties": {
+            "agent": {
+              "type": "string",
+              "title": "Agent"
+            },
+            "short_name": {
+              "type": "string",
+              "title": "Short Name"
+            },
+            "name": {
+              "type": "string",
+              "title": "Name"
+            },
+            "cron": {
+              "type": "string",
+              "title": "Cron"
+            },
+            "message": {
+              "type": "string",
+              "title": "Message"
+            },
+            "enabled": {
+              "type": "boolean",
+              "title": "Enabled"
+            },
+            "timezone": {
+              "type": "string",
+              "title": "Timezone"
+            },
+            "description": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Description"
+            }
+          },
+          "type": "object",
+          "required": [
+            "agent",
+            "short_name",
+            "name",
+            "cron",
+            "message",
+            "enabled",
+            "timezone"
+          ],
+          "title": "SystemSchedulePreview"
+        }
+      }
+    },
+    "first_run_seed_fresh_install": {
+      "seed_pass_result": {
+        "system": "acme",
+        "action": "created",
+        "status": "deployed",
+        "message": "Default system 'acme' seeded (3 agents, 0 failed, source=bundled)"
+      },
+      "cornelius_calls": [
+        {
+          "fresh": true
+        }
+      ],
+      "deploy_calls": [
+        {
+          "manifest_is_the_bundled_file": true,
+          "as_user": {
+            "id": 1,
+            "username": "admin",
+            "email": null,
+            "role": "admin",
+            "mcp_scope": null
+          },
+          "request_passed": false,
+          "kwargs": {
+            "strict": false
+          },
+          "result": "{\"status\":\"deployed\",\"system_name\":\"acme\",\"agents_created\":[\"acme-scout\",\"acme-sage\",\"acme-scribe\"],\"agents_to_create\":null,\"prompt_updated\":false,\"permissions_configured\":6,\"schedules_created\":0,\"tags_configured\":3,\"system_view_created\":null,\"warnings\":[],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}"
+        }
+      ],
+      "create_calls": [
+        {
+          "name": "acme-scout",
+          "template": "local:scout",
+          "resources": {
+            "cpu": "1",
+            "memory": "2g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": false,
+          "other_kwargs": []
+        },
+        {
+          "name": "acme-sage",
+          "template": "local:sage",
+          "resources": {
+            "cpu": "1",
+            "memory": "2g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": false,
+          "other_kwargs": []
+        },
+        {
+          "name": "acme-scribe",
+          "template": "local:scribe",
+          "resources": {
+            "cpu": "1",
+            "memory": "2g"
+          },
+          "kind": null,
+          "as_user": "admin",
+          "skip_name_sanitization": true,
+          "request_passed": false,
+          "other_kwargs": []
+        }
+      ],
+      "start_calls": [
+        "acme-scout",
+        "acme-sage",
+        "acme-scribe"
+      ],
+      "fleet_writes": {
+        "agent_permissions": {
+          "added": [
+            {
+              "created_by": "admin",
+              "source_agent": "acme-sage",
+              "target_agent": "acme-scout"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "acme-sage",
+              "target_agent": "acme-scribe"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "acme-scout",
+              "target_agent": "acme-sage"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "acme-scout",
+              "target_agent": "acme-scribe"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "acme-scribe",
+              "target_agent": "acme-sage"
+            },
+            {
+              "created_by": "admin",
+              "source_agent": "acme-scribe",
+              "target_agent": "acme-scout"
+            }
+          ],
+          "removed": []
+        },
+        "agent_shared_folder_config": {
+          "added": [
+            {
+              "agent_name": "acme-sage",
+              "consume_enabled": 1,
+              "expose_enabled": 1
+            },
+            {
+              "agent_name": "acme-scout",
+              "consume_enabled": 0,
+              "expose_enabled": 1
+            },
+            {
+              "agent_name": "acme-scribe",
+              "consume_enabled": 1,
+              "expose_enabled": 1
+            }
+          ],
+          "removed": []
+        },
+        "agent_tags": {
+          "added": [
+            {
+              "agent_name": "acme-sage",
+              "tag": "acme"
+            },
+            {
+              "agent_name": "acme-scout",
+              "tag": "acme"
+            },
+            {
+              "agent_name": "acme-scribe",
+              "tag": "acme"
+            }
+          ],
+          "removed": []
+        },
+        "agent_schedules": {
+          "added": [],
+          "removed": []
+        },
+        "system_views": {
+          "added": [],
+          "removed": []
+        },
+        "system_settings": {
+          "added": [
+            {
+              "key": "default_system_seed_info",
+              "value": "{\"system\": \"acme\", \"manifest_sha256\": \"<sha256 of config/manifests/default-system.yaml>\", \"source\": \"bundled\", \"status\": \"deployed\", \"agents_created\": 3, \"agents_failed\": 0, \"seeded_at\": \"2026-10-27T09:00:00.000000Z\"}"
+            },
+            {
+              "key": "default_system_seeded",
+              "value": "true"
+            },
+            {
+              "key": "first_run_fresh",
+              "value": "true"
+            }
+          ],
+          "removed": []
+        },
+        "operator_queue": {
+          "added": [],
+          "removed": []
+        }
+      }
+    }
+  }
+}
