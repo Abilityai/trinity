@@ -121,8 +121,10 @@ def test_an_authorization_refusal_records_the_client(bundled, monkeypatch):
     # The object the app's routes were built with. A bare `from dependencies
     # import ...` can name a re-imported copy when another unit test has
     # evicted and reloaded the module, and an override keyed on that copy is
-    # silently never consulted.
-    get_current_user = main.get_current_user
+    # silently never consulted. `main.get_current_user` is no safer: when a
+    # router was imported before `main` and the unit conftest then evicted
+    # `dependencies`, `main` binds a newer copy than the route was built with.
+    get_current_user = route_globals("/api/agents", "POST")["get_current_user"]
 
     agent_principal = User(id=99, username="owner", email="owner@example.com", role="admin",
                            agent_name="worker-873", mcp_scope="agent")
