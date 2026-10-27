@@ -692,3 +692,155 @@ def test_legacy_flood_rows_derive_the_subject_observe_uses():
                                    {"held": 3, "reason": "ingestion_cap"})
     assert got.kind == "queue_flood"
     assert got.subject == pa.subject_for("queue_flood", "ingestion_cap")
+
+
+# ---------------------------------------------------------------------------
+# The effect guard's refusal (`effect_unguarded`, lifetime-only)
+# ---------------------------------------------------------------------------
+
+def _refuse_effect(monkeypatch, effect_type="message", reason="absent"):
+    from services import idempotency_service as idem
+    monkeypatch.setattr(idem, "effect_dedup_required", lambda agent: True)
+    with pytest.raises(idem.EffectUnguardedError):
+        asyncio.run(idem._on_unguarded_effect(effect_type, AGENT, reason))
+
+
+def test_an_unguarded_effect_is_one_row_per_effect_and_reason(seam, monkeypatch):
+    """The seam properties of a lifetime-only kind: the subject, a second
+    reading bumping `seen_count` and moving `last_seen_at` and the deadline,
+    another reason another subject — and the send refused every time."""
+    _refuse_effect(monkeypatch)
+    (first,) = rows(seam)
+    assert first["subject"] == "effect_unguarded:message:absent"
+    assert first["type"] == "effect_unguarded" and first["request_id"].startswith("effect-unguarded-")
+    assert first["context"] == {"effect_type": "message", "reason": "absent", "seen_count": 1}
+    assert _parse(first["expires_at"]) == T0 + timedelta(days=14)
+
+    seam.clock.advance(hours=1)
+    _refuse_effect(monkeypatch)
+    (again,) = rows(seam)
+    assert again["id"] == first["id"] and again["context"]["seen_count"] == 2
+    assert again["last_seen_at"] > first["last_seen_at"] and again["expires_at"] > first["expires_at"]
+
+    _refuse_effect(monkeypatch, reason="foreign")
+    assert sorted(r["subject"] for r in rows(seam)) == [
+        "effect_unguarded:message:absent", "effect_unguarded:message:foreign"]
+
+
+def test_an_unguarded_effect_row_ends_with_its_lifetime(seam, monkeypatch):
+    _refuse_effect(monkeypatch)
+    seam.clock.advance(days=14, seconds=1)
+    seam.db.mark_operator_queue_expired()
+    assert [r["status"] for r in rows(seam)] == ["expired"]
+
+
+def test_legacy_effect_rows_derive_the_subject_observe_uses():
+    from services import platform_alerts as pa
+    got = pa.derive_legacy_subject(f"effect-unguarded-{AGENT}-{TS}",
+                                   {"effect_type": "message", "reason": "absent"})
+    assert got.kind == "effect_unguarded"
+    assert got.subject == pa.subject_for("effect_unguarded", "message:absent")
+
+
+# ---------------------------------------------------------------------------
+# A scheduled command whose skill is missing (`skill_not_found`)
+# ---------------------------------------------------------------------------
+
+def _missing_skill(seam, command="/gen"):
+    import services.task_execution_service as tes
+    asyncio.run(tes._alert_skill_not_found(AGENT, command, "exec-1", "schedule"))
+
+
+@pytest.fixture
+def notifications(seam, monkeypatch):
+    sent = []
+    real = seam.db.create_notification
+
+    def _record(agent, notification):
+        sent.append(notification)
+        return real(agent, notification)
+
+    monkeypatch.setattr(seam.db, "create_notification", _record)
+    return sent
+
+
+def test_a_repeat_of_a_pending_command_updates_its_row_and_sends_no_notification(seam, notifications):
+    """D3: the notification goes with a NEW row only. A repeat of a pending
+    command is an update (each run re-reads it, D9), and its row already had
+    its notification."""
+    from services import platform_alerts as pa
+
+    _missing_skill(seam)
+    (first,) = rows(seam)
+    assert first["subject"] == pa.subject_for("skill_not_found", "/gen")
+    assert first["context"]["command"] == "/gen" and first["context"]["seen_count"] == 1
+    assert len(notifications) == 1
+
+    seam.clock.advance(days=1)
+    _missing_skill(seam)
+    (again,) = rows(seam)
+    assert again["id"] == first["id"] and again["context"]["seen_count"] == 2
+    assert again["expires_at"] > first["expires_at"]
+    assert len(notifications) == 1
+
+
+def test_a_pending_pre_seam_row_for_the_command_still_stands_for_it(seam, notifications):
+    """A subject-less row an older build filed is matched by the dedup read
+    until the upgrade sweep stamps it: no second row beside it, no notification."""
+    from db_harness import run as _run
+
+    _run("INSERT INTO operator_queue (id, agent_name, request_id, type, status, priority, "
+         "title, question, context, created_at) VALUES ('legacy-1', :a, :r, 'skill_not_found', "
+         "'pending', 'high', 't', 'q', :c, :ts)",
+         a=AGENT, r=f"skill-not-found-{AGENT}-{TS}", c='{"command": "/gen"}', ts=TS)
+    _missing_skill(seam)
+    assert [r["id"] for r in rows(seam)] == ["legacy-1"]
+    assert notifications == []
+
+
+def test_at_the_budget_a_new_command_is_refused_without_a_notification(seam, notifications):
+    from services import operator_queue_service as oqs
+
+    for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
+        _missing_skill(seam, f"/cmd-{i}")
+    sent = len(notifications)
+    _missing_skill(seam, "/one-more")
+    drain(seam)
+    assert len(notifications) == sent
+    assert "/one-more" not in str([r["context"] for r in rows(seam)])
+    assert one(seam, kind="alert_budget")["subject"] == "alert_budget:skill_not_found"
+
+
+def test_legacy_skill_rows_derive_the_subject_observe_uses():
+    from services import platform_alerts as pa
+    got = pa.derive_legacy_subject(f"skill-not-found-{AGENT}-{TS}",
+                                   {"command": "/gen", "triggered_by": "schedule"})
+    assert got.kind == "skill_not_found"
+    assert got.subject == pa.subject_for("skill_not_found", "/gen")
+
+
+# ---------------------------------------------------------------------------
+# The other shape: the clock 30 days ahead
+# ---------------------------------------------------------------------------
+
+def test_the_clock_30_days_ahead(seam, notifications):
+    """A full `skill_not_found` budget frees itself: its rows pass their 14-day
+    lifetime and the real expiry sweep ends them, so a new distinct command
+    files (with its notification)."""
+    from services import operator_queue_service as oqs
+
+    for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
+        _missing_skill(seam, f"/cmd-{i}")
+    _missing_skill(seam, "/refused-today")
+    assert "/refused-today" not in str([r["context"] for r in rows(seam)])
+
+    seam.clock.advance(days=30)
+    seam.db.mark_operator_queue_expired()
+    skill_rows = [r for r in rows(seam) if r["type"] == "skill_not_found"]
+    assert {r["status"] for r in skill_rows} == {"expired"}
+
+    sent = len(notifications)
+    _missing_skill(seam, "/a-new-command")
+    (fresh,) = rows(seam, status="pending")
+    assert fresh["context"]["command"] == "/a-new-command"
+    assert len(notifications) == sent + 1

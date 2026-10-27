@@ -66,8 +66,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
     ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
-    ("services/idempotency_service.py", "_on_unguarded_effect"): ("effect-unguarded-", _PR2),
-    ("services/task_execution_service.py", "_alert_skill_not_found"): ("skill-not-found-", _PR2),
     ("services/git_service/gitignore_sweep.py", "_emit_gitignore_untracked_alert"):
         ("gitignore-untracked-", _PR2),
     ("client_portal/service.py", "raise_problem_report"): ("workspace-problem-", _PR2),
@@ -91,6 +89,11 @@ NO_CLEAR_SITE: dict = {
     # create, so no emitter observes it freeing up.
     "alert_budget": "the budget is measured only inside the seam's create; each "
                     "further refusal re-reads it, otherwise its 14-day lifetime ends it",
+    # #3254: only the dispatch path's `if unresolved_command:` could see a command
+    # resolve, and `detect_unresolved_slash_command` returns None both for
+    # "resolved" and for "not a slash command" — a clear there would be invented.
+    "skill_not_found": "nothing observes a command start resolving; each scheduled "
+                       "run re-reads it, otherwise its 14-day lifetime ends it",
 }
 
 _DIRECT = ("create_operator_queue_item", "create_operator_queue_item_with_outcome",

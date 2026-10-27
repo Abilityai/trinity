@@ -309,28 +309,29 @@ async def _alert_skill_not_found(
     """Raise an Operating Room item + notification when a scheduled/triggered
     slash-command no-ops because its skill is missing (#1410).
 
-    Best-effort and idempotent-per-series: skips creation when a pending
-    ``skill_not_found`` item already exists for this agent+command, so a
-    recurring schedule doesn't flood the queue between operator responses.
+    Reported through the platform-alert seam (#3254): one row per
+    (agent, command), subject ``skill_not_found:<command>``, rewritten in
+    place by each further run, so a recurring schedule doesn't flood the
+    queue between operator responses. No place in this module learns that a
+    command resolves (the dispatch path's check cannot tell "resolved" from
+    "not a slash command"), so each run re-reads it and the kind's 14-day
+    lifetime ends a row nobody re-read. A pending pre-#3246 row for the same
+    command still stands for it until the upgrade sweep stamps it.
     Never raises — a failed alert must not turn the (already-FAILED) terminal
     write into an exception.
 
     #1677: this emitter is agent-INFLUENCEABLE — distinct unknown commands
-    defeat the per-command dedup — so the queue item is created through
-    ``operator_queue_service.create_bounded_alert`` (per-(agent, type)
-    pending-depth budget). Order is pinned **dedup → budget → both creates**:
-    a benign repeat of an already-pending command at cap must stay a silent
-    no-op, never a false "compromised" episode alert. A ``False`` return
-    suppresses the paired notification too — a notification must never
-    outlive its queue item.
+    defeat the per-command dedup — so the kind is budgeted (per-(agent, type)
+    pending depth, applied inside the seam's locked create). A repeat of a
+    pending command is an update there and is never refused at the cap, so it
+    never raises a false "compromised" episode alert. The paired notification
+    is sent only when a NEW row was created — a notification must never
+    outlive its queue item, and a pending row gets one.
     """
     try:
-        # Lazy import — the budget seam lives with the rest of the
-        # operator-queue ingestion policy (cycle-free; rare path).
-        from services.operator_queue_service import (
-            _truncate_with_marker,
-            create_bounded_alert,
-        )
+        # Lazy imports — the seam and the truncation helper (cycle-free; rare path).
+        from services import platform_alerts
+        from services.operator_queue_service import _truncate_with_marker
 
         # #1677: truncate the agent-derived command for EVERY surface it is
         # echoed into (question, context, notification, log line).
@@ -339,14 +340,14 @@ async def _alert_skill_not_found(
         existing = db.list_operator_queue_items(
             status="pending", type="skill_not_found", agent_name=agent_name
         )
-        already = any(
+        legacy = any(
             (it.get("context") or {}).get("command") == command_display
+            and not it.get("subject")
             for it in existing
         )
-        if already:
+        if legacy:
             return
 
-        now = utc_now_iso()
         title = "Scheduled command references a missing skill"
         question = (
             f"{agent_name}'s scheduled command '{command_display}' did not resolve to an "
@@ -355,25 +356,21 @@ async def _alert_skill_not_found(
             f"(.claude/skills/{command_display.lstrip('/').split()[0]}/SKILL.md) or fix the "
             f"schedule's command."
         )
-        item = {
-            "id": f"skill-not-found-{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "skill_not_found",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": {
+        outcome = platform_alerts.observe(
+            agent_name, "skill_not_found", command_display,
+            title=title,
+            question=question,
+            priority="high",
+            context={
                 "command": command_display,
                 "triggered_by": triggered_by,
                 "execution_id": execution_id or "",
             },
-            "created_at": now,
-        }
-        created = await create_bounded_alert(agent_name, item)
-        if not created:
-            # #1677: at-cap or fail-closed — the queue item was suppressed, so
-            # the notification below is suppressed WITH it. The
+        )
+        if outcome != platform_alerts.OBSERVED_CREATED:
+            # #1677: `updated` is a repeat of a pending command, which already
+            # had its notification; at-cap, failed or snoozed wrote no new row.
+            # The notification goes only with a new row. The
             # FAILED/SKILL_NOT_FOUND execution row remains the primary
             # observability surface.
             return

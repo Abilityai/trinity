@@ -249,13 +249,27 @@ def test_no_stale_allowlist_entries():
 
 def test_skill_not_found_emitter_is_routed_not_allowlisted():
     """The #1677 target must never regress to a direct create: the routed
-    emitter is absent from the allowlist by design, and its module must call
-    the budget helper."""
+    emitter is absent from the allowlist by design, and its module must report
+    through the budgeted seam.
+
+    #3254 re-pin: the seam that composes the budget is now
+    ``platform_alerts.observe`` itself, so the module must CALL it with the
+    ``"skill_not_found"`` kind — an AST call, never a mention in prose."""
     assert not any(
         p == "services/task_execution_service.py" for (p, _q) in _ALLOWED_CALLERS
-    ), "task_execution_service must route through create_bounded_alert, not be allowlisted"
-    text = (_BACKEND / "services/task_execution_service.py").read_text(encoding="utf-8")
-    assert "create_bounded_alert" in text
+    ), "task_execution_service must report through the seam, not be allowlisted"
+    tree = ast.parse((_BACKEND / "services/task_execution_service.py").read_text(encoding="utf-8"))
+    kinds = [
+        node.args[1].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "observe"
+        and _receiver_names(node.func.value) == ["platform_alerts"]
+        and len(node.args) > 1
+        and isinstance(node.args[1], ast.Constant)
+    ]
+    assert "skill_not_found" in kinds
 
 
 # ---------------------------------------------------------------------------

@@ -438,10 +438,10 @@ def test_without_an_execution_id_the_call_runs_unguarded_or_is_refused_on_a_pull
     # #2392: a pull-mode agent is refused, not sent unguarded — 422, nothing dialled.
     monkeypatch.setattr(idem, "effect_dedup_required", lambda agent: True)
 
-    async def _alert(agent, item):
-        pass
-    import services.operator_queue_service as oq
-    monkeypatch.setattr(oq, "create_bounded_alert", _alert)
+    # #3254 re-pin: the refusal's alarm reports through the platform-alert
+    # seam, so that is where it is stubbed (the old helper patch was dead).
+    from services import platform_alerts
+    monkeypatch.setattr(platform_alerts, "observe", lambda *a, **k: platform_alerts.OBSERVED_CREATED)
     sends = len(route.res.calls)
     r = route.post({k: v for k, v in CALL.items() if k != "execution_id"})
     assert r.status_code == 422 and r.json()["detail"]["reason"] == "effect_unguarded"

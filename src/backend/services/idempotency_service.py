@@ -397,17 +397,16 @@ async def _on_unguarded_effect(
             "pull-mode agent sent an effect without a usable execution id",
             effect_type, agent_name, reason,
         )
-        from services.operator_queue_service import create_bounded_alert
-        from utils.helpers import utc_now_iso
-        now = utc_now_iso()
-        await create_bounded_alert(agent_name, {
-            "id": f"{EFFECT_UNGUARDED_ALERT_PREFIX}{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "effect_unguarded",
-            "status": "pending",
-            "priority": "high",
-            "title": "Side effect refused: no execution id",
-            "question": (
+        # #3254: one row per (agent, effect type, reason) on the platform-alert
+        # seam, rewritten in place by each further refusal and budgeted there
+        # (#1677: the agent drives the volume). Nothing observes an agent
+        # starting to send ids, so the kind's lifetime ends the row. The send
+        # is refused whatever the alarm's outcome.
+        from services import platform_alerts
+        platform_alerts.observe(
+            agent_name, "effect_unguarded", f"{effect_type}:{reason}",
+            title="Side effect refused: no execution id",
+            question=(
                 f"{agent_name} tried to send a '{effect_type}' without a usable execution "
                 f"id ({reason}). It runs on the durable queue, where a turn can be "
                 f"re-delivered, so the send was refused rather than risk a duplicate. "
@@ -417,9 +416,9 @@ async def _on_unguarded_effect(
                 f"acting for this agent), which carries no id; or the API was called "
                 f"directly instead of through the agent's Trinity MCP tools."
             ),
-            "context": {"effect_type": effect_type, "reason": reason},
-            "created_at": now,
-        })
+            priority="high",
+            context={"effect_type": effect_type, "reason": reason},
+        )
         raise EffectUnguardedError(effect_type, reason)
     logger.warning(
         "effect_guard.degraded effect_type=%s agent=%s reason=%s — "
