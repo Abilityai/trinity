@@ -7,6 +7,7 @@ import asyncio
 import json
 import os
 import stat
+import time
 import yaml
 
 from utils.safe_yaml import (
@@ -3241,17 +3242,38 @@ class ApplyLeaseKeeper:
     DEGRADED would be the fail-open the lock exists to avoid (Codex 3).
     Renewal is the atomic compare-and-expire, so a stale holder can never
     extend a successor's lease.
+
+    The renewals run on the event loop, and the writes are synchronous: a
+    write that blocks the loop past the TTL lets the lease lapse in Redis
+    before the keeper runs again, and a successor may take it. So `ok` also
+    keeps a conservative local DEADLINE — the time a renewal (or the
+    acquisition) was ISSUED plus the TTL, minus a margin — and refuses every
+    write after it whether or not the keeper got to run. Ownership as Redis
+    sees it is never older than that deadline assumes.
     """
 
-    def __init__(self, lock: SingleFlightLock, interval: float):
+    def __init__(self, lock: SingleFlightLock, interval: float, *, ttl: float,
+                 issued_at: float):
         self._lock = lock
         self._interval = interval
+        self._ttl = ttl
+        self._margin = min(30.0, ttl * 0.1)
+        self._deadline = issued_at + ttl - self._margin
         self._task: Optional["asyncio.Task"] = None
         self.lost: Optional[LeaseState] = None
 
     @property
     def ok(self) -> bool:
+        if self.lost is None and time.monotonic() >= self._deadline:
+            self.lost = LeaseState.LOST  # may have lapsed while the loop was blocked
         return self.lost is None
+
+    def _renew(self) -> LeaseState:
+        issued = time.monotonic()
+        state = self._lock.refresh_if_owned_atomic()
+        if state is LeaseState.OWNED:
+            self._deadline = issued + self._ttl - self._margin
+        return state
 
     def start(self) -> None:
         self._task = asyncio.create_task(self._run())
@@ -3260,8 +3282,10 @@ class ApplyLeaseKeeper:
         try:
             while self.lost is None:
                 await asyncio.sleep(self._interval)
-                state = await asyncio.to_thread(self._lock.refresh_if_owned_atomic)
-                if state is not LeaseState.OWNED:
+                if not self.ok:
+                    return
+                state = await asyncio.to_thread(self._renew)
+                if state is not LeaseState.OWNED and self.lost is None:
                     self.lost = state
         except asyncio.CancelledError:
             raise
@@ -3270,7 +3294,9 @@ class ApplyLeaseKeeper:
 
     def confirm(self) -> LeaseState:
         """Renew now: ownership is confirmed immediately before the first write."""
-        state = self._lock.refresh_if_owned_atomic()
+        if not self.ok:
+            return self.lost
+        state = self._renew()
         if state is not LeaseState.OWNED and self.lost is None:
             self.lost = state
         return state
@@ -3645,6 +3671,7 @@ async def apply_manifest(
 
         lock = SingleFlightLock(f"system_apply:{manifest.name}", APPLY_LOCK_TTL_SECONDS,
                                 client=get_breaker_redis())
+        issued_at = time.monotonic()
         if not lock.acquire():
             return _apply_report(plan, warnings, dry_run=False, status="refused",
                                  extra_blockers=(_lock_blocker(LeaseState.LOST, manifest.name),))
@@ -3653,7 +3680,8 @@ async def apply_manifest(
             return _apply_report(plan, warnings, dry_run=False, status="refused",
                                  extra_blockers=(_lock_blocker(LeaseState.DEGRADED, manifest.name),))
 
-        lease = ApplyLeaseKeeper(lock, APPLY_LEASE_RENEW_SECONDS)
+        lease = ApplyLeaseKeeper(lock, APPLY_LEASE_RENEW_SECONDS,
+                                 ttl=APPLY_LOCK_TTL_SECONDS, issued_at=issued_at)
         lease.start()
         try:
             snapshot = await read_apply_snapshot(manifest, current_user)

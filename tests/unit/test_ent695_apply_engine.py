@@ -1230,6 +1230,38 @@ class TestH13TheLock:
         if loss == "lost":
             assert ew.redis.store[KEY] == "successor"  # a stale release never deletes it
 
+    def test_a_write_that_blocks_the_loop_past_the_ttl_stops_every_later_write(self, ew, monkeypatch):
+        """Codex pass 1 #1: renewals run on the event loop and the writes are
+        synchronous, so a write that blocks the loop past the TTL lets the
+        lease lapse (and a successor take it) before the keeper runs again.
+        The keeper here never gets to run (300 s interval); only the local
+        deadline can stop the later writes."""
+        import time as _time
+
+        monkeypatch.setattr(system_service, "APPLY_LOCK_TTL_SECONDS", 2)
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-b")
+        real_add = db.add_agent_tag
+        blocked = {}
+
+        def add(name, tag):
+            if name == "acme-a" and not blocked:
+                blocked["at"] = True
+                _time.sleep(2.0)                       # blocks the event loop
+                ew.redis.store[KEY] = "successor"      # the lease lapsed; B took it
+            return real_add(name, tag)
+
+        monkeypatch.setattr(db, "add_agent_tag", add)
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n    tags: [x]\n"
+              "  b:\n    template: local:plain\n    tags: [y]\n")
+        result = W.apply(ew, mf, dry_run=False)
+
+        assert "x" in db.get_agent_tags("acme-a")      # the in-flight write finished
+        assert "y" not in db.get_agent_tags("acme-b")  # nothing after the deadline
+        assert [(f.name, f.step) for f in result.failed if f.reason.startswith("lock_lost")] == [
+            ("acme-b", "tag")]
+        assert ew.redis.store[KEY] == "successor"
+
     def test_the_lease_lost_after_the_first_start_stops_the_second(self, ew, monkeypatch):
         """H8: started one by one behind the stop flag, never in bulk."""
         monkeypatch.setattr(system_service, "APPLY_LEASE_RENEW_SECONDS", 0.01)
