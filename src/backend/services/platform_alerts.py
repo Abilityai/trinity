@@ -109,6 +109,7 @@ class Kind:
     lifetime: Optional[str]
     clears: str
     budgeted_type: Optional[str] = None
+    row_type: Optional[str] = None  # #3254 D2: the row `type`, when not `alert` / budgeted_type
     material_keys: Tuple[str, ...] = ()
     event: bool = False
 
@@ -121,6 +122,12 @@ class Kind:
             raise ValueError(f"kind {self.name}: unknown lifetime class {self.lifetime!r}")
         if self.clears not in _CLEARS:
             raise ValueError(f"kind {self.name}: unknown clears {self.clears!r}")
+        if (self.row_type is not None and self.budgeted_type is not None
+                and self.row_type != self.budgeted_type):
+            # The #1677 budget counts pending rows BY TYPE: a kind writing one
+            # type while capped under another would never meet its cap.
+            raise ValueError(f"kind {self.name}: row_type {self.row_type!r} differs from "
+                             f"budgeted_type {self.budgeted_type!r}")
 
 
 # Prefixes whose emitter lives outside this repository (the enterprise
@@ -141,10 +148,10 @@ _BUILTIN_KINDS = (
     # -- every other in-repo platform emitter -----------------------------
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK),
     Kind("skills_fleet_reinject", "skills-fleet-reinject-", _D, CLEARS_HOOK),
-    Kind("sync_failing", "sync-failing-", _N, CLEARS_HOOK),
-    Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK),
-    Kind("git_bloat_size", "git-bloat-", _N, CLEARS_HOOK),
-    Kind("git_bloat_maintenance", "git-bloat-", _N, CLEARS_HOOK),
+    Kind("sync_failing", "sync-failing-", _N, CLEARS_HOOK, row_type="sync_failing"),
+    Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK, row_type="sync_diverged"),
+    Kind("git_bloat_size", "git-bloat-", _N, CLEARS_HOOK, row_type="git_bloat"),
+    Kind("git_bloat_maintenance", "git-bloat-", _N, CLEARS_HOOK, row_type="git_bloat"),
     Kind("db_backup_failure", "db-backup-", _D, CLEARS_HOOK),
     Kind("db_backup_stale", "db-backup-", _D, CLEARS_HOOK),
     Kind("log_archive_unwritable", "log-archive-", _D, CLEARS_HOOK),
@@ -623,7 +630,7 @@ def observe(
         stem = _belt_key(key) + "-" if subject is not None else ""
         item = {
             "id": f"{k.prefix}{stem}{utc_now_iso()}",
-            "type": k.budgeted_type or "alert",
+            "type": k.row_type or k.budgeted_type or "alert",
             "status": "pending",
             "priority": priority,
             "title": title,
