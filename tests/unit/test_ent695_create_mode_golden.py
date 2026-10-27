@@ -18,9 +18,9 @@ What is pinned (fixture: `fixtures/ent695_create_mode_golden.json`)
   an unusable cpu value); the `_2` conflict preview against a seeded agent;
   `deployed`; `partial`; `failed` (the 500 body); the `strict` abort (status +
   detail); the named 400 for an empty `agents: {}`; and a non-admin creator's
-  deploy over a base name another user's agent holds. For each, also the
-  fleet-state rows the request wrote, the `AgentConfig` fields handed to create
-  and the start calls, in order.
+  deploy over a base name another user's agent holds. For each, also every row
+  the request added to or removed from ANY table of the schema (all columns),
+  the whole `AgentConfig` handed to create, and the start calls, in order.
 * The route's OpenAPI operation and the `SystemDeployRequest`,
   `SystemDeployResponse`, `SystemDeployFailure` and `SystemSchedulePreview`
   component schemas, in their rendered key order, minus their free-text
@@ -31,7 +31,7 @@ What is pinned (fixture: `fixtures/ent695_create_mode_golden.json`)
   `ensure_first_run_seeded` runs the real `deploy_manifest` over the real
   bundled `config/manifests/default-system.yaml`; pinned are the pass result,
   the deploy result, the flag writes (`first_run_fresh`, `default_system_seeded`,
-  `default_system_seed_info`) and the fleet rows.
+  `default_system_seed_info`) and every row written, in any table.
 
 What is real and what is a seam
 -------------------------------
@@ -53,12 +53,21 @@ Those two need Docker; everything create mode decides itself runs for real.
 
 Stability rules the fixture follows
 -----------------------------------
-* Generated ids are substituted with placeholders and nothing else is: the
-  System View id (it appears in the `deployed` body) and schedule ids.
-* Timestamp columns are not recorded; the clock the seeder stamps into
-  `default_system_seed_info.seeded_at` is frozen at its binding in
-  `system_seed_service` (`utc_now_iso`), so the fixture pins a date and never
-  compares a literal to the current time.
+* The fleet rows are EVERY table and EVERY column, so a new column, a new
+  table write or a changed default is red by construction. Exactly three kinds
+  of value are canonicalized, never dropped:
+  - generated text ids (the System View id, which also appears in the
+    `deployed` body, and schedule ids) become placeholders named by the row's
+    natural key;
+  - a column named `*_at` holds a clock reading and is recorded as
+    `<timestamp>` when set, `None` when not, so setting or clearing one is
+    still a change;
+  - a lone INTEGER PRIMARY KEY is a rowid, decided by insertion order rather
+    than by create mode, and is left out; the row's content is still compared,
+    as a multiset.
+* The clock the seeder stamps into `default_system_seed_info.seeded_at` is
+  frozen at its binding in `system_seed_service` (`utc_now_iso`), so the
+  fixture pins a date and never compares a literal to the current time.
 * Set-valued data is compared as a set: `system_views.filter_tags` is stored
   from a Python `set`, so it is recorded sorted; rows are recorded sorted.
 * `manifest_sha256` in the seed info is recorded as a placeholder that the test
@@ -73,9 +82,9 @@ Stability rules the fixture follows
 
 Generation rule (read this before touching the fixture)
 -------------------------------------------------------
-Generated once, on commit f754dfb02 (`dev` before any apply code existed),
-with the clock frozen at
-2026-10-27T09:00:00.000000Z. NEVER regenerate it to make a red run green. A red
+Generated from the create mode of commit f754dfb02 (`dev` before any apply
+code existed; the branch that adds this module changes no product code), with
+the clock frozen at 2026-10-27T09:00:00.000000Z. NEVER regenerate it to make a red run green. A red
 run here means create mode changed, which is a behaviour change for every
 existing caller (UI, MCP `deploy_system`, the first-run seeder, scripts) and
 needs its own issue. Only once such an issue rules the change intended,
@@ -132,21 +141,25 @@ BASE_COMMIT = "f754dfb02"
 FROZEN_NOW = "2026-10-27T09:00:00.000000Z"
 REGENERATE_ENV = "TRINITY_ENT695_REGENERATE_GOLDEN"
 
-# Every case the fixture holds. A case in the fixture that no test produces is
-# an orphan and fails `test_golden_holds_exactly_the_exercised_cases`.
-CASES = (
-    "dry_run_valid",
-    "dry_run_invalid",
-    "dry_run_name_conflict",
-    "deployed",
-    "partial",
-    "failed",
-    "strict_abort",
-    "empty_agents_400",
-    "deployed_by_creator_over_foreign_name",
-    "openapi",
-    "first_run_seed_fresh_install",
-)
+# Every case the fixture holds, bound to the one test that produces it. The
+# fixture must hold exactly these cases (`test_golden_holds_exactly_the_exercised_cases`),
+# and each test must exist, check its case and be neither skipped nor xfailed
+# (`test_every_case_is_produced_by_a_live_test`): a pinned case can never stop
+# being checked quietly.
+CASE_TESTS = {
+    "dry_run_valid": "test_dry_run_valid",
+    "dry_run_invalid": "test_dry_run_invalid",
+    "dry_run_name_conflict": "test_dry_run_name_conflict",
+    "deployed": "test_deployed",
+    "partial": "test_partial",
+    "failed": "test_failed_returns_500_with_report",
+    "strict_abort": "test_strict_abort",
+    "empty_agents_400": "test_empty_agents_is_a_named_400",
+    "deployed_by_creator_over_foreign_name": "test_deployed_by_creator_over_foreign_name",
+    "openapi": "test_openapi_contract",
+    "first_run_seed_fresh_install": "test_first_run_seed_on_fresh_install",
+}
+CASES = tuple(CASE_TESTS)
 
 ADMIN = User(id=1, username="admin", email=None, role="admin")
 # A non-admin creator, and the other user whose agent already holds a base name.
@@ -285,60 +298,55 @@ permissions:
 
 
 # --- fleet state --------------------------------------------------------------
-# The tables create mode writes, with the columns it decides. Timestamps and the
-# autoincrement key are left out (clock- and order-dependent, not create-mode
-# decisions); `agent_ownership` is left out because, in this harness, the create
-# seam writes it, not create mode.
-_FLEET_TABLES = {
-    "agent_permissions": ("source_agent", "target_agent", "created_by"),
-    "agent_shared_folder_config": ("agent_name", "expose_enabled", "consume_enabled"),
-    "agent_tags": ("agent_name", "tag"),
-    "agent_schedules": (
-        "id",
-        "agent_name",
-        "name",
-        "cron_expression",
-        "message",
-        "enabled",
-        "timezone",
-        "description",
-        "owner_id",
-        "deleted_at",
-    ),
-    "system_views": (
-        "id",
-        "name",
-        "description",
-        "icon",
-        "color",
-        "filter_tags",
-        "owner_id",
-        "is_shared",
-    ),
-    "system_settings": ("key", "value"),
-    "operator_queue": (
-        "id",
-        "agent_name",
-        "type",
-        "status",
-        "priority",
-        "title",
-        "question",
-    ),
-}
+# Every table of the schema, every column (see "Stability rules"). The tables
+# that must be empty before the fresh-install case, i.e. the fleet state an
+# install with only its admin account does not have yet:
+_FLEET_STATE_TABLES = (
+    "agent_ownership",
+    "agent_permissions",
+    "agent_shared_folder_config",
+    "agent_tags",
+    "agent_schedules",
+    "system_views",
+    "system_settings",
+    "operator_queue",
+)
+TIMESTAMP = "<timestamp>"
 
 
 def _fleet_snapshot() -> dict:
+    """{table: [row, ...]} for EVERY table, all columns, clock columns as
+    `<timestamp>` (or None) and a lone INTEGER PRIMARY KEY (a rowid) left out."""
     with get_engine().connect() as conn:
-        return {
-            table: [
-                dict(row)
-                for row in conn.execute(
-                    text(f"SELECT {', '.join(cols)} FROM {table}")
-                ).mappings()
+        tables = [
+            row[0]
+            for row in conn.execute(
+                text(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' "
+                    "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+                )
+            )
+        ]
+        snapshot = {}
+        for table in tables:
+            info = conn.execute(text(f'PRAGMA table_info("{table}")')).mappings().all()
+            keys = [c for c in info if c["pk"]]
+            rowid = (
+                {keys[0]["name"]}
+                if len(keys) == 1 and (keys[0]["type"] or "").upper() == "INTEGER"
+                else set()
+            )
+            snapshot[table] = [
+                {
+                    key: (TIMESTAMP if value is not None else None)
+                    if key.endswith("_at")
+                    else value
+                    for key, value in row.items()
+                    if key not in rowid
+                }
+                for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings()
             ]
-            for table, cols in _FLEET_TABLES.items()
-        }
+        return snapshot
 
 
 def _generated_ids(*snapshots: dict) -> dict:
@@ -349,9 +357,9 @@ def _generated_ids(*snapshots: dict) -> dict:
     """
     ids = {}
     for snapshot in snapshots:
-        for row in snapshot["system_views"]:
+        for row in snapshot.get("system_views", []):
             ids[row["id"]] = f"<generated system_views.id: {row['name']}>"
-        for row in snapshot["agent_schedules"]:
+        for row in snapshot.get("agent_schedules", []):
             ids[row["id"]] = (
                 f"<generated agent_schedules.id: {row['agent_name']}/{row['name']}>"
             )
@@ -375,7 +383,7 @@ def _canonical_row(table: str, row: dict, ids: dict, replacements: dict) -> dict
 def _fleet_writes(
     before: dict, after: dict, ids: dict, replacements: dict | None = None
 ) -> dict:
-    """Rows the request added and rows it removed, per table, canonicalized.
+    """Rows the request added and rows it removed, per changed table, canonicalized.
 
     A multiset difference, not a set one: two rows that canonicalize alike (two
     same-named schedules on one agent share a placeholder id) must count twice,
@@ -386,16 +394,17 @@ def _fleet_writes(
     def canon(snapshot, table):
         return Counter(
             json.dumps(_canonical_row(table, row, ids, replacements), sort_keys=True)
-            for row in snapshot[table]
+            for row in snapshot.get(table, [])
         )
 
     writes = {}
-    for table in _FLEET_TABLES:
+    for table in sorted(set(before) | set(after)):
         b, a = canon(before, table), canon(after, table)
-        writes[table] = {
-            "added": [json.loads(r) for r in sorted((a - b).elements())],
-            "removed": [json.loads(r) for r in sorted((b - a).elements())],
-        }
+        if a != b:  # only the tables the request changed: a new one is a new key
+            writes[table] = {
+                "added": [json.loads(r) for r in sorted((a - b).elements())],
+                "removed": [json.loads(r) for r in sorted((b - a).elements())],
+            }
     return writes
 
 
@@ -405,8 +414,8 @@ def _fleet_writes(
 class _Seams:
     """Stands in for `routers.agents.create_agent_internal` / `start_agent_internal`.
 
-    Create records the `AgentConfig` fields create mode decides (name, template,
-    resources, kind) and the call's other arguments, raises when the case says
+    Create records the whole `AgentConfig` it is handed (every field, defaults
+    included) and the call's other arguments, raises when the case says
     the create fails, and otherwise registers the live ownership row the real
     create leaves behind, which the later create-mode writers depend on (the
     `agent_tags` foreign key, `create_schedule`'s access and liveness gates).
@@ -423,12 +432,7 @@ class _Seams:
     ):
         self.create_calls.append(
             {
-                "name": config.name,
-                "template": config.template,
-                "resources": (
-                    dict(config.resources) if config.resources is not None else None
-                ),
-                "kind": config.kind,
+                "config": config.model_dump(mode="json"),
                 "as_user": current_user.username,
                 "skip_name_sanitization": skip_name_sanitization,
                 "request_passed": request is not None,
@@ -776,9 +780,8 @@ def test_first_run_seed_on_fresh_install(install):
 
     before = _fleet_snapshot()
     # The shape under test: nothing but the admin account exists yet.
-    assert all(not rows for rows in before.values()), before
-    with get_engine().connect() as conn:
-        assert conn.execute(text("SELECT COUNT(*) FROM agent_ownership")).scalar() == 0
+    assert all(not before[table] for table in _FLEET_STATE_TABLES), before
+    assert [row["username"] for row in before["users"]] == [ADMIN.username]
 
     result = asyncio.run(sss.ensure_first_run_seeded())
 
@@ -824,7 +827,7 @@ def test_fleet_diff_counts_duplicate_rows_and_masks_removed_ids():
         "owner_id": 1,
         "deleted_at": None,
     }
-    empty = {table: [] for table in _FLEET_TABLES}
+    empty = {"agent_schedules": [], "system_views": []}
     one = {**empty, "agent_schedules": [row]}
     two = {**empty, "agent_schedules": [row, {**row, "id": "s2"}]}
 
@@ -843,6 +846,25 @@ def test_fleet_diff_counts_duplicate_rows_and_masks_removed_ids():
         "added": [],
         "removed": [{**row, "id": "<generated agent_schedules.id: a/nightly>"}],
     }
+
+
+def test_every_case_is_produced_by_a_live_test():
+    """A pinned case whose test is deleted, renamed, skipped or xfailed would
+    otherwise stop being checked while the module stays green."""
+    import inspect
+
+    module = sys.modules[__name__]
+    for case, test_name in CASE_TESTS.items():
+        fn = getattr(module, test_name, None)
+        assert callable(fn), f"case {case!r}: its test {test_name} is missing"
+        marks = {mark.name for mark in getattr(fn, "pytestmark", [])}
+        assert not marks & {"skip", "skipif", "xfail"}, f"{test_name} is marked {marks}"
+        source = inspect.getsource(fn)
+        assert "_check(" in source and f'"{case}"' in source, (
+            f"{test_name} no longer checks the {case!r} case"
+        )
+        for call in ("pytest.skip", "pytest.xfail", "importorskip"):
+            assert call not in source, f"{test_name} calls {call}"
 
 
 def test_golden_holds_exactly_the_exercised_cases():
