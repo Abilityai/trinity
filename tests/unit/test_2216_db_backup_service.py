@@ -72,8 +72,10 @@ class FakeDB:
     def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
         return None
 
+    # The seam may pass further keyword-only options (e.g. how a reading
+    # updates a pending row); this double files every reading and decides none.
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None):
+                                            max_pending_for_type=None, **_seam_options):
         self.queue_items.append((agent_name, item))
         return {"outcome": "created", "row": item, "changed": False}
 
