@@ -1475,8 +1475,8 @@
       "description": "Tests for SSRF prevention in skills library URL: github.com hostname enforcement, internal IP rejection, scheme validation, bypass attempts (28 tests)"
     },
     {
-      "file": "test_ip_rate_limit_fix.py",
-      "feature": "Issue #181",
+      "file": "unit/test_181_ip_rate_limit_spoofing.py",
+      "feature": "Issue #181, trinity-enterprise#873",
       "added": "2026-03-27",
       "categories": [
         "backend",
@@ -1484,7 +1484,7 @@
         "rate-limiting",
         "unit"
       ],
-      "description": "Tests for X-Forwarded-For rate limit bypass fix: trusted-proxy validation, spoofed header rejection, per-token secondary rate limit, pentest 3.2.4 PoC scenario"
+      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
     },
     {
       "file": "test_subscription_usage.py",
