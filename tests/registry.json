@@ -1,6 +1,43 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3180_ops_write_scope.py",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The ops_write scope through the real resolver and routers on the real schema, keys minted through POST /api/mcp/keys; only Docker and Redis faked. Pass paths for circuit-breaker reset, agent stop (audit row carries mcp_key_id and mcp_scope=ops_write), execution terminate (queued cancel) and agent start through the real start_agent_internal including the #1854 self-heal of a revoked baked key (fresh key bound to the target, superseded active key pruned, nothing returned to the caller, caller's reach unchanged). Target policy: start/stop refuse the system agent, an is_system agent and a ghost, refuse when the ghost lookup raises or cannot be proven, and stay scope-specific; reset/terminate keep every agent. Demoted owner (creator, operator) 403 and suspended owner 401 on all four; password change with revoke_api_keys revokes it; PERSON_KEY_SCOPES == the mintable set. Mint matrix composed (admin JWT ok; non-admin JWT, user, ops, ops_write, agent keys 403, no row) and each redundant rung isolated. The ops key refused on the four writes; A2A 403 with no dispatch and no anonymous fallback; enumeration-safe refusal; verify verdict foreign_ops_write_key; a crafted Host with the desync asserted. Mutations: fence call, path check, owner check, each mark, target policy (call, fail-open, is_system), creatable scope, revoke set, each mint rung, verdict, url.path each turn named tests red."
+    },
+    {
+      "file": "unit/test_3180_ops_write_route_census.py",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "ops_write mark census (frozen marked set, unaliased, reasoned, below the route decorator, no other reference, authenticates through get_current_user) and path-list agreement (each entry resolves to exactly one live marked route), the test_2323 fence/gate pair mirrored for reset, and a sweep of every live OSS route of the real main.app in a hermetic subprocess (_ops_write_sweep.py) with real keys, classified by credential dependency: 623 unlisted routes refuse, A2A 403, get_optional_user treats the key as unrecognised, routes reading no Trinity credential listed by name; path list holed -> the mark refuses every unmarked handler; every handler marked -> the path list refuses; demoted owner refused and suspended owner 401 on every route; the ops key reaches no write; never-grantable families refused, and with the fence call removed each shows its own gate or (key revoke/delete, credentials inject/export/import, subscription assign) that the fence is its only layer. Mutations: fence call, path check, mark check, owner check, reset opt-in, each mark, an overbroad path entry each turn named tests red. OSS routes only."
+    },
+    {
+      "file": "../src/frontend/tests/unit/mcpKeysOpsWriteScope.mount.spec.js",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "frontend",
+        "auth",
+        "unit"
+      ],
+      "description": "McpKeysTab mounted: an ops_write key is badged 'Ops (writes)' distinct from 'Ops (read-only)'; an admin is offered the 'Ops (operational writes)' radio beside the read-only one and creating sends scope 'ops_write' exactly; a non-admin is offered no bounded scope."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
