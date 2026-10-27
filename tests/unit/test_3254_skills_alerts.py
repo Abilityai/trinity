@@ -506,6 +506,20 @@ class TestFleetReinject:
         sweep({f"a{i}": self.OK for i in range(4)})
         assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
 
+    def test_long_agent_names_are_capped_by_size_and_still_raise_the_alarm(self, db, sweep):
+        """Agent names have no length limit: 500 names of 200 characters are
+        about 100 KB, past the queue's 64 KiB context belt, which would turn the
+        alarm into a failed write. The list is capped by size, the row is filed,
+        and with its evidence incomplete no sweep ends it."""
+        names = [f"a{i:03d}-" + "x" * 195 for i in range(500)]
+        sweep({n: self.BAD for n in names})
+        [row] = _pending(db, self.SUBJECT)
+        assert row["context"]["agents_failed"] == 500
+        assert 0 < len(row["context"]["agents"]) < 500
+        assert row["context"]["agents"] == sorted(names)[:len(row["context"]["agents"])]
+        sweep({n: self.OK for n in names})
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
+
     @pytest.mark.parametrize("agents", [
         "absent", None, "", {}, "a1", ["a1", 3], [],
     ], ids=["absent", "none", "empty-str", "dict", "str", "non-str-name", "empty-list"])

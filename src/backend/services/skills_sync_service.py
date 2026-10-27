@@ -58,10 +58,24 @@ FLEET_LAST_RUN_KEY = "skills_fleet_reinject_last_run"
 # pre-move row with the subject this module now files (R1).
 FLEET_ALERT_KEY = "fleet"
 # The alarm's context names every failed agent (the clear's evidence, #3254
-# R10), apart from the report's 25-name display list; capped well inside the
-# operator queue's 64 KiB context belt. A longer list is stored capped, and its
+# R10), apart from the report's 25-name display list; capped by count and by
+# its serialised size, well inside the operator queue's 64 KiB context belt
+# (agent names have no length limit). A longer list is stored capped, and its
 # row is then left to its lifetime (the clear cannot see every failed agent).
 FLEET_ALERT_MAX_AGENTS = 500
+FLEET_ALERT_AGENTS_MAX_BYTES = 32 * 1024
+
+
+def _capped_agent_names(names: List[str]) -> List[str]:
+    """Whole names, in order, within both caps."""
+    kept: List[str] = []
+    size = 2                                     # the list's brackets
+    for name in names[:FLEET_ALERT_MAX_AGENTS]:
+        size += len(json.dumps(name).encode("utf-8")) + 2
+        if size > FLEET_ALERT_AGENTS_MAX_BYTES:
+            break
+        kept.append(name)
+    return kept
 
 # Idle poll while auto-sync is disabled. Short enough that flipping the toggle
 # takes effect promptly, long enough to cost nothing.
@@ -437,8 +451,9 @@ class SkillsLibrarySyncService:
                     "commit_sha": report.get("commit_sha"),
                     # every failed agent (capped), not the report's 25: the
                     # clear must see each one current again (R10)
-                    "agents": (sorted(failed_agents) if failed_agents is not None
-                               else sorted(report["failures"]))[:FLEET_ALERT_MAX_AGENTS],
+                    "agents": _capped_agent_names(
+                        sorted(failed_agents) if failed_agents is not None
+                        else sorted(report["failures"])),
                 },
             )
         except Exception as e:  # noqa: BLE001 — the alarm is decorative
