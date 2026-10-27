@@ -116,8 +116,6 @@ _ALLOWED_CALLERS = {
         "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
         "{diverged_since}), and an episode must last > 24 h before it can raise "
         "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
-        "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         "platform-only: fires only for schedules the operator enabled validation "
         "on; cadence operator-bound (#1632 classification)",
