@@ -872,6 +872,24 @@ class TestH2NeverRemoves:
         a = next(m for m in result.members if m.short_name == "a")
         assert [(c.code, c.current) for c in a.changes] == [("permission_extra", ["acme-b"])]
 
+    def test_adding_an_edge_keeps_a_hand_granted_edge_and_its_skill_grant(self, ew):
+        """The write path, not only the report: `set_permissions` is a full
+        replacement that also deletes the peer skill grants on the edges it
+        drops (ent#662). Apply adds `a -> b` and leaves `a -> outsider`."""
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-b")
+        db.add_agent_permission("acme-a", "outsider", W.ALICE)
+        _hrun("INSERT INTO agent_peer_skill_grants (caller_agent, target_agent, skill_name, "
+              "granted_by, granted_at) VALUES ('acme-a', 'outsider', 'review', 'alice695', "
+              "'2026-10-01T00:00:00Z')")
+        result = W.apply(ew, _manifest("a", "b", extra="permissions:\n  preset: full-mesh\n"),
+                         dry_run=False)
+        assert result.status == "applied", result.failed
+        assert db.get_permitted_agents("acme-a") == ["acme-b", "outsider"]
+        assert db.get_permitted_agents("acme-b") == ["acme-a"]
+        assert W.Witness.dump_tables()["agent_peer_skill_grants"] == [
+            ("acme-a", "outsider", "review", "alice695", "2026-10-01T00:00:00Z")]
+
 
 class TestH3SchedulesOnACreatedMember:
     def test_the_templates_same_named_row_is_updated_after_creation(self, ew):
