@@ -83,6 +83,23 @@ USER = mint("user", "sweep admin user key")  # the unbounded key `ops_write` exi
 BOGUS = "trinity_mcp_" + secrets.token_hex(20)
 client = TestClient(main.app, raise_server_exceptions=False)
 
+# A live `authorized` canvas share on the owner's agent: the one
+# `get_optional_user` door, probed with a token that MATCHES a row, so an
+# authenticated viewer and an anonymous one get different answers.
+CANVAS_ID = "cv-sweep3180"
+db.upsert_agent_canvas(AGENT, CANVAS_ID, blocks=[{"type": "markdown", "markdown": "ops_write sweep"}],
+                       title="sweep3180")
+SHARE = db.create_canvas_share(AGENT, CANVAS_ID, scope="authorized", created_by=OWNER)
+
+
+def canvas_view(token):
+    got = call("GET", f"/api/public/canvas/{SHARE['token']}", token)
+    detail = got.get("detail")
+    got["share_status"] = detail.get("status") if isinstance(detail, dict) else None
+    if got["status"] == 200:
+        got["share_status"] = json.loads(got["body"]).get("status")
+    return got
+
 
 def flat_routes():
     out = []
@@ -191,6 +208,13 @@ swallowing = [row for row in TABLE if row["cls"] == "swallowing"]
 
 out["normal"] = sweep(OW.api_key, fenced)
 out["swallowing"] = sweep(OW.api_key, swallowing, compare_bogus=True)
+out["canvas"] = {
+    "ops_write": canvas_view(OW.api_key),
+    "anonymous": canvas_view(None),
+    "bogus_key": canvas_view(BOGUS),
+    "owner_user_key": canvas_view(USER.api_key),
+    "owner_session": canvas_view(D.create_access_token({"sub": OWNER})),
+}
 
 # Layer masking, direction 1: the path list holed (admits every method and path).
 real_list = D._OPS_WRITE_ALLOWED_ROUTES
@@ -275,6 +299,7 @@ out["families"] = run_families(OW.api_key, "fenced")
 real_fence = D._enforce_ops_write_key_fence
 D._enforce_ops_write_key_fence = lambda request, owner: None
 out["families_no_fence"] = run_families(OW.api_key, "no-fence")
+out["canvas_no_fence"] = canvas_view(OW.api_key)
 D._enforce_ops_write_key_fence = real_fence
 # The unbounded key `ops_write` replaces, over the fence-only families ONLY: it
 # passes the admin gates, so letting it run a gated family first (registering a
@@ -282,17 +307,28 @@ D._enforce_ops_write_key_fence = real_fence
 out["families_user_key"] = run_families(USER.api_key, "user-key", only=lambda fam: fam.get("own_gate") is None)
 
 # Doors that validate a Trinity key themselves and never run the resolver.
+# The pull seams refuse a non-pilot agent before they read the key at all, so
+# the seeded agent is made a pilot first; each door is then also driven with
+# the agent's OWN key, which must get past the key check, so a 403 for
+# `ops_write` is the key check refusing and not something in front of it.
+os.environ["PULL_MODE_PILOT_AGENTS"] = AGENT
+AGENT_KEY = db.create_agent_mcp_api_key(AGENT, OWNER)
 eid = "sweep3180-exec"
-doors = {
-    "heartbeat": call("POST", f"/api/agents/{AGENT}/heartbeat", OW.api_key, json={}),
-    "result_callback": call("POST", f"/api/agents/{AGENT}/executions/{eid}/result", OW.api_key,
-                            json={"status": "success", "response": "x"}),
-    "pull_next_task": call("GET", f"/api/internal/next-task?agent_name={AGENT}&worker_id=w-3180", OW.api_key),
-    "pull_task_result": call("POST", f"/api/internal/tasks/{eid}/result", OW.api_key,
-                             json={"claim_token": "c-3180", "status": "success", "response": "x"}),
-    "mcp_validate": call("POST", "/api/mcp/validate", OW.api_key),
-}
-out["doors"] = doors
+
+
+def door_calls(token):
+    return {
+        "heartbeat": call("POST", f"/api/agents/{AGENT}/heartbeat", token, json={}),
+        "result_callback": call("POST", f"/api/agents/{AGENT}/executions/{eid}/result", token,
+                                json={"status": "success", "response": "x"}),
+        "pull_next_task": call("GET", f"/api/internal/next-task?agent_name={AGENT}&worker_id=w-3180", token),
+        "pull_task_result": call("POST", f"/api/internal/tasks/{eid}/result", token,
+                                 json={"claim_token": "c-3180", "status": "success", "content": "x"}),
+    }
+
+
+out["doors"] = {"ops_write": door_calls(OW.api_key), "agent_key": door_calls(AGENT_KEY.api_key),
+                "mcp_validate": call("POST", "/api/mcp/validate", OW.api_key)}
 
 
 def ws_close(path):
