@@ -1831,6 +1831,7 @@ async def run_async_task(
             # backlog drain) is downstream of the /task admission seam's skill gate,
             # and every enqueue into the backlog happens after a gate check.
             gate_checked=True,
+            max_turns=request.max_turns,  # #2328: the caller's per-task turn cap
         )
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -2691,6 +2692,7 @@ async def _dispatch_sync_immediate(
         images=image_data,
         dispatch_gate_checked=True,  # #526: router already gated at acquire()
         gate_checked=True,  # ent#751: the /task admission seam ran the skill gate
+        max_turns=request.max_turns,  # #2328: the caller's per-task turn cap
     )
 
     if collaboration_activity_id:
@@ -2869,6 +2871,7 @@ async def dispatch_parallel_task(
                     source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
                     chain_depth=chain_depth,
+                    max_turns=request.max_turns,
                 ),
                 **skill_gate_service.frozen_replay(request.message, request.system_prompt),
             },

@@ -68,7 +68,7 @@ Every area below is read **on demand**, not auto-loaded. The third column is the
 | [`frontend.md`](architecture/frontend.md) | `src/frontend/src/**`<br>`src/frontend/scripts/**` | The dashboard renders three modes over one store seam. A filter added outside `stores/network.js::visibleAgents` silently applies to one mode only (ent#261). Any change here is also bound by `docs/memory/design-system-contract.md` and the raw-color ratchet, whose per-file counts may only shrink. |
 | [`mcp-server.md`](architecture/mcp-server.md) | `src/mcp-server/**`<br>`src/helper-mcp/**` | Tool visibility is an allowlist (`OPERATOR_SCOPES`), never a deny-check. The previous `!== "connector"` shape advertised every operator tool to any scope it had not heard of, including a null auth context where `canAccess` filtering is skipped entirely (#848). |
 | [`database.md`](architecture/database.md) | `src/backend/db/schema.py`<br>`src/backend/db/migrations.py`<br>`src/backend/db/tables.py`<br>`src/backend/migrations/versions/**`<br>`src/backend/db/alembic_runner.py` | Every schema change needs BOTH tracks: a versioned SQLite entry and a new Alembic revision (Invariant #9). Two revisions sharing a `down_revision` are two heads, and `upgrade head` resolves its target before applying anything, so it applies ZERO revisions while git reports no conflict (#2068). |
-| [`security.md`](architecture/security.md) | `src/backend/dependencies.py`<br>`src/backend/error_handlers.py`<br>`src/backend/services/credential_encryption.py`<br>`src/backend/services/secret_settings.py`<br>`src/backend/services/credential_paths.py`<br>`src/backend/utils/url_validation.py`<br>`src/backend/utils/safe_yaml.py`<br>`docker-compose.yml`<br>`docker-compose.prod.yml` | `require_admin` and `assert_admin` reject agent principals themselves. An agent-scoped MCP key resolves to its owner CARRYING the owner's role, so on a default admin-owned install any agent's injected key satisfied every admin gate. That was five separate incidents (trinity-ops-agent#232, #1644, #1816, ent#236, ent#293) before the gate was fixed rather than the endpoints; never write `require_role("admin")`, which is a third spelling that lets agent keys through. |
+| [`security.md`](architecture/security.md) | `src/backend/dependencies.py`<br>`src/backend/error_handlers.py`<br>`src/backend/services/credential_encryption.py`<br>`src/backend/services/secret_settings.py`<br>`src/backend/services/credential_paths.py`<br>`src/backend/utils/url_validation.py`<br>`src/backend/utils/safe_yaml.py`<br>`src/backend/utils/client_ip.py`<br>`docker-compose.yml`<br>`docker-compose.prod.yml`<br>`docker-compose.hosted.yml`<br>`src/frontend/nginx.conf`<br>`src/frontend/nginx-server.conf`<br>`src/frontend/render-nginx.sh`<br>`scripts/deploy/probe-proxy-listener.sh` | `require_admin` and `assert_admin` reject agent principals themselves. An agent-scoped MCP key resolves to its owner CARRYING the owner's role, so on a default admin-owned install any agent's injected key satisfied every admin gate. That was five separate incidents (trinity-ops-agent#232, #1644, #1816, ent#236, ent#293) before the gate was fixed rather than the endpoints; never write `require_role("admin")`, which is a third spelling that lets agent keys through. |
 | [`background-services.md`](architecture/background-services.md) | `src/backend/main.py` | Every loop here starts in EVERY uvicorn worker. A cycle without a Redis leader lease double-probes the fleet, double-persists its rows, and gives each cross-cycle marker two writers (#1464, #1632, #1881). Whether the lease fails open or closed is decided per loop and stated in each entry. |
 
 ---
@@ -115,18 +115,19 @@ These are structural patterns that must be preserved. Breaking them causes casca
 
 ---
 
-## Network Topology (#589)
+## Network Topology (#589, trinity-enterprise#873)
 
-Two Docker bridge networks, by design — agents physically cannot route to Redis.
+Two Docker bridge networks everywhere, by design — agents physically cannot route to Redis — plus, on prod/hosted only, an ingress network that gives the bundled proxies addresses no agent can obtain.
 
 | Network | Subnet | Members |
 |---------|--------|---------|
 | `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector, postgres (hosted compose; dev `--profile postgres`, #3159) |
-| `trinity-agent-network` | 172.28.0.0/16 | agents, frontend |
+| `trinity-agent-network` | 172.28.0.0/16 | agents (and the dev frontend) |
+| `trinity-proxy-network` (prod/hosted) | `${TRINITY_PROXY_PREFIX:-172.30.0}.0/24`, pool `.128/25` | frontend `.2` (its only network), cloudflared `.3`, backend `.4`, mcp-server (pool). Gateway `.1` is never trusted |
 
-Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on platform side, agents on agent side), `mcp-server` (agents reach `http://mcp-server:8080/mcp` via Docker DNS), `otel-collector` (agents push metrics), `cloudflared` (prod only — proxies to backend and public agents).
+Bridges (members of **both** networks): `backend` (primary HTTP API — Redis on platform side, agents on agent side), `mcp-server` (agents reach `http://mcp-server:8080/mcp` via Docker DNS), `otel-collector` (agents push metrics), `cloudflared` (prod only — proxies to backend and public agents). On prod/hosted `backend`, `mcp-server` and `cloudflared` also join the ingress network; the backend trusts forwarded client identity only from `.2`/`.3` there (`utils/client_ip.py`, see `architecture/security.md` §1a).
 
-**Rule:** agents are *never* on `trinity-platform-network`. Any new service that mounts the agent network must NOT connect to Redis — full stop. The three agent-container-create sites hard-code the network name `trinity-agent-network` (cited by function so the reference survives line drift): `crud.py::_create_agent_container` (#1484), `lifecycle.py::_provision_folders_and_run_agent_container`, and `system_agent_service.py::SystemAgentService._create_system_agent`.
+**Rule:** agents are *never* on `trinity-platform-network` or `trinity-proxy-network`. Any new service that mounts the agent network must NOT connect to Redis — full stop. The three agent-container-create sites hard-code the network name `trinity-agent-network` (cited by function so the reference survives line drift): `crud.py::_create_agent_container` (#1484), `lifecycle.py::_provision_folders_and_run_agent_container`, and `system_agent_service.py::SystemAgentService._create_system_agent`.
 
 **Redis ACL users:**
 

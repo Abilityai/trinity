@@ -82,12 +82,13 @@ def _bin(tmp_path: Path) -> Path:
 
 
 def _run(tmp_path: Path, body: str, funcs: list[str], env: dict[str, str] | None = None,
-         state: Path | None = None) -> subprocess.CompletedProcess:
+         state: Path | None = None, lock: Path | None = None) -> subprocess.CompletedProcess:
     state = state or (tmp_path / "etc-trinity")
     units = tmp_path / "units"
     units.mkdir(exist_ok=True)
     src = "\n".join(_extract(f) for f in funcs)
     src = src.replace("/etc/trinity", str(state)).replace("/etc/systemd/system", str(units))
+    src = src.replace("/run/trinity-provision.lock", str(lock or tmp_path / "provision.lock"))
     script = "\n".join([
         "set -e",
         f". '{_ENV_FILE_SH}'",
@@ -484,9 +485,12 @@ def _main(tmp_path, phase="refresh", held=False, pending=False, old="198.51.100.
         holder = subprocess.Popen(["flock", str(lock), "sleep", "3" if held == "briefly" else "30"])
         time.sleep(0.5)
     try:
+        # ent#873 extracted the lock into `provision_lock` (shared with the
+        # managed-host upgrade path); its path is redirected like the block's.
         r = _run(tmp_path, body, _IMDS + ["provision_on_cloud", "provision_refresh_target",
                                           "provision_refresh_apply", "provision_apply_ip",
-                                          "provision_default_provenance"], env, state)
+                                          "provision_default_provenance", "provision_lock"],
+                 env, state, lock=lock)
     finally:
         if holder:
             holder.kill()
