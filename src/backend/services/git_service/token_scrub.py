@@ -13,7 +13,6 @@ import logging
 import shlex
 from typing import Any, Dict, Optional
 
-from database import db
 from services import git_credential_helper, platform_alerts
 from services.docker_service import execute_command_in_container
 
@@ -159,15 +158,15 @@ def _clear_git_token_scrub_alarms(agent_name: str, report: Dict[str, Any]) -> No
     """End the scrub alarms this sweep proves are over (#3254). Never raises.
 
     Only on positive evidence that the sweep inspected the workspace: it
-    succeeded, AND it could read ROOT's repository or could traverse ROOT and
-    found no repository there (#2930). A successful all-zero report from a tree
-    it could not see is not recovery, so it ends neither alarm. A refusal is
-    over only when such an inspection refused nothing.
+    succeeded AND it could read ROOT's repository. A successful all-zero report
+    from a tree it could not see is not recovery, so it ends neither alarm. Nor
+    is "no repository at ROOT" (#2930): when the toplevel probe fails (its
+    timeout, an exec error), `gitignore._detect_git_dir` falls back to
+    `/home/developer`, and a legacy repo under `workspace/` then reads exactly
+    so while its config still holds the token. A refusal is over only when such
+    an inspection refused nothing.
     """
-    inspected = bool(report.get("success")) and bool(
-        report.get("root_readable")
-        or (report.get("root_traversable") and not report.get("git_present"))
-    )
+    inspected = bool(report.get("success")) and bool(report.get("root_readable"))
     if not inspected:
         return
     platform_alerts.clear(agent_name, "git_token_scrub_unreadable", agent_name)

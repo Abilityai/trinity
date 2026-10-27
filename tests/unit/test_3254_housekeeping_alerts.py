@@ -619,18 +619,10 @@ def _raise_both(run):
     run(**UNREADABLE)
 
 
-@pytest.mark.parametrize(
-    "clean",
-    [
-        dict(),  # read ROOT's repo
-        dict(root_readable=0, root_traversable=1, git_present=0),  # no repo (#2930)
-    ],
-    ids=["readable", "no_repository"],
-)
-def test_an_inspected_clean_sweep_ends_both_alarms(sweep, db, clean):
+def test_an_inspected_clean_sweep_ends_both_alarms(sweep, db):
     run, agent = sweep
     _raise_both(run)
-    run(**clean)
+    run()  # read ROOT's repo, refused nothing
     assert _ended_by_platform(_scrub(db, agent, "git_token_scrub_refused"))
     assert _ended_by_platform(_scrub(db, agent, "git_token_scrub_unreadable"))
 
@@ -645,8 +637,13 @@ def test_an_inspected_clean_sweep_ends_both_alarms(sweep, db, clean):
             root_readable=0, root_traversable=1, git_present=1
         ),  # repo there, unreadable
         dict(exit_code=1),  # the sweep failed
+        # No repo at ROOT (#2930) is also what a fallback ROOT reads: a failed
+        # toplevel probe sends the sweep to /home/developer while a legacy
+        # repo under workspace/ still holds the token.
+        dict(root_readable=0, root_traversable=1, git_present=0),
     ],
-    ids=["not_traversable", "present_unreadable", "sweep_failed"],
+    ids=["not_traversable", "present_unreadable", "sweep_failed",
+         "no_repository_or_fallback_root"],
 )
 def test_zero_refusals_without_inspection_evidence_end_neither(sweep, db, reading):
     run, agent = sweep
