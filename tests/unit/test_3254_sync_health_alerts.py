@@ -104,7 +104,12 @@ _DENIED = "remote: Write access to repository not granted."
 class _Clock:
     """One clock for the poller, the seam and the queue. Each reader is
     patched in the globals of the code that runs it (R6), so a sibling suite
-    that re-imported a module cannot leave this test on the wall clock."""
+    that re-imported a module cannot leave this test on the wall clock.
+
+    Like real time it moves between two reads (1 µs). The seam's request ids
+    carry a timestamp, and a frozen instant would hand the two git-bloat kinds
+    (one prefix, one key) the same id, which the seam reports as `created`
+    while filing nothing: a pre-existing seam defect, drafted as a follow-up."""
 
     def __init__(self):
         self.now = T0
@@ -112,11 +117,15 @@ class _Clock:
     def advance(self, **delta):
         self.now += timedelta(**delta)
 
+    def read(self):
+        self.now += timedelta(microseconds=1)
+        return self.now
+
     def iso(self):
-        return self.now.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        return self.read().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
     def monotonic(self):
-        return (self.now - T0).total_seconds() + 10_000.0
+        return (self.read() - T0).total_seconds() + 10_000.0
 
 
 @pytest.fixture
@@ -136,7 +145,7 @@ def clock(service, db, monkeypatch):
     class _Datetime(datetime):
         @classmethod
         def now(cls, tz=None):
-            return c.now if tz is None else c.now.astimezone(tz)
+            return c.read() if tz is None else c.read().astimezone(tz)
 
     import utils.helpers
     poller = type(service)._sync_agent.__globals__
@@ -204,6 +213,11 @@ def _ts(value):
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _about(a, b):
+    """Equal up to the clock's per-read tick (two writes, a few µs apart)."""
+    return abs(a - b) < timedelta(seconds=1)
+
+
 def _person_ends(db, row):
     """A person acknowledges the row through the answer sink (AC 7, #2372)."""
     from services import ask_service
@@ -215,6 +229,7 @@ _FAIL = _payload(status="failed", error="boom")
 _OK = _payload()
 _MIN = {"minutes": 1}
 _AHEAD = _payload(ahead=7)
+_BIG, _SMALL = 2**40, 2**20  # either side of the 10 GiB GIT_DIR_ALERT_BYTES default
 
 # How each condition is raised, kept, and recovered through the real poller:
 # `raise_` is (time to wait before, payload) per poll.
@@ -229,6 +244,17 @@ SCENARIOS = {
         "prefix": "sync-diverged-", "row_type": "sync_diverged",
         "raise_": [({}, _AHEAD), ({"hours": 25}, _AHEAD)],
         "persist": _AHEAD, "recover": _OK,
+    },
+    # Two conditions under the one `git-bloat-` prefix, two subjects (AC 5).
+    "git_bloat_size": {
+        "prefix": "git-bloat-", "row_type": "git_bloat",
+        "raise_": [({}, _payload(git_dir_bytes=_BIG))],
+        "persist": _payload(git_dir_bytes=_BIG), "recover": _payload(git_dir_bytes=_SMALL),
+    },
+    "git_bloat_maintenance": {
+        "prefix": "git-bloat-", "row_type": "git_bloat",
+        "raise_": [({}, _payload(maintenance_failures=3))],
+        "persist": _payload(maintenance_failures=4), "recover": _payload(maintenance_failures=0),
     },
 }
 
@@ -257,7 +283,7 @@ async def test_the_alert_is_a_condition_on_the_seam(kind, service, seed_agent, d
     assert row["subject"] == f"{kind}:alpha"
     assert row["type"] == sc["row_type"]
     assert row["context"]["seen_count"] == 1
-    assert _ts(row["expires_at"]) == _ts(row["last_seen_at"]) + timedelta(days=30)
+    assert _about(_ts(row["expires_at"]), _ts(row["last_seen_at"]) + timedelta(days=30))
 
     # R9's "at most": a poll inside the 6 hours touches nothing.
     clock.advance(hours=1)
@@ -361,7 +387,7 @@ async def test_a_row_whose_recovery_edge_was_lost_expires_30_days_after_its_last
     await _poll(service, _FAIL)  # the last reading
     (row,) = _pending(db, "sync-failing-")
     last = _ts(row["last_seen_at"])
-    assert _ts(row["expires_at"]) == last + timedelta(days=30)
+    assert _about(_ts(row["expires_at"]), last + timedelta(days=30))
 
     real_lookup = db.find_pending_operator_queue_by_subject
     lost = {"on": True}
@@ -459,3 +485,46 @@ async def test_divergence_outlives_a_sync_failing_precedence_and_ends_with_its_e
     ended = db.get_operator_queue_item(row["id"])
     assert (ended["status"], ended["disposed_by"]) == ("cancelled", "platform")
     assert len(_rows(db, "sync-diverged-")) == 1
+
+
+# --------------------------------------------------------------------------
+# Git bloat: two conditions, two subjects (AC 5); R1 exempt
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_ac5_size_and_maintenance_are_two_subjects(service, seed_agent, db, clock):
+    """`.git` over its ceiling and a failing-maintenance streak need different
+    operator action, so each is its own row, and one ending leaves the other."""
+    seed_agent()
+    await _poll(service, _payload(git_dir_bytes=_BIG, maintenance_failures=3))
+    rows = {r["subject"]: r for r in _pending(db, "git-bloat-")}
+    assert set(rows) == {"git_bloat_size:alpha", "git_bloat_maintenance:alpha"}
+    assert "GiB" in rows["git_bloat_size:alpha"]["question"]
+    assert "maintenance has failed 3" in rows["git_bloat_maintenance:alpha"]["question"]
+    assert {r["type"] for r in rows.values()} == {"git_bloat"}
+
+    clock.advance(**_MIN)  # the repack succeeds while .git stays over the ceiling
+    await _poll(service, _payload(git_dir_bytes=_BIG, maintenance_failures=0))
+    size = db.get_operator_queue_item(rows["git_bloat_size:alpha"]["id"])
+    maintenance = db.get_operator_queue_item(rows["git_bloat_maintenance:alpha"]["id"])
+    assert (maintenance["status"], maintenance["disposed_by"]) == ("cancelled", "platform")
+    assert size["status"] == "pending"
+
+
+def test_r1_git_bloat_is_exempt_and_a_legacy_row_gets_a_lifetime_stamp_only(pa):
+    """R1 exemption, with its residual. A pre-move `git-bloat-{agent}-{ts}` row
+    told size from maintenance only in its prose, so the sweep's parser is
+    `_no_subject` on purpose and never guesses which condition it was. The
+    second upgrade sweep therefore stamps such a row with a lifetime only: it
+    sits beside the seam's row for up to 30 days and then expires."""
+    old_id = "git-bloat-alpha-2026-10-20T08:15:30.123456Z"
+    assert pa.derive_legacy_subject(old_id, {"git_dir_bytes": _BIG}) == \
+        pa.LegacyMatch("git_bloat_size", None)
+    plan = pa.plan_sweep([{
+        "id": "g1", "agent_name": "alpha", "request_id": old_id, "status": "pending",
+        "created_at": "2026-10-20T08:15:30.123456Z", "expires_at": None, "context": None,
+        "subject": None, "disposed_by": None, "disposed_at": None, "raised_by": None,
+    }], now=T0)
+    assert plan.survivor_stamps == () and plan.ended_ids == ()
+    (stamp,) = plan.lifetime_stamps
+    assert _ts(stamp.expires_at) == T0 + timedelta(days=30)

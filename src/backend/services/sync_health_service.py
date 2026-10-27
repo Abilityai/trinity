@@ -101,10 +101,11 @@ def _poll_interval_seconds() -> int:
     return value if value > 0 else DEFAULT_POLL_INTERVAL
 
 
-# #1595: edge-triggered git-bloat alerting — the killed-auto-gc failure class
-# was "completely silent until the disk fills"; a column behind an API nobody
-# queries reproduces that. Both thresholds compare prior DB row → new value so
-# each crossing fires exactly once per episode (the sync_failing pattern).
+# #1595: git-bloat alerting — the killed-auto-gc failure class was "completely
+# silent until the disk fills"; a column behind an API nobody queries
+# reproduces that. Both thresholds compare prior DB row → new value: the
+# crossing reports the condition and the falling edge ends it (#3254, the
+# sync_failing pattern).
 GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
 MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
 
@@ -672,30 +673,42 @@ class SyncHealthService:
         else:
             self._lock_stuck_agents.discard(agent_name)
 
-        # #1595: edge-triggered git-bloat / maintenance-health alerts.
+        # #1595: git bloat and failing maintenance are two conditions with two
+        # subjects (#3254 AC 5), each reported on its crossing, re-read while
+        # over (R9), and ended by the platform when the agent's own measurement
+        # falls back under the threshold. An absent or garbage value keeps the
+        # stored one (upsert), so it never reads as a recovery (R10).
         new_git_dir_bytes = updated.get("git_dir_bytes") or 0
-        if prior_git_dir_bytes < GIT_DIR_ALERT_BYTES <= new_git_dir_bytes:
-            self._emit_git_bloat_alert(
-                agent_name, updated,
-                reason=(
-                    f".git has grown to {new_git_dir_bytes / 1024**3:.1f} GiB "
-                    f"(alert threshold {GIT_DIR_ALERT_BYTES / 1024**3:.1f} GiB)"
-                ),
-            )
+        if new_git_dir_bytes >= GIT_DIR_ALERT_BYTES:
+            if self._reading_due("git_bloat_size", agent_name,
+                                 edge=prior_git_dir_bytes < GIT_DIR_ALERT_BYTES):
+                self._observe_git_bloat(
+                    agent_name, "git_bloat_size", updated,
+                    reason=(
+                        f".git has grown to {new_git_dir_bytes / 1024**3:.1f} GiB "
+                        f"(alert threshold {GIT_DIR_ALERT_BYTES / 1024**3:.1f} GiB)"
+                    ),
+                )
+        elif prior_git_dir_bytes >= GIT_DIR_ALERT_BYTES:
+            platform_alerts.clear(agent_name, "git_bloat_size", agent_name)
+            self._forget_reading("git_bloat_size", agent_name)
         new_maintenance_failures = updated.get("maintenance_failures") or 0
-        if (
-            prior_maintenance_failures
-            < MAINTENANCE_FAILURES_ALERT_THRESHOLD
-            <= new_maintenance_failures
-        ):
-            self._emit_git_bloat_alert(
-                agent_name, updated,
-                reason=(
-                    f"git maintenance has failed {new_maintenance_failures} "
-                    "consecutive times — the repo may be too large to repack "
-                    "within its budget"
-                ),
-            )
+        if new_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD:
+            if self._reading_due(
+                "git_bloat_maintenance", agent_name,
+                edge=prior_maintenance_failures < MAINTENANCE_FAILURES_ALERT_THRESHOLD,
+            ):
+                self._observe_git_bloat(
+                    agent_name, "git_bloat_maintenance", updated,
+                    reason=(
+                        f"git maintenance has failed {new_maintenance_failures} "
+                        "consecutive times — the repo may be too large to repack "
+                        "within its budget"
+                    ),
+                )
+        elif prior_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD:
+            platform_alerts.clear(agent_name, "git_bloat_maintenance", agent_name)
+            self._forget_reading("git_bloat_maintenance", agent_name)
 
     async def _fetch_git_status(self, agent_name: str) -> Optional[Dict]:
         """Fetch /api/git/status from the agent. None on unreachable."""
@@ -807,35 +820,26 @@ class SyncHealthService:
         logger.warning("sync_diverged for %s (%s): %s",
                        agent_name, verdict["freeze_reason"], outcome)
 
-    def _emit_git_bloat_alert(self, agent_name: str, state: Dict, *, reason: str) -> None:
-        """#1595: operator-queue entry for repo bloat / failing maintenance.
+    def _observe_git_bloat(self, agent_name: str, kind: str, state: Dict, *, reason: str) -> None:
+        """#1595: report repo bloat or failing maintenance through the seam.
 
-        Edge-triggered by the caller (prior DB row vs new value crosses the
-        threshold), so each episode fires once — mirrors
-        :meth:`_emit_sync_failing_alert`.
+        `kind` is `git_bloat_size` or `git_bloat_maintenance`: two conditions,
+        two subjects (#3254 AC 5), one row type (`git_bloat`).
         """
-        now = utc_now_iso()
-        item = {
-            "id": f"git-bloat-{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "git_bloat",
-            "status": "pending",
-            "priority": "high",
-            "title": "Agent git repo needs attention",
-            "question": f"{agent_name}: {reason}.",
-            "context": {
+        outcome = platform_alerts.observe(
+            agent_name, kind, agent_name,
+            priority="high",
+            title="Agent git repo needs attention",
+            question=f"{agent_name}: {reason}.",
+            context={
                 "git_dir_bytes": state.get("git_dir_bytes"),
                 "pack_count": state.get("pack_count"),
                 "loose_objects": state.get("loose_objects"),
                 "maintenance_failures": state.get("maintenance_failures"),
             },
-            "created_at": now,
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            logger.warning("git_bloat emitted for %s: %s", agent_name, reason)
-        except Exception:
-            logger.exception("failed to emit git_bloat alert")
+        )
+        self._note_reading(kind, agent_name, outcome)
+        logger.warning("%s for %s: %s (%s)", kind, agent_name, reason, outcome)
 
 
 # Module-level singleton mirrors operator_queue_service.
