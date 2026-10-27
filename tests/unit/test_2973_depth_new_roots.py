@@ -152,6 +152,23 @@ def _depths(agent: str) -> list:
         ]
 
 
+def _execution_ids(agent: str) -> set:
+    from db.engine import get_engine
+    from sqlalchemy import text
+
+    with get_engine().connect() as conn:
+        return {
+            r[0]
+            for r in conn.execute(
+                text(
+                    "SELECT id FROM schedule_executions "
+                    "WHERE agent_name = :a AND message != 'in-flight turn'"
+                ),
+                {"a": agent},
+            )
+        }
+
+
 def _bearer(agent=A) -> dict:
     return {"Authorization": f"Bearer {db.create_agent_mcp_api_key(agent, OWNER).api_key}"}
 
@@ -200,8 +217,26 @@ def test_2973_loop_iterations_carry_the_starters_depth_after_its_turn_ends(clien
     # Iteration 2 runs after the starter's turn has finished: its running rows
     # read 0 now, so only the persisted loop depth can carry the chain.
     _finish(starter)
-    asyncio.run(_LOOPSVC.get_loop_service()._dispatch_run(db.get_loop(loop_id), run_number=2))
+    # #3317: dispatching run 2 is a claim on the loop row, so put the loop where
+    # its own advance would leave it: run 1 closed, `runs_completed = 1`.
+    _hrun("UPDATE agent_loop_runs SET status='completed', completed_at=started_at "
+          "WHERE loop_id=:l AND run_number=1", l=loop_id)
+    _hrun("UPDATE agent_loops SET runs_completed=1 WHERE id=:l", l=loop_id)
+    svc = _LOOPSVC.get_loop_service()
+    before = _execution_ids(A)
+    assert asyncio.run(svc._dispatch_run(db.get_loop(loop_id), run_number=2)) is True
     assert _depths(A) == [2, 2]
+    (dispatched,) = _execution_ids(A) - before
+    assert [r["execution_id"] for r in db.list_loop_runs(loop_id) if r["run_number"] == 2] == [dispatched]
+
+    # A second dispatcher of run 2 loses the claim: no second run row, and the
+    # execution row it created is closed `skipped`, never left `running`.
+    before = _execution_ids(A)
+    assert asyncio.run(svc._dispatch_run(db.get_loop(loop_id), run_number=2)) is False
+    (refused,) = _execution_ids(A) - before
+    assert [r["run_number"] for r in db.list_loop_runs(loop_id)] == [1, 2]
+    assert db.get_execution(refused).status == "skipped"
+    assert db.get_execution(dispatched).status == "running"
 
 
 def test_2973_a_loop_started_by_a_human_key_stays_a_root(client, world):

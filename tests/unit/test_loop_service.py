@@ -213,8 +213,39 @@ class _FakeDB:
             and r["status"] not in _TERMINAL_LOOP_STATUSES
         ][:limit]
 
+    def rearm_lost_dispatch(self, loop_id: str, *, due_for):
+        # #3317: the real one decides under the loop row's lock; this fake is
+        # single-threaded, so it classifies the same way on current state.
+        row = self.loops.get(loop_id)
+        if row is None:
+            return "missing", None
+        if row["status"] in _TERMINAL_LOOP_STATUSES:
+            return "terminal", None
+        if row.get("next_run_at"):
+            return "parked", None
+        runs = self.list_loop_runs(loop_id)
+        open_run = next((r for r in runs if r["status"] == "running"), None)
+        if open_run is not None:
+            return "open_run", open_run
+        if any(r["run_number"] > (row["runs_completed"] or 0) for r in runs):
+            return "stuck", None
+        row["next_run_at"] = due_for(dict(row), runs)
+        return "armed", None
+
     # ---- run rows ----
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
+        # #3317: inserting run K is a claim, as the real one: a non-terminal
+        # loop with runs_completed == K-1 and no row numbered K or above. A win
+        # spends any pending park.
+        row = self.loops.get(loop_id)
+        if (
+            row is None
+            or row["status"] in _TERMINAL_LOOP_STATUSES
+            or row["runs_completed"] != run_number - 1
+            or any(r["run_number"] >= run_number for r in self.runs.get(loop_id, []))
+        ):
+            return None
+        row["next_run_at"] = None
         self._next_run += 1
         rid = f"lr_{self._next_run}"
         self.runs[loop_id].append({
@@ -899,7 +930,7 @@ class TestRestartRecovery:
         loop = db.get_loop(row["id"])
         assert loop["status"] == "running"          # NOT interrupted
         assert loop["stop_reason"] is None
-        assert loop["next_run_at"] is not None      # due now → the sweep takes it
+        assert loop["next_run_at"] is not None      # parked → the sweep takes it when due
 
     def test_a_loop_with_a_live_execution_is_left_alone(self, loop_module):
         """Its terminal — or `cleanup_service`'s recovery of it, which writes

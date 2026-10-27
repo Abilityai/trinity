@@ -297,6 +297,12 @@ class _MemDB:
         self.loops[lid]["next_run_at"] = at
 
     def start_loop_run(self, lid, n, *, execution_id=None):
+        # #3317: inserting run K is a claim, as the real one.
+        row = self.loops.get(lid)
+        if (row is None or row["status"] in _TERMINAL or row["runs_completed"] != n - 1
+                or any(r["run_number"] >= n for r in self.runs[lid])):
+            return None
+        row["next_run_at"] = None
         rid = f"{lid}_{n}_{len(self.runs[lid])}"
         self.runs[lid].append({"id": rid, "loop_id": lid, "run_number": n,
                                "execution_id": execution_id, "status": "running",

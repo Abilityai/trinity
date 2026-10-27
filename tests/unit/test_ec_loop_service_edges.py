@@ -566,7 +566,7 @@ class TestDefensiveBranches:
         ts.script = ["queued", "queued"]
         bad = _start(ls, max_runs=2)
         good = _start(ls, max_runs=2)
-        # good: lost its dispatch (no open run). bad: its run read raises.
+        # good: lost its dispatch (no open run). bad: its re-arm raises.
         from sqlalchemy import delete
 
         from db.engine import get_engine
@@ -574,18 +574,24 @@ class TestDefensiveBranches:
 
         with get_engine().begin() as conn:
             conn.execute(delete(agent_loop_runs).where(agent_loop_runs.c.loop_id == good))
-        orig = db.ops.list_runs
+        # #3317: reconcile reads a loop's runs inside `rearm_lost_dispatch` now,
+        # so the fault goes there (an injection into `list_runs` would no
+        # longer fire, and the test would pass without exercising the guard).
+        orig = db.ops.rearm_lost_dispatch
+        raised = []
 
-        def _list(lid):
+        def _rearm(lid, **kw):
             if lid == bad:
+                raised.append(lid)
                 raise RuntimeError("row read failed")
-            return orig(lid)
+            return orig(lid, **kw)
 
-        db.ops.list_runs = _list
+        db.ops.rearm_lost_dispatch = _rearm
         try:
             moved = _run(ls.LoopService().reconcile_after_restart())
         finally:
-            db.ops.list_runs = orig
+            db.ops.rearm_lost_dispatch = orig
+        assert raised == [bad]
         assert moved == 1
         assert _loop(db, good)["next_run_at"]
 
@@ -926,14 +932,6 @@ class TestRestartMidAdvance:
         assert loop["stop_reason"] == "max_runs_reached"
         assert [r["run_number"] for r in _runs(db, lid)] == [1, 2, 3]
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "BUG: reconcile_after_restart (worker B booting) re-arms a loop that worker "
-            "A is mid-advance on (run N closed, run N+1 not yet started), so the sweep "
-            f"dispatches run N+1 a second time — #3317"
-        ),
-    )
     def test_m61_reconcile_during_live_advance_double_dispatches(self, env, monkeypatch):
         ls, db, ts = env
         worker_b = ls.LoopService()
