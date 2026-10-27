@@ -106,8 +106,10 @@ class _DbDouble:
         self.writes += 1
         self.settings.pop(key, None)
 
+    # The seam may pass further keyword-only options (e.g. how a reading
+    # updates a pending row); this double files every reading and decides none.
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None):
+                                            max_pending_for_type=None, **_seam_options):
         self.writes += 1
         self.queue_items.append((agent_name, item))
         self.subjects.append(subject)

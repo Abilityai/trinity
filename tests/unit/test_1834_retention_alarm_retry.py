@@ -164,8 +164,8 @@ def _own_db(tmp_path_factory):
 
 
 def _clear_alarm_host():
-    from sqlalchemy import text
     from db.engine import get_engine
+    from sqlalchemy import text
     with get_engine().begin() as conn:
         conn.execute(text("DELETE FROM operator_queue WHERE agent_name = :a"),
                      {"a": _RG.ALARM_AGENT_NAME})

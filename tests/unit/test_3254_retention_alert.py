@@ -108,8 +108,8 @@ def _own_db(tmp_path_factory):
 
 
 def _clear_alarm_host():
-    from sqlalchemy import text
     from db.engine import get_engine
+    from sqlalchemy import text
     with get_engine().begin() as conn:
         conn.execute(text("DELETE FROM operator_queue WHERE agent_name = :a"),
                      {"a": _RG.ALARM_AGENT_NAME})
@@ -328,14 +328,22 @@ class TestRefresh:
         assert row["context"]["seen_count"] == 2
         assert row["expires_at"] > first["expires_at"]
 
-    def test_a_failed_refresh_is_retried_on_the_next_cycle(self, db, key, clocks, seam):
+    def test_a_failed_refresh_is_retried_on_the_next_cycle(
+        self, db, key, clocks, seam, caplog
+    ):
         _refuse(key)
         assert _one(db, key)["context"]["seen_count"] == 1
 
         clocks.advance(_RG.ALARM_REFRESH_SECONDS)
         seam["down"] = True
-        _refuse(key)
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            _refuse(key)
         assert _one(db, key)["context"]["seen_count"] == 1
+        # The alarm was delivered: a failed refresh is a WARNING to retry, never
+        # the "unable to write the refusal alarm" escalation of an undelivered one.
+        messages = [r.getMessage() for r in caplog.records]
+        assert len([m for m in messages if "could not refresh the alarm" in m]) == 1
+        assert [m for m in messages if "unable to write the refusal alarm" in m] == []
 
         seam["down"] = False
         clocks.advance(_CYCLE)
@@ -385,7 +393,7 @@ class TestReasonChange:
 
 class TestPersonEnding:
 
-    def test_after_a_persons_ending_the_same_window_snoozes(self, db, key, clocks):
+    def test_after_a_persons_ending_the_same_window_snoozes(self, db, key, clocks, caplog):
         _refuse(key, window=5)
         row = _one(db, key)
         assert row["subject"] == f"{_KIND}:{key}"
@@ -398,6 +406,38 @@ class TestPersonEnding:
         assert db.get_operator_queue_item(row["id"])["status"] == "acknowledged"
         assert _RG._refusal_episodes[key].alarm_delivered is True, (
             "a snoozed reading is delivery: the episode must not retry every cycle")
+
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            for _ in range(10):
+                clocks.advance(_CYCLE)
+                _refuse(key, window=5)
+        assert [r for r in caplog.records if "could not" in r.getMessage()] == [], (
+            "a snoozed refresh is not retried every cycle for the snooze window")
+
+    def test_after_a_restart_a_snoozed_first_reading_is_delivery(
+        self, db, key, clocks, caplog
+    ):
+        """A restart empties the episode memo; the row a person ended stays. The
+        new process's first reading is `snoozed`, and that is delivery (#1834 via
+        D3): no retry every cycle, and no false "unable to write" escalation."""
+        _refuse(key, window=5)
+        row = _one(db, key)
+        assert row["subject"] == f"{_KIND}:{key}"
+        assert _person_ends(db, row)["status"] == "acknowledged"
+
+        _RG.reset_transition_memo()                      # a fresh process
+        cycles = int(_RG.ALARM_ESCALATION_AGE_SECONDS / _CYCLE) + 3
+        with caplog.at_level(logging.INFO, logger=_RG.logger.name):
+            for _ in range(cycles):
+                _refuse(key, window=5)
+                clocks.advance(_CYCLE)
+
+        assert _RG._refusal_episodes[key].alarm_delivered is True
+        assert _alarms(db, key) == []
+        assert db.get_operator_queue_item(row["id"])["status"] == "acknowledged"
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m for m in messages if "unable to write the refusal alarm" in m] == []
+        assert [m for m in messages if "could not" in m] == []
 
     def test_after_a_persons_ending_a_different_window_files_a_fresh_row(self, db, key, clocks):
         _refuse(key, window=5)
