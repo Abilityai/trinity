@@ -3,9 +3,10 @@ Sync Health Service (#389 S1).
 
 Polls each git-enabled agent on an interval, reads its `/api/git/status`
 response (which now carries dual ahead/behind + persisted sync-state from
-the auto-sync heartbeat), upserts `agent_sync_state`, and emits a
-`sync_failing` operator-queue entry when the consecutive-failures counter
-crosses the alert threshold.
+the auto-sync heartbeat), upserts `agent_sync_state`, and reports
+`sync_failing` through the platform-alert seam (#3254) while the
+consecutive-failures counter is at or over the alert threshold, ending it
+when the counter falls back.
 
 Lifecycle mirrors `OperatorQueueSyncService`:
   - `start()` kicks off `_poll_loop`
@@ -44,13 +45,15 @@ import asyncio
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import git_service
+from services import platform_alerts
 from services import sync_freeze_policy
 from services.sync_health_view import sync_view
 from services.agent_client import AgentClient
@@ -60,6 +63,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 60  # seconds
 ALERT_THRESHOLD = 3  # emit sync_failing entry after N consecutive failures
+
+# #3254 (R9): how often a condition that persists is re-read through the
+# platform-alert seam. Each re-read moves its row's deadline, so a lifetime only
+# ends a condition nobody re-read (a clear lost to a fault), never one that still
+# holds. #3255's base-image alarm cooldown is the precedent.
+ALERT_REFRESH_SECONDS = 6 * 60 * 60
 
 # #2742: single Redis key holding the current sync-health leader's worker id.
 # One poller across all uvicorn workers. Collides with none of the five existing
@@ -361,6 +370,13 @@ class SyncHealthService:
         # freeze lasts. The DB's (agent_name, request_id) conflict target is
         # what makes it one item per episode across restarts and workers.
         self._diverged_alerted: Dict[str, str] = {}
+        # #3254: when this process last reported each live condition to the
+        # platform-alert seam, `(kind, agent) -> (episode, monotonic seconds)`.
+        # A crossing is reported at once and a persisting condition at most
+        # every ALERT_REFRESH_SECONDS (R9), so the 60 s poll touches no row in
+        # between. The seam's subject, not this memo, keeps it one row across
+        # restarts and workers; a restart only re-reads once.
+        self._alert_read_at: Dict[Tuple[str, str], Tuple[Optional[str], float]] = {}
 
     @property
     def poll_interval(self) -> int:
@@ -604,10 +620,18 @@ class SyncHealthService:
             last_check_at=now_iso,
         )
 
-        # Edge-triggered alert: only emit when we cross the threshold.
+        # #3254: sync failing is a condition on the platform-alert seam —
+        # reported on the crossing, re-read while it lasts (R9), and ended by the
+        # platform on the falling edge. The counter resets on a `success` and on
+        # nothing else, so the falling edge is evidence the sync recovered (R10).
         new_failures = updated["consecutive_failures"]
-        if prior_failures < ALERT_THRESHOLD <= new_failures:
-            self._emit_sync_failing_alert(agent_name, updated)
+        if new_failures >= ALERT_THRESHOLD:
+            if self._reading_due("sync_failing", agent_name,
+                                 edge=prior_failures < ALERT_THRESHOLD):
+                self._observe_sync_failing(agent_name, updated)
+        elif prior_failures >= ALERT_THRESHOLD:
+            platform_alerts.clear(agent_name, "sync_failing", agent_name)
+            self._forget_reading("sync_failing", agent_name)
 
         # trinity-enterprise#706: a divergence freeze is in force → one
         # sync_diverged item for the episode. Rule 2 (sync_failing) already
@@ -689,17 +713,36 @@ class SyncHealthService:
 
     # -------------------------- alerting --------------------------
 
-    def _emit_sync_failing_alert(self, agent_name: str, state: Dict) -> None:
-        """Insert a sync_failing operator-queue entry.
+    def _reading_due(self, kind: str, agent_name: str, *, edge: bool = False,
+                     episode: Optional[str] = None) -> bool:
+        """R9 (#3254): report a crossing at once, and a condition that persists
+        at most every ALERT_REFRESH_SECONDS. A new `episode` is a new condition."""
+        if edge:
+            return True
+        last = self._alert_read_at.get((kind, agent_name))
+        if last is None or last[0] != episode:
+            return True
+        return time.monotonic() - last[1] >= ALERT_REFRESH_SECONDS
 
-        The ID embeds the emission timestamp so each distinct failure series
-        produces a unique row. This method is only called on the edge where
-        consecutive_failures crosses from (threshold-1) → threshold, so we
-        fire at most once per series naturally.
+    def _note_reading(self, kind: str, agent_name: str, outcome: str,
+                      episode: Optional[str] = None) -> None:
+        """Remember a reading the seam took. `observe` never raises, so a failed
+        write is only its outcome: it is retried on the next poll, not in 6 h."""
+        if outcome == platform_alerts.OBSERVED_FAILED:
+            self._alert_read_at.pop((kind, agent_name), None)
+        else:
+            self._alert_read_at[(kind, agent_name)] = (episode, time.monotonic())
+
+    def _forget_reading(self, kind: str, agent_name: str) -> None:
+        self._alert_read_at.pop((kind, agent_name), None)
+
+    def _observe_sync_failing(self, agent_name: str, state: Dict) -> None:
+        """Report the sync-failing condition through the seam (#389, #3254).
+
+        One pending row per agent (subject `sync_failing:<agent>`), updated in
+        place with the latest reading, so a re-read re-states the count.
         """
-        now = utc_now_iso()
-        last_sync_at = state.get("last_sync_at") or now
-        item_id = f"sync-failing-{agent_name}-{now}"
+        last_sync_at = state.get("last_sync_at") or utc_now_iso()
         error = state.get("last_error_summary") or ""
         failures = state["consecutive_failures"]
         context = {
@@ -727,25 +770,12 @@ class SyncHealthService:
         else:
             title = "Git sync failing"
             question = f"{agent_name}'s git sync has failed {failures} times in a row."
-        item = {
-            "id": item_id,
-            "agent_name": agent_name,
-            "type": "sync_failing",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": context,
-            "created_at": now,
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            logger.warning(
-                "sync_failing emitted for %s (failures=%s)",
-                agent_name, state["consecutive_failures"],
-            )
-        except Exception:
-            logger.exception("failed to emit sync_failing alert")
+        outcome = platform_alerts.observe(
+            agent_name, "sync_failing", agent_name,
+            priority="high", title=title, question=question, context=context,
+        )
+        self._note_reading("sync_failing", agent_name, outcome)
+        logger.warning("sync_failing for %s (failures=%s): %s", agent_name, failures, outcome)
 
     def _emit_sync_diverged_alert(self, agent_name: str, state: Dict, verdict: Dict) -> None:
         """trinity-enterprise#706: one operator-queue item per divergence episode.
