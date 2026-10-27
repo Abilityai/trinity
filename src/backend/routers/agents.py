@@ -1140,6 +1140,23 @@ async def reset_circuit_breaker_endpoint(
     prior_dispatch = DispatchBreaker(agent_name).to_dict().get("state", "closed")
     reset_circuit(agent_name)
     reset_dispatch(agent_name)
+    # #3180: the most-run operator write had no audit row. Written only once
+    # both resets have returned, for every principal that reaches this route;
+    # `log` derives the key fields from the principal (#2389), so a key's reset
+    # names the key. Not conditional on DISPATCH_BREAKER_ENABLED or the
+    # per-agent toggle: the transport breaker trips with both off.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="circuit_breaker_reset",
+        source="api",
+        actor_user=current_user,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "prior_transport_state": prior_transport,
+            "prior_dispatch_state": prior_dispatch,
+        },
+    )
     return {
         "agent_name": agent_name,
         "prior_state": prior_transport,  # back-compat field (transport breaker)
