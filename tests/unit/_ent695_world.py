@@ -135,6 +135,8 @@ TEMPLATES = {
     ),
     # Overrides a declared resource (H4, P-F exception 2).
     "heavy": "name: heavy\nresources:\n  cpu: '4'\n  memory: '8g'\n",
+    # Declares its own shared-folder settings (fresh review #2: `folders: {}`).
+    "exposing": "name: exposing\nshared_folders:\n  expose: true\n",
 }
 
 

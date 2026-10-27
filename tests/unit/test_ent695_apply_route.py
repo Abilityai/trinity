@@ -198,6 +198,39 @@ class TestAC5OverTheRealAuthPath:
         assert [b["code"] for b in res.json()["blockers"]] == ["roster_unreadable"]
 
 
+class TestAgentsTheCallerCannotManage:
+    """Fresh review #1 and #5, through the real authenticated path: an agent the
+    caller may not manage neither refuses the run nor appears in the body, and
+    a DECLARED one is the uniform 409 with nothing written."""
+
+    def test_a_shared_agent_owned_by_another_user_does_not_block_and_is_not_named(self, http):
+        http.seed_agent("acme-a")
+        http.seed_agent("acme-notes", owner=W.BOB, tags=())  # untagged: name-only evidence
+        http.seed_agent("acme-bobs", owner=W.BOB)            # tagged: would be drift
+        for name in ("acme-notes", "acme-bobs"):
+            db.share_agent(name, W.BOB, f"{W.ALICE}@example.com")
+        res = http.client.post(APPLY, json={"manifest": _manifest("a"), "dry_run": False},
+                               headers=_user_key())
+        assert res.status_code == 200, res.text
+        assert res.json()["status"] == "applied" and res.json()["drift"] == []
+        assert "acme-notes" not in res.text and "acme-bobs" not in res.text
+
+    def test_a_declared_member_owned_by_another_user_is_a_409_writing_nothing(self, http):
+        http.seed_agent("acme-api", owner=W.BOB)
+        headers = _user_key()
+        with W.Witness(http, http.tmp_path) as w:
+            res = http.client.post(APPLY, json={"manifest": _manifest("api", "b"), "dry_run": False},
+                                   headers=headers)
+        assert res.status_code == 409, res.text
+        body = res.json()
+        assert body["status"] == "refused"
+        assert [(b["code"], b["member"], b["retryable"]) for b in body["blockers"]] == [
+            ("member_name_unavailable", "acme-api", False)]
+        assert W.BOB not in res.text  # the owner is never named
+        w.assert_no_fleet_write()  # and nothing was created for the free `b` either
+        assert http.create_calls == [] and http.audits == []
+
+
 class TestD12PersonsOnly:
     def test_an_agent_key_is_refused_before_any_read(self, http, monkeypatch):
         http.seed_agent("acme-a")
@@ -276,6 +309,17 @@ class TestStatusMapping:
                                headers=_jwt(W.ALICE))
         assert res.status_code == 200
         assert any("audit record could not be written" in w for w in res.json()["warnings"])
+
+    def test_a_retryable_and_a_non_retryable_blocker_together_are_a_409(self, http):
+        """Fresh review #3: 503 only when EVERY blocker is retryable; one that is
+        not (here `folders_invalid`) makes it a 409, so a caller that retries on
+        503 does not retry a broken manifest forever."""
+        http.docker.readable = False
+        mf = _manifest("a").replace("template: local:plain", "template: local:plain\n    folders: {expose: null}")
+        res = http.client.post(APPLY, json={"manifest": mf, "dry_run": False}, headers=_jwt(W.ALICE))
+        assert res.status_code == 409, res.text
+        retryable = {b["code"]: b["retryable"] for b in res.json()["blockers"]}
+        assert retryable == {"roster_unreadable": True, "folders_invalid": False}
 
     def test_a_held_lock_is_a_503(self, http):
         http.redis.store[f"system_apply:{SYSTEM}"] = "someone-else"

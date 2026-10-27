@@ -246,8 +246,9 @@ class TestManagedMemberGates:
 
 
 class TestRoster:
-    """Engineering F1 + Codex 6: containers UNION live ownership rows,
-    filtered by access; never `list_all_agents_fast` (the world makes it raise)."""
+    """Engineering F1 + Codex 6: containers UNION live ownership rows, filtered
+    by the manage predicate (fresh review #1); never `list_all_agents_fast`
+    (the world makes it raise)."""
 
     def test_a_live_row_without_a_container_is_a_member(self, world):
         world.seed_agent("acme-restored", container=False)
@@ -272,6 +273,33 @@ class TestRoster:
         snap = world.snapshot(_manifest("a"))
         assert "acme-bobs" not in snap.roster
         assert "acme-bobs" not in snap.membership.members
+
+    def test_an_agent_shared_with_the_caller_but_not_theirs_to_manage_is_outside_the_roster(self, world):
+        """Fresh review #1: the roster is filtered by H1's manage predicate, not
+        by access. Bob's untagged `acme-notes`, shared with Alice, would
+        otherwise refuse her apply with a remedy (tag it) only Bob may follow,
+        and Bob's tagged `acme-bobs` would show as her drift."""
+        world.seed_agent("acme-a")
+        world.seed_agent("acme-notes", owner=W.BOB, tags=())
+        world.seed_agent("acme-bobs", owner=W.BOB)
+        for name in ("acme-notes", "acme-bobs"):
+            db.share_agent(name, W.BOB, f"{W.ALICE}@example.com")
+            assert db.can_user_access_agent(W.ALICE, name)
+        snap = world.snapshot(_manifest("a"))
+        assert snap.roster == ["acme-a"]
+        assert snap.membership.members == ["acme-a"] and not snap.blockers
+        # Bob, who manages both, still sees them: the gate is the caller's reach.
+        bob = world.snapshot(_manifest("a"), username=W.BOB)
+        assert ("membership_evidence_prefix_only", "acme-notes") in _codes(bob)
+
+    def test_with_docker_unreadable_a_name_that_reads_as_free_is_blocked_never_create(self, ew):
+        """Fresh review #6 (P-B): a name held only by a container reads as free
+        while Docker cannot be asked, so the dry run must not call it `create`."""
+        ew.docker.readable = False
+        result = W.apply(ew, _manifest("a"), dry_run=True)
+        assert result.status == "invalid"
+        assert [b.code for b in result.blockers] == ["roster_unreadable"]
+        assert _verdicts(result) == {"a": "blocked"}
 
 
 # ===========================================================================
@@ -879,8 +907,11 @@ class TestF3NothingNamesAMemberWhoseCreateFailed:
         assert "acme-b" not in db.get_permitted_agents("acme-a")
         steps = sorted((f.name, f.step) for f in result.failed)
         assert ("acme-b", "create") in steps
-        assert {s for n, s in steps if n == "acme-b"} >= {"tag", "edge", "folders", "created_schedules"}
-        assert ("acme-a", "edge") in steps  # a -> b skipped, b was not created
+        # One step name per writer, the same a write that ran reports (fresh review #7).
+        assert {s for n, s in steps if n == "acme-b"} >= {"tag", "permissions", "folders", "schedules"}
+        assert ("acme-a", "permissions") in steps  # a -> b skipped, b was not created
+        assert {s for _, s in steps} <= {"create", "tag", "permissions", "folders", "resources",
+                                         "schedules", "start"}
         create_failure = next(f for f in result.failed if f.step == "create")
         assert "secret-pat" not in create_failure.reason  # through _failure_reason
         assert ("start", "acme-b") not in ew.docker.events
@@ -1432,6 +1463,38 @@ class TestOtherShapeFreshInstall:
         # override row (create keeps template-wins).
         assert create_state["limits"] == {"acme-a": None, "acme-b": None}
         assert apply_state["limits"] == {"acme-a": None, "acme-b": {"memory": None, "cpu": "2"}}
+
+
+    def test_empty_folders_on_a_created_member_leave_the_templates_settings_in_both_modes(
+            self, db_backend, monkeypatch, tmp_path):
+        """Fresh review #2: create writes folders only for a non-empty mapping,
+        so `folders: {}` keeps the template's `shared_folders`; apply matches."""
+        import db_harness
+        import routers.agents as agents_router
+
+        manifest = f"name: {SYSTEM}\nagents:\n  a:\n    template: local:exposing\n    folders: {{}}\n"
+
+        def folders():
+            c = db.get_shared_folder_config("acme-a")
+            return (c.expose_enabled, c.consume_enabled) if c else None
+
+        create_world = W.make_world(monkeypatch, tmp_path / "create")
+        W.install_executor_seams(create_world, monkeypatch)
+        monkeypatch.setattr(agents_router, "start_agent_internal", create_world.docker.start)
+        created = asyncio.run(system_service.deploy_manifest(
+            manifest, create_world.user(W.ADMIN), None, dry_run=False,
+            create_agent_fn=create_world.create))
+        assert created.status == "deployed", created
+        create_folders = folders()
+
+        (tmp_path / "apply").mkdir()
+        db_harness._activate_backend(db_backend, tmp_path / "apply", monkeypatch)
+        apply_world = W.make_world(monkeypatch, tmp_path / "apply")
+        W.install_executor_seams(apply_world, monkeypatch)
+        applied = W.apply(apply_world, manifest, W.ADMIN, dry_run=False)
+        assert applied.status == "applied", applied.failed
+        assert create_folders == folders() == (True, False)
+        assert not any(c.field == "folders" for m in applied.members for c in m.changes)
 
 
 class TestOtherShapeEmptyData:

@@ -2344,7 +2344,9 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     """Read what apply needs to plan. Reads only, never writes (AC4).
 
     Roster: the tri-state container list UNION the live ownership rows,
-    filtered by the canonical `can_user_access_agent` — never
+    filtered by the manage predicate H1 uses (`can_user_share_agent` +
+    `agent_may_reach(manage=True)`; an agent merely shared with the caller is
+    outside it, so it never blocks the run or shows as drift) — never
     `get_accessible_agents`, which is built on `list_all_agents_fast` and
     returns `[]` without a Docker client, so the evidence gate would pass over
     an empty membership (#2196 class). The ownership rows bring in a recovered
@@ -2383,7 +2385,8 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         caller_is_admin=caller_is_admin,
     )
 
-    # 1. Roster (tri-state containers U live ownership rows, access-filtered).
+    # 1. Roster (tri-state containers U live ownership rows), manage-filtered
+    # (see the docstring: a merely shared agent is outside it).
     states = docker_service.agent_container_states()
     roster_ok = docker_ok = states is not None
     if states is None:
@@ -2408,7 +2411,8 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         try:
             snapshot.roster = [
                 n for n in sorted(set(states) | live_rows)
-                if db.can_user_access_agent(current_user.username, n)
+                if db.can_user_share_agent(current_user.username, n)
+                and agent_may_reach(current_user, n, manage=True)
             ]
         except Exception as e:  # noqa: BLE001
             roster_ok = False
@@ -2445,6 +2449,10 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             state.blocked = True
             continue
         if not taken:
+            if not docker_ok:
+                # P-B: with Docker unreadable a name held only by a container
+                # reads as free; its verdict is unknown, never `create`.
+                state.blocked = True
             continue  # absent -> create
 
         try:
@@ -2755,11 +2763,15 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "schedule.description": ("reconciled", "only when declared"),
 }
 
-# The order the executor writes in, by kind (phase-major, as create mode does).
-_APPLY_OP_PHASES = (
-    "tag", "edge", "folders", "resources", "created_resources",
-    "schedule_create", "schedule_update", "created_schedules",
-)
+# The order the executor writes in, by kind (phase-major, as create mode does),
+# and each kind's `failed[].step`: the name the write itself reports, so a
+# skipped write and an attempted one never use two names for one writer.
+_APPLY_OP_STEP = {
+    "tag": "tag", "edge": "permissions", "folders": "folders", "resources": "resources",
+    "created_resources": "resources", "schedule_create": "schedules",
+    "schedule_update": "schedules", "created_schedules": "schedules",
+}
+_APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
 
 
 @dataclass
@@ -3117,8 +3129,9 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
                                         current=[], desired=wanted))
         mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in wanted)
 
-    if isinstance(cfg.folders, dict) and _folders_error(cfg.folders) is None:
-        # Both keys, an omitted one False: create's `configure_folders` (Codex 7).
+    if isinstance(cfg.folders, dict) and cfg.folders and _folders_error(cfg.folders) is None:
+        # Both keys, an omitted one False, and nothing for `{}` (the template's
+        # settings stand): create's `configure_folders` (Codex 7).
         expose = cfg.folders.get("expose", False)
         consume = cfg.folders.get("consume", False)
         mp.changes.append(_apply_change("folders", "write", "folder_differs",
@@ -3495,18 +3508,19 @@ async def execute_apply_plan(
     ops = [op for mp in plan.members.values() for op in mp.ops]
     for phase in _APPLY_OP_PHASES:
         for op in (o for o in ops if o.kind == phase):
+            step = _APPLY_OP_STEP[op.kind]
             if op.member not in exists:
-                fail(op.member, op.short_name, op.kind,
+                fail(op.member, op.short_name, step,
                      "skipped_member_not_created: the member was not created")
                 continue
             if op.kind == "edge" and op.args["target"] not in exists:
-                fail(op.member, op.short_name, op.kind,
+                fail(op.member, op.short_name, step,
                      f"skipped_member_not_created: '{op.args['target']}' was not created")
                 continue
             try:
                 await _run_op(op, current_user, out, attempt)
             except Exception as e:  # noqa: BLE001 — never lose the report after a write
-                fail(op.member, op.short_name, op.kind, _failure_reason(e)[0])
+                fail(op.member, op.short_name, step, _failure_reason(e)[0])
 
     # 3. The platform prompt and the view.
     if plan.prompt_op is not None:
