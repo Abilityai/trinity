@@ -465,10 +465,12 @@ class TestTheAlarmAuthorizesNothing:
     def test_the_alarm_is_not_load_bearing_for_authorization(self, guard_db):
         """T-B6 — the #1644 invariant the retry must not disturb.
 
-        A load-bearing queue item would wedge shut permanently once it reached
-        any terminal state (Clear All -> `cancelled`), and `prune_terminal_items`
-        would delete the approval at 90 days — the sweep deleting its own
-        authorization. Both directions are asserted: a permanently failing alarm
+        A load-bearing queue item would wedge shut once it reached any terminal
+        state (Clear All -> `cancelled`): permanently under the pre-#3254 ON
+        CONFLICT DO NOTHING sink, for the snooze window on the seam. And
+        `prune_terminal_items` would delete the approval at 90 days — the sweep
+        deleting its own authorization. Both directions are asserted: a
+        permanently failing alarm
         cannot BLOCK an acknowledged prune, and a delivered alarm cannot GRANT an
         unacknowledged one.
         """

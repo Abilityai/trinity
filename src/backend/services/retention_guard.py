@@ -48,10 +48,11 @@ DESIGN NOTES (each one is load-bearing; read before changing)
    queue item load-bearing was rejected in review: the alarm's sink was then a
    blind `INSERT ... ON CONFLICT DO NOTHING`, so once the row existed in *any*
    state (e.g. an operator hits Clear All -> `cancelled`) re-emission was a no-op
-   and the gate would wedge shut permanently and silently. It still would on the
-   platform-alert seam (#3254): a person's ending silences the same reading for
-   the snooze window. And `prune_terminal_items`
-   would delete the approval at 90 days — the sweep deleting its own authorization.
+   and the gate would wedge shut permanently and silently. On the platform-alert
+   seam (#3254) it would wedge for the snooze window instead: a person's ending
+   silences the same reading that long, and only then does a reading file again.
+   And `prune_terminal_items` would delete the approval at 90 days — the sweep
+   deleting its own authorization.
    Keeping the alarm decorative dissolves both: a wedged alarm costs
    discoverability, not correctness, and responding to it grants nothing.
 """
