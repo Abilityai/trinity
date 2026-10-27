@@ -35,3 +35,8 @@ d70fd559b87c25c9e6d2c46bbc3f934e6aa13cf5:src/backend/services/aauth/keys.py:gene
 391fef346478b23ed0d447175f3270c684ef3e8a:.gitleaksignore:generic-api-key:25
 # ent#878: same false-positive class in services/aauth/signer.py:56, a typed dataclass attribute declaration in the adding commit e579476d2.
 e579476d2623a983a4e35151d08be3e1b2c0e241:src/backend/services/aauth/signer.py:generic-api-key:56
+# ent#873: the RFC 6455 sample WebSocket handshake nonce (a published test vector, not a credential) in scripts/testing/verify-client-ip.sh, added in commit 36d294cf9; the script now generates a fresh nonce per connection, but the range scan re-flags the adding commit.
+36d294cf9341e6673fdc3eefe056b4d2f8a14cb4:scripts/testing/verify-client-ip.sh:generic-api-key:439
+36d294cf9341e6673fdc3eefe056b4d2f8a14cb4:scripts/testing/verify-client-ip.sh:generic-api-key:442
+36d294cf9341e6673fdc3eefe056b4d2f8a14cb4:scripts/testing/verify-client-ip.sh:generic-api-key:611
+36d294cf9341e6673fdc3eefe056b4d2f8a14cb4:scripts/testing/verify-client-ip.sh:generic-api-key:623

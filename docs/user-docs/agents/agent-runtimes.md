@@ -87,6 +87,8 @@ A Codex agent reads its identity and instructions from `AGENTS.md`. At startup T
 
 Trinity's MCP tools are available to Codex agents. Codex references tools by their bare name (no `mcp__trinity__` prefix); Trinity adjusts the platform prompt automatically so the agent calls them correctly. The prompt's protected-paths sentence is adjusted per runtime too: only Claude Code runs the file guardrail hook on its Write and Edit tools, so a Codex or Gemini agent is told plainly that nothing in its runtime blocks writes to credential and platform paths and that the rule is its own to keep (see [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is)).
 
+The platform prompt also tells every agent not to run a coding-agent CLI (`claude`, `codex`, `gemini` or similar) as a subprocess, because a nested run escapes Trinity's execution ledger (see [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is)). That sentence is adjusted per runtime as well. A Claude Code agent is pointed to its `Agent` subagent tool (also named `Task`) for work inside the turn, when the agent has that tool. A Codex or Gemini agent has no such tool and is pointed to its own tools. Every runtime is pointed to `chat_with_agent` with `parallel=true` (which can target the agent itself and take a `model`) or `fan_out` for delegated, batch or second-model work.
+
 There is no API or MCP endpoint to switch an agent's runtime after creation. See the full API reference at `http://localhost:8000/docs`.
 
 ## Limitations
