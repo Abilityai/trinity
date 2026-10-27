@@ -17,7 +17,9 @@ int costs) and full-unicode / whitespace-heavy text:
   P7  end to end, the loop stops at exactly the iteration the budget oracle
       predicts (boundary-only gate, `>=`, max_runs first);
   P8  end to end, a continue-mode loop aborts at exactly the run the
-      consecutive-failure oracle predicts, and promotes correctly otherwise.
+      consecutive-failure oracle predicts, and promotes correctly otherwise;
+  P9  `_rearm_due_at` (#3317) is total over any stamps and lands in
+      `[now, now + LOOP_REARM_GRACE_SECONDS]`.
 
 P7/P8 drive the real `LoopService` over a small in-memory DB (same surface as
 `test_2523_loops_terminal_driven._DB`; deliberately not imported).
@@ -445,3 +447,37 @@ def test_p8_failure_streak_oracle(oks, max_runs, cap):
         assert (loop["status"], loop["stop_reason"]) == (expected, "max_runs_reached")
         assert loop["failed_runs"] == failed
         assert calls == max_runs
+
+
+# ---------------------------------------------------------------------------
+# P9 — the #3317 re-arm grace is total and bounded
+# ---------------------------------------------------------------------------
+
+_instants = st.datetimes(min_value=datetime(1, 1, 2), max_value=datetime(9999, 12, 30))
+_offsets = st.integers(min_value=-14 * 60, max_value=14 * 60).map(lambda m: timedelta(minutes=m))
+stamps = st.one_of(
+    st.none(),
+    st.text(max_size=40),
+    _instants.map(lambda d: d.isoformat() + "Z"),
+    st.tuples(_instants, _offsets).map(
+        lambda t: t[0].isoformat() + ("+" if t[1] >= timedelta(0) else "-")
+        + f"{abs(int(t[1].total_seconds())) // 3600:02d}:{abs(int(t[1].total_seconds())) % 3600 // 60:02d}"
+    ),
+)
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    now=st.datetimes(min_value=datetime(1, 1, 1), max_value=datetime(9999, 12, 31, 23, 57)),
+    closes=st.lists(st.tuples(st.sampled_from(["completed", "failed", "skipped", "running"]), stamps),
+                    max_size=6),
+    started=stamps,
+    created=stamps,
+)
+@example(now=datetime(2026, 10, 27, 12), closes=[], started="", created="2026-10-26T12:00:00Z")
+@example(now=datetime(2026, 10, 27, 12), closes=[("completed", "9999-12-31T23:59:59.999999Z")],
+         started=None, created=None)
+def test_p9_rearm_due_at_is_total_and_bounded(now, closes, started, created):
+    runs = [{"status": s, "completed_at": c} for s, c in closes]
+    due = ls._rearm_due_at({"id": "p9", "started_at": started, "created_at": created}, runs, now)
+    assert now <= due <= now + timedelta(seconds=ls.LOOP_REARM_GRACE_SECONDS)

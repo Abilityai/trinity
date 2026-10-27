@@ -953,3 +953,820 @@ class TestRestartMidAdvance:
         numbers = [r["run_number"] for r in _runs(db, lid)]
         assert numbers.count(2) == 1, numbers
         assert len(ts.calls) == 2
+
+
+# ---------------------------------------------------------------------------
+# #3317 — one owner for run N+1: the dispatch claim, the locked re-arm, the grace
+# ---------------------------------------------------------------------------
+#
+# Worker A advances run N to run N+1 in separate commits; between its close of
+# run N and its claim of run N+1 the loop reads exactly like a lost dispatch.
+# Worker B's boot-time reconcile can land there. These tests put B into that
+# window at each place it can open (the terminal path, `start_loop`, the sweep
+# path) and with each kind of stale read, on the real SQL. "Worker B" is a second
+# `LoopService`; where A is inside a synchronous DB call, B runs on its own event
+# loop in a second thread, as a second process would.
+
+
+def _on_another_worker(make_coro):
+    """Run ``make_coro()`` on a fresh event loop in a second thread, and wait for
+    the dispatches it spawned there (``asyncio.run`` would cancel them)."""
+    import concurrent.futures
+
+    from services import loop_service as ls
+
+    async def _drive():
+        result = await make_coro()
+        me = asyncio.get_running_loop()
+        for _ in range(20000):
+            if not any(
+                t.get_loop() is me and not t.done() for t in list(ls._inflight_dispatches)
+            ):
+                break
+            await asyncio.sleep(0)
+        return result
+
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        return pool.submit(lambda: asyncio.run(_drive())).result()
+
+
+class _SnapshotReadAs:
+    """Make reconcile's snapshot read return ``snap`` (a read taken earlier)."""
+
+    def __init__(self, db, snap):
+        self.db, self.snap = db, snap
+
+    def __enter__(self):
+        self.db.ops.list_non_terminal_loops = lambda: self.snap
+
+    def __exit__(self, *exc):
+        del self.db.ops.list_non_terminal_loops
+
+
+def _record_rearms(db) -> list:
+    """Spy on ``rearm_lost_dispatch``: one ``(loop_id, outcome)`` per call."""
+    seen: list = []
+    orig = db.ops.rearm_lost_dispatch
+
+    def _spy(loop_id, **kw):
+        out = orig(loop_id, **kw)
+        seen.append((loop_id, out[0]))
+        return out
+
+    db.ops.rearm_lost_dispatch = _spy
+    return seen
+
+
+def _naive(stamp: str) -> datetime:
+    from services import loop_service as ls
+
+    parsed = ls._utc_naive(stamp)
+    assert parsed is not None, stamp
+    return parsed
+
+
+def _grace_end(db, lid) -> datetime:
+    """The instant a re-arm park written now would fall due (`_rearm_due_at`'s
+    anchor + grace), from the loop's own stored stamps."""
+    from services import loop_service as ls
+
+    closed = [r["completed_at"] for r in _runs(db, lid) if r["status"] != "running"]
+    anchor = max(_naive(s) for s in closed) if closed else _naive(_loop(db, lid)["started_at"])
+    return anchor + timedelta(seconds=ls.LOOP_REARM_GRACE_SECONDS)
+
+
+def _sweep_at(ls, monkeypatch, when: datetime) -> int:
+    """One sweep tick with the sweep's clock at ``when``."""
+    with monkeypatch.context() as m:
+        m.setattr(ls, "utc_now_iso", lambda: _iso(when))
+        return _run(ls.LoopService().dispatch_due_loops())
+
+
+def _nums(db, lid) -> list:
+    return [r["run_number"] for r in _runs(db, lid)]
+
+
+def _close_run(db, run_id, response="r"):
+    assert db.ops.finalize_loop_run(
+        run_id, status="completed", response=response, error=None, cost=0.0, duration_ms=1,
+    )
+
+
+def _advance_by_hand(db, lid, k):
+    """What a worker's terminal path does for run k, minus the dispatch of k+1:
+    claim the run, claim the advance, close the run."""
+    rid = db.ops.start_loop_run(lid, k, execution_id=f"x{k}")
+    assert rid is not None
+    assert db.ops.claim_loop_advance(lid, k)
+    _close_run(db, rid)
+
+
+def _skipped(db) -> list:
+    return sorted(e.id for e in db.executions.values() if e.status == "skipped")
+
+
+def _dead_after_close(ls, db, ts):
+    """Run 1 in flight; worker B snapshots the loop (runs_completed=0); then
+    worker A claims run 1's advance, closes it, and dies at its progress write.
+    Returns (loop_id, B's snapshot)."""
+    ts.script = ["queued", {"response": "r2"}, {"response": "r3"}]
+    lid = _start(ls, max_runs=3)
+    snap = db.ops.list_non_terminal_loops()
+    calls = {"n": 0}
+
+    def _fault_once(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+
+    db.hooks["update_loop_progress"] = _fault_once
+    db.executions["exec_1"].status, db.executions["exec_1"].response = "success", "r1"
+    _run(ls.LoopService().advance_on_terminal("exec_1"))
+    db.hooks.pop("update_loop_progress")
+    assert (_loop(db, lid)["runs_completed"], _runs(db, lid)[0]["status"]) == (1, "completed")
+    assert _loop(db, lid)["next_run_at"] is None
+    return lid, snap
+
+
+class TestDispatchClaim:
+    """M1: inserting run K is a claim on the loop row (real SQL)."""
+
+    def _loop_after_run1(self, db, *, park=None):
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=5)
+        lid = loop["id"]
+        db.mark_loop_running(lid)
+        _advance_by_hand(db, lid, 1)
+        if park:
+            db.set_loop(lid, next_run_at=park)
+        return lid
+
+    def test_a_claim_spends_a_pending_park(self, env):
+        ls, db, ts = env
+        lid = self._loop_after_run1(db, park="2030-01-01T00:00:00.000000Z")
+        rid = db.ops.start_loop_run(lid, 2, execution_id="e2")
+        assert rid is not None
+        assert _loop(db, lid)["next_run_at"] is None
+        assert [(r["run_number"], r["execution_id"]) for r in _runs(db, lid)] == [(1, "x1"), (2, "e2")]
+
+    @pytest.mark.parametrize("why", ["counter_moved", "run_exists", "loop_finished"])
+    def test_a_lost_claim_writes_nothing(self, env, why):
+        ls, db, ts = env
+        park = "2030-01-01T00:00:00.000000Z"
+        lid = self._loop_after_run1(db)
+        k = 2
+        if why == "counter_moved":
+            k = 3  # runs_completed is 1, so run 3 is not next
+        elif why == "run_exists":
+            assert db.ops.start_loop_run(lid, 2, execution_id="first") is not None
+        else:
+            db.finalize_loop(lid, status="stopped", stop_reason="user_stopped")
+        db.set_loop(lid, next_run_at=park)
+        before = (_loop(db, lid), _runs(db, lid))
+        assert db.ops.start_loop_run(lid, k, execution_id="loser") is None
+        assert (_loop(db, lid), _runs(db, lid)) == before  # the park survives a refusal
+
+    def test_t5_a_duplicate_already_in_the_table_does_not_cascade(self, env):
+        """Before the fix a duplicate run-2 row's terminal took the #3316 repair
+        path and dispatched run 3 a second time, and so on for every later
+        iteration. The repair path is unchanged; the claim refuses the second
+        run 3, and that dispatch's own execution row is closed `skipped`."""
+        ls, db, ts = env
+        from sqlalchemy import insert
+
+        from db.engine import get_engine
+        from db.tables import agent_loop_runs
+
+        ts.script = [{"response": "r1"}, "queued", "queued", "queued", "queued"]
+        lid = _start(ls, max_runs=5)
+        assert _nums(db, lid) == [1, 2]
+        dup = db.create_task_execution()
+        with get_engine().begin() as conn:  # a row this bug wrote before the fix
+            conn.execute(insert(agent_loop_runs).values(
+                id="lr_legacy_dup", loop_id=lid, run_number=2, execution_id=dup.id,
+                status="running", started_at=_iso(datetime(2026, 10, 1)),
+            ))
+        first = [r for r in _runs(db, lid) if r["run_number"] == 2 and r["execution_id"] != dup.id]
+        first_id = first[0]["execution_id"]
+        db.executions[first_id].status, db.executions[first_id].response = "success", "a"
+        _run(ls.LoopService().advance_on_terminal(first_id))
+        db.executions[dup.id].status, db.executions[dup.id].response = "success", "b"
+        _run(ls.LoopService().advance_on_terminal(dup.id))
+
+        assert _nums(db, lid).count(3) == 1, _nums(db, lid)
+        assert len(ts.calls) == 3  # run 1, run 2, run 3, once each
+        run3 = [r for r in _runs(db, lid) if r["run_number"] == 3][0]["execution_id"]
+        (loser,) = _skipped(db)
+        assert loser != run3
+        assert db.executions[loser].error == f"superseded: run 3 of loop {lid} was already dispatched"
+
+
+class TestReconcileDuringLiveAdvance:
+    """The three windows and the overtaken shapes, each with worker B inside."""
+
+    def test_t1d_m61_then_a_sweep_after_the_grace_dispatches_nothing_more(self, env, monkeypatch):
+        """m61 with B's sweep run again once the grace has passed. With the
+        grace alone (no claim) this was still [1, 2, 2]: m61 would pass while the
+        duplicate was only delayed."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        fired = {"v": False}
+
+        async def _broadcast(event):
+            if event.get("type") == "loop_run_completed" and not fired["v"]:
+                fired["v"] = True
+                await worker_b.reconcile_after_restart()
+
+        monkeypatch.setattr(ls, "_broadcast", _broadcast)
+        ts.script = [{"response": "r1"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        assert fired["v"]
+        end = _grace_end(db, lid)
+        assert _sweep_at(ls, monkeypatch, end - timedelta(microseconds=1)) == 0
+        assert _sweep_at(ls, monkeypatch, end + timedelta(microseconds=1)) == 0
+        assert _nums(db, lid) == [1, 2], _nums(db, lid)
+        assert len(ts.calls) == 2
+        assert _loop(db, lid)["next_run_at"] is None  # A's claim spent B's park
+
+    def test_t3_start_loop_window_on_a_fresh_install(self, env, monkeypatch):
+        """The first loop on empty tables. B's reconcile lands after
+        `mark_loop_running` and before run 1's row exists: it re-arms (nothing
+        says otherwise), and A's claim of run 1 then spends that park."""
+        ls, db, ts = env
+        from db_harness import count
+
+        assert count("agent_loops") == 0 and count("agent_loop_runs") == 0
+        worker_b = ls.LoopService()
+        seen = _record_rearms(db)
+        once = {"v": False}
+
+        def _b_reconciles(*a, **k):
+            if not once["v"]:
+                once["v"] = True
+                assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+
+        db.hooks["start_loop_run"] = _b_reconciles
+        ts.script = ["queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        assert [o for _, o in seen] == ["armed"]
+        assert _loop(db, lid)["next_run_at"] is None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+        assert _nums(db, lid) == [1]
+        assert len(ts.calls) == 1
+
+    def test_t3b_a_queued_read_overtaken_leaves_one_run_1_and_no_park(self, env, monkeypatch):
+        """B reads the loop while it is still `queued`, then decides after A has
+        flipped it to `running` but before A's run 1 exists."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        snap: dict = {}
+        db.hooks["mark_loop_running"] = lambda lid: snap.setdefault("v", db.ops.list_non_terminal_loops())
+        once = {"v": False}
+
+        def _b_reconciles(*a, **k):
+            if not once["v"]:
+                once["v"] = True
+                assert snap["v"][0]["status"] == "queued"
+                with _SnapshotReadAs(db, snap["v"]):
+                    assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+
+        db.hooks["start_loop_run"] = _b_reconciles
+        ts.script = ["queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        assert _loop(db, lid)["next_run_at"] is None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+        assert _nums(db, lid) == [1]
+        assert len(ts.calls) == 1
+
+    def test_t4_sweep_window(self, env, monkeypatch):
+        """A's own sweep took the delay park and is about to insert run 2 when
+        B's reconcile re-arms the loop; B's next tick must find nothing."""
+        ls, db, ts = env
+        ts.script = [{"response": "r1"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3, delay_seconds=30)
+        park = _naive(_loop(db, lid)["next_run_at"])
+        worker_b = ls.LoopService()
+        once = {"v": False}
+
+        def _b_reconciles(*a, **k):
+            if not once["v"]:
+                once["v"] = True
+                assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+
+        db.hooks["start_loop_run"] = _b_reconciles
+        assert _sweep_at(ls, monkeypatch, park) == 1  # worker A's tick
+        db.hooks.pop("start_loop_run")
+        assert once["v"]
+        assert _loop(db, lid)["next_run_at"] is None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+        assert _nums(db, lid) == [1, 2], _nums(db, lid)
+        assert len(ts.calls) == 2
+
+    def test_t7_a_stale_read_does_not_erase_a_pause(self, env):
+        """B read the loop before A parked it for an hour; B's decision lands
+        after the park. The pause must survive."""
+        ls, db, ts = env
+        snap: dict = {}
+        db.hooks["schedule_loop_next_run"] = lambda lid, at: snap.setdefault("v", db.ops.list_non_terminal_loops())
+        ts.script = [{"response": "r1"}, "queued"]
+        lid = _start(ls, max_runs=3, delay_seconds=3600)
+        db.hooks.pop("schedule_loop_next_run")
+        parked = _loop(db, lid)["next_run_at"]
+        assert parked and snap["v"][0]["next_run_at"] is None
+        seen = _record_rearms(db)
+        with _SnapshotReadAs(db, snap["v"]):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 0
+        assert seen == [(lid, "parked")]
+        assert _loop(db, lid)["next_run_at"] == parked
+
+    def test_t7r_a_rearm_before_the_pause_does_not_bypass_it(self, env, monkeypatch):
+        """B re-arms and sweeps while A sits between run 1's progress write and
+        its 1-hour park. B's park is inside the grace, so B's tick dispatches
+        nothing, and A's pause stands."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        fired = {"v": False}
+
+        async def _broadcast(event):
+            if event.get("type") == "loop_run_completed" and not fired["v"]:
+                fired["v"] = True
+                assert await worker_b.reconcile_after_restart() == 1
+                assert await worker_b.dispatch_due_loops() == 0
+
+        monkeypatch.setattr(ls, "_broadcast", _broadcast)
+        ts.script = [{"response": "r1"}, "queued"]
+        lid = _start(ls, max_runs=3, delay_seconds=3600)
+        assert fired["v"]
+        park = _naive(_loop(db, lid)["next_run_at"])
+        assert park - _naive(_runs(db, lid)[0]["completed_at"]) >= timedelta(seconds=3500)
+        assert _nums(db, lid) == [1]
+        assert len(ts.calls) == 1
+
+    def test_t8b_a_rearm_decided_after_run_n_plus_1_exists_arms_nothing(self, env, monkeypatch):
+        """B's read saw no open run (A between close and claim); B's decision
+        lands after A inserted run 2. It finds run 2 in flight and leaves it."""
+        ls, db, ts = env
+        snap: dict = {}
+
+        async def _broadcast(event):
+            if event.get("type") == "loop_run_completed" and "v" not in snap:
+                snap["v"] = db.ops.list_non_terminal_loops()
+
+        monkeypatch.setattr(ls, "_broadcast", _broadcast)
+        ts.script = [{"response": "r1"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        assert snap["v"][0]["next_run_at"] is None
+        seen = _record_rearms(db)
+        with _SnapshotReadAs(db, snap["v"]):
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert moved == 0
+        assert seen == [(lid, "open_run")]
+        assert _loop(db, lid)["next_run_at"] is None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+        assert _nums(db, lid) == [1, 2]
+        assert len(ts.calls) == 2
+
+
+class TestLiveWorkerKeepsItsDecision:
+    """M3: inside the grace, the worker that ran run N's post-run gates decides
+    what follows it, even when B re-arms and sweeps in its window."""
+
+    def test_t13r_a_stop_signal_match_is_not_overtaken(self, env, monkeypatch):
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        fired = {"v": False}
+
+        async def _broadcast(event):
+            if event.get("type") == "loop_run_completed" and not fired["v"]:
+                fired["v"] = True
+                assert await worker_b.reconcile_after_restart() == 1
+                assert await worker_b.dispatch_due_loops() == 0
+
+        monkeypatch.setattr(ls, "_broadcast", _broadcast)
+        ts.script = [{"response": "r1 DONE"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3, stop_signal="DONE")
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("completed", "stop_signal_matched")
+        assert _nums(db, lid) == [1]
+        assert len(ts.calls) == 1
+        # B's park outlives the loop; every reader of a park skips a terminal loop.
+        assert loop["next_run_at"] is not None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+
+    def test_t13r_an_abort_after_failure_is_not_overtaken(self, env, monkeypatch):
+        """A failed run has no broadcast in its tail, so B lands at A's progress
+        write instead (A blocked in a synchronous call, B on its own loop)."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        once = {"v": False}
+
+        def _b_reconciles_and_sweeps(*a, **k):
+            if once["v"]:
+                return
+            once["v"] = True
+
+            async def _b():
+                assert await worker_b.reconcile_after_restart() == 1
+                return await worker_b.dispatch_due_loops()
+
+            assert _on_another_worker(_b) == 0
+
+        db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
+        ts.script = [{"status": "failed", "error": "boom"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3, on_failure="abort")
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("failed", "error")
+        assert _nums(db, lid) == [1]
+        assert len(ts.calls) == 1
+
+    def test_t14_runs_completed_is_not_rewound(self, env):
+        """B re-arms and sweeps while A sits before run 1's progress write. Had
+        B dispatched there, A's late `runs_completed = 1` would land on top of
+        B's run 2 and strand the loop."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        once = {"v": False}
+
+        def _b_reconciles_and_sweeps(*a, **k):
+            if once["v"]:
+                return
+            once["v"] = True
+
+            async def _b():
+                await worker_b.reconcile_after_restart()
+                return await worker_b.dispatch_due_loops()
+
+            assert _on_another_worker(_b) == 0
+
+        db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
+        ts.script = [{"response": "r1"}, {"status": "failed", "error": "boom"}, "queued", "queued"]
+        lid = _start(ls, max_runs=5, on_failure="continue")
+        loop = _loop(db, lid)
+        runs = _runs(db, lid)
+        closed = [r["run_number"] for r in runs if r["status"] != "running"]
+        assert loop["runs_completed"] == max(closed) == 2
+        assert [(r["run_number"], r["status"]) for r in runs] == [
+            (1, "completed"), (2, "failed"), (3, "running"),
+        ]
+        assert loop["status"] == "running"
+
+    def test_t13_rtail_a_park_forced_due_inside_the_window_still_dispatches_once(self, env, monkeypatch):
+        """The stated residual (R-tail): when the park is due inside A's window
+        (A's tail outlasting the grace), B's sweep can overtake A's stop gate.
+        What must still hold is that run 2 exists exactly once."""
+        ls, db, ts = env
+        worker_b = ls.LoopService()
+        fired = {"v": False}
+
+        async def _broadcast(event):
+            if event.get("type") == "loop_run_completed" and not fired["v"]:
+                fired["v"] = True
+                await worker_b.reconcile_after_restart()
+                lid_ = event["loop_id"]
+                with monkeypatch.context() as m:
+                    when = _grace_end(db, lid_) + timedelta(seconds=1)
+                    m.setattr(ls, "utc_now_iso", lambda: _iso(when))
+                    await worker_b.dispatch_due_loops()
+
+        monkeypatch.setattr(ls, "_broadcast", _broadcast)
+        ts.script = [{"response": "r1 DONE"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3, stop_signal="DONE")
+        assert _nums(db, lid).count(2) == 1, _nums(db, lid)
+
+
+class TestDeadAdvanceStillRecovers:
+    """The re-arm reconcile exists for: the advancing worker really died."""
+
+    def _dead_advance(self, ls, db, ts, **kw):
+        calls = {"n": 0}
+
+        def _fault_once(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("database is locked")
+
+        db.hooks["update_loop_progress"] = _fault_once
+        lid = _start(ls, **kw)
+        db.hooks.pop("update_loop_progress")
+        return lid
+
+    def test_t16_recovered_only_once_the_grace_has_passed(self, env, monkeypatch):
+        ls, db, ts = env
+        ts.script = [{"response": "r1"}, {"response": "r2"}, {"response": "r3"}]
+        lid = self._dead_advance(ls, db, ts, max_runs=3)
+        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        park = _loop(db, lid)["next_run_at"]
+        assert park == _iso(_grace_end(db, lid))  # 180 s after run 1's stored close
+        assert _sweep_at(ls, monkeypatch, _naive(park) - timedelta(microseconds=1)) == 0
+        assert _nums(db, lid) == [1]
+        assert _sweep_at(ls, monkeypatch, _naive(park)) == 1
+        loop = _loop(db, lid)
+        assert loop["stop_reason"] == "max_runs_reached"
+        assert _nums(db, lid) == [1, 2, 3]
+
+    def test_t15_clock_30_days_ahead_a_month_old_loss_is_due_at_once(self, env, monkeypatch):
+        """Other shape: the clock frozen at a pinned instant 30 days after the
+        loop's last stored close. The park is due at that instant, not 180 s
+        later — the grace never delays an old loss."""
+        ls, db, ts = env
+        from sqlalchemy import update
+
+        from db.engine import get_engine
+        from db.tables import agent_loop_runs
+
+        ts.script = [{"response": "r1"}, {}, {}]
+        lid = self._dead_advance(ls, db, ts, max_runs=3)
+        closed_at = datetime(2026, 9, 27, 12, 0, 0)
+        frozen = closed_at + timedelta(days=30)
+        with get_engine().begin() as conn:
+            conn.execute(update(agent_loop_runs).where(agent_loop_runs.c.loop_id == lid)
+                         .values(completed_at=_iso(closed_at)))
+
+        class _Frozen:
+            @staticmethod
+            def utcnow():
+                return frozen
+
+            fromisoformat = staticmethod(datetime.fromisoformat)
+
+        monkeypatch.setattr(ls, "datetime", _Frozen)
+        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert _loop(db, lid)["next_run_at"] == "2026-10-27T12:00:00.000000Z"
+
+    def test_t18_a_real_loss_behind_a_stale_snapshot_is_rearmed(self, env, monkeypatch):
+        ls, db, ts = env
+        lid, snap = _dead_after_close(ls, db, ts)
+        assert snap[0]["runs_completed"] == 0  # B's read predates A's claim
+        seen = _record_rearms(db)
+        with _SnapshotReadAs(db, snap):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert seen == [(lid, "armed")]
+        assert _loop(db, lid)["next_run_at"] is not None
+        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid)) == 1
+        assert _nums(db, lid)[:2] == [1, 2]
+
+    def test_t19_a_queued_read_then_a_crash_before_run_1_is_rearmed(self, env):
+        ls, db, ts = env
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=2)
+        snap = db.ops.list_non_terminal_loops()
+        db.mark_loop_running(loop["id"])  # ... and worker A dies here
+        seen = _record_rearms(db)
+        with _SnapshotReadAs(db, snap):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert seen == [(loop["id"], "armed")]
+        assert _loop(db, loop["id"])["next_run_at"] == _iso(_grace_end(db, loop["id"]))
+
+    def test_t21_overtaken_four_times_before_b_decides_then_death(self, env):
+        """Between B's read and B's decision a worker runs four whole iterations
+        and dies. One call, on the state it finds: re-armed, due from run 4."""
+        ls, db, ts = env
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=10)
+        lid = loop["id"]
+        db.mark_loop_running(lid)
+        overtakes = {"n": 0}
+
+        def _four_iterations(*a, **k):
+            overtakes["n"] += 1
+            for k_ in range(1, 5):
+                _advance_by_hand(db, lid, k_)
+
+        db.hooks["rearm_lost_dispatch"] = _four_iterations
+        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert overtakes["n"] == 1
+        assert _loop(db, lid)["runs_completed"] == 4
+        assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
+
+    def test_t24_a_queued_read_then_a_whole_iteration_and_a_death_is_not_stuck(self, env, caplog):
+        """B read `queued`; before B decides, A marks the loop running, claims
+        and runs iteration 1, closes it, and dies. A reading of the counter from
+        B's snapshot (0) beside run 1 would call this stuck; the locked read
+        does not."""
+        ls, db, ts = env
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=5)
+        lid = loop["id"]
+        snap = db.ops.list_non_terminal_loops()
+        done = {"v": False}
+
+        def _a_runs_one_iteration(*a, **k):
+            if not done["v"]:
+                done["v"] = True
+                db.mark_loop_running(lid)
+                _advance_by_hand(db, lid, 1)
+
+        db.hooks["rearm_lost_dispatch"] = _a_runs_one_iteration
+        seen = _record_rearms(db)
+        with caplog.at_level(logging.WARNING), _SnapshotReadAs(db, snap):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert seen == [(lid, "armed")]
+        assert not any("not re-armed" in r.getMessage() for r in caplog.records)
+        assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
+
+    def test_t25_a_park_aba_before_b_decides_is_rearmed_in_one_call(self, env):
+        """Another reconcile parks the loop and a sweep takes the park and
+        crashes, all between B's read and B's decision. Nothing parked, nothing
+        in flight: re-armed, one call."""
+        ls, db, ts = env
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=5)
+        lid = loop["id"]
+        db.mark_loop_running(lid)
+        aba = {"n": 0}
+
+        def _park_then_take(*a, **k):
+            aba["n"] += 1
+            at = "2026-10-01T00:00:00.000000Z"
+            db.ops.schedule_next_run(lid, at)
+            assert db.ops.claim_due_loop(lid, at)  # ... and that sweep crashes
+
+        db.hooks["rearm_lost_dispatch"] = _park_then_take
+        seen = _record_rearms(db)
+        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert aba["n"] == 1 and seen == [(lid, "armed")]
+        assert _loop(db, lid)["next_run_at"] is not None
+
+    def test_t23_the_stuck_shape_is_reported_once_and_not_rearmed(self, env, caplog):
+        """A closed run numbered past `runs_completed` with nothing in flight
+        (the counter-rewind shape). Re-arming would dispatch run 2 again."""
+        ls, db, ts = env
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=10)
+        lid = loop["id"]
+        db.mark_loop_running(lid)
+        _advance_by_hand(db, lid, 1)
+        _advance_by_hand(db, lid, 2)
+        db.set_loop(lid, runs_completed=1)  # rewound under a closed run 2
+        seen = _record_rearms(db)
+        with caplog.at_level(logging.WARNING):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 0
+        assert seen == [(lid, "stuck")]
+        warned = [r for r in caplog.records if "not re-armed" in r.getMessage()]
+        assert len(warned) == 1 and lid in warned[0].getMessage()
+        assert _loop(db, lid)["next_run_at"] is None
+
+
+class TestRearmOutcomes:
+    """One case per `rearm_lost_dispatch` outcome, on the real SQL: the outcome,
+    reconcile's count, and that every refusal writes nothing."""
+
+    def _due_for(self, calls):
+        def _due_for(loop, runs):
+            calls.append((loop["id"], [r["run_number"] for r in runs]))
+            return "2030-01-01T00:00:00.000000Z"
+        return _due_for
+
+    def _running_loop(self, db):
+        loop = db.create_loop(agent_name="a1", message_template="m", max_runs=5)
+        db.mark_loop_running(loop["id"])
+        return loop["id"]
+
+    def test_armed(self, env):
+        ls, db, ts = env
+        lid = self._running_loop(db)
+        _advance_by_hand(db, lid, 1)
+        calls: list = []
+        assert db.ops.rearm_lost_dispatch(lid, due_for=self._due_for(calls)) == ("armed", None)
+        assert calls == [(lid, [1])]
+        assert _loop(db, lid)["next_run_at"] == "2030-01-01T00:00:00.000000Z"
+
+    def test_open_run_with_a_live_execution_is_left_alone(self, env):
+        ls, db, ts = env
+        ts.script = ["queued"]
+        lid = _start(ls, max_runs=3)
+        before = (_loop(db, lid), _runs(db, lid))
+        calls: list = []
+        outcome, run = db.ops.rearm_lost_dispatch(lid, due_for=self._due_for(calls))
+        assert (outcome, run["run_number"], run["execution_id"]) == ("open_run", 1, "exec_1")
+        assert calls == [] and (_loop(db, lid), _runs(db, lid)) == before
+        assert _run(ls.LoopService().reconcile_after_restart()) == 0
+        assert (_loop(db, lid), _runs(db, lid)) == before
+
+    def test_open_run_with_a_terminal_execution_is_advanced_and_counted_once(self, env):
+        ls, db, ts = env
+        ts.script = ["queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        db.executions["exec_1"].status, db.executions["exec_1"].response = "success", "r1"
+        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        assert _loop(db, lid)["runs_completed"] == 1
+        assert _nums(db, lid) == [1, 2]
+        assert _loop(db, lid)["next_run_at"] is None
+        assert len(ts.calls) == 2
+
+    def test_stuck(self, env):
+        ls, db, ts = env
+        lid = self._running_loop(db)
+        _advance_by_hand(db, lid, 1)
+        _advance_by_hand(db, lid, 2)
+        db.set_loop(lid, runs_completed=1)
+        before = (_loop(db, lid), _runs(db, lid))
+        calls: list = []
+        assert db.ops.rearm_lost_dispatch(lid, due_for=self._due_for(calls)) == ("stuck", None)
+        assert calls == [] and (_loop(db, lid), _runs(db, lid)) == before
+
+    @pytest.mark.parametrize("outcome", ["parked", "terminal", "missing"])
+    def test_a_loop_that_moved_since_the_snapshot_is_left_alone(self, env, outcome):
+        ls, db, ts = env
+        lid = self._running_loop(db)
+        snap = db.ops.list_non_terminal_loops()  # unparked, running
+        if outcome == "parked":
+            db.ops.schedule_next_run(lid, "2030-01-01T00:00:00.000000Z")
+        elif outcome == "terminal":
+            db.finalize_loop(lid, status="stopped", stop_reason="user_stopped")
+        else:
+            from sqlalchemy import delete
+
+            from db.engine import get_engine
+            from db.tables import agent_loops
+
+            with get_engine().begin() as conn:
+                conn.execute(delete(agent_loops).where(agent_loops.c.id == lid))
+        before = _loop(db, lid)
+        calls: list = []
+        assert db.ops.rearm_lost_dispatch(lid, due_for=self._due_for(calls)) == (outcome, None)
+        assert calls == [] and _loop(db, lid) == before
+        seen = _record_rearms(db)
+        with _SnapshotReadAs(db, snap):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 0
+        assert seen == [(lid, outcome)]
+        assert _loop(db, lid) == before
+
+
+class TestRearmDueAt:
+    """M3's pure helper: exact due times at a pinned instant (no clock read)."""
+
+    NOW = datetime(2026, 10, 27, 12, 0, 0)
+
+    @staticmethod
+    def _closed(stamp):
+        return {"status": "completed", "completed_at": stamp}
+
+    @pytest.mark.parametrize(
+        "loop,runs,want,warns",
+        [
+            pytest.param({}, [_closed.__func__("2026-10-27T11:58:20+00:00"),
+                              _closed.__func__("2026-10-27T11:59:50.000000Z")],
+                         datetime(2026, 10, 27, 12, 2, 50), False, id="t22-newest_of_two_closed"),
+            pytest.param({}, [_closed.__func__("2026-10-27T13:59:00+02:00")],
+                         datetime(2026, 10, 27, 12, 2, 0), False, id="t20-plus_two_offset_normalised"),
+            pytest.param({}, [_closed.__func__("not-a-time"),
+                              _closed.__func__("2026-09-27T12:00:00.000000Z")],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="t22-garbage_beside_an_old_valid_stamp"),
+            pytest.param({}, [_closed.__func__(None)],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="closed_run_without_a_stamp"),
+            pytest.param({}, [_closed.__func__("2026-10-27T11:57:00.000000Z")],
+                         datetime(2026, 10, 27, 12, 0, 0), False, id="closed_exactly_one_grace_ago"),
+            pytest.param({}, [_closed.__func__("2026-10-27T11:57:01.000000Z")],
+                         datetime(2026, 10, 27, 12, 0, 1), False, id="closed_just_inside_the_grace"),
+            pytest.param({}, [_closed.__func__("2026-09-27T12:00:00.000000Z")],
+                         datetime(2026, 10, 27, 12, 0, 0), False, id="t22-old_loss"),
+            pytest.param({}, [_closed.__func__("2026-11-26T12:00:00.000000Z")],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="t20-future_anchor"),
+            pytest.param({}, [_closed.__func__("9999-12-31T23:59:59.999999Z")],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="t22-far_future_anchor"),
+            pytest.param({}, [_closed.__func__("0001-01-01T00:00:00+02:00")],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="offset_that_cannot_normalise"),
+            pytest.param({}, [_closed.__func__("2026-10-27T11:59:10.000000Z"),
+                              {"status": "running", "completed_at": None}],
+                         datetime(2026, 10, 27, 12, 2, 10), False, id="a_running_row_is_not_a_close"),
+            pytest.param({"started_at": "2026-10-27T11:59:30.000000Z",
+                          "created_at": "2026-10-26T12:00:00.000000Z"}, [],
+                         datetime(2026, 10, 27, 12, 2, 30), False, id="no_runs_started_recently"),
+            pytest.param({"started_at": None, "created_at": "2026-10-26T12:00:00.000000Z"}, [],
+                         datetime(2026, 10, 27, 12, 0, 0), False, id="t22-no_runs_absent_started_old_created"),
+            pytest.param({"created_at": "2026-10-27T11:59:00.000000Z"}, [],
+                         datetime(2026, 10, 27, 12, 2, 0), False, id="no_runs_missing_started_recent_created"),
+            pytest.param({"started_at": "garbage", "created_at": "2026-10-26T12:00:00.000000Z"}, [],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="t22-no_runs_unreadable_started"),
+            pytest.param({"started_at": "", "created_at": "2026-10-26T12:00:00.000000Z"}, [],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="t22b-empty_started_at"),
+            pytest.param({"started_at": None, "created_at": None}, [],
+                         datetime(2026, 10, 27, 12, 3, 0), True, id="no_stamp_at_all"),
+        ],
+    )
+    def test_exact_due_time(self, loop, runs, want, warns, caplog):
+        from services import loop_service as ls
+
+        with caplog.at_level(logging.WARNING, logger="services.loop_service"):
+            got = ls._rearm_due_at({"id": "loop_x", **loop}, runs, self.NOW)
+        assert got == want
+        warned = [r for r in caplog.records if "re-arm" in r.getMessage()]
+        assert bool(warned) is warns, [r.getMessage() for r in warned]
+        if warns:
+            assert len(warned) == 1 and "loop_x" in warned[0].getMessage()
+
+    def test_an_unrepresentable_instant_saturates_to_now(self):
+        from services import loop_service as ls
+
+        assert ls._rearm_due_at({}, [self._closed("2026-10-27T11:59:00Z")], datetime.max) == datetime.max
+
+    def test_the_park_is_written_in_the_sweeps_format(self, monkeypatch):
+        """`list_due_loops` compares `next_run_at <= utc_now_iso()` as text, so
+        the park must be written in exactly that shape."""
+        from services import loop_service as ls
+
+        class _Frozen:
+            @staticmethod
+            def utcnow():
+                return datetime(2026, 10, 27, 12, 0, 0)
+
+            fromisoformat = staticmethod(datetime.fromisoformat)
+
+        monkeypatch.setattr(ls, "datetime", _Frozen)
+        due = ls.LoopService._rearm_due_for({}, [self._closed("2026-10-27T11:59:00.000000Z")])
+        assert due == "2026-10-27T12:02:00.000000Z"
