@@ -1376,6 +1376,9 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity#2328: the caller's per-task turn cap is a property of the task,
+    # like its model and timeout — the approved run keeps it.
+    "max_turns": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1691,6 +1694,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         system_prompt=system_prompt,
         timeout_seconds=frozen.get("timeout_seconds"),
         async_mode=True,
+        max_turns=frozen.get("max_turns"),
     )
     row = db.create_task_execution(
         agent_name=agent,
