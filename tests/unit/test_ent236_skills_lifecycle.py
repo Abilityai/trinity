@@ -623,7 +623,9 @@ class TestReconcile:
         orphans = [f"secret-skill-{i}" for i in range(25)]
         captured = {}
 
-        def _create(agent_name, item, *, subject, max_pending_for_type=None):
+        # The seam may pass further keyword-only options (e.g. how a reading
+        # updates a pending row); this capture does not decide them.
+        def _create(agent_name, item, *, subject, max_pending_for_type=None, **_seam_options):
             captured.update(agent=agent_name, item=item, subject=subject)
             return {"outcome": "created", "row": None, "changed": True}
 
