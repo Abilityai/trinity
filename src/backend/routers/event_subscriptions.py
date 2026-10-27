@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, assert_agent_owner, assert_agent_access, principal_reach
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, agent_principal_name, assert_agent_owner, assert_agent_access, assert_own_agent, is_person_principal, principal_reach
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -396,6 +396,39 @@ async def emit_event(
     return event
 
 
+# An agent key emits only as its own agent; the census recognises the gate as the
+# handler's first statement (AGENT_CALLABLE_SELF, trinity-enterprise#840).
+_OWN_EMIT = "Agent-scoped key may only emit events as its own agent"
+_EMITTER_REQUIRED = "Only an agent's own key or a person may emit an event for an agent"
+_SCOPE_ABSENT = object()
+
+
+def _assert_may_emit_for_agent(current_user: User) -> None:
+    """Who may emit for an agent (trinity-enterprise#719), after the self-gate.
+
+    An ALLOWlist over `mcp_scope` that fails closed: the scope column is free
+    text with no CHECK constraint, so a check that names only the keys it
+    refuses would admit the next scope that ships (Invariant #8, #2323).
+    `assert_own_agent` has already held an agent key to `{name}` and the system
+    key to `trinity-system`; this admits exactly those two keys and a person (a
+    session or the person's own `user` key, never a loopback). Every other
+    principal gets 403: a connector, ops or portal-delegate key, an unknown
+    scope, and a principal with no `mcp_scope` at all, read through a sentinel
+    so an absent attribute is never the session value.
+    """
+    scope = getattr(current_user, "mcp_scope", _SCOPE_ABSENT)
+    acts_as_agent = agent_principal_name(current_user) is not None
+    if scope == "agent" and acts_as_agent:
+        return
+    if scope == "system" and not acts_as_agent:
+        return
+    if is_person_principal(current_user) and not getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        return
+    raise HTTPException(status_code=403, detail=_EMITTER_REQUIRED)
+
+
 @router.post("/agents/{name}/emit-event", response_model=AgentEvent, status_code=201)
 async def emit_event_for_agent(
     name: AuthorizedAgent,
@@ -407,7 +440,16 @@ async def emit_event_for_agent(
 
     Alternative to POST /api/events for cases where the source agent
     needs to be explicitly specified (e.g., admin triggering events).
+
+    Self-gated (trinity-enterprise#719): the event records `{name}` as its
+    source, and each subscriber's delivery is authorised against that recorded
+    source (trinity-enterprise#739), so an agent key emits only as its own agent
+    and the system key only as `trinity-system`. A person may still emit for an
+    agent they can access. Every other principal is refused.
     """
+    assert_own_agent(current_user, name, detail=_OWN_EMIT)
+    _assert_may_emit_for_agent(current_user)
+
     # Validate event_type format
     if not re.match(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$", data.event_type):
         raise HTTPException(
@@ -419,8 +461,9 @@ async def emit_event_for_agent(
     _reject_reserved_emit(data.event_type)
 
     matching_subs = db.find_matching_event_subscriptions(name, data.event_type)
-    # #2973: the depth is the EMITTING principal's, whichever agent it names —
-    # a sibling emitting "for" another agent must not launder its own depth.
+    # #2973: the depth is the EMITTING principal's. An agent key names only its
+    # own agent here and the system key only `trinity-system` (the gates above);
+    # a person's emit is a root.
     chain_depth = await _emit_chain_depth(
         current_user, matching_subs, f"/api/agents/{name}/emit-event"
     )
@@ -443,10 +486,11 @@ async def emit_event_for_agent(
                 sub,
                 event,
                 # ent#614: this endpoint is `AuthorizedAgent`-gated — READ access,
-                # not ownership — so `name` is a value a human accessor (or a
-                # sibling agent's key, which resolves to the owner) CHOSE. The
-                # event row still records it, but the loopback must not certify
-                # it: a vouched claim would hand the subscriber's execution
+                # not ownership — so for a person `name` is a value a human
+                # accessor CHOSE (an agent key is held to its own agent by the
+                # self-gate above). The event row still records it, but the
+                # loopback must not certify it: a vouched claim would hand the
+                # subscriber's execution
                 # `triggered_by='agent'`, an `actor_type='agent'` SEC-001 row and
                 # an AGENT_COLLABORATION edge on `name` — the exact primitive
                 # this issue removes, re-minted one level up and now signed by

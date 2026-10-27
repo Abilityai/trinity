@@ -1,6 +1,45 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_self_gate_identity.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "A self-gated route acts only as the agent its key names, through the real routers on a fresh tmp DB (SQLite; Postgres too when TEST_POSTGRES_URL is set). emit-event: an in-reach (edge) sibling key gets 403 and nothing is recorded; a nonexistent and an out-of-reach agent get the same 404; the agent's own key emits as itself (201); the owner, on a session or a user key, emits for the agent; the system key emits as trinity-system; after the self-gate an allowlist admits only an agent key, the system key and a person, so an unknown scope, ops, portal_delegate, a connector bound to the agent, a principal with no mcp_scope and a loopback principal (vouched or not) each get 403 and nothing is recorded; a real signed loopback JWT (vouched or not) is refused by the entry fence. The system key is trinity-system on every assert_own_agent route, derived from the census by gate kind: naming another agent it gets that route's own refusal, byte for byte what an in-reach agent key gets; naming trinity-system it passes; a person and the agent's own key still pass (observed at the gate's call site: the real helper decides, a wrapper records it and stops at a fixed 418). The canvas removal helper, reached alone, holds the system key to trinity-system's canvases. The three get_self_acting_agent routes are pinned unchanged. Fresh install (trinity-system plus one agent, no subscribers): the agent emits as itself; trinity-system's own report and canvas writes run whole and pass; its write to the other agent's canvas is refused. Mutations: drop the emit gate line -> the sibling test and census rule 8 red; drop the emitter allowlist call -> its eight refused-principal rows red; revert the helper's system branch -> the 20 system-key rows, the fresh-install refusal, the canvas-helper test and two ent840 rows red. No Docker."
+    },
+    {
+      "file": "unit/test_ent719_room_uses_delegated.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "The three room uses the route census lists DELEGATED, each with the named behavioural test its entry cites, through the real rooms router with real credentials: an agent key lists only its own memberships; a non-member agent key gets the missing-room 404 on read and on rename, and a member agent cannot rename; a person passes every route; the event loopback is refused on all of them. Room creation stays in the baseline (its budget fields are ruled on their own); its reach rule is pinned: every agent named must be inside the creator's reach, an unknown and an unreachable agent get one 403 with the same shape for an agent key and for a person, and nothing is created. Other shape: an agent in no room lists [] and reads the uniform 404."
+    },
+    {
+      "file": "unit/test_ent719_listed_agent_uses.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The 11 channel, VoIP, agent-delete and event-subscription routes the route census lists AGENT_CALLABLE_ANY (no runtime change), each sibling answer through the real routers with real credentials and no dependency override (an agent's own MCP key, a user-scoped key, a session JWT, a signed loopback JWT). Use reach (Telegram groups, Slack channels and binding, VoIP call): the own key, an edge target and a spawned agent pass; a sibling with no edge, an agent spawned under a key the caller no longer holds and another user's agent are refused and nothing is sent. Manage reach (Telegram and Slack sends, VoIP binding read, the three subscription writes): an edge target is refused too. Agent delete: the own key never deletes itself (capability fence without agents.manage, spawn scope with it), a spawned durable agent needs agents.manage, a spawned ghost is discarded without it, edge-only, unrelated, retired-key-spawned and unspawned-ghost targets are refused even with the grant, another user's agent is a 404, a person deletes. A cross-agent subscription needs the subscriber's own edge to the source: for an agent the caller spawned, the caller's edge does not count and a person's grant to that agent does. A person (session or user key) passes every route; the event loopback is refused by the entry fence on all 11. Other shape: an agent with nothing bound gets [], {bound: false}, configured: false and named not-bound 404s."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
@@ -6549,7 +6588,7 @@
         "security",
         "guard"
       ],
-      "description": "The agent-key self-gate is one helper the route census recognises. dependencies.assert_own_agent's truth table (an agent key on its own agent passes; a sibling gets 403 with the route's own detail; JWT, user, system, connector and event-loopback principals pass, like the hand copies it replaced; refusal= builds the exception; a non-string agent_name is not an agent key). Then ONE sibling refusal per AGENT_CALLABLE_SELF route, driven off the census: each handler (or the get_self_acting_agent dependency its signature names) is called directly with a sibling agent's key on the path agent and the caller's own name in every other argument, so a gate comparing the wrong parameter fails; the routes this change converted keep their pre-existing messages; both self-gate mechanisms are exercised (per family, not a total). No Docker, no network."
+      "description": "The agent-key self-gate is one helper the route census recognises. dependencies.assert_own_agent's truth table (an agent key on its own agent passes; a sibling gets 403 with the route's own detail; the system key passes as trinity-system and gets the route's own refusal naming any other agent (trinity-enterprise#719); JWT, user, connector and event-loopback principals pass; refusal= builds the exception; a non-string agent_name is not an agent key, and a double whose mcp_scope is absent or a mock is not the system key). Then ONE sibling refusal per AGENT_CALLABLE_SELF route, driven off the census: each handler (or the get_self_acting_agent dependency its signature names) is called directly with a sibling agent's key on the path agent and the caller's own name in every other argument, so a gate comparing the wrong parameter fails; the routes this change converted keep their pre-existing messages; both self-gate mechanisms are exercised (per family, not a total). No Docker, no network."
     },
     {
       "file": "../src/mcp-server/src/tools/self-fenced-overrides.test.ts",

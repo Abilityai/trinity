@@ -2732,8 +2732,8 @@ def assert_own_agent(
     detail: Any = OWN_AGENT_DETAIL,
     refusal: Optional[Callable[[], HTTPException]] = None,
 ) -> None:
-    """The agent-key self-gate (trinity-enterprise#840) — 403 when an
-    agent-scoped key names an agent other than its own.
+    """The agent-key self-gate (trinity-enterprise#840) — 403 when a key that
+    acts as one agent names a different one.
 
     An agent key resolves to its owner carrying the owner's role, so
     ``AuthorizedAgent`` / ``assert_agent_access`` answer "may this key reach that
@@ -2742,21 +2742,30 @@ def assert_own_agent(
     call that reads or changes one agent's state calls this as its FIRST
     statement, after the docstring, on its ``get_current_user`` principal and
     the path agent. That shape is what the route census
-    (``tests/unit/_route_census.py``) recognises for ``AGENT_CALLABLE_SELF``, and
-    it runs before any lookup, so the refusal says nothing about the target
-    (#186).
+    (``tests/unit/_route_census.py``) recognises for ``AGENT_CALLABLE_SELF``.
+    On a route with an access dependency it runs after that dependency, so a
+    nonexistent or out-of-reach agent gets its uniform 404 and only an agent the
+    key already reaches gets this 403; on a route without one it runs before
+    any lookup. Either way the refusal discloses nothing new (#186).
 
-    A no-op for every principal that is not an agent key — a person, a
-    ``user`` / ``system`` / connector key, the event loopback — exactly like the
-    hand copies it replaced: whether those may reach another agent is the
-    access check's question, not this one's. The predicate is
-    ``agent_principal_name``, the one ``agent_may_reach`` uses.
+    Two keys act as an agent: an agent-scoped key (``agent_principal_name``, the
+    predicate ``agent_may_reach`` uses) and the system key, which carries no
+    agent name on REST and acts as ``trinity-system`` (trinity-enterprise#719) —
+    the rule ``get_self_acting_agent`` already applies. Its scope is read with
+    the ``_SCOPE_ABSENT`` sentinel and compared to the string, so a test double
+    whose ``mcp_scope`` is absent or a mock is not the system key. A no-op for
+    every other principal — a person, a ``user`` / connector key, the event
+    loopback: whether those may reach the agent is the access check's question,
+    not this one's.
 
     ``detail`` is the route's own message. ``refusal`` builds the exception
     instead, for a router whose access dependency answers a uniform 404 and
     whose self refusal must stay byte-identical to it.
     """
     caller = agent_principal_name(current_user)
+    if caller is None and getattr(current_user, "mcp_scope", _SCOPE_ABSENT) == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+        caller = SYSTEM_AGENT_NAME
     if caller is None or caller == agent_name:
         return
     if refusal is not None:

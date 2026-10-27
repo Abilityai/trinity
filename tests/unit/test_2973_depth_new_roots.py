@@ -318,17 +318,18 @@ def test_2973_emit_hands_each_subscriber_the_inherited_depth(client, world):
     assert world.dispatched == [(A, {"agent_originated": True, "chain_depth": 2})]
 
 
-def test_2973_emit_for_a_sibling_carries_the_emitters_depth_unvouched(client, world):
-    """A emits "for" B: the event is B's, the loopback is NOT vouched (ent#614),
-    but the depth is A's — the sibling path must not launder it."""
+def test_2973_an_agent_cannot_emit_for_a_sibling(client, world):
+    """A's key naming B on the per-agent emit is refused by the self-gate
+    (trinity-enterprise#719: an agent key emits only as its own agent), and
+    nothing is dispatched."""
     _set_max(3)
     _running_row(A, 2)
     _subscribe(B, B)
     resp = client.post(
         f"/api/agents/{B}/emit-event", json={"event_type": "work.done"}, headers=_bearer()
     )
-    assert resp.status_code == 201, resp.text
-    assert world.dispatched == [(B, {"agent_originated": False, "chain_depth": 3})]
+    assert resp.status_code == 403, resp.text
+    assert world.dispatched == []
 
 
 def test_2973_a_human_emit_is_a_root(client, world):

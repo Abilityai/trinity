@@ -1770,11 +1770,11 @@ derived, and `User.mcp_scope` is a Pydantic field, not a column.
 - **The name always comes from the key row, never from a parameter**, so admitting a scope
   widens identity by exactly zero — a system key already reaches every agent's data on the
   read surfaces.
-- **The backend was never the refuser** and is unchanged: `POST /api/agents/{name}/reports`,
-  the canvas writes and `POST /api/agents/{name}/metrics/points` are `AuthorizedAgent` plus a
-  self-gate on `current_user.agent_name`, which `dependencies.py` sets only for
-  `scope == "agent"` — so for a system key the self-gate is a no-op and the write succeeds
-  (verified live against the instance before the tools were touched).
+- **The backend admits the system agent's own writes**: `POST /api/agents/{name}/reports`,
+  the canvas writes and `POST /api/agents/{name}/metrics/points` are `AuthorizedAgent` plus
+  the self-gate `dependencies.assert_own_agent`, which holds a system key to
+  `trinity-system` (trinity-enterprise#719) — the identity these tools resolve — so the
+  system agent's own writes succeed and another agent's are refused.
 - **Impact this closes**: the daily `/fleet-health` run and the weekly ops review on
   `trinity-system` could read every surface and publish nothing; both fell back to
   `~/reports/` and the operator queue.

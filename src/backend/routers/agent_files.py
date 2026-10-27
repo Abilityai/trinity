@@ -583,8 +583,11 @@ async def get_agent_objectives(
     `source.*`, and `findings[]` sentences an operator can act on. An objective
     naming an undeclared metric comes back with that finding, never a blank.
     """
-    # --- self-gate (after access, before any read: the `/metrics` spelling,
-    # so the two reads agree on who "itself" is) ----------------------------
+    # --- self-gate (after access, before any read) --------------------------
+    # For an agent key this is the `/metrics` spelling, so the two reads agree
+    # on who "itself" is. The system key is held to `trinity-system` here
+    # (trinity-enterprise#719); `/metrics` reads it as it reads any principal
+    # that is not an agent key, through the access dependency alone.
     assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own objectives")
 
     objectives_read_budget.enforce(

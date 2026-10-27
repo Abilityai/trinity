@@ -10,7 +10,8 @@ every such route in `AGENT_CALLABLE_SELF` with why it is a use, not a grant.
 
 Pins:
 * the helper's truth table: every principal kind, the route's own message, the
-  `refusal=` factory;
+  `refusal=` factory; the system key is held to `trinity-system`
+  (trinity-enterprise#719), every other non-agent principal is a no-op;
 * ONE sibling refusal per `AGENT_CALLABLE_SELF` route, driven off the census. The
   handler (or the `get_self_acting_agent` dependency its signature names) is
   called with a sibling agent's key on the path agent and the CALLER's own name
@@ -127,16 +128,48 @@ class TestAssertOwnAgent:
         [
             _principal(),  # a person on a JWT
             _principal(mcp_scope="user"),  # the person's own key
-            _principal(mcp_scope="system"),  # trinity-system: no agent name on REST
             _principal(mcp_scope="connector", connector_agent="a"),
             _principal(is_event_loopback=True, vouched_source_agent="b"),
         ],
-        ids=["jwt", "user-key", "system-key", "connector-key", "event-loopback"],
+        ids=["jwt", "user-key", "connector-key", "event-loopback"],
     )
-    def test_a_principal_that_is_not_an_agent_key_passes(self, principal):
-        """Exactly the inline copies' rule: they read `agent_name`, which only an
-        agent-scoped key carries. Whether these principals may reach another
-        agent is the access check's question (trinity-enterprise#719)."""
+    def test_a_principal_that_acts_as_no_agent_passes(self, principal):
+        """Neither an agent key nor the system key: whether these principals may
+        reach the agent is the access check's question, not this one's. (The
+        loopback is confined to the subscriber-task dispatch by the
+        `get_current_user` entry fence, ent#614.)"""
+        assert _deps().assert_own_agent(principal, "a") is None
+
+    # The system key carries no agent name on REST, yet it acts as one agent:
+    # trinity-system (trinity-enterprise#719), the rule `get_self_acting_agent`
+    # already applies (ent#611).
+    def test_the_system_key_passes_as_trinity_system(self):
+        assert _deps().assert_own_agent(_principal(mcp_scope="system"), "trinity-system") is None
+
+    def test_the_system_key_naming_another_agent_gets_403_with_the_routes_message(self):
+        with pytest.raises(HTTPException) as exc:
+            _deps().assert_own_agent(_principal(mcp_scope="system"), "a", detail="the route's own words")
+        assert (exc.value.status_code, exc.value.detail) == (403, "the route's own words")
+
+    def test_the_system_key_naming_another_agent_gets_the_routes_refusal(self):
+        built = HTTPException(status_code=404, detail="Agent not found")
+        with pytest.raises(HTTPException) as exc:
+            _deps().assert_own_agent(_principal(mcp_scope="system"), "a", refusal=lambda: built)
+        assert exc.value is built
+
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            types.SimpleNamespace(agent_name=None),  # no mcp_scope attribute at all
+            types.SimpleNamespace(agent_name=None, mcp_scope=MagicMock()),
+            MagicMock(agent_name=None),
+        ],
+        ids=["scope-absent", "scope-is-a-mock", "bare-mock"],
+    )
+    def test_only_the_string_system_scope_is_the_system_key(self, principal):
+        """Read with a sentinel and compared to the string: a double whose
+        `mcp_scope` is absent or a mock is not the system key, so it is not held
+        to `trinity-system` (it stays a no-op, as before)."""
         assert _deps().assert_own_agent(principal, "a") is None
 
     def test_refusal_builds_the_exception(self):

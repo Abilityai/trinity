@@ -837,6 +837,11 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
         "MCP share_file: a download link for a file in the agent's OWN publish dir (FILES-001); the owner gate "
         "follows. Listed as today's behaviour, not a ruling: whether minting a public link is a grant (person-only, "
         "like the canvas share, trinity-enterprise#554) is open in trinity-enterprise#719's sharing cluster"),
+    "routers/event_subscriptions.py::emit_event_for_agent": (
+        "POST /api/agents/{name}/emit-event",
+        "an agent emits an event as ITS OWN source; delivery authorises each subscriber against the recorded "
+        "source (trinity-enterprise#739), so the source is the caller (trinity-enterprise#719). MCP emit_event "
+        "takes the source from the key (POST /api/events); a person may emit for an agent they can access"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "MCP report: structured output an agent publishes about itself (#918)"),
     "routers/metric_points.py::record_metric_points": (
@@ -919,6 +924,15 @@ _SIB_SKILL_GATE_WRITE = (
 _SIB_READ = (
     "a non-sensitive read a sibling may make only inside its reach: an edge target or an agent "
     "it spawned (agent_may_reach, trinity-enterprise#629)")
+_SIB_USE = (
+    "a sibling may use it only inside its reach: an edge target or an agent it spawned "
+    "(agent_may_reach, trinity-enterprise#629)")
+_SIB_MANAGE = (
+    "a sibling may use it only on an agent it spawned with its current key, never through an "
+    "edge (the trinity-enterprise#629 manage reach)")
+_SIB_SUBSCRIPTION = (
+    "a sibling changes only a subscription whose subscriber it spawned with its current key, "
+    "never through an edge (assert_agent_owner, the trinity-enterprise#629 manage reach)")
 
 # Reviewed uses an agent key may make WITHOUT a recognised self-gate.
 # key -> ("METHOD /full/path", reason, sibling)
@@ -963,6 +977,65 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         "POST /api/agents/{name}/schedules/{schedule_id}/trigger", "MCP trigger_schedule (a manual run)",
         "no capability fence ('trigger now' is exempt from schedules.manage, trinity-enterprise#164): a sibling "
         "triggers another agent's schedule only as an agent it spawned (OwnedAgent, the ent#629 manage reach)"),
+    # trinity-enterprise#719: uses of what a person granted — a channel binding and its
+    # proactive consent, a VoIP binding, agents.manage under the spawn scope.
+    "routers/telegram.py::list_telegram_groups": (
+        "GET /api/agents/{agent_name}/telegram/groups",
+        "MCP list_channel_groups: the groups the agent's bot is in (ids, titles, welcome text); no secret",
+        _SIB_READ),
+    "routers/telegram.py::send_telegram_group_message": (
+        "POST /api/agents/{agent_name}/telegram/groups/{chat_id}/messages",
+        "MCP send_group_message: a send on a group a person bound to the agent, rate-capped per group and agent (#349)",
+        _SIB_MANAGE),
+    "routers/slack.py::list_agent_slack_channels": (
+        "GET /api/agents/{name}/slack/channels",
+        "MCP list_channel_groups: the channels the agent is bound to (ids and names)",
+        _SIB_READ),
+    "routers/slack.py::get_agent_slack_channel": (
+        "GET /api/agents/{name}/slack/channel",
+        "the agent's channel binding: names and flags, no token and no person field",
+        _SIB_READ),
+    "routers/slack.py::send_agent_slack_channel_message": (
+        "POST /api/agents/{name}/slack/channels/{channel_id}/messages",
+        "MCP send_group_message: a send on a channel a person bound, refused unless a person turned on its "
+        "proactive consent (trinity-enterprise#223)",
+        _SIB_MANAGE),
+    "routers/voip.py::place_voip_call": (
+        "POST /api/agents/{agent_name}/voip/call",
+        "MCP call_user: a USE of a binding a person configured and enabled (VOIP-001), rate-limited and capped per day",
+        _SIB_USE),
+    "routers/voip.py::get_voip_binding": (
+        "GET /api/agents/{agent_name}/voip",
+        "the binding's public fields only (VoipBindingResponse carries no auth token)",
+        _SIB_MANAGE),
+    "routers/agents.py::delete_agent_endpoint": (
+        "DELETE /api/agents/{agent_name}",
+        "MCP delete_agent: a USE of agents.manage (trinity-enterprise#164) under the spawn scope "
+        "(trinity-enterprise#69): an agent never deletes itself, and discarding a ghost it spawned needs no grant",
+        "a sibling deletes only an agent it spawned with its current key (enforce_agent_spawn_scope); a durable "
+        "one also needs agents.manage, bounded to agents its owner owns (capability_fence)"),
+    # trinity-enterprise#719: event-subscription writes, listed while its decision 2 (is an
+    # event delivery bounded by autonomy?) is open. If deliveries are ruled unbounded, a
+    # self-subscription is an unattended trigger and these three entries are revisited.
+    "routers/event_subscriptions.py::create_event_subscription": (
+        "POST /api/agents/{name}/event-subscriptions",
+        "MCP subscribe_to_event names the caller's own agent as the subscriber (this route also admits an "
+        "agent it spawned, below); for a source other than the subscriber, the subscriber's own edge to it is "
+        "a person's grant, checked here and again at every delivery (trinity-enterprise#739). Pending "
+        "trinity-enterprise#719 decision 2 (event deliveries and autonomy)",
+        "a sibling subscribes only an agent it spawned with its current key, never through an edge (OwnedAgent, "
+        "the trinity-enterprise#629 manage reach), and only to that agent itself or to a source that agent "
+        "holds an edge to (the caller's own edges do not count)"),
+    "routers/event_subscriptions.py::update_event_subscription": (
+        "PUT /api/event-subscriptions/{subscription_id}",
+        "an edit of a subscription the agent holds (event type, message, enabled); pending "
+        "trinity-enterprise#719 decision 2",
+        _SIB_SUBSCRIPTION),
+    "routers/event_subscriptions.py::delete_event_subscription": (
+        "DELETE /api/event-subscriptions/{subscription_id}",
+        "MCP delete_event_subscription: removing a subscription the agent holds; pending "
+        "trinity-enterprise#719 decision 2",
+        _SIB_SUBSCRIPTION),
     # Reads of the settings whose writes #2996 made person-only.
     "routers/agent_config.py::get_agent_api_key_setting": ("GET /api/agents/{agent_name}/api-key-setting", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
     "routers/agent_config.py::get_agent_autonomy_status": ("GET /api/agents/{agent_name}/autonomy", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
@@ -1112,6 +1185,24 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
 DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#719: three room uses. Agents read and post in a room as
+    # themselves (ent#169); `get_room_principal` fits no census gate, and the
+    # service keeps each room to its members. Creating a room stays in the
+    # baseline: it also sets the room's budget, which is ruled on its own
+    # (a follow-up to trinity-enterprise#719).
+    "shared_sessions/router.py::list_rooms": (
+        "GET /api/rooms",
+        "shared_sessions.service.list_rooms -> db.list_rooms_for_participant (an agent key sees its own memberships)",
+        "tests/unit/test_ent719_room_uses_delegated.py::test_an_agent_lists_only_the_rooms_it_is_in"),
+    "shared_sessions/router.py::get_room": (
+        "GET /api/rooms/{room_id}",
+        "shared_sessions.service.get_room -> _require_membership (a non-member gets the missing-room 404)",
+        "tests/unit/test_ent719_room_uses_delegated.py::test_a_non_member_agent_gets_the_uniform_404_on_read"),
+    "shared_sessions/router.py::rename_room": (
+        "PATCH /api/rooms/{room_id}",
+        "shared_sessions.service.rename_room -> _require_membership, then refuses an agent key (a member agent "
+        "gets 403 not_a_person)",
+        "tests/unit/test_ent719_room_uses_delegated.py::test_a_non_member_agent_gets_the_uniform_404_on_rename"),
     # trinity-enterprise#631: the people picker of a room. Its principal is
     # `get_room_principal` (a platform user OR a Workspace client), so no
     # dependency gate fits; the refusal of agents, system keys and external
@@ -1134,7 +1225,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 330
+FROZEN_BASELINE_COUNT = 315
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:
