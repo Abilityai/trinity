@@ -306,25 +306,76 @@ class LoopOperations:
         run_number: int,
         *,
         execution_id: Optional[str] = None,
-    ) -> str:
-        """Insert a new `running` loop-run row; return its id."""
+    ) -> Optional[str]:
+        """Claim run ``run_number`` and insert its `running` row (#3317).
+
+        Inserting a run row is the claim on dispatching that iteration. Two
+        callers can reach here for the same run K: the worker that closed run
+        K-1, and a sweep that took a park a booting worker's reconcile wrote
+        while the first was between its close and this call. Returns the new
+        run id to the one that may spawn the turn, and None to the other.
+
+        One transaction, write first:
+
+        1. ``UPDATE agent_loops SET next_run_at = NULL WHERE id AND
+           runs_completed = K-1 AND status`` non-terminal. The write takes the
+           loop row (PostgreSQL row lock, SQLite write lock) and spends any
+           pending park for run K, because run K is being dispatched now. No
+           row matched: the loop moved on or finished, so the claim is lost.
+        2. Under that lock, a run row numbered K or above: lost.
+        3. Insert run K and commit: won.
+
+        A lost claim rolls back, so it writes nothing. Step 2 is sound only
+        because every inserter of ``agent_loop_runs`` takes the parent row
+        first, and this method is the only one (a static guard pins that). A
+        single ``UPDATE ... WHERE NOT EXISTS (...)`` would not be: on PostgreSQL
+        the re-check after a lock wait covers the target row only, and the
+        subquery keeps the statement's original snapshot.
+        """
         run_id = f"lr_{secrets.token_urlsafe(10)}"
-        now = utc_now_iso()
-        stmt = insert(agent_loop_runs).values(
-            id=run_id,
-            loop_id=loop_id,
-            run_number=run_number,
-            execution_id=execution_id,
-            status="running",
-            response=None,
-            error=None,
-            cost=None,
-            duration_ms=None,
-            started_at=now,
-            completed_at=None,
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
+        with get_engine().connect() as conn, conn.begin() as tx:
+            claimed = conn.execute(
+                update(agent_loops)
+                .where(
+                    and_(
+                        agent_loops.c.id == loop_id,
+                        agent_loops.c.runs_completed == run_number - 1,
+                        agent_loops.c.status.notin_(tuple(TERMINAL_STATUSES)),
+                    )
+                )
+                .values(next_run_at=None)
+            ).rowcount
+            if not claimed:
+                tx.rollback()
+                return None
+            taken = conn.execute(
+                select(agent_loop_runs.c.id)
+                .where(
+                    and_(
+                        agent_loop_runs.c.loop_id == loop_id,
+                        agent_loop_runs.c.run_number >= run_number,
+                    )
+                )
+                .limit(1)
+            ).first()
+            if taken is not None:
+                tx.rollback()
+                return None
+            conn.execute(
+                insert(agent_loop_runs).values(
+                    id=run_id,
+                    loop_id=loop_id,
+                    run_number=run_number,
+                    execution_id=execution_id,
+                    status="running",
+                    response=None,
+                    error=None,
+                    cost=None,
+                    duration_ms=None,
+                    started_at=utc_now_iso(),
+                    completed_at=None,
+                )
+            )
         return run_id
 
     def finalize_loop_run(

@@ -4545,7 +4545,7 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
     def finalize_loop_run(self, run_id: str, **kwargs) -> bool:

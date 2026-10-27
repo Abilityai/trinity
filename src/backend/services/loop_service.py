@@ -43,6 +43,14 @@ next iteration. That is also what makes it safe for `_run_and_advance` to call
 the advance directly on a fast-fail return *and* for the terminal hook to call
 it: whichever gets there first wins, exactly once.
 
+That makes the *close* of run N exactly-once; the *dispatch* of run N+1 has a
+second door. A park (`next_run_at`) also leads to a dispatch, and a booting
+worker's `reconcile_after_restart` can write one while another worker is between
+closing run N and starting run N+1 (#3317). So every dispatch also goes through
+`db.start_loop_run`, which is itself a claim: inserting run K requires
+`runs_completed = K-1` and no row numbered K or above, decided under the loop
+row's lock. Two dispatchers of one iteration produce one run row and one turn.
+
 Stop-condition precedence is preserved from the `for`-loop implementation:
     user_stopped > deadline_exceeded > budget_exhausted   (next-iteration gate)
     stop_signal_matched > no_progress                     (post-run gate)
@@ -678,11 +686,10 @@ class LoopService:
                 )
                 return False
 
-        await self._dispatch_run(loop, run_number=next_run_number)
-        return True
+        return await self._dispatch_run(loop, run_number=next_run_number)
 
-    async def _dispatch_run(self, loop: dict, *, run_number: int) -> None:
-        """Create the execution + run rows, then dispatch without awaiting the turn.
+    async def _dispatch_run(self, loop: dict, *, run_number: int) -> bool:
+        """Create the execution row, claim the run, then dispatch without awaiting the turn.
 
         The execution row is created HERE rather than inside `execute_task` so
         `agent_loop_runs.execution_id` is stamped before the turn can produce a
@@ -690,6 +697,14 @@ class LoopService:
         find its iteration (#2523). Under pull the dispatch returns as soon as
         the row is queued; under push it returns when the turn ends. Either way
         this coroutine does not wait for it.
+
+        #3317: inserting the run row is a claim (`db.start_loop_run`), because
+        two dispatchers can reach the same iteration: the worker that closed the
+        previous run, and a sweep that took a park a booting worker's reconcile
+        wrote while the first was mid-advance. Only the claim's winner spawns
+        the turn; the loser closes the execution row it created as `skipped`.
+
+        Returns True when this call dispatched the run.
         """
         loop_id = loop["id"]
         message = _render_template(
@@ -722,10 +737,43 @@ class LoopService:
                 stop_reason="error",
                 error=f"Iteration {run_number}: could not create the execution record",
             )
-            return
+            return False
 
-        db.start_loop_run(loop_id, run_number, execution_id=execution.id)
+        if db.start_loop_run(loop_id, run_number, execution_id=execution.id) is None:
+            await self._abandon_superseded_dispatch(loop_id, run_number, execution.id)
+            return False
         _spawn(self._run_and_advance(loop, run_number, execution.id, message))
+        return True
+
+    @staticmethod
+    async def _abandon_superseded_dispatch(
+        loop_id: str, run_number: int, execution_id: str
+    ) -> None:
+        """Close the execution row of a dispatch whose run claim was lost (#3317).
+
+        The row was created `running` and never handed to `execute_task`, so it
+        is closed `skipped` (not run), not `cancelled` (a user's terminate, #671)
+        and not `failed` (nothing failed). No terminal event is emitted: there
+        is no turn to report, and the loop advances from the winner's run. The
+        activity close keeps execution.md's rule that a terminal writer closes
+        its paired dispatch activity; none was opened here, so it is a no-op.
+        """
+        from models import TaskExecutionStatus
+        from services.activity_service import activity_service
+
+        error = f"superseded: run {run_number} of loop {loop_id} was already dispatched"
+        logger.warning(
+            "[Loop] %s run %d was already dispatched; execution %s not run",
+            loop_id, run_number, execution_id,
+        )
+        db.update_execution_status(
+            execution_id=execution_id,
+            status=TaskExecutionStatus.SKIPPED,
+            result=ExecutionResult(error=error),
+        )
+        await activity_service.close_execution_activity(
+            execution_id, TaskExecutionStatus.SKIPPED, error=error,
+        )
 
     async def _run_and_advance(
         self, loop: dict, run_number: int, execution_id: str, message: str
