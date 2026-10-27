@@ -221,7 +221,7 @@ class _FakeDB:
             return "missing", None
         if row["status"] in _TERMINAL_LOOP_STATUSES:
             return "terminal", None
-        if row.get("next_run_at"):
+        if row.get("next_run_at") is not None:  # SQL: `next_run_at IS NULL`
             return "parked", None
         runs = self.list_loop_runs(loop_id)
         open_run = next((r for r in runs if r["status"] == "running"), None)

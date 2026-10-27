@@ -1035,6 +1035,54 @@ def _grace_end(db, lid) -> datetime:
     return anchor + timedelta(seconds=ls.LOOP_REARM_GRACE_SECONDS)
 
 
+class _ServiceClockAt:
+    """Pin the loop service's clock at ``at``: `datetime.utcnow()` (reconcile's
+    grace) and `utc_now_iso()` (the sweep's due test). A race then means "worker
+    B acts at this instant" however long a loaded machine took to get there."""
+
+    def __init__(self, ls, at: datetime):
+        from unittest import mock
+
+        class _Frozen:
+            @staticmethod
+            def utcnow():
+                return at
+
+            fromisoformat = staticmethod(datetime.fromisoformat)
+
+        self._patches = [mock.patch.object(ls, "datetime", _Frozen),
+                         mock.patch.object(ls, "utc_now_iso", lambda: _iso(at))]
+
+    def __enter__(self):
+        for p in self._patches:
+            p.start()
+
+    def __exit__(self, *exc):
+        for p in reversed(self._patches):
+            p.stop()
+
+
+def _last_close(db, lid) -> datetime:
+    return max(_naive(r["completed_at"]) for r in _runs(db, lid) if r["status"] != "running")
+
+
+def _pin_closes(db, lid, at_by_run: dict):
+    """Overwrite stored close stamps (run_number -> instant)."""
+    from sqlalchemy import and_, update
+
+    from db.engine import get_engine
+    from db.tables import agent_loop_runs
+
+    with get_engine().begin() as conn:
+        for k, at in at_by_run.items():
+            conn.execute(update(agent_loop_runs).where(and_(
+                agent_loop_runs.c.loop_id == lid, agent_loop_runs.c.run_number == k,
+            )).values(completed_at=_iso(at)))
+
+
+_PINNED = datetime(2026, 10, 27, 12, 0, 0)
+
+
 def _sweep_at(ls, monkeypatch, when: datetime) -> int:
     """One sweep tick with the sweep's clock at ``when``."""
     with monkeypatch.context() as m:
@@ -1290,8 +1338,9 @@ class TestReconcileDuringLiveAdvance:
 
         async def _broadcast(event):
             if event.get("type") == "loop_run_completed" and "moved" not in b:
-                b["moved"] = await worker_b.reconcile_after_restart()
-                b["swept"] = await worker_b.dispatch_due_loops()
+                with _ServiceClockAt(ls, _last_close(db, event["loop_id"]) + timedelta(seconds=1)):
+                    b["moved"] = await worker_b.reconcile_after_restart()
+                    b["swept"] = await worker_b.dispatch_due_loops()
 
         monkeypatch.setattr(ls, "_broadcast", _broadcast)
         ts.script = [{"response": "r1"}, "queued"]
@@ -1337,8 +1386,9 @@ class TestLiveWorkerKeepsItsDecision:
 
         async def _broadcast(event):
             if event.get("type") == "loop_run_completed" and "moved" not in b:
-                b["moved"] = await worker_b.reconcile_after_restart()
-                b["swept"] = await worker_b.dispatch_due_loops()
+                with _ServiceClockAt(ls, _last_close(db, event["loop_id"]) + timedelta(seconds=1)):
+                    b["moved"] = await worker_b.reconcile_after_restart()
+                    b["swept"] = await worker_b.dispatch_due_loops()
 
         monkeypatch.setattr(ls, "_broadcast", _broadcast)
         ts.script = [{"response": "r1 DONE"}, "queued", "queued"]
@@ -1363,9 +1413,10 @@ class TestLiveWorkerKeepsItsDecision:
             return (await worker_b.reconcile_after_restart(),
                     await worker_b.dispatch_due_loops())
 
-        def _b_reconciles_and_sweeps(*a, **k):
+        def _b_reconciles_and_sweeps(loop_id, **k):
             if "moved_swept" not in b:
-                b["moved_swept"] = _on_another_worker(_b)
+                with _ServiceClockAt(ls, _last_close(db, loop_id) + timedelta(seconds=1)):
+                    b["moved_swept"] = _on_another_worker(_b)
 
         db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
         ts.script = [{"status": "failed", "error": "boom"}, "queued", "queued"]
@@ -1388,9 +1439,10 @@ class TestLiveWorkerKeepsItsDecision:
             await worker_b.reconcile_after_restart()
             return await worker_b.dispatch_due_loops()
 
-        def _b_reconciles_and_sweeps(*a, **k):
+        def _b_reconciles_and_sweeps(loop_id, **k):
             if "swept" not in b:
-                b["swept"] = _on_another_worker(_b)
+                with _ServiceClockAt(ls, _last_close(db, loop_id) + timedelta(seconds=1)):
+                    b["swept"] = _on_another_worker(_b)
 
         db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
         ts.script = [{"response": "r1"}, {"status": "failed", "error": "boom"}, "queued", "queued"]
@@ -1449,9 +1501,11 @@ class TestDeadAdvanceStillRecovers:
         ls, db, ts = env
         ts.script = [{"response": "r1"}, {"response": "r2"}, {"response": "r3"}]
         lid = self._dead_advance(ls, db, ts, max_runs=3)
-        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        _pin_closes(db, lid, {1: _PINNED})
+        with _ServiceClockAt(ls, _PINNED + timedelta(seconds=1)):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 1
         park = _loop(db, lid)["next_run_at"]
-        assert park == _iso(_grace_end(db, lid))  # 180 s after run 1's stored close
+        assert park == "2026-10-27T12:03:00.000000Z"  # 180 s after run 1's stored close
         assert _sweep_at(ls, monkeypatch, _naive(park) - timedelta(microseconds=1)) == 0
         assert _nums(db, lid) == [1]
         assert _sweep_at(ls, monkeypatch, _naive(park)) == 1
@@ -1492,8 +1546,9 @@ class TestDeadAdvanceStillRecovers:
         ls, db, ts = env
         lid, snap = _dead_after_close(ls, db, ts)
         assert snap[0]["runs_completed"] == 0  # B's read predates A's claim
+        _pin_closes(db, lid, {1: _PINNED})
         seen = _record_rearms(db)
-        with _SnapshotReadAs(db, snap):
+        with _SnapshotReadAs(db, snap), _ServiceClockAt(ls, _PINNED + timedelta(seconds=1)):
             moved = _run(ls.LoopService().reconcile_after_restart())
         assert seen == [(lid, "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
@@ -1506,12 +1561,13 @@ class TestDeadAdvanceStillRecovers:
         loop = db.create_loop(agent_name="a1", message_template="m", max_runs=2)
         snap = db.ops.list_non_terminal_loops()
         db.mark_loop_running(loop["id"])  # ... and worker A dies here
+        db.set_loop(loop["id"], started_at=_iso(_PINNED))
         seen = _record_rearms(db)
-        with _SnapshotReadAs(db, snap):
+        with _SnapshotReadAs(db, snap), _ServiceClockAt(ls, _PINNED + timedelta(seconds=1)):
             moved = _run(ls.LoopService().reconcile_after_restart())
         assert seen == [(loop["id"], "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
-        assert _loop(db, loop["id"])["next_run_at"] == _iso(_grace_end(db, loop["id"]))
+        assert _loop(db, loop["id"])["next_run_at"] == "2026-10-27T12:03:00.000000Z"
 
     def test_t21_overtaken_four_times_before_b_decides_then_death(self, env):
         """Between B's read and B's decision a worker runs four whole iterations
@@ -1526,12 +1582,15 @@ class TestDeadAdvanceStillRecovers:
             overtakes["n"] += 1
             for k_ in range(1, 5):
                 _advance_by_hand(db, lid, k_)
+            _pin_closes(db, lid, {k_: _PINNED - timedelta(minutes=5 - k_) for k_ in range(1, 5)})
 
         db.hooks["rearm_lost_dispatch"] = _four_iterations
-        assert _run(ls.LoopService().reconcile_after_restart()) == 1
+        with _ServiceClockAt(ls, _PINNED):
+            assert _run(ls.LoopService().reconcile_after_restart()) == 1
         assert overtakes["n"] == 1
         assert _loop(db, lid)["runs_completed"] == 4
-        assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
+        # due from run 4's close (P - 1 min), not run 1's
+        assert _loop(db, lid)["next_run_at"] == "2026-10-27T12:02:00.000000Z"
 
     def test_t24_a_queued_read_then_a_whole_iteration_and_a_death_is_not_stuck(self, env, caplog):
         """B read `queued`; before B decides, A marks the loop running, claims
@@ -1549,15 +1608,16 @@ class TestDeadAdvanceStillRecovers:
                 done["v"] = True
                 db.mark_loop_running(lid)
                 _advance_by_hand(db, lid, 1)
+                _pin_closes(db, lid, {1: _PINNED - timedelta(minutes=1)})
 
         db.hooks["rearm_lost_dispatch"] = _a_runs_one_iteration
         seen = _record_rearms(db)
-        with caplog.at_level(logging.WARNING), _SnapshotReadAs(db, snap):
+        with caplog.at_level(logging.WARNING), _SnapshotReadAs(db, snap), _ServiceClockAt(ls, _PINNED):
             moved = _run(ls.LoopService().reconcile_after_restart())
         assert seen == [(lid, "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
         assert not any("not re-armed" in r.getMessage() for r in caplog.records)
-        assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
+        assert _loop(db, lid)["next_run_at"] == "2026-10-27T12:02:00.000000Z"
 
     def test_t25_a_park_aba_before_b_decides_is_rearmed_in_one_call(self, env):
         """Another reconcile parks the loop and a sweep takes the park and
@@ -1658,13 +1718,17 @@ class TestRearmOutcomes:
         assert db.ops.rearm_lost_dispatch(lid, due_for=self._due_for(calls)) == ("stuck", None)
         assert calls == [] and (_loop(db, lid), _runs(db, lid)) == before
 
-    @pytest.mark.parametrize("outcome", ["parked", "terminal", "missing"])
-    def test_a_loop_that_moved_since_the_snapshot_is_left_alone(self, env, outcome):
+    @pytest.mark.parametrize("case", ["parked", "parked_empty_string", "terminal", "missing"])
+    def test_a_loop_that_moved_since_the_snapshot_is_left_alone(self, env, case):
         ls, db, ts = env
+        outcome = case.split("_")[0]
         lid = self._running_loop(db)
         snap = db.ops.list_non_terminal_loops()  # unparked, running
-        if outcome == "parked":
+        if case == "parked":
             db.ops.schedule_next_run(lid, "2030-01-01T00:00:00.000000Z")
+        elif case == "parked_empty_string":
+            # Not NULL, so not unparked: the SQL leaves it, and so must a fake.
+            db.ops.schedule_next_run(lid, "")
         elif outcome == "terminal":
             db.finalize_loop(lid, status="stopped", stop_reason="user_stopped")
         else:

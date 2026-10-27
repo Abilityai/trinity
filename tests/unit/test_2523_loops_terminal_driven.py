@@ -169,7 +169,7 @@ class _DB:
             return "missing", None
         if row["status"] in _TERMINAL:
             return "terminal", None
-        if row.get("next_run_at"):
+        if row.get("next_run_at") is not None:  # SQL: `next_run_at IS NULL`
             return "parked", None
         runs = self.list_loop_runs(lid)
         open_run = next((r for r in runs if r["status"] == "running"), None)
