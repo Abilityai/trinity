@@ -155,8 +155,10 @@ class TestReconcileRefusal:
         clock.advance(hours=3)
         assert self._reconcile(svc, 31)["status"] == "refused"
 
-        [row] = _pending(db, self.SUBJECT)
-        assert len(db.list_operator_queue_items(agent_name=HOST, status="pending")) == 1
+        pending = db.list_operator_queue_items(agent_name=HOST, status="pending")
+        assert [(r["subject"], r["context"]["orphan_count"]) for r in pending] == [
+            (self.SUBJECT, 31)]                               # one row, on the subject
+        [row] = pending
         assert row["request_id"].startswith(f"skills-reconcile-{self.AGENT}-")
         assert row["type"] == "alert" and row["priority"] == "high"
         assert row["context"]["seen_count"] == 2
@@ -269,8 +271,10 @@ class TestFleetReinject:
         clock.advance(hours=6)
         sweep({"a1": self.OK, "a2": self.BAD, "a3": self.BAD}, commit="c2")
 
-        [row] = _pending(db, self.SUBJECT)
-        assert len(db.list_operator_queue_items(agent_name=HOST, status="pending")) == 1
+        pending = db.list_operator_queue_items(agent_name=HOST, status="pending")
+        assert [(r["subject"], r["context"]["commit_sha"]) for r in pending] == [
+            (self.SUBJECT, "c2")]                             # one row, on the subject
+        [row] = pending
         assert row["request_id"].startswith("skills-fleet-reinject-fleet-")
         assert row["priority"] == "medium"
         assert row["context"]["seen_count"] == 2
