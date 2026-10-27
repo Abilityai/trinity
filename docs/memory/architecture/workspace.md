@@ -1620,7 +1620,7 @@ capability default, because the mistakes are not symmetrical.
 
 **A negative rating reaches the operator.** ent#366's redaction stands — the rated agent reads
 the score and never the words — so the operator's copy goes straight to `operator_queue`,
-routed through `create_bounded_alert` (the volume is driven by a client clicking, which is the
+reported through `platform_alerts.observe` with the #1677 budget (the volume is driven by a client clicking, which is the
 agent-influenceable side of the #1677 classification) with its own registered type and a
 reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
 commented ones: "this was not useful" is the report and the words are the elaboration.

@@ -2654,7 +2654,7 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
-  `operator_queue_service.create_bounded_alert` with its own registered type
+  `platform_alerts.observe` (which applies the #1677 budget) with its own registered type
   `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
@@ -2673,7 +2673,7 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   attaches once more after its own create (the click's create can land in
   between). **Stated residual**: a comment sent after the operator ended that
   day's item does not reach it; the next day's item carries the next report.
-- **Emitted off the response path.** `create_bounded_alert` is async and the
+- **Emitted off the response path.** `raise_problem_report` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
   alert is raised: the client's action must never fail because the operator's
