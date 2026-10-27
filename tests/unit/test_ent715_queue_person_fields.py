@@ -274,9 +274,13 @@ _HEADS_UP_PREFIXES = ("portal-inbox-collision-", "workspace-problem-")
 
 def _file_heads_ups(real_db, agent, tag):
     """Both heads-ups on `agent`, through their REAL emitters, found by their
-    own id or target, never by a scan: `trinity-system` is shared by every
+    own subject or target, never by a scan: `trinity-system` is shared by every
     test in the run. The report's id is bucketed by UTC day, so it is never
-    recomputed. `markers` is everything that would say who or what they are."""
+    recomputed. `markers` is everything that would say who or what they are.
+
+    #3254 re-pin (id shape): the collision is reported through the platform
+    alert seam, so its request id carries a timestamp
+    (`portal-inbox-collision-<dir>-<ts>`) and the row is found by its subject."""
     from types import SimpleNamespace
     from client_portal import service as cps
 
@@ -285,8 +289,8 @@ def _file_heads_ups(real_db, agent, tag):
     cps._alert_collided_inbox(agent, f"legacy_{tag}", list(people))
     assert asyncio.run(cps.raise_problem_report(
         agent, rater, target_kind="message", target_id=target, comment=words)) is True
-    collision = real_db.get_operator_queue_item_for_agent_by_request_id(
-        agent, f"portal-inbox-collision-legacy_{tag}")
+    collision = real_db.find_pending_operator_queue_by_subject(
+        agent, f"portal_inbox_collision:legacy_{tag}")
     (report,) = [i for i in real_db.list_operator_queue_items(
                      agent_name=agent, types=("workspace_problem_report",), limit=500)
                  if (i.get("context") or {}).get("target_id") == target]

@@ -5268,39 +5268,54 @@ def _legacy_migration_is_safe(agent_name: str, email: str) -> bool:
     return True
 
 
-def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
-    """Raise ONE operator-queue item per collided legacy inbox (ent#308).
+# ent#308, #3254: the collision is recomputed on every inbox read and keeps
+# reading true while the two shares exist, so this process reports it at most
+# once per 6 hours per (agent, folder, claimant set). A new claimant is a new
+# key and is reported at once.
+_COLLISION_REOBSERVE_SECONDS = 6 * 60 * 60
+_collision_observed_at: dict[tuple[str, str, str], float] = {}
 
-    Best-effort and idempotent: the id is derived from the legacy directory and
-    `create_item` is an INSERT ... ON CONFLICT DO NOTHING (keyed per agent), so a
-    repeat access does not re-alert. Never raises — an alert failure must not
-    break a client's inbox read.
+
+def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
+    """Report a collided legacy inbox to the operator queue (ent#308). Never raises.
+
+    Through the platform alert seam (#3246, #3254): one pending row per legacy
+    folder (subject `portal_inbox_collision:<dir>`). A must-act kind: it never
+    expires and only a person ends it. A person's ending is final. The
+    collision keeps reading true after someone split the folder, because the
+    platform cannot tell, so a repeat access never re-alerts the same
+    claimants. A NEW claimant changes `claimants_digest`, the kind's material
+    key (sha256 of the sorted set; no address in the context), and re-alerts.
 
     The id's prefix is reserved (`_RESERVED_ID_PREFIXES`, #715): the text lists
     client addresses, so the item is a platform alarm the agent's own file and
     resume turn never receive, the queue's reads never return it to a machine
-    key, and an agent cannot pre-create the id to swallow the alert through that
-    same ON CONFLICT. The ERROR log in the caller still fires on every access.
+    key, and an agent cannot pre-create one. The ERROR log in the caller still
+    fires on every access.
     """
-    try:
-        from database import db as core_db
-        core_db.create_operator_queue_item(agent_name, {
-            "id": f"portal-inbox-collision-{legacy_dir}",
-            "type": "alert",
-            "priority": "high",
-            "title": "Two portal clients shared one inbox folder",
-            "question": (
-                f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
-                f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
-                + ", ".join(claimants)
-                + ". Their files are mixed together and nothing records which file belongs to whom, "
-                "so Trinity will not split it automatically. New uploads are already isolated in "
-                "per-client folders. Please review the old folder and move or delete its contents."
-            ),
-            "created_at": utc_now_iso(),
-        })
-    except Exception as exc:  # noqa: BLE001 — alerting must never break a read
-        logger.warning("[#308] could not raise collided-inbox alert for %s: %s", agent_name, exc)
+    digest = hashlib.sha256("\0".join(sorted(claimants)).encode("utf-8")).hexdigest()
+    memo_key = (agent_name, legacy_dir, digest)
+    now = time.monotonic()
+    seen = _collision_observed_at.get(memo_key)
+    if seen is not None and now - seen < _COLLISION_REOBSERVE_SECONDS:
+        return
+    from services import platform_alerts
+    outcome = platform_alerts.observe(
+        agent_name, "portal_inbox_collision", legacy_dir,
+        priority="high",
+        title="Two portal clients shared one inbox folder",
+        question=(
+            f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
+            f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
+            + ", ".join(claimants)
+            + ". Their files are mixed together and nothing records which file belongs to whom, "
+            "so Trinity will not split it automatically. New uploads are already isolated in "
+            "per-client folders. Please review the old folder and move or delete its contents."
+        ),
+        context={"claimants_digest": digest},
+    )
+    if outcome != platform_alerts.OBSERVED_FAILED:
+        _collision_observed_at[memo_key] = now
 
 
 def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:

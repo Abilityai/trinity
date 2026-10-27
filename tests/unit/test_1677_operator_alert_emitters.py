@@ -57,8 +57,6 @@ _EXCLUDE_DIRS = ("enterprise/",)
 # inventory the operating-room feature flow points at.
 # ---------------------------------------------------------------------------
 _ALLOWED_CALLERS = {
-    ("client_portal/service.py", "_alert_collided_inbox"):
-        "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
