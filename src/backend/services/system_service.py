@@ -3,6 +3,7 @@ System manifest parsing and deployment service.
 
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
+import asyncio
 import json
 import os
 import stat
@@ -33,7 +34,10 @@ from models import (
     SystemApplyBlocker,
     SystemApplyChange,
     SystemApplyDrift,
+    SystemApplyFailure,
+    SystemApplyMember,
     SystemApplyPromptVerdict,
+    SystemApplyResponse,
     SystemApplyViewVerdict,
     SystemDeployFailure,
     SystemDeployResponse,
@@ -42,6 +46,7 @@ from models import (
 )
 from database import db
 from db_models import ScheduleCreate, SystemViewCreate
+from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
@@ -3209,3 +3214,482 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings,
     )
+
+
+# ----------------------------------------------------------------------------
+# Execution under a lease (H13) and the orchestrator.
+# ----------------------------------------------------------------------------
+
+APPLY_LOCK_TTL_SECONDS = 900
+# Renew every TTL/3 for the whole run: creation is serial and a `github:`
+# clone can outlive a fixed TTL.
+APPLY_LEASE_RENEW_SECONDS = APPLY_LOCK_TTL_SECONDS / 3
+
+
+class ApplyLeaseKeeper:
+    """Renews the apply lock from acquisition to release; raises a stop flag.
+
+    Any renewal result but OWNED — LOST (another holder, or a lapse), or
+    DEGRADED (Redis error) — stops the run: the in-flight write finishes and
+    every later write and start is reported `lock_lost`. Continuing on
+    DEGRADED would be the fail-open the lock exists to avoid (Codex 3).
+    Renewal is the atomic compare-and-expire, so a stale holder can never
+    extend a successor's lease.
+    """
+
+    def __init__(self, lock: SingleFlightLock, interval: float):
+        self._lock = lock
+        self._interval = interval
+        self._task: Optional["asyncio.Task"] = None
+        self.lost: Optional[LeaseState] = None
+
+    @property
+    def ok(self) -> bool:
+        return self.lost is None
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while self.lost is None:
+                await asyncio.sleep(self._interval)
+                state = await asyncio.to_thread(self._lock.refresh_if_owned_atomic)
+                if state is not LeaseState.OWNED:
+                    self.lost = state
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — an unknown is not ownership
+            self.lost = LeaseState.DEGRADED
+
+    def confirm(self) -> LeaseState:
+        """Renew now: ownership is confirmed immediately before the first write."""
+        state = self._lock.refresh_if_owned_atomic()
+        if state is not LeaseState.OWNED and self.lost is None:
+            self.lost = state
+        return state
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+
+@dataclass
+class ApplyOutcome:
+    """What a real run did, counted from the writers' return values."""
+
+    failed: List["SystemApplyFailure"] = field(default_factory=list)
+    created: List[str] = field(default_factory=list)
+    started: List[str] = field(default_factory=list)
+    succeeded: int = 0
+    tags_written: List[str] = field(default_factory=list)
+    member_failed: set = field(default_factory=set)
+    extra_changes: Dict[str, List] = field(default_factory=dict)
+    restart_required: Dict[str, bool] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+
+
+def _default_start_agent_fn():
+    """The start function, resolved at call time (same reason, and same unit
+    seam, as `_default_create_agent_fn`): the `routers/agents` facade over
+    `lifecycle.start_agent_internal`, one created member at a time (H8)."""
+    from routers.agents import start_agent_internal
+    return start_agent_internal
+
+
+def _member_agent_config(name: str, cfg: SystemAgentConfig) -> AgentConfig:
+    """The `AgentConfig` create mode builds for a member, field for field
+    (bootstrap equivalence). The resources dict is copied so the create path's
+    template merge never writes into the parsed manifest."""
+    return AgentConfig(
+        name=name,
+        template=cfg.template,
+        resources=dict(cfg.resources) if cfg.resources else _manifest_default_resources(),
+        kind=cfg.kind,
+    )
+
+
+async def execute_apply_plan(
+    plan: ApplyPlan,
+    manifest: SystemManifest,
+    current_user: User,
+    request: Optional[Request],
+    create_agent_fn: Callable,
+    start_agent_fn: Callable,
+    lease: ApplyLeaseKeeper,
+) -> ApplyOutcome:
+    """Write the plan. Writes only; no exception escapes once a write happened.
+
+    Order: create each absent member and tag it with the system tag at once
+    (H11b) -> keep only the writes that name members which exist (existing +
+    created), as create scopes to `created_map`, so nothing is ever written for
+    an agent whose create failed -> tags, edges, folders, resource overrides,
+    schedules (a created member's against a fresh post-create read), prompt,
+    view -> start the created members one at a time. The lease's stop flag is
+    checked before every write and every start (H13).
+    """
+    out = ApplyOutcome()
+    system = plan.system_name
+    by_name = {mp.name: mp for mp in plan.members.values()}
+
+    def fail(name: str, short: str, step: str, reason: str) -> None:
+        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step, reason=reason))
+        if name in by_name:
+            out.member_failed.add(name)
+
+    def lost(name: str, short: str, step: str) -> bool:
+        if lease.ok:
+            return False
+        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply")
+        return True
+
+    async def attempt(name: str, short: str, step: str, write) -> bool:
+        if lost(name, short, step):
+            return False
+        try:
+            result = write()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as e:  # noqa: BLE001 — recorded per write, the run continues (P-C)
+            fail(name, short, step, _failure_reason(e)[0])
+            return False
+        if result is False or result is None:
+            fail(name, short, step, "the write was refused or stored nothing")
+            return False
+        out.succeeded += 1
+        return True
+
+    # 1. Create absent members; tag each with the system tag first.
+    for mp in plan.members.values():
+        if not mp.creating:
+            continue
+        config = _member_agent_config(mp.name, mp.config)
+        created = await attempt(mp.name, mp.short_name, "create", lambda c=config: _created(
+            create_agent_fn(config=c, current_user=current_user, request=request,
+                            skip_name_sanitization=True)))
+        if not created:
+            continue
+        out.created.append(mp.name)
+        tagged = await attempt(mp.name, mp.short_name, "tag", lambda n=mp.name: _tag_stored(n, system))
+        if tagged:
+            out.tags_written.append(mp.name)
+        else:
+            # The next apply would refuse it as name-only evidence; say so (H11b).
+            out.failed[-1].reason += (
+                f"; '{mp.name}' was created but not tagged '{system}', so the next apply "
+                f"refuses it until you add the tag (POST /api/agents/{mp.name}/tags/{system})")
+
+    exists = {mp.name for mp in plan.members.values() if not mp.creating} | set(out.created)
+
+    # 2. The remaining writes, phase by phase, filtered to members that exist.
+    ops = [op for mp in plan.members.values() for op in mp.ops]
+    for phase in _APPLY_OP_PHASES:
+        for op in (o for o in ops if o.kind == phase):
+            if op.member not in exists:
+                fail(op.member, op.short_name, op.kind,
+                     "skipped_member_not_created: the member was not created")
+                continue
+            if op.kind == "edge" and op.args["target"] not in exists:
+                fail(op.member, op.short_name, op.kind,
+                     f"skipped_member_not_created: '{op.args['target']}' was not created")
+                continue
+            await _run_op(op, current_user, out, attempt)
+
+    # 3. The platform prompt and the view.
+    if plan.prompt_op is not None:
+        await attempt(system, "", "prompt",
+                      lambda: db.set_setting("trinity_prompt", plan.prompt_op.args["prompt"]))
+    if plan.view_op is not None:
+        await attempt(system, "", "system_view", lambda: create_system_view(
+            system_name=system, system_view=manifest.system_view,
+            default_tags=manifest.default_tags, owner_id=str(current_user.id)))
+
+    # 4. Start the members this run created, one at a time, never an existing one.
+    for name in out.created:
+        mp = by_name[name]
+        if await attempt(name, mp.short_name, "start", lambda n=name: _started(start_agent_fn(n))):
+            out.started.append(name)
+
+    # 5. `restart_required` for the existing members this run reconfigured,
+    # from the platform's predicates over the container as it now is.
+    for mp in plan.members.values():
+        if mp.creating or not any(op.kind in ("folders", "resources") for op in mp.ops):
+            continue
+        try:
+            container = _member_container(mp.name)
+            if _container_labels(container) is not None:
+                out.restart_required[mp.name] = await _restart_pending(mp.name, container)
+        except Exception:  # noqa: BLE001 — keep the plan's prediction
+            pass
+    return out
+
+
+async def _created(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+async def _started(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+def _tag_stored(name: str, tag: str) -> bool:
+    return tag in (db.add_agent_tag(name, tag) or [])
+
+
+async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt) -> None:
+    name, short = op.member, op.short_name
+    if op.kind == "tag":
+        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
+            if name not in out.tags_written:
+                out.tags_written.append(name)
+    elif op.kind == "edge":
+        target = op.args["target"]
+        await attempt(name, short, "permissions", lambda: (
+            db.add_agent_permission(name, target, current_user.username) is not None
+            or bool(db.is_agent_permitted(name, target))))
+    elif op.kind == "folders":
+        await attempt(name, short, "folders", lambda: db.upsert_shared_folder_config(
+            agent_name=name, expose_enabled=op.args["expose_enabled"],
+            consume_enabled=op.args["consume_enabled"]))
+    elif op.kind == "resources":
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=op.args["memory"], cpu=op.args["cpu"]))
+    elif op.kind == "created_resources":
+        await _apply_created_resources(op, out, attempt)
+    elif op.kind == "schedule_create":
+        await attempt(name, short, "schedules", lambda: db.create_schedule(
+            agent_name=name, username=op.args["owner_username"],
+            schedule_data=_build_schedule_create(op.args["entry"])))
+    elif op.kind == "schedule_update":
+        await attempt(name, short, "schedules", lambda: db.update_schedule(
+            op.args["schedule_id"], current_user.username, op.args["fields"]))
+    elif op.kind == "created_schedules":
+        await _apply_created_schedules(op, current_user, out, attempt)
+
+
+async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:
+    """A member apply created runs with its TEMPLATE's resources (create keeps
+    template-wins, AC6). A declared key the template overrode is written as an
+    override now, before the member's start, so the platform's start path
+    recreates it with the declared values once (H4, P-A)."""
+    name, short = op.member, op.short_name
+    try:
+        labels = _container_labels(_member_container(name))
+    except Exception:  # noqa: BLE001
+        labels = None
+    if labels is None:
+        out.failed.append(SystemApplyFailure(
+            name=name, short_name=short, step="resources",
+            reason="the created member's container could not be read; its declared "
+                   "resources were not compared"))
+        out.member_failed.add(name)
+        return
+    differs = {k: v for k, v in op.args["declared"].items() if labels.get(f"trinity.{k}") != v}
+    changes = out.extra_changes.setdefault(name, [])
+    for key, desired in differs.items():
+        changes.append(_apply_change(
+            f"resources.{key}", "write", "resource_differs",
+            current=labels.get(f"trinity.{key}"), desired=desired,
+            note="the template's value; overridden before the member's first start"))
+    if differs:
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=differs.get("memory"), cpu=differs.get("cpu")))
+
+
+async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOutcome,
+                                   attempt) -> None:
+    """P-D's one re-read: the template materialized its own rows inside create,
+    so a created member's schedules are resolved against a FRESH read. If that
+    read fails they go to `failed[]`, never to an unfiltered create (the open
+    failure `create_schedules` falls back to, engineering F5)."""
+    name, short = op.member, op.short_name
+    try:
+        rows = list(db.list_agent_schedules(name) or [])
+    except Exception as e:  # noqa: BLE001
+        reason = _failure_reason(e)[0]
+        for entry in op.args["entries"]:
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule '{entry.get('name')}': the post-create read failed ({reason})"))
+        out.member_failed.add(name)
+        return
+    changes = out.extra_changes.setdefault(name, [])
+    for action in resolve_declared_schedule_actions(op.args["entries"], rows):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            changes.append(_apply_change(field_name, "write", "schedule_create",
+                                         desired=_schedule_view(action.entry)))
+            await attempt(name, short, "schedules", lambda a=action: db.create_schedule(
+                agent_name=name, username=current_user.username,
+                schedule_data=_build_schedule_create(a.entry)))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC")
+            if error:
+                out.failed.append(SystemApplyFailure(
+                    name=name, short_name=short, step="schedules",
+                    reason=f"{error[0]}: schedule '{action.name}': {error[1]}"))
+                out.member_failed.add(name)
+                continue
+            changes.append(_apply_change(
+                field_name, "write", "schedule_update", current=action.current,
+                desired=action.fields,
+                note="the template's same-named schedule, updated to the manifest's fields"))
+            await attempt(name, short, "schedules", lambda a=action: db.update_schedule(
+                a.row.id, current_user.username, dict(a.fields)))
+        elif action.kind == "enabled_differs":
+            changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="the template's schedule keeps its own enabled state"))
+        elif action.kind == "undeclared":
+            changes.append(_apply_change(field_name, "report", "schedule_undeclared",
+                                         current=_schedule_view(action.row),
+                                         note="declared by the template, not the manifest"))
+        elif action.kind == "ambiguous":
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule_name_ambiguous: more than one schedule named '{action.name}'"))
+            out.member_failed.add(name)
+
+
+def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status: str,
+                  outcome: Optional[ApplyOutcome] = None,
+                  extra_blockers: Tuple = ()) -> "SystemApplyResponse":
+    members = []
+    for mp in plan.members.values():
+        changes = list(mp.changes)
+        restart = mp.restart_required
+        applied = None
+        if outcome is not None:
+            if mp.name in outcome.extra_changes:
+                # The real run reports what it actually did for a created
+                # member's template-resolved fields (P-D).
+                changes = [c for c in changes if c.code != "pending_template_resolution"]
+                changes.extend(outcome.extra_changes[mp.name])
+            restart = outcome.restart_required.get(mp.name, restart)
+            applied = mp.name not in outcome.member_failed
+        members.append(SystemApplyMember(
+            name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
+            restart_required=restart, applied=applied))
+    response = SystemApplyResponse(
+        dry_run=dry_run,
+        system_name=plan.system_name,
+        status=status,
+        members=members,
+        drift=plan.drift,
+        blockers=[*plan.blockers, *extra_blockers],
+        prompt=plan.prompt,
+        system_view=plan.system_view,
+        failed=list(outcome.failed) if outcome else [],
+        warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
+    )
+    if outcome is not None:
+        response._tags_written = list(outcome.tags_written)
+    return response
+
+
+async def apply_manifest(
+    manifest_yaml: str,
+    current_user: User,
+    request: Optional[Request] = None,
+    *,
+    dry_run: bool,
+    create_agent_fn: Optional[Callable] = None,
+    start_agent_fn: Optional[Callable] = None,
+) -> "SystemApplyResponse":
+    """Reconcile a live system to a manifest (trinity-enterprise#695).
+
+    `parse_manifest` + `validate_manifest` (create's own, unchanged: every named
+    400, `agents: {}` included) -> snapshot -> plan -> a dry run returns here
+    -> blockers refuse with NO lock key written -> acquire the lock and start
+    the lease keeper -> snapshot and plan again under it -> blockers refuse and
+    release -> confirm ownership -> execute -> release (H13, Codex 2).
+
+    `dry_run` has no default here on purpose: the request model's `True` is the
+    only default, so a caller cannot reach a real run by omission.
+    """
+    try:
+        try:
+            manifest = parse_manifest(manifest_yaml)
+        except ManifestError as e:
+            raise HTTPException(status_code=400, detail=f"{e.code}: {e}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            warnings = validate_manifest(manifest)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        snapshot = await read_apply_snapshot(manifest, current_user)
+        plan = resolve_apply_plan(manifest, snapshot)
+        if dry_run:
+            return _apply_report(plan, warnings, dry_run=True,
+                                 status="invalid" if plan.blockers else "valid")
+        if plan.blockers:
+            return _apply_report(plan, warnings, dry_run=False, status="refused")
+
+        lock = SingleFlightLock(f"system_apply:{manifest.name}", APPLY_LOCK_TTL_SECONDS,
+                                client=get_breaker_redis())
+        if not lock.acquire():
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.LOST, manifest.name),))
+        if not lock.held:
+            # `acquire()` failed OPEN (no Redis): apply never runs unlocked.
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.DEGRADED, manifest.name),))
+
+        lease = ApplyLeaseKeeper(lock, APPLY_LEASE_RENEW_SECONDS)
+        lease.start()
+        try:
+            snapshot = await read_apply_snapshot(manifest, current_user)
+            plan = resolve_apply_plan(manifest, snapshot)
+            if plan.blockers:
+                return _apply_report(plan, warnings, dry_run=False, status="refused")
+            state = lease.confirm()
+            if state is not LeaseState.OWNED:
+                return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                     extra_blockers=(_lock_blocker(state, manifest.name),))
+            outcome = await execute_apply_plan(
+                plan, manifest, current_user, request,
+                create_agent_fn or _default_create_agent_fn(),
+                start_agent_fn or _default_start_agent_fn(),
+                lease,
+            )
+        finally:
+            await lease.stop()
+            lock.release_if_owned_atomic()
+
+        if not outcome.failed:
+            status = "applied"
+        elif outcome.succeeded == 0:
+            status = "failed"
+        else:
+            status = "partial"
+        return _apply_report(plan, warnings, dry_run=False, status=status, outcome=outcome)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"System apply failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+
+
+def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":
+    if state is LeaseState.LOST:
+        return _apply_blocker(
+            "apply_in_progress", None,
+            f"Another apply of '{system_name}' holds the lock.",
+            "Retry when it has finished.")
+    return _apply_blocker(
+        "apply_lock_unavailable", None,
+        "The apply lock could not be taken (Redis is unreachable or errored).",
+        "Retry when Redis is reachable; apply never runs without its lock.")

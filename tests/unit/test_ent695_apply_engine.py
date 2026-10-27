@@ -7,8 +7,10 @@ field reconcilers, the executor.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -594,3 +596,717 @@ class TestFieldCoverageCensus:
         assert {cls for cls, _why in table.values()} <= system_service.APPLY_FIELD_CLASSES
         assert table["SystemAgentConfig.kind"][0] == "create-only"
         assert self._schedule_keys() == {"name", "cron", "message", "enabled", "timezone", "description"}
+
+
+# ===========================================================================
+# 4. The executor and the orchestrator: the AC rows end to end
+# ===========================================================================
+
+@pytest.fixture
+def ew(world, monkeypatch):
+    """The world plus the executor's seams (create, start, the lock's Redis)."""
+    W.install_executor_seams(world, monkeypatch)
+    return world
+
+
+def _witness(world, tmp_path):
+    return W.Witness(world, tmp_path)
+
+
+FLEET = f"""\
+name: {SYSTEM}
+default_tags: [Prod]
+permissions:
+  explicit:
+    a: [a, b]
+agents:
+  a:
+    template: local:sched
+    folders: {{expose: true}}
+    schedules:
+      - {{name: daily, cron: '0 7 * * *', message: /manifest-daily}}
+      - {{name: weekly, cron: '0 9 * * MON', message: /weekly}}
+  b:
+    template: local:heavy
+    resources: {{cpu: '2'}}
+"""
+
+
+def _verdicts(result):
+    return {m.short_name: m.verdict for m in result.members}
+
+
+def _sched(name, agent="acme-a"):
+    (row,) = [s for s in db.list_agent_schedules(agent) if s.name == name]
+    return row
+
+
+class TestAC1ApplyTwiceIsANoOp:
+    def test_fresh_install_then_apply_again_writes_nothing(self, ew, tmp_path):
+        """The template declares a same-named schedule, a `Prod` tag, a
+        schedule with no timezone, an explicit self-edge, partial folders,
+        and a template that overrides a declared resource."""
+        first = W.apply(ew, FLEET, dry_run=False)
+        assert first.status == "applied", first.failed
+        assert _verdicts(first) == {"a": "create", "b": "create"}
+
+        with _witness(ew, tmp_path) as w:
+            second = W.apply(ew, FLEET, dry_run=False)
+        assert second.status == "applied"
+        assert _verdicts(second) == {"a": "unchanged", "b": "unchanged"}
+        assert w.fleet_statements == []
+        assert w.creates == [] and w.docker_events == []
+        assert w.changed_tables() == []
+
+    @pytest.mark.parametrize("writer,change", [
+        ("schedule", ("cron: '0 9 * * MON'", "cron: '0 8 * * MON'")),
+        ("tag", ("    resources: {cpu: '2'}", "    resources: {cpu: '2'}\n    tags: [team-x]")),
+        ("edge", ("    a: [a, b]", "    a: [a, b]\n    b: [a]")),
+        ("folder", ("folders: {expose: true}", "folders: {expose: true, consume: true}")),
+        ("resource", ("resources: {cpu: '2'}", "resources: {cpu: '2', memory: '16g'}")),
+        ("prompt", ("default_tags: [Prod]", "default_tags: [Prod]\nprompt: be brief")),
+        ("view", ("default_tags: [Prod]", "default_tags: [Prod]\nsystem_view: {name: Acme}")),
+    ])
+    def test_each_writer_converges_after_one_change(self, ew, tmp_path, writer, change):
+        """Codex B-AC1: change one declared value -> apply -> apply again ->
+        zero fleet-state statements, for every writer."""
+        assert W.apply(ew, FLEET, W.ADMIN, dry_run=False).status == "applied"
+        changed = FLEET.replace(*change)
+        assert changed != FLEET
+        updated = W.apply(ew, changed, W.ADMIN, dry_run=False)
+        assert updated.status == "applied", updated.failed
+        assert "update" in _verdicts(updated).values() or writer in ("prompt", "view")
+        with _witness(ew, tmp_path) as w:
+            again = W.apply(ew, changed, W.ADMIN, dry_run=False)
+        assert set(_verdicts(again).values()) == {"unchanged"}
+        assert w.fleet_statements == [], w.fleet_statements
+        assert again.prompt.verdict in ("not_declared", "unchanged")
+        assert again.system_view.verdict in ("not_requested", "unchanged")
+
+
+class TestAC2AChangedFieldUpdatesInPlace:
+    def test_cron_message_tag_folder_and_cpu_update_the_existing_agent(self, ew):
+        assert W.apply(ew, FLEET, dry_run=False).status == "applied"
+        daily_id = _sched("daily").id
+        changed = (FLEET.replace("'0 7 * * *', message: /manifest-daily", "'0 6 * * *', message: /new")
+                        .replace("folders: {expose: true}", "folders: {expose: false}")
+                        .replace("resources: {cpu: '2'}", "resources: {cpu: '8'}\n    tags: [team-x]"))
+        db.set_resource_limits("acme-b", memory="16g", cpu="2")  # an override the manifest omits
+
+        result = W.apply(ew, changed, dry_run=False)
+
+        assert result.status == "applied", result.failed
+        assert _verdicts(result) == {"a": "update", "b": "update"}
+        daily = _sched("daily")
+        assert daily.id == daily_id and daily.cron_expression == "0 6 * * *" and daily.message == "/new"
+        assert daily.enabled is False  # the template's state; never written
+        a = next(m for m in result.members if m.short_name == "a")
+        assert ("schedule:daily", "report", "enabled_differs") in [
+            (c.field, c.action, c.code) for c in a.changes]
+        assert not db.get_agent_owner("acme-a_2") and not db.get_agent_owner("acme-b_2")
+        assert db.get_shared_folder_config("acme-a").expose_enabled is False
+        assert "team-x" in db.get_agent_tags("acme-b")
+        assert db.get_resource_limits("acme-b") == {"memory": "16g", "cpu": "8"}
+        b = next(m for m in result.members if m.short_name == "b")
+        assert b.restart_required is True
+        assert [e for e in ew.docker.events if e[1] in ("acme-a", "acme-b")
+                and e[0] != "start"] == []
+        # Existing members are never started by this run.
+        assert ew.docker.events.count(("start", "acme-b")) == 1  # only the first run's
+
+    def test_an_omitted_timezone_and_description_survive_an_update(self, ew):
+        """Engineering F2: a row on Europe/Berlin with a template description,
+        under a manifest entry that omits both, keeps both."""
+        ew.seed_agent("acme-a")
+        db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
+            {"name": "daily", "cron": "0 9 * * *", "message": "/d",
+             "timezone": "Europe/Berlin", "description": "the template's purpose"}))
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n"
+              "    schedules:\n      - {name: daily, cron: '0 10 * * *', message: /d}\n")
+        assert W.apply(ew, mf, dry_run=False).status == "applied"
+        row = _sched("daily")
+        assert (row.cron_expression, row.timezone, row.description) == (
+            "0 10 * * *", "Europe/Berlin", "the template's purpose")
+
+
+class TestAC3DriftIsReportedAndUntouched:
+    def test_undeclared_members_are_drift_and_nothing_touches_them(self, ew, tmp_path):
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-old")
+        ew.seed_agent("acme-a_2")
+        ew.seed_agent("acme-restored", container=False)
+        for name in ("acme-old", "acme-a_2"):
+            db.create_schedule(name, W.ALICE, system_service._build_schedule_create(
+                {"name": "s", "cron": "0 9 * * *", "message": "/s"}))
+        before = {n: (db.get_agent_owner(n), db.get_agent_tags(n),
+                      [s.id for s in db.list_agent_schedules(n)])
+                  for n in ("acme-old", "acme-a_2", "acme-restored")}
+
+        result = W.apply(ew, _manifest("a"), dry_run=False)
+
+        assert result.status == "applied"
+        drift = {d.name: d.note for d in result.drift}
+        assert sorted(drift) == ["acme-a_2", "acme-old", "acme-restored"]
+        assert "suffixed copy" in drift["acme-a_2"]
+        after = {n: (db.get_agent_owner(n), db.get_agent_tags(n),
+                     [s.id for s in db.list_agent_schedules(n)]) for n in before}
+        assert after == before
+        assert [e for e in ew.docker.events if e[0] != "start"] == []
+        assert ("start", "acme-old") not in ew.docker.events
+
+
+class TestAC4DryRunWritesNothing:
+    def test_a_plan_with_creates_updates_and_drift_writes_nothing(self, ew, tmp_path):
+        ew.seed_agent("acme-a", tags=(SYSTEM,))
+        ew.seed_agent("acme-old")
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n    tags: [team-x]\n"
+              "  b:\n    template: local:sched\n")
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, mf, dry_run=True)
+        assert result.status == "valid" and result.dry_run is True
+        assert _verdicts(result) == {"a": "update", "b": "create"}
+        assert [d.name for d in result.drift] == ["acme-old"]
+        assert all(m.applied is None for m in result.members)
+        w.assert_no_fleet_write()
+        assert w.statements == []  # no request bookkeeping on the service path either
+
+    def test_a_dry_run_with_blockers_is_invalid_and_writes_nothing(self, ew, tmp_path):
+        ew.seed_agent("acme-a", tags=())
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, _manifest("a", "b"), dry_run=True)
+        assert result.status == "invalid"
+        assert [b.code for b in result.blockers] == ["membership_evidence_prefix_only"]
+        w.assert_no_fleet_write()
+
+
+class TestAC5WeakEvidenceRefusedBeforeAnyWrite:
+    def _refused(self, ew, tmp_path, mf):
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, mf, dry_run=False)
+        assert result.status == "refused"
+        w.assert_no_fleet_write()  # incl. no Redis command: no lock key
+        return result
+
+    def test_a_declared_untagged_member_refuses_even_though_another_is_absent(self, ew, tmp_path):
+        """The input only the ORDER decides: `b` is absent, so a gate placed
+        after the create step would have created it first."""
+        ew.seed_agent("acme-a", tags=())
+        result = self._refused(ew, tmp_path, _manifest("a", "b"))
+        (b,) = result.blockers
+        assert (b.code, b.member) == ("membership_evidence_prefix_only", "acme-a")
+        assert "POST /api/agents/acme-a/tags/acme" in b.remedy
+
+    def test_an_undeclared_untagged_member_alone_refuses(self, ew, tmp_path):
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-notes", tags=())
+        (b,) = self._refused(ew, tmp_path, _manifest("a")).blockers
+        assert (b.code, b.member) == ("membership_evidence_prefix_only", "acme-notes")
+        assert "belongs to another system" in b.remedy
+
+    def test_an_unreadable_tag_table_refuses_retryably(self, ew, tmp_path, monkeypatch):
+        ew.seed_agent("acme-a")
+
+        def _boom(names):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(db, "get_tags_for_agents", _boom)
+        (b,) = self._refused(ew, tmp_path, _manifest("a")).blockers
+        assert (b.code, b.retryable) == ("membership_tags_unreadable", True)
+
+    def test_unreadable_docker_refuses_retryably(self, ew, tmp_path):
+        ew.seed_agent("acme-a")
+        ew.docker.readable = False
+        codes = {(b.code, b.retryable) for b in self._refused(ew, tmp_path, _manifest("a")).blockers}
+        assert ("roster_unreadable", True) in codes
+
+    def test_a_label_read_returning_nothing_refuses_retryably(self, ew, tmp_path):
+        ew.seed_agent("acme-a")
+        ew.docker.unreadable_labels.add("acme-a")
+        (b,) = self._refused(ew, tmp_path, _manifest("a")).blockers
+        assert (b.code, b.retryable) == ("member_reads_unavailable", True)
+
+
+class TestF3NothingNamesAMemberWhoseCreateFailed:
+    def test_a_failed_create_leaves_no_row_naming_it(self, ew):
+        ew.fail_create.add("acme-b")
+        mf = FLEET.replace("    a: [a, b]", "    a: [a, b]\n    b: [a]").replace(
+            "    resources: {cpu: '2'}",
+            "    resources: {cpu: '2'}\n    folders: {expose: true}\n"
+            "    schedules:\n      - {name: s, cron: '0 9 * * *', message: /s}")
+        result = W.apply(ew, mf, dry_run=False)
+
+        assert result.status == "partial"
+        assert not db.get_agent_tags("acme-b") and not db.get_shared_folder_config("acme-b")
+        assert not db.list_agent_schedules("acme-b") and not db.get_permitted_agents("acme-b")
+        assert "acme-b" not in db.get_permitted_agents("acme-a")
+        steps = sorted((f.name, f.step) for f in result.failed)
+        assert ("acme-b", "create") in steps
+        assert {s for n, s in steps if n == "acme-b"} >= {"tag", "edge", "folders", "created_schedules"}
+        assert ("acme-a", "edge") in steps  # a -> b skipped, b was not created
+        create_failure = next(f for f in result.failed if f.step == "create")
+        assert "secret-pat" not in create_failure.reason  # through _failure_reason
+        assert ("start", "acme-b") not in ew.docker.events
+        b = next(m for m in result.members if m.short_name == "b")
+        assert b.applied is False
+
+    def test_every_attempted_write_failing_is_failed(self, ew):
+        ew.fail_create.update({"acme-a", "acme-b"})
+        assert W.apply(ew, FLEET, dry_run=False).status == "failed"
+
+
+class TestH2NeverRemoves:
+    def test_operator_tag_foreign_edge_grant_and_intra_edge_survive(self, ew):
+        ew.seed_agent("acme-a", tags=(SYSTEM, "operator-pick"))
+        ew.seed_agent("acme-b")
+        db.add_agent_permission("acme-a", "outsider", W.ALICE)
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        _hrun("INSERT INTO agent_peer_skill_grants (caller_agent, target_agent, skill_name, "
+              "granted_by, granted_at) VALUES ('acme-a', 'acme-b', 'review', 'alice695', "
+              "'2026-10-01T00:00:00Z')")
+        result = W.apply(ew, _manifest("a", "b", extra="permissions:\n  preset: none\n"), dry_run=False)
+
+        assert result.status == "applied"
+        assert db.get_agent_tags("acme-a") == ["acme", "operator-pick"]
+        assert db.get_permitted_agents("acme-a") == ["acme-b", "outsider"]
+        assert W.Witness.dump_tables()["agent_peer_skill_grants"] != []
+        a = next(m for m in result.members if m.short_name == "a")
+        assert [(c.code, c.current) for c in a.changes] == [("permission_extra", ["acme-b"])]
+
+
+class TestH3SchedulesOnACreatedMember:
+    def test_the_templates_same_named_row_is_updated_after_creation(self, ew):
+        dry = W.apply(ew, FLEET, dry_run=True)
+        a = next(m for m in dry.members if m.short_name == "a")
+        assert ("schedule:daily", "pending_template_resolution") in [(c.field, c.code) for c in a.changes]
+
+        real = W.apply(ew, FLEET, dry_run=False)
+        rows = {s.name: s for s in db.list_agent_schedules("acme-a")}
+        assert sorted(rows) == ["daily", "weekly"]  # never two `daily` rows
+        assert (rows["daily"].cron_expression, rows["daily"].message) == ("0 7 * * *", "/manifest-daily")
+        assert rows["daily"].description == "from the template"  # not declared: kept
+        assert rows["daily"].enabled is False and rows["weekly"].enabled is True
+        a = next(m for m in real.members if m.short_name == "a")
+        codes = [(c.field, c.code) for c in a.changes]
+        assert ("schedule:daily", "schedule_update") in codes
+        assert ("schedule:weekly", "schedule_create") in codes
+        assert "pending_template_resolution" not in [c for _f, c in codes]
+
+    def test_a_failed_post_create_read_never_creates_unfiltered(self, ew, monkeypatch):
+        real_list = db.list_agent_schedules
+        calls = {"n": 0}
+
+        def flaky(agent_name):
+            if agent_name == "acme-a":
+                calls["n"] += 1
+                if calls["n"] >= 2:  # the template's own read succeeds; apply's fails
+                    raise RuntimeError("read failed")
+            return real_list(agent_name)
+
+        monkeypatch.setattr(db, "list_agent_schedules", flaky)
+        result = W.apply(ew, FLEET, dry_run=False)
+        monkeypatch.setattr(db, "list_agent_schedules", real_list)
+        assert result.status == "partial"
+        assert [s.name for s in db.list_agent_schedules("acme-a")] == ["daily"]  # the template's only
+        assert sorted(f.reason.split("'")[1] for f in result.failed if f.name == "acme-a") == [
+            "daily", "weekly"]
+
+
+class TestH3bOwnerAndInvoker:
+    def test_an_admins_apply_creates_the_row_as_the_agent_owner(self, ew):
+        ew.seed_agent("acme-a")
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n"
+              "    schedules:\n      - {name: daily, cron: '0 9 * * *', message: /d}\n")
+        assert W.apply(ew, mf, W.ADMIN, dry_run=False).status == "applied"
+        assert _sched("daily").owner_id == ew.user(W.ALICE).id
+
+    def test_an_update_refused_at_write_time_is_a_failure_not_a_success(self, ew, monkeypatch):
+        ew.seed_agent("acme-a")
+        db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
+            {"name": "daily", "cron": "0 9 * * *", "message": "/d"}))
+        monkeypatch.setattr(db, "update_schedule", lambda *a, **k: None)  # the race
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n"
+              "    schedules:\n      - {name: daily, cron: '0 10 * * *', message: /d}\n")
+        result = W.apply(ew, mf, dry_run=False)
+        assert result.status == "failed"
+        assert [(f.name, f.step) for f in result.failed] == [("acme-a", "schedules")]
+
+
+class TestH4Resources:
+    def test_a_created_member_gets_its_override_before_its_first_start(self, ew, monkeypatch):
+        """The template ran the container with cpu 4; the declared 2 is
+        written BEFORE apply's start step, and the platform's own predicate
+        then reports the mismatch that drives the start path's recreate."""
+        from services.agent_service.helpers import check_resource_limits_match
+
+        seen = {}
+        real_start = ew.docker.start
+
+        async def start(name):
+            seen[name] = (db.get_resource_limits(name),
+                          check_resource_limits_match(ew.docker.containers[name], name))
+            return await real_start(name)
+
+        result = asyncio.run(system_service.apply_manifest(
+            FLEET, ew.user(W.ALICE), None, dry_run=False,
+            create_agent_fn=ew.create, start_agent_fn=start))
+        assert result.status == "applied", result.failed
+        assert seen["acme-b"] == ({"memory": None, "cpu": "2"}, False)
+        assert ew.docker.containers["acme-b"].labels["trinity.cpu"] == "2"
+        b = next(m for m in result.members if m.short_name == "b")
+        assert ("resources.cpu", "write", "resource_differs") in [
+            (c.field, c.action, c.code) for c in b.changes]
+        # The created member was started once; nothing else was.
+        assert sorted(n for k, n in ew.docker.events if k == "start") == ["acme-a", "acme-b"]
+
+    def test_an_existing_member_is_written_never_restarted(self, ew):
+        ew.seed_agent("acme-a", cpu="2")
+        db.set_resource_limits("acme-a", memory="8g", cpu=None)
+        mf = f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n    resources: {{cpu: '4'}}\n"
+        result = W.apply(ew, mf, dry_run=False)
+        assert db.get_resource_limits("acme-a") == {"memory": "8g", "cpu": "4"}
+        assert ew.docker.events == []
+        (a,) = result.members
+        assert a.restart_required is True
+        again = W.apply(ew, mf, dry_run=False)
+        assert again.members[0].verdict == "unchanged" and again.members[0].restart_required is True
+        ew.docker.containers["acme-a"].labels.update({"trinity.cpu": "4", "trinity.memory": "8g"})
+        assert W.apply(ew, mf, dry_run=False).members[0].restart_required is False
+
+
+class TestH4RealStartPathKeepsTheVolumes:
+    """Codex pass 3 point 1: through the REAL `start_agent_internal` ->
+    `recreate_container_with_updated_config`, with Docker mocked at its
+    calls. The just-created member's replacement gets the same named volumes,
+    and the declared resources."""
+
+    def test_the_recreate_reuses_the_members_volumes(self, ew, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from services.agent_service import lifecycle as lc
+
+        ew.seed_agent("acme-b", cpu="4", memory="8g")  # as the template created it
+        db.set_resource_limits("acme-b", memory=None, cpu="2")  # apply's override
+        container = ew.docker.containers["acme-b"]
+        container.attrs["Config"]["Image"] = "trinity-agent-base:latest"
+        container.attrs["Config"]["Labels"]["trinity.ssh-port"] = "2222"
+
+        provisioned = {}
+
+        async def provision(agent_name, **kwargs):
+            provisioned.update(kwargs, agent_name=agent_name)
+            return container
+
+        for name in ("check_shared_folder_mounts_match",):
+            monkeypatch.setattr(lc, name, AsyncMock(return_value=True))
+        for name in ("check_public_folder_mount_matches", "check_api_key_env_matches",
+                     "check_github_pat_env_matches", "check_full_capabilities_match",
+                     "check_guardrails_env_matches", "check_agent_auth_token_env_matches",
+                     "check_pull_mode_env_matches", "check_agent_mcp_key_matches",
+                     "check_agent_name_env_matches"):
+            monkeypatch.setattr(lc, name, MagicMock(return_value=True))
+        if hasattr(lc, "check_base_image_matches"):
+            monkeypatch.setattr(lc, "check_base_image_matches", AsyncMock(return_value=True))
+        monkeypatch.setattr(lc, "get_agent_container", lambda n: container)
+        monkeypatch.setattr(lc, "container_reload", AsyncMock())
+        monkeypatch.setattr(lc, "container_stop", AsyncMock())
+        monkeypatch.setattr(lc, "container_remove", AsyncMock())
+        monkeypatch.setattr(lc, "container_start", AsyncMock())
+        monkeypatch.setattr(lc, "validate_base_image", lambda image: None)
+        monkeypatch.setattr(lc, "image_get", AsyncMock(side_effect=RuntimeError("no daemon")))
+        monkeypatch.setattr(lc, "reserve_port_for_recreate", lambda port: None)
+        monkeypatch.setattr(lc, "_provision_folders_and_run_agent_container", provision)
+        for name in ("wait_for_agent_ready", "inject_assigned_credentials",
+                     "inject_assigned_skills", "inject_read_only_hooks", "remove_read_only_hooks"):
+            if hasattr(lc, name):
+                monkeypatch.setattr(lc, name, AsyncMock(return_value={"status": "stubbed"}))
+        for name in ("clear_agent_runtime_state", "clear_agent_breakers"):
+            monkeypatch.setattr(lc, name, MagicMock(), raising=False)
+
+        asyncio.run(lc.start_agent_internal("acme-b"))
+
+        assert provisioned["agent_name"] == "acme-b"
+        assert provisioned["base_volumes"] == {
+            "agent-acme-b-workspace": {"bind": "/home/developer", "mode": "rw"}}
+        assert (provisioned["cpu"], provisioned["memory"]) == ("2", "8g")
+
+
+class TestH4bFolders:
+    def test_an_existing_members_omitted_key_keeps_its_value(self, ew):
+        ew.seed_agent("acme-a")
+        db.upsert_shared_folder_config("acme-a", expose_enabled=False, consume_enabled=True)
+        mf = f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n    folders: {{expose: true}}\n"
+        assert W.apply(ew, mf, dry_run=False).status == "applied"
+        cfg = db.get_shared_folder_config("acme-a")
+        assert (cfg.expose_enabled, cfg.consume_enabled) == (True, True)
+
+
+class TestH6Prompt:
+    def test_written_only_by_an_admin_and_only_when_different(self, ew, monkeypatch):
+        ew.seed_agent("acme-a")
+        db.set_setting("trinity_prompt", "old")
+        writes = []
+        real = db.set_setting
+        monkeypatch.setattr(db, "set_setting", lambda k, v: (writes.append((k, v)), real(k, v))[1])
+
+        creator = W.apply(ew, _manifest("a", extra="prompt: new\n"), dry_run=False)
+        assert creator.prompt.verdict == "requires_admin" and writes == []
+        assert W.apply(ew, _manifest("a", extra="prompt: old\n"), W.ADMIN, dry_run=False).prompt.verdict == "unchanged"
+        assert writes == []
+        admin = W.apply(ew, _manifest("a", extra="prompt: new\n"), W.ADMIN, dry_run=False)
+        assert admin.prompt.verdict == "update" and writes == [("trinity_prompt", "new")]
+        assert W.apply(ew, _manifest("a", extra='prompt: ""\n'), W.ADMIN, dry_run=False).prompt.verdict == "not_declared"
+
+
+class TestH7H8ViewAndStart:
+    def test_a_second_apply_creates_no_second_view(self, ew):
+        mf = _manifest("a", extra="system_view: {name: Acme}\n")
+        first = W.apply(ew, mf, dry_run=False)
+        assert first.system_view.verdict == "create"
+        second = W.apply(ew, mf, dry_run=False)
+        assert second.system_view.verdict == "unchanged"
+        views = db.list_user_system_views(str(ew.user(W.ALICE).id))
+        assert len(views) == 1 and second.system_view.id == views[0].id
+
+    def test_another_users_private_view_does_not_stop_the_callers_own(self, ew):
+        from db_models import SystemViewCreate
+        db.create_system_view(str(ew.user(W.BOB).id), SystemViewCreate(
+            name="Bob's", description=system_service.SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=SYSTEM),
+            filter_tags=[SYSTEM], is_shared=False))
+        result = W.apply(ew, _manifest("a", extra="system_view: {name: Acme}\n"), dry_run=False)
+        assert result.system_view.verdict == "create"
+        assert len(db.list_user_system_views(str(ew.user(W.ALICE).id))) == 1
+
+    def test_a_stopped_existing_member_is_not_started_a_created_one_is(self, ew):
+        ew.seed_agent("acme-a", status="exited")
+        assert W.apply(ew, _manifest("a", "b"), dry_run=False).status == "applied"
+        assert ew.docker.events == [("start", "acme-b")]
+        assert ew.docker.containers["acme-a"].status == "exited"
+
+
+class TestH11bCreatedMemberTaggedFirst:
+    def test_a_failed_system_tag_is_named_and_the_next_apply_refuses_it(self, ew, monkeypatch):
+        real_add = db.add_agent_tag
+
+        def add(name, tag):
+            if name == "acme-b" and tag == SYSTEM:
+                raise RuntimeError("tag write failed")
+            return real_add(name, tag)
+
+        monkeypatch.setattr(db, "add_agent_tag", add)
+        result = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        failure = next(f for f in result.failed if f.name == "acme-b" and f.step == "tag")
+        assert "was created but not tagged 'acme'" in failure.reason
+        monkeypatch.setattr(db, "add_agent_tag", real_add)
+
+        again = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        assert again.status == "refused"
+        assert [(b.code, b.member) for b in again.blockers] == [
+            ("membership_evidence_prefix_only", "acme-b")]
+
+
+KEY = f"system_apply:{SYSTEM}"
+
+
+class TestH13TheLock:
+    def test_a_held_lock_refuses_and_writes_nothing(self, ew, tmp_path):
+        ew.redis.store[KEY] = "someone-else"
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, _manifest("a"), dry_run=False)
+        assert result.status == "refused"
+        assert [(b.code, b.retryable) for b in result.blockers] == [("apply_in_progress", True)]
+        assert w.fleet_statements == [] and w.creates == []
+        assert ew.redis.store[KEY] == "someone-else"
+
+    def test_no_redis_refuses_never_runs_unlocked(self, ew, tmp_path, monkeypatch):
+        monkeypatch.setattr(system_service, "get_breaker_redis", lambda: None)
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, _manifest("a"), dry_run=False)
+        assert [(b.code, b.retryable) for b in result.blockers] == [("apply_lock_unavailable", True)]
+        assert w.fleet_statements == [] and w.creates == []
+
+    def test_the_lock_is_released_and_never_read_back_client_side(self, ew):
+        assert W.apply(ew, _manifest("a"), dry_run=False).status == "applied"
+        assert KEY not in ew.redis.store
+        # SET NX to take it; scripts to renew and release. A client-side GET
+        # would mean the non-atomic GET-then-EXPIRE/DELETE path.
+        assert ("get", KEY) not in ew.redis.commands
+        assert ("script", "release", KEY) in ew.redis.commands
+
+    def test_a_blocker_that_appears_only_under_the_lock_refuses_and_releases(self, ew, monkeypatch):
+        ew.seed_agent("acme-a")
+        real = system_service.read_apply_snapshot
+        calls = {"n": 0}
+
+        async def snapshot(manifest, user):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                db.set_agent_tags("acme-a", [])  # someone untags it meanwhile
+            return await real(manifest, user)
+
+        monkeypatch.setattr(system_service, "read_apply_snapshot", snapshot)
+        result = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        assert result.status == "refused" and calls["n"] == 2
+        assert [b.code for b in result.blockers] == ["membership_evidence_prefix_only"]
+        assert KEY not in ew.redis.store and ew.create_calls == []
+
+    def test_the_keeper_renews_from_acquisition_through_the_replan(self, ew, monkeypatch):
+        monkeypatch.setattr(system_service, "APPLY_LEASE_RENEW_SECONDS", 0.01)
+        real = system_service.read_apply_snapshot
+        seen = {}
+
+        async def slow_snapshot(manifest, user):
+            result = await real(manifest, user)
+            if "first" in seen:
+                await asyncio.sleep(0.1)
+                seen["renewals_during_replan"] = ew.redis.commands.count(("script", "refresh", KEY))
+            seen["first"] = True
+            return result
+
+        monkeypatch.setattr(system_service, "read_apply_snapshot", slow_snapshot)
+        assert W.apply(ew, _manifest("a"), dry_run=False).status == "applied"
+        assert seen["renewals_during_replan"] >= 1
+
+    @pytest.mark.parametrize("loss", ["lost", "degraded"])
+    def test_a_lease_lost_during_a_slow_create_stops_every_later_write(self, ew, monkeypatch, loss):
+        monkeypatch.setattr(system_service, "APPLY_LEASE_RENEW_SECONDS", 0.01)
+        real_create = ew.create
+
+        async def slow_create(config, current_user, request=None, skip_name_sanitization=False):
+            if config.name == "acme-a":
+                if loss == "lost":
+                    ew.redis.store[KEY] = "successor"
+                else:
+                    def _down(target, key):
+                        raise ConnectionError("redis down")
+                    ew.redis.on_refresh = _down
+                await asyncio.sleep(0.1)
+            return await real_create(config, current_user, request, skip_name_sanitization)
+
+        ew.create = slow_create
+        result = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        ew.redis.on_refresh = None
+        assert db.get_agent_owner("acme-a")  # the in-flight create finished
+        assert not db.get_agent_owner("acme-b")
+        assert result.status == "partial"
+        lost = [(f.name, f.step) for f in result.failed if f.reason.startswith("lock_lost")]
+        assert ("acme-b", "create") in lost and ("acme-a", "tag") in lost
+        assert ew.docker.events == []  # nothing started after the loss
+        if loss == "lost":
+            assert ew.redis.store[KEY] == "successor"  # a stale release never deletes it
+
+    def test_the_lease_lost_after_the_first_start_stops_the_second(self, ew, monkeypatch):
+        """H8: started one by one behind the stop flag, never in bulk."""
+        monkeypatch.setattr(system_service, "APPLY_LEASE_RENEW_SECONDS", 0.01)
+        real_start = ew.docker.start
+
+        async def start(name):
+            out = await real_start(name)
+            if name == "acme-a":
+                ew.redis.store[KEY] = "successor"
+                await asyncio.sleep(0.1)
+            return out
+
+        result = asyncio.run(system_service.apply_manifest(
+            _manifest("a", "b"), ew.user(W.ALICE), None, dry_run=False,
+            create_agent_fn=ew.create, start_agent_fn=start))
+        assert [n for k, n in ew.docker.events if k == "start"] == ["acme-a"]
+        assert ("acme-b", "start") in [(f.name, f.step) for f in result.failed
+                                       if f.reason.startswith("lock_lost")]
+
+
+class TestOtherShapeFreshInstall:
+    """Bootstrap equivalence: on an instance with no agents, tags, schedules
+    or prior deploy, apply builds what create mode builds, but for the two
+    stated differences, asserted as such (Codex B-AC6)."""
+
+    def _state(self):
+        names = ["acme-a", "acme-b"]
+        return {
+            "tags": {n: db.get_agent_tags(n) for n in names},
+            "folders": {n: (lambda c: (c.expose_enabled, c.consume_enabled) if c else None)(
+                db.get_shared_folder_config(n)) for n in names},
+            "edges": {n: db.get_permitted_agents(n) for n in names},
+            "prompt": (db.get_setting("trinity_prompt") or SimpleNamespace(value=None)).value,
+            "views": [(v.name, v.description, sorted(v.filter_tags), v.is_shared)
+                      for v in db.list_user_system_views(str(db.get_user_by_username(W.ADMIN)["id"]))],
+            "schedules": {n: sorted((s.name, s.cron_expression, s.message, s.enabled, s.timezone,
+                                     s.description) for s in db.list_agent_schedules(n))
+                          for n in names},
+            "limits": {n: db.get_resource_limits(n) for n in names},
+        }
+
+    def test_apply_on_a_fresh_install_builds_what_create_builds(self, db_backend, monkeypatch, tmp_path):
+        import db_harness
+        import routers.agents as agents_router
+
+        manifest = FLEET + "prompt: the system prompt\nsystem_view: {name: Acme, icon: A}\n"
+
+        create_world = W.make_world(monkeypatch, tmp_path / "create")
+        W.install_executor_seams(create_world, monkeypatch)
+        monkeypatch.setattr(agents_router, "start_agent_internal", create_world.docker.start)
+        created = asyncio.run(system_service.deploy_manifest(
+            manifest, create_world.user(W.ADMIN), None, dry_run=False,
+            create_agent_fn=create_world.create))
+        assert created.status == "deployed", created
+        create_configs = [c.model_dump() for c in create_world.create_calls]
+        create_state = self._state()
+
+        (tmp_path / "apply").mkdir()
+        db_harness._activate_backend(db_backend, tmp_path / "apply", monkeypatch)
+        apply_world = W.make_world(monkeypatch, tmp_path / "apply")
+        W.install_executor_seams(apply_world, monkeypatch)
+        applied = W.apply(apply_world, manifest, W.ADMIN, dry_run=False)
+        assert applied.status == "applied", applied.failed
+        assert set(_verdicts(applied).values()) == {"create"}
+        apply_state = self._state()
+
+        assert [c.model_dump() for c in apply_world.create_calls] == create_configs
+        for key in ("tags", "folders", "edges", "prompt", "views"):
+            assert apply_state[key] == create_state[key], key
+        # Stated difference 1: the template's same-named schedule carries the
+        # manifest's declared fields (create skipped the manifest's entry).
+        assert create_state["schedules"]["acme-a"] == [
+            ("daily", "0 9 * * *", "/template-daily", False, "UTC", "from the template"),
+            ("weekly", "0 9 * * MON", "/weekly", True, "UTC", None)]
+        assert apply_state["schedules"]["acme-a"] == [
+            ("daily", "0 7 * * *", "/manifest-daily", False, "UTC", "from the template"),
+            ("weekly", "0 9 * * MON", "/weekly", True, "UTC", None)]
+        assert apply_state["schedules"]["acme-b"] == create_state["schedules"]["acme-b"] == []
+        # Stated difference 2: a declared resource the template overrode is an
+        # override row (create keeps template-wins).
+        assert create_state["limits"] == {"acme-a": None, "acme-b": None}
+        assert apply_state["limits"] == {"acme-a": None, "acme-b": {"memory": None, "cpu": "2"}}
+
+
+class TestOtherShapeEmptyData:
+    def test_an_empty_manifest_is_creates_named_400_and_writes_nothing(self, ew, tmp_path):
+        from fastapi import HTTPException
+        mf = f"name: {SYSTEM}\nagents: {{}}\n"
+        with pytest.raises(HTTPException) as create_error:
+            asyncio.run(system_service.deploy_manifest(mf, ew.user(W.ALICE), None, dry_run=True))
+        for dry_run in (True, False):
+            with _witness(ew, tmp_path) as w:
+                with pytest.raises(HTTPException) as apply_error:
+                    W.apply(ew, mf, dry_run=dry_run)
+            assert (apply_error.value.status_code, apply_error.value.detail) == (
+                create_error.value.status_code, create_error.value.detail) == (
+                400, "Missing required field: agents (must have at least 1)")
+            w.assert_no_fleet_write()
+
+
+class TestExecutionNeverLosesTheReport:
+    def test_a_writer_that_raises_is_recorded_and_the_run_continues(self, ew, monkeypatch):
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-b")
+
+        def boom(*a, **k):
+            raise RuntimeError("edge table locked")
+
+        monkeypatch.setattr(db, "add_agent_permission", boom)
+        mf = _manifest("a", "b", extra="permissions:\n  preset: full-mesh\n") + ""
+        mf = mf.replace("  b:\n    template: local:plain", "  b:\n    template: local:plain\n    tags: [x]")
+        result = W.apply(ew, mf, dry_run=False)
+        assert result.status == "partial"
+        assert sorted((f.name, f.step) for f in result.failed) == [
+            ("acme-a", "permissions"), ("acme-b", "permissions")]
+        assert "x" in db.get_agent_tags("acme-b")
