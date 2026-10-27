@@ -471,6 +471,25 @@ def test_a_raising_cornelius_seeder_keeps_its_alarm(seed, db):
     assert row["status"] == "pending" and row["context"]["seen_count"] == 2
 
 
+def test_a_missing_cornelius_result_keeps_its_alarm(seed, db):
+    """No result at all (the seeder returned None, not a dict) says nothing."""
+    _raise_seed_alarm("cornelius-failed")
+
+    async def nothing(fresh=None):
+        return None
+
+    seed.monkeypatch.setattr(sss.cornelius_agent_service, "ensure_seeded", nothing)
+    seed.monkeypatch.setattr(
+        sss.system_seed_service,
+        "ensure_seeded",
+        AsyncMock(return_value={"action": "none"}),
+    )
+    seed.monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *results: None)
+    asyncio.run(sss.ensure_first_run_seeded())
+    row = _seed_row(db, "cornelius-failed")
+    assert row["status"] == "pending" and row["context"]["seen_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # A person's ending is never overwritten (AC 7 / #2372, through the answer path)
 # ---------------------------------------------------------------------------
@@ -673,13 +692,18 @@ def test_a_sweep_that_never_raised_an_alarm_writes_nothing(sweep, db):
 
 @pytest.fixture
 def readings(monkeypatch):
-    """Record what the emitters hand the seam, without writing."""
-    from services import platform_alerts as pa
+    """Record what the emitters hand the seam, without writing. Patched on the
+    module object each emitter holds (R6): a sibling suite that re-imports
+    `services.platform_alerts` would otherwise detach the patch."""
+    from services.git_service import token_scrub
 
     seen = []
-    monkeypatch.setattr(
-        pa, "observe", lambda host, kind, key=None, **kw: seen.append((host, kind, key))
-    )
+
+    def record(host, kind, key=None, **kw):
+        seen.append((host, kind, key))
+
+    for module in {id(m): m for m in (sss.platform_alerts, token_scrub.platform_alerts)}.values():
+        monkeypatch.setattr(module, "observe", record)
     return seen
 
 
@@ -707,6 +731,30 @@ def test_r1_scrub_refused_key_matches_the_legacy_parser(readings):
         "ent615-git-token-scrub-agent-a-2026-09-01", report
     )
     assert host == "agent-a"
+    assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "#3254 residual (pre-existing in the #3246 legacy parser): prefixes match "
+        "longest first, so a pre-move REFUSAL id of an agent named `unreadable-...` "
+        "reads as the unreadable kind with the name's tail as the key. The parser is "
+        "in services/platform_alerts.py, outside this slice; an XPASS means it was "
+        "fixed, so drop this marker then."
+    ),
+)
+def test_r1_scrub_refused_key_for_an_agent_named_unreadable_(readings):
+    from services import platform_alerts as pa
+    from services.git_service import token_scrub
+
+    report = {"remotes_scrubbed": 0, "refused": 1, "root_readable": 1, "success": True}
+    token_scrub._alarm_git_token_scrub_refused("unreadable-agent-a", report)
+    [(host, kind, key)] = readings
+    legacy = pa.derive_legacy_subject(
+        "ent615-git-token-scrub-unreadable-agent-a-2026-09-01", report
+    )
+    assert host == "unreadable-agent-a"
     assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
 
 
