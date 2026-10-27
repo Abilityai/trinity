@@ -800,6 +800,7 @@ CREATE TABLE agent_sync_state (
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts
+    git_stats_at TEXT,                     -- #4000: when the git stats above were measured (agent-written, coerced)
     diverged_since TEXT,                   -- ent#706: divergence episode start (ISO-Z; set once, cleared at 0/0)
     dirty_files INTEGER,                   -- ent#706: porcelain change count
     dirty_since TEXT,                      -- ent#706: dirt episode start (ISO-Z; cleared at 0)
