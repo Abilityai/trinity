@@ -146,7 +146,8 @@ def write_templates(root) -> None:
 
 def make_world(monkeypatch, tmp_path=None) -> World:
     """Users, the Docker fakes and the seams. Call inside a `db_backend` test."""
-    for username, role in ((ADMIN, "admin"), (ALICE, "creator"), (BOB, "creator"), (CAROL, "user")):
+    # CAROL is an `operator`: past the Workspace floor, below `creator`.
+    for username, role in ((ADMIN, "admin"), (ALICE, "creator"), (BOB, "creator"), (CAROL, "operator")):
         db.create_user(UserCreate(username=username, role=role, email=f"{username}@example.com"))
     docker = FakeDocker()
     world = World(docker=docker)
