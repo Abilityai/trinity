@@ -284,7 +284,7 @@ async def create_mcp_api_key_endpoint(
     request: Request,
     current_user: User = Depends(require_interactive)
 ):
-    # scope != "user": ops/portal_delegate only, admin-only (see Key scopes)
+    # scope != "user": ops/ops_write/portal_delegate only, admin-only (see Key scopes)
     api_key = db.create_mcp_api_key(current_user.username, key_data)
     if not api_key:
         raise HTTPException(status_code=400, detail="Failed to create API key")
