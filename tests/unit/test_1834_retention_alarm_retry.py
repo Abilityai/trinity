@@ -55,8 +55,8 @@ outcome below is unchanged; each changed test says which class its re-pin is:
   second row. The subject is the setting, so a new window rewrites the one row;
 * fixture shape: "delivered" is now an outcome of the seam (created / updated /
   snoozed), and a delivered alarm is re-read once per `ALARM_REFRESH_SECONDS`
-  (R9, pinned in `test_3254_retention_alert.py`), so "never re-emitted" holds
-  inside that period.
+  (R9, pinned in `test_3254_retention_alert.py`), so T-B2 is renamed
+  `test_a_delivered_alarm_is_not_re_emitted_within_the_refresh_period`.
 
 Invocation: `cd tests && python -m pytest unit/test_1834_retention_alarm_retry.py`.
 """
@@ -248,13 +248,14 @@ class TestFailedAlarmIsRetried:
             "said 'seen' and no later cycle ever tried again"
         )
 
-    def test_a_delivered_alarm_is_never_re_emitted(self, guard_db, caplog):
+    def test_a_delivered_alarm_is_not_re_emitted_within_the_refresh_period(self, guard_db, caplog):
         """T-B2 — the anti-alarm-fatigue half, unchanged from today. 288 identical
         ERRORs a day is how an alert gets muted, and a muted alert IS #1638.
 
-        #3254 re-pin (fixture shape): "never" holds inside `ALARM_REFRESH_SECONDS`;
-        R9's one re-read per period is pinned in `test_3254_retention_alert.py`.
-        These three calls are milliseconds apart on the real clock."""
+        #3254 re-pin (fixture shape, renamed from `..._is_never_re_emitted`): no
+        re-emission inside `ALARM_REFRESH_SECONDS`; R9's one re-read per period is
+        pinned in `test_3254_retention_alert.py`. These three calls are
+        milliseconds apart on the real clock."""
         _RG.announce_refusal(_KEY, "rows", 5, _verdict())
         caplog.clear()
         with caplog.at_level(logging.INFO, logger=_RG.logger.name):
@@ -441,9 +442,9 @@ class TestEpisodeBoundaries:
 
         A window change while the previous window's alarm is still undelivered
         starts a fresh episode and drops the old retry. That is correct: the new
-        window is a new blast radius, it alarms immediately under its own natural
-        key, and the abandoned attempt described a window that is no longer in
-        force. Recorded because it is the one place the retry is bounded by
+        window is a new blast radius and alarms immediately (since #3254 by
+        rewriting the setting's one row to the new window), and the abandoned
+        attempt described a window that is no longer in force. Recorded because it is the one place the retry is bounded by
         something other than delivery.
         """
         guard_db.fail_next = 1
@@ -521,8 +522,8 @@ class TestTheAlarmAuthorizesNothing:
         """T-B10 — pins the in-process design argument.
 
         `cleanup_service` runs in every uvicorn worker with NO leader lease, so
-        both processes already call `announce_refusal` and the natural key already
-        absorbs it. Two independent loops make delivery MORE likely, not less:
+        both processes already call `announce_refusal`, and the subject's one
+        pending row absorbs it (#3254; at #1834 it was the natural-key id). Two independent loops make delivery MORE likely, not less:
         worker B can land the row worker A failed to write, and A's next attempt
         then conflicts and settles. Redis would add a failure domain whose own
         outage would have to fail open (suppressing the alarm) or closed

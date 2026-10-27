@@ -397,9 +397,10 @@ class TestRefusalAlarm:
     def test_first_refusal_logs_error_and_raises_exactly_one_alarm(
         self, guard_db, caplog
     ):
-        """C1. 'Exactly one' is the point: `create_item` is INSERT ... ON CONFLICT
-        DO NOTHING, so a duplicate is silent — only a count proves the transition
-        gate works."""
+        """C1. 'Exactly one' is the point: a duplicate reading is silent at the row
+        (since #3254 it updates the setting's one pending row; at #1771 an INSERT
+        ... ON CONFLICT DO NOTHING absorbed it), so only a count of the writes
+        proves the transition gate works."""
         with caplog.at_level(logging.INFO, logger=_RG.logger.name):
             _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
 

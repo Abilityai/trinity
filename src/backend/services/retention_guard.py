@@ -45,10 +45,12 @@ DESIGN NOTES (each one is load-bearing; read before changing)
    the alarm, which is #1833.
 
 4. **The ack is the gate; the operator-queue item is only an alarm.** Making the
-   queue item load-bearing was rejected in review: `create_item` is a blind
-   `INSERT ... ON CONFLICT DO NOTHING`, so once the row exists in *any* state
-   (e.g. an operator hits Clear All -> `cancelled`) re-emission is a no-op and the
-   gate would wedge shut permanently and silently; and `prune_terminal_items`
+   queue item load-bearing was rejected in review: the alarm's sink was then a
+   blind `INSERT ... ON CONFLICT DO NOTHING`, so once the row existed in *any*
+   state (e.g. an operator hits Clear All -> `cancelled`) re-emission was a no-op
+   and the gate would wedge shut permanently and silently. It still would on the
+   platform-alert seam (#3254): a person's ending silences the same reading for
+   the snooze window. And `prune_terminal_items`
    would delete the approval at 90 days — the sweep deleting its own authorization.
    Keeping the alarm decorative dissolves both: a wedged alarm costs
    discoverability, not correctness, and responding to it grants nothing.
@@ -549,7 +551,7 @@ def announce_refusal(
     fresh = ep is None or (ep.window_days, ep.reason) != (window_days, verdict.reason)
     if fresh:
         # ARM BEFORE THE ATTEMPT (#1897's ordering): the record exists before
-        # `create_item` is called, so a crash / SIGKILL / BaseException inside the
+        # `observe` is called, so a crash / SIGKILL / BaseException inside the
         # write leaves an UNDELIVERED episode that the next cycle retries — rather
         # than a memo saying "handled" for an alarm that never landed (#1834).
         # `asyncio.CancelledError` is not an `Exception`, so arming in the except

@@ -42,7 +42,8 @@ def _reset_retention_episodes():
     """#1834: clear `retention_guard`'s in-process refusal state around every test.
 
     This file never had one, and it needs one: `test_alarm_failure_never_flips_the_
-    refusal` calls `announce_refusal` with a failing `create_operator_queue_item`,
+    refusal` calls `announce_refusal` with a failing alarm write (the seam's create
+    since #3254),
     which since #1834 leaves an UNDELIVERED episode carrying a `_clock()` stamp
     (before #1834 it left an inert window int). CI runs the whole unit suite in one
     process under `pytest-randomly` with three seeds, so a leaked undelivered
