@@ -97,6 +97,8 @@ Owners can tighten guardrails for specific agents. Overrides are additive -- you
 | `extra_path_deny` | list (max 50) | Additional paths to protect |
 | `disallowed_tools` | list (max 50) | Claude Code tools to disable |
 
+A task that stops at `max_turns_task` fails with HTTP `422` and the error code `max_turns` (on the `X-Trinity-Error-Code` response header), and the execution's error reads *Task exceeded turn limit*. Retrying the same task stops at the same limit: raise `max_turns_task` or split the work into smaller tasks.
+
 ### Configure via UI
 
 1. Open the agent detail page

@@ -169,7 +169,11 @@ def _extract_agent_error(
             # #1853: the full stream-json transcript, salvaged onto the FAILED row.
             execution_log = detail.get("execution_log")
         elif "detail" in error_data:
-            error_msg = error_data["detail"]
+            # #3988: FastAPI's request-validation 422 carries a LIST detail. The
+            # classifiers downstream call str methods on this, and a list
+            # crashed the except-handler into "Unexpected error".
+            detail_value = error_data["detail"]
+            error_msg = detail_value if isinstance(detail_value, str) else str(detail_value)
     except Exception:
         if response.text:
             error_msg = response.text[:500]

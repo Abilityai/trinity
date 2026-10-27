@@ -214,8 +214,9 @@ def _turn_limit_detail(cap: int) -> str:
 
 
 @pytest.mark.parametrize("status,detail_fn,code", [
-    (422, lambda: _turn_limit_detail(401), "agent_error"),
-    (422, lambda: _turn_limit_detail(403), "agent_error"),
+    # #3988: a turn limit carries its own code, `max_turns` (never `auth`).
+    (422, lambda: _turn_limit_detail(401), "max_turns"),
+    (422, lambda: _turn_limit_detail(403), "max_turns"),
     (503, lambda: _agent_answer(_PROMPT_TOO_LONG_EVENTS).detail, "agent_error"),
     (503, lambda: _OLD_IMAGE_PROMPT_503, "agent_error"),
 ], ids=["turn-cap-401", "turn-cap-403", "prompt-length", "prompt-length-old-image"])

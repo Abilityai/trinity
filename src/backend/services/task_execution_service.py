@@ -3171,6 +3171,12 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 422 and is_turn_limit(error_msg):
+            # #3988: the turn stopped at its cap. Coded so the caller is told to
+            # raise the cap or split the task, not that the agent is down. The
+            # shape check stays: a request-validation 422 is not a turn limit.
+            logger.warning(f"[TaskExecService] Turn limit reached on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.MAX_TURNS
         elif agent_status_code == 503 and is_prompt_too_long(error_msg):
             logger.warning(f"[TaskExecService] Prompt too long on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AGENT_ERROR

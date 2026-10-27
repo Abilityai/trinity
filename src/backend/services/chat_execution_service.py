@@ -2422,7 +2422,12 @@ _SYNC_BACKLOG_TERMINAL = (
 
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+    422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
+    refused, #3012) / 503. Raises ChatDispatchError.
+
+    #3988: the turn limit answers 422 — the agent's own status — and always
+    carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
+    from the 422 this route already answers for invalid input (#2806).
 
     #2661: releases the idempotency claim before raising. Both sync branches
     call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
@@ -2443,6 +2448,13 @@ def _map_task_failure(name, result, *, idem):
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
+        if getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MAX_TURNS.value
+        ):
+            # #3988: checked before the prose matches below — the detail carries
+            # the CLI's raw text, and a "timed out" in it would answer 504, which
+            # the MCP client reads as its own wait running out.
+            raise ChatDispatchError(422, result.error, headers=code_headers)
         if "at capacity" in (result.error or "") or getattr(
             getattr(result, "error_code", None), "value", None
         ) == TaskExecutionErrorCode.CAPACITY.value:
