@@ -8,14 +8,13 @@ character mints a token for a URL the client never calls. `request.base_url`
 gets the scheme wrong on a standard Trinity deployment for two independent
 reasons, and the second is why this helper reads the raw header itself:
 
-1. `docker-compose.prod.yml` / `docker-compose.hosted.yml` override the image's
-   `command:`, dropping the Dockerfile CMD's `--proxy-headers
-   --forwarded-allow-ips=*`. Without that, uvicorn does not trust `X-Forwarded-*`
-   from a non-loopback proxy at all, so `request.url.scheme` stays `http` behind
-   ANY proxy — whether or not the frontend nginx is in the path. Restoring those
-   flags is a trust change (it re-prices `request.client.host` for every per-IP
-   limiter, and agents on the agent network reach `backend:8000` directly), so it
-   is deliberately out of scope and this helper does not depend on it.
+1. uvicorn's own forwarded-header processing is OFF in every launcher
+   (`--no-proxy-headers`, trinity-enterprise#873), so `request.url.scheme` is
+   always the raw hop's `http` behind ANY proxy — whether or not the frontend
+   nginx is in the path. That is deliberate: the client ADDRESS is resolved from
+   explicitly trusted proxies only, by `utils/client_ip.py`, and turning uvicorn's
+   processing back on would let it rewrite that address under a second, broader
+   trust rule. The scheme stays this helper's job, from the raw header.
 2. The frontend nginx forwards `X-Forwarded-Proto $scheme`, and `$scheme` is
    `http` on that hop because TLS terminates upstream — so it clobbers the
    upstream `https`. Fixed in `nginx.conf` alongside this helper.
