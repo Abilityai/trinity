@@ -1984,7 +1984,7 @@ class OperatorQueueSyncService:
 
         if file_exists:
             # #3130: a sane-size read ends an oversize episode.
-            self._flood_episodes.discard((agent_name, "oversize_file"))
+            self._end_flood_episode(agent_name, "oversize_file")
             try:
                 queue_data = json.loads(content)
             except json.JSONDecodeError:
@@ -2393,7 +2393,7 @@ class OperatorQueueSyncService:
             await self._maybe_emit_flood_alert(agent_name, held=held)
         else:
             # #3130: nothing held — the episode is over; the next one alerts.
-            self._flood_episodes.discard((agent_name, "ingestion_cap"))
+            self._end_flood_episode(agent_name, "ingestion_cap")
 
         # 3. Broadcast new items via WebSocket
         if new_items and _websocket_manager:
@@ -2707,49 +2707,67 @@ class OperatorQueueSyncService:
 
         Edge-triggered (#3130): an episode alerts once, however many cycles or
         cooldown windows it lasts, and the next alert needs the condition to
-        have cleared first (`_sync_agent` ends the episode). It used to be one
+        have cleared first (`_sync_agent` ends the episode through
+        `_end_flood_episode`, which ends its alert too). It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
         minimum spacing between episodes, so a cap that flaps cannot re-alert
         every cycle.
 
-        Budgeted (#1677, #3130): created through `create_bounded_alert` as type
-        `queue_flood` — an agent's own filing volume drives this emitter, which
-        is the test that classification applies. The budget is the backstop for
-        what the in-memory episode state cannot see (a leader failover re-alerts
-        once). Excluded from the agent's own depth read by its reserved prefix.
+        Reported through `platform_alerts.observe` (#3254) as kind
+        `queue_flood`, keyed by the reason: one pending row per (agent, reason),
+        rewritten in place. Budgeted (#1677, #3130): the kind's budgeted type is
+        `queue_flood`, so `observe` applies the per-(agent, type) budget — an
+        agent's own filing volume drives this emitter, which is the test that
+        classification applies. The budget is the backstop for what the
+        in-memory episode state cannot see (a leader failover re-reads once,
+        onto the same row). Excluded from the agent's own depth read by its
+        reserved prefix. Softened wording to avoid cry-wolf (C9).
 
-        An **un-guessable** `queue-flood-{agent}-{utc_now_iso()}` id so the
-        agent can't pre-suppress it (C2); softened wording to avoid cry-wolf
-        (C9). Never raises — an emit failure must not kill the sync.
+        Re-read while it lasts (#3254 R9): an episode that persists is observed
+        again at most every 6 hours, so the kind's 14-day lifetime ends only a
+        row nobody re-read (a lost clear), never one whose condition still
+        holds. The refresh time per (agent, reason) lives in a dict this method
+        creates on the instance for itself (`_flood_refreshed_at`).
 
-        The cooldown and the episode are stamped BEFORE the create. Outcomes:
-          * created → the episode is consumed (one alert per episode);
-          * FAILED (count read or create raised) → the episode is RELEASED so
-            the alarm is retried, and the cooldown stamp spaces those retries
-            to at most one per window (review I1: holding the episode on a
-            failure silenced the alarm until the condition cleared — for a
-            runaway agent, never);
-          * REFUSED at budget → the episode is consumed. The agent already has
+        The cooldown and the episode are stamped BEFORE the reading. Outcomes:
+          * created / updated / snoozed → the episode is consumed (one alert per
+            episode; a snoozed reading is a person's ending, which stands);
+          * failed → the episode is RELEASED so the alarm is retried, and the
+            cooldown stamp spaces those retries to at most one per window
+            (review I1: holding the episode on a failure silenced the alarm until
+            the condition cleared — for a runaway agent, never);
+          * refused at budget → the episode is consumed. The agent already has
             a full budget of pending flood alerts and the budget emits its own
             `alert-budget-` episode alert, so re-knocking every window would
-            add nothing but budget-episode churn. Unregistered type is the same
-            (a code defect retrying cannot fix).
+            add nothing but budget-episode churn. An unregistered kind is the
+            same (a code defect retrying cannot fix).
+        Never raises (`observe` never does): an alert must not kill the sync.
         """
+        from services import platform_alerts
+
         key = (agent_name, reason)
-        if key in self._flood_episodes:
-            return  # this episode already alerted
         now = time.monotonic()
-        # `None` = never alerted for this agent. A `0.0` default would be wrong:
-        # `time.monotonic()` is seconds from an arbitrary reference and can be
-        # < COOLDOWN on a freshly-booted process, so `now - 0.0 < COOLDOWN` would
-        # suppress the FIRST-ever alert for the first COOLDOWN seconds of uptime.
-        last = self._flood_alert_cooldown.get(agent_name)
-        if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
-            return  # too soon after the last episode — the next cycle retries
-        self._flood_alert_cooldown[agent_name] = now
-        self._flood_episodes.add(key)
+        refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        if key in self._flood_episodes:
+            # R9: the 6-hour re-read of a persisting episode, the #3255
+            # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+            last_read = refreshed.get(key)
+            if last_read is not None and now - last_read < 6 * 60 * 60:
+                return  # this episode already alerted and was read recently
+        else:
+            # `None` = never alerted for this agent. A `0.0` default would be
+            # wrong: `time.monotonic()` is seconds from an arbitrary reference
+            # and can be < COOLDOWN on a freshly-booted process, so
+            # `now - 0.0 < COOLDOWN` would suppress the FIRST-ever alert for
+            # the first COOLDOWN seconds of uptime.
+            last = self._flood_alert_cooldown.get(agent_name)
+            if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
+                return  # too soon after the last episode — the next cycle retries
+            self._flood_alert_cooldown[agent_name] = now
+            self._flood_episodes.add(key)
+        refreshed[key] = now
 
         if reason == "oversize_file":
             title = f"Agent '{agent_name}' produced an oversized operator-queue file"
@@ -2770,48 +2788,38 @@ class OperatorQueueSyncService:
                 f"recent activity before acting on its requests."
             )
 
-        alert = {
-            "id": f"queue-flood-{agent_name}-{utc_now_iso()}",
-            "type": "queue_flood",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": {"held": held, "reason": reason},
-            "created_at": utc_now_iso(),
-        }
-
-        try:
-            outcome = await create_bounded_alert_outcome(agent_name, alert)
-        except Exception as e:  # the helper never raises; belt for the sync loop
-            logger.error(f"Failed to emit operator-queue flood alert for {agent_name}: {e}")
-            outcome = ALERT_FAILED_CREATE
-        if outcome in (ALERT_FAILED_COUNT, ALERT_FAILED_CREATE):
-            self._flood_episodes.discard(key)  # retry next window (I1)
-            return
-        if outcome != ALERT_CREATED:
-            return  # refused: the episode stays consumed
-
-        logger.warning(
-            f"Operator-queue flood alert emitted for {agent_name} "
-            f"(reason={reason}, held={held})"
+        outcome = platform_alerts.observe(
+            agent_name, "queue_flood", reason,
+            title=title, question=question, priority="high",
+            context={"held": held, "reason": reason},
         )
+        if outcome == platform_alerts.OBSERVED_FAILED:
+            self._flood_episodes.discard(key)  # retry next window (I1)
+            refreshed.pop(key, None)
+            return
+        if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
+            logger.warning(
+                f"Operator-queue flood alert {outcome} for {agent_name} "
+                f"(reason={reason}, held={held})"
+            )
 
-        if _websocket_manager:
-            try:
-                await _websocket_manager.broadcast(json.dumps({
-                    "type": "operator_queue_new",
-                    "data": {
-                        "id": alert["id"],
-                        "agent_name": agent_name,
-                        "type": alert["type"],
-                        "priority": "high",
-                        "title": alert["title"],
-                        "created_at": alert["created_at"],
-                    }
-                }))
-            except Exception as e:
-                logger.error(f"Failed to broadcast flood alert for {agent_name}: {e}")
+    def _end_flood_episode(self, agent_name: str, reason: str) -> None:
+        """#3130 / #3254: the over-cap condition behind `reason` cleared.
+
+        Called from `_sync_agent` where it knows (a sane-size read ends an
+        oversize episode; a cycle that held nothing ends an ingestion-cap one).
+        Ends the episode, so the next over-cap reading alerts again, and, only
+        when one was running, ends its alert as the platform
+        (`platform_alerts.clear`, a compare-and-set on pending: a person's
+        ending is never overwritten). Every cycle without an episode costs no
+        read. Never raises (`clear` never does).
+        """
+        key = (agent_name, reason)
+        if key not in self._flood_episodes:
+            return
+        self._flood_episodes.discard(key)
+        from services import platform_alerts
+        platform_alerts.clear(agent_name, "queue_flood", reason)
 
 
 # Global service instance

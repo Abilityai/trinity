@@ -508,3 +508,187 @@ def test_legacy_episode_rows_derive_the_subject_observe_uses():
     )
     assert got.kind == "alert_budget"
     assert got.subject == pa.subject_for("alert_budget", "skill_not_found")
+
+
+# ---------------------------------------------------------------------------
+# The flood alarm (`queue_flood`): one row per reason, re-read while the
+# episode lasts (R9), ended where the episode ends (D8)
+# ---------------------------------------------------------------------------
+
+def _sync_loop(monkeypatch, *, over_cap=True):
+    """The real `_sync_agent` over a stand-in agent file: the file side of the
+    db (`oqs.db`) is stubbed, and the alert lands in the real seam."""
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services import operator_queue_service as oqs
+    from services.rate_limiter import RateLimitResult
+
+    state = {"over_cap": over_cap}
+    db = MagicMock()
+    db.count_operator_queue_pending_for_agent.side_effect = (
+        lambda agent, item_type=None, exclude_request_id_prefixes=None:
+        oqs.OPERATOR_QUEUE_MAX_PENDING_PER_AGENT if state["over_cap"] else 0)
+    db.get_operator_queue_responded_for_agent.return_value = []
+    db.get_operator_queue_terminal_for_agent.return_value = []
+    db.get_operator_queue_sync_index_for_agent.return_value = {
+        "open": [], "terminal": {}, "foreign": []}
+    db.set_operator_queue_sync_state.return_value = False
+    db.set_operator_queue_delivery_state.return_value = False
+    db.create_operator_queue_item_with_outcome.side_effect = lambda agent, item, **kw: (None, True)
+    db.mark_operator_queue_unconfirmed.return_value = 0
+    db.refresh_operator_queue_last_confirmed.return_value = 0
+    db.get_setting_value.return_value = "24"
+    monkeypatch.setattr(oqs, "db", db)
+
+    requests = [{"id": f"req-{i}", "status": "pending", "title": "t", "question": "q"}
+                for i in range(3)]
+    file = {"content": json.dumps({"requests": requests})}
+    client = MagicMock()
+
+    async def _read(path, timeout=5.0):
+        return {"success": True, "content": file["content"]}
+
+    async def _write(path, content, **kw):
+        file["content"] = content
+        return {"success": True}
+
+    client.read_file = AsyncMock(side_effect=_read)
+    client.write_file = AsyncMock(side_effect=_write)
+    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.rate_limiter, "check",
+                        lambda *a, **k: RateLimitResult(True, 10, 0, 60))
+    svc = oqs.OperatorQueueSyncService()
+    return SimpleNamespace(svc=svc, state=state,
+                           cycle=lambda: asyncio.run(svc._sync_agent(AGENT)))
+
+
+def _flood_rows(seam, status=None):
+    return [r for r in rows(seam, status=status)
+            if r["request_id"].startswith("queue-flood-")]
+
+
+def test_a_persisting_flood_is_one_row_reread_for_thirty_days_then_cleared(seam, monkeypatch):
+    """R9 through the real poll: an over-cap episode that lasts 30 simulated
+    days, swept by the real expiry every 3 hours, keeps exactly one pending row
+    (subject `queue_flood:ingestion_cap`) whose deadline the 6-hourly re-read
+    moves; the cycle that holds nothing ends it as the platform (D8)."""
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()
+    (first,) = _flood_rows(seam)
+    assert first["subject"] == "queue_flood:ingestion_cap"
+    assert first["type"] == "queue_flood" and first["priority"] == "high"
+    assert first["context"]["reason"] == "ingestion_cap" and first["context"]["held"] >= 1
+    assert first["context"]["seen_count"] == 1
+    assert _parse(first["expires_at"]) == T0 + timedelta(days=14)
+
+    for _ in range(30 * 8):
+        seam.clock.advance(hours=3)
+        loop.cycle()
+        seam.db.mark_operator_queue_expired()
+    (row,) = _flood_rows(seam)
+    assert row["id"] == first["id"] and row["status"] == "pending"
+    assert row["context"]["seen_count"] == 1 + 30 * 4         # one re-read per 6 hours
+    assert _parse(row["last_seen_at"]) == T0 + timedelta(days=30)
+    assert _parse(row["expires_at"]) == T0 + timedelta(days=44)
+
+    loop.state["over_cap"] = False
+    loop.cycle()
+    ended = seam.db.get_operator_queue_item(first["id"])
+    assert (ended["status"], ended["disposed_by"], ended["disposition_reason"]) == (
+        "cancelled", "platform", "condition_cleared")
+    assert _flood_rows(seam, status="pending") == []
+
+
+def test_without_an_episode_the_clear_site_reads_nothing(seam, monkeypatch):
+    """D8: `_end_flood_episode` runs every cycle the condition is absent; with no
+    episode it must cost no database read."""
+    from services import operator_queue_service as oqs
+
+    reads = []
+    real = seam.db.find_pending_operator_queue_by_subject
+    monkeypatch.setattr(seam.db, "find_pending_operator_queue_by_subject",
+                        lambda *a: reads.append(a) or real(*a))
+    svc = oqs.OperatorQueueSyncService()
+    svc._end_flood_episode(AGENT, "ingestion_cap")
+    svc._end_flood_episode(AGENT, "oversize_file")
+    assert reads == []
+
+
+def test_the_two_reasons_are_two_subjects_and_end_separately(seam):
+    from services import operator_queue_service as oqs
+
+    svc = oqs.OperatorQueueSyncService()
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=4))
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1)
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, reason="oversize_file"))
+    assert sorted(r["subject"] for r in _flood_rows(seam)) == [
+        "queue_flood:ingestion_cap", "queue_flood:oversize_file"]
+    svc._end_flood_episode(AGENT, "oversize_file")
+    assert [r["subject"] for r in _flood_rows(seam, status="pending")] == [
+        "queue_flood:ingestion_cap"]
+
+
+def test_a_failed_flood_reading_is_retried_after_the_cooldown(seam, monkeypatch):
+    """#3130 I1 on the real seam: a write that fails releases the episode, and
+    the next window files the alert once."""
+    from services import operator_queue_service as oqs
+
+    real = seam.db.create_platform_operator_queue_item
+    calls = {"n": 0}
+
+    def _flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", _flaky)
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()
+    assert _flood_rows(seam) == []
+    loop.cycle()                                   # inside the cooldown: no retry yet
+    assert calls["n"] == 1
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1)
+    loop.cycle()
+    assert len(_flood_rows(seam)) == 1 and calls["n"] == 2
+
+
+def test_a_person_ending_of_the_flood_stands_through_the_reread_and_the_clear(seam, monkeypatch):
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()
+    (row,) = _flood_rows(seam)
+    person_ends(seam, row)
+    seam.clock.advance(hours=7)                    # past the 6-hour re-read
+    loop.cycle()
+    assert [r["status"] for r in _flood_rows(seam)] == ["acknowledged"]
+    loop.state["over_cap"] = False
+    loop.cycle()                                   # the episode ends; the clear finds nothing
+    still = seam.db.get_operator_queue_item(row["id"])
+    assert (still["status"], still["disposed_by"]) == ("acknowledged", "person")
+    assert len(_flood_rows(seam)) == 1
+
+
+def test_the_flood_sends_the_thin_sync_trigger_not_its_title(seam, monkeypatch):
+    """#918 / D16: the old `operator_queue_new` carried the title; the seam's
+    trigger names the host agent only."""
+    import json
+    from unittest.mock import AsyncMock, MagicMock
+
+    from services import operator_queue_service as oqs
+
+    ws = MagicMock()
+    ws.broadcast = AsyncMock()
+    monkeypatch.setattr(oqs, "_websocket_manager", ws)
+    asyncio.run(oqs.OperatorQueueSyncService()._maybe_emit_flood_alert(AGENT, held=2))
+    drain(seam)
+    payloads = [json.loads(c.args[0]) for c in ws.broadcast.await_args_list]
+    assert payloads == [{"type": "operator_queue_sync", "data": {"agent_name": AGENT}}]
+
+
+def test_legacy_flood_rows_derive_the_subject_observe_uses():
+    from services import platform_alerts as pa
+    got = pa.derive_legacy_subject(f"queue-flood-{AGENT}-{TS}",
+                                   {"held": 3, "reason": "ingestion_cap"})
+    assert got.kind == "queue_flood"
+    assert got.subject == pa.subject_for("queue_flood", "ingestion_cap")

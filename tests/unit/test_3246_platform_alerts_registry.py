@@ -66,8 +66,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
     ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
-    ("services/operator_queue_service.py", "OperatorQueueSyncService._maybe_emit_flood_alert"):
-        ("queue-flood-", _PR2),
     ("services/idempotency_service.py", "_on_unguarded_effect"): ("effect-unguarded-", _PR2),
     ("services/task_execution_service.py", "_alert_skill_not_found"): ("skill-not-found-", _PR2),
     ("services/git_service/gitignore_sweep.py", "_emit_gitignore_untracked_alert"):

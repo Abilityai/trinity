@@ -790,7 +790,7 @@
         "operator-queue",
         "unit"
       ],
-      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal. Fresh DB per test (db_backend), both clocks frozen."
+      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal; the flood alarm as one queue_flood:<reason> row re-read every 6 hours through the real _sync_agent poll for 30 simulated days (R9), ended as the platform where the episode ends and never read when no episode runs (D8), retried after a failed write (#3130 I1), a person's ending standing through the re-read and the clear. Fresh DB per test (db_backend), both clocks frozen."
     },
     {
       "file": "unit/test_3246_platform_alert_sweep.py",
