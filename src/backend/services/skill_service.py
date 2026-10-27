@@ -1599,32 +1599,50 @@ print(json.dumps(out))
         comes from the agent's own filesystem, i.e. untrusted input that later
         reaches path math.
 
-        An ABSENT skills directory is an empty inventory (nothing is managed).
-        A directory that exists but cannot be listed (permissions, not a
-        directory) is a failure: the script prints ``null``. It used to print
-        ``[]`` for both, so an unreadable directory read as a clean pass — and a
-        clean pass ends the reconcile-refusal alarm (#3254, R10) and lets the
-        gate reconcile drop unassigned defaults (`drop_after_prune`).
+        An ABSENT skills directory is an empty inventory (nothing is managed),
+        and so is an entry or marker that is simply not there. Anything that
+        could not be INSPECTED is a failure and the script prints ``null``: a
+        directory that cannot be listed, or an entry or marker whose stat fails
+        (a skills dir that lists but cannot be searched, a child dir with no
+        permissions). The script used to print ``[]`` for a failed listing, and
+        `os.path.isdir`/`isfile` turn a failed stat into False, so an
+        uninspectable inventory read as smaller than it is. A clean or
+        reconciled pass ends the reconcile-refusal alarm (#3254, R10) and lets
+        the gate reconcile drop unassigned defaults (`drop_after_prune`), so
+        "could not look" must never read as "nothing there".
         """
         script = f"""
-import json, os
+import json, os, stat
 base = os.path.expanduser("~/.claude/skills")
 meta_name = {json.dumps(pkg.META_FILENAME)}
-try:
-    names = os.listdir(base)
-except FileNotFoundError:
-    names = []
-except Exception:
-    names = None
-if names is None:
-    print("null")
-else:
+
+def mode_of(path):
+    # None: not there. Raises: could not look.
+    try:
+        return os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+
+def inventory():
+    try:
+        names = os.listdir(base)
+    except FileNotFoundError:
+        return []
     out = []
     for name in names:
         d = os.path.join(base, name)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, meta_name)):
+        mode = mode_of(d)
+        if mode is None or not stat.S_ISDIR(mode):
+            continue
+        meta = mode_of(os.path.join(d, meta_name))
+        if meta is not None and stat.S_ISREG(meta):
             out.append(name)
-    print(json.dumps(sorted(out)))
+    return sorted(out)
+
+try:
+    print(json.dumps(inventory()))
+except Exception:
+    print("null")
 """
         result = await self._run_agent_python(agent_name, script)
         if not isinstance(result, list):

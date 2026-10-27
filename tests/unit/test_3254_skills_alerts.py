@@ -251,31 +251,44 @@ class TestReconcileRefusal:
             (d / pkg.META_FILENAME).write_text("{}")
         return skills
 
-    @pytest.mark.parametrize("damage", ["not_a_directory", "unreadable"])
+    @pytest.mark.parametrize("damage", [
+        "not_a_directory", "unreadable", "unsearchable", "inaccessible_children"])
     def test_an_unreadable_skills_dir_leaves_the_refusal_alone(
             self, db, svc, agent_home, clock, damage):
-        """R10 through the real inventory: an enumeration that FAILS is "could
-        not look", never "nothing is managed". It used to print `[]`, which read
-        as a clean pass and would have ended the refusal."""
-        if damage == "unreadable" and os.geteuid() == 0:
-            pytest.skip("root can list a mode-000 directory")
+        """R10 through the real inventory: an inspection that FAILS is "could
+        not look", never "nothing is managed". The script used to print `[]`
+        for a failed listing, and `os.path.isdir`/`isfile` turn a failed stat
+        into False, so a skills dir that lists but cannot be searched read as
+        empty, and children it could not open read as unmanaged. Either can
+        bring the count under the cap: a clean or reconciled pass that would
+        have ended the refusal."""
+        if damage != "not_a_directory" and os.geteuid() == 0:
+            pytest.skip("root bypasses directory permissions")
         skills = self._managed(agent_home, 12)
         assert asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))["status"] == "refused"
         [first] = _pending(db, self.SUBJECT)
 
+        children = sorted(p for p in skills.iterdir())[:3]
         if damage == "not_a_directory":
             shutil.rmtree(skills)
             skills.write_text("")
-        else:
+        elif damage == "unreadable":
             skills.chmod(0)
-        clock.advance(minutes=1)
+        elif damage == "unsearchable":
+            skills.chmod(0o600)                   # listable, children cannot be stat'ed
+        else:
+            for child in children:                # 12 - 3 = 9: under the cap of 10
+                child.chmod(0)
         try:
             result = asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))
         finally:
-            if damage == "unreadable":
+            if damage != "not_a_directory":
                 skills.chmod(0o755)
+                for child in children:
+                    child.chmod(0o755)
         assert result == {"status": "skipped", "reason": "inventory_unavailable"}
-        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [first["id"]]   # not ended
+        assert [(r["id"], r["context"]["seen_count"]) for r in _pending(db, self.SUBJECT)] == [
+            (first["id"], 1)]                                 # untouched, not ended
 
     def test_an_absent_skills_dir_is_a_clean_pass_that_ends_the_refusal(
             self, db, svc, agent_home, clock):
