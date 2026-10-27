@@ -1,15 +1,21 @@
 """
-#3254 (S5) — the first-run seed's alarms report through the platform alert
+#3254 (S5) — the boot housekeeping alarms report through the platform alert
 seam.
 
-`system_seed_service` raises kind `system_seed`, one subject per seed kind
-(`failed`, `error`, `override-unreadable`, `partial`, `cornelius-failed`) on
-`trinity-system`. Each is one pending row updated in place, and the place the
-code has POSITIVE evidence the condition is over ends it as the platform. An
-inconclusive result (a skipped or failed Cornelius pass, a seed pass that
-deployed nothing) ends nothing. Against a fresh database per test
-(db_harness), asserting the rows: `observe` never raises, so a failure would
-only log.
+Two start-time sweeps raise operator alarms:
+
+* the first-run seed (`system_seed_service`): kind `system_seed`, one subject
+  per seed kind (`failed`, `error`, `override-unreadable`, `partial`,
+  `cornelius-failed`) on `trinity-system`;
+* the ent#615 token sweep (`git_service/token_scrub.py`): kinds
+  `git_token_scrub_refused` and `git_token_scrub_unreadable`, one subject per
+  agent.
+
+Each is one pending row updated in place, and the place the code has POSITIVE
+evidence the condition is over ends it as the platform. An inconclusive result
+(a skipped or failed Cornelius pass, a sweep that could not see the tree) ends
+nothing. Against a fresh database per test (db_harness), asserting the rows:
+`observe` never raises, so a failure would only log.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+import uuid
 from datetime import datetime, timedelta
 from unittest.mock import AsyncMock
 
@@ -42,6 +49,7 @@ agents:
 """
 SEED_KINDS = ("failed", "error", "override-unreadable", "partial", "cornelius-failed")
 NET = timedelta(days=30)  # `system_seed` is LIFETIME_NET
+DEFAULT = timedelta(days=14)  # both scrub kinds are LIFETIME_DEFAULT
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +520,152 @@ def test_fresh_install_first_boot_fails_and_the_next_boot_ends_it(seed, db):
 
 
 # ---------------------------------------------------------------------------
+# The ent#615 token sweep
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sweep(db, monkeypatch):
+    """Run the real `scrub_git_remote_tokens` against a stubbed exec that
+    returns the given report; yields (run, agent)."""
+    from services.git_service import token_scrub
+
+    agent = f"agent-3254ts-{uuid.uuid4().hex[:6]}"
+
+    def run(
+        *, refused=0, root_readable=1, root_traversable=1, git_present=1, exit_code=0
+    ):
+        async def fake_exec(
+            container_name, command, timeout=60, *, environment=None, user="developer"
+        ):
+            if "base64 -d" in command and "sh -s" in command:
+                return {
+                    "exit_code": exit_code,
+                    "output": (
+                        f"TRINITY_SCRUB_REPORT remotes_scrubbed=0 harvested=0 seeded=0 "
+                        f"refused={refused} gitmodules_hits=0 helper_ok=1 "
+                        f"competing_helpers=0 root_readable={root_readable} "
+                        f"root_traversable={root_traversable} git_present={git_present}"
+                    ),
+                }
+            return {"exit_code": 0, "output": ""}  # the helper install
+
+        monkeypatch.setattr(token_scrub, "execute_command_in_container", fake_exec)
+        return asyncio.run(
+            token_scrub.scrub_git_remote_tokens(agent, git_dir="/home/developer")
+        )
+
+    return run, agent
+
+
+REFUSING = dict(refused=2)
+UNREADABLE = dict(root_readable=0, root_traversable=0, git_present=0)
+
+
+def _scrub(db, agent, kind):
+    rows = _subject_rows(db, agent, f"{kind}:{agent}")
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+@pytest.mark.parametrize(
+    "kind, reading",
+    [
+        ("git_token_scrub_refused", REFUSING),
+        ("git_token_scrub_unreadable", UNREADABLE),
+    ],
+)
+def test_each_scrub_alarm_is_one_row_per_agent(sweep, db, kind, reading):
+    run, agent = sweep
+    run(**reading)
+    first = _rows(db, agent, "ent615-git-token-scrub-")
+    assert len(first) == 1, first
+    run(**reading)
+    second = _rows(db, agent, "ent615-git-token-scrub-")
+    assert len(second) == 1, second
+    _assert_two_readings_one_row(first[0], second[0], f"{kind}:{agent}", DEFAULT)
+    assert second[0]["priority"] == "medium"
+
+
+def test_the_refusal_keeps_its_counts_only_context(sweep, db):
+    run, agent = sweep
+    run(**REFUSING)
+    ctx = _scrub(db, agent, "git_token_scrub_refused")["context"]
+    assert ctx["refused"] == 2 and ctx["success"] is True
+    assert all(isinstance(v, (int, bool)) for k, v in ctx.items() if k != "seen_count")
+
+
+def _raise_both(run):
+    run(**REFUSING)
+    run(**UNREADABLE)
+
+
+@pytest.mark.parametrize(
+    "clean",
+    [
+        dict(),  # read ROOT's repo
+        dict(root_readable=0, root_traversable=1, git_present=0),  # no repo (#2930)
+    ],
+    ids=["readable", "no_repository"],
+)
+def test_an_inspected_clean_sweep_ends_both_alarms(sweep, db, clean):
+    run, agent = sweep
+    _raise_both(run)
+    run(**clean)
+    assert _ended_by_platform(_scrub(db, agent, "git_token_scrub_refused"))
+    assert _ended_by_platform(_scrub(db, agent, "git_token_scrub_unreadable"))
+
+
+@pytest.mark.parametrize(
+    "reading",
+    [
+        dict(
+            root_readable=0, root_traversable=0, git_present=0
+        ),  # ROOT not traversable
+        dict(
+            root_readable=0, root_traversable=1, git_present=1
+        ),  # repo there, unreadable
+        dict(exit_code=1),  # the sweep failed
+    ],
+    ids=["not_traversable", "present_unreadable", "sweep_failed"],
+)
+def test_zero_refusals_without_inspection_evidence_end_neither(sweep, db, reading):
+    run, agent = sweep
+    _raise_both(run)
+    report = run(**reading)
+    assert report["refused"] == 0
+    assert _scrub(db, agent, "git_token_scrub_refused")["status"] == "pending"
+    assert _scrub(db, agent, "git_token_scrub_unreadable")["status"] == "pending"
+
+
+def test_a_readable_refusing_sweep_ends_only_the_unreadable_alarm(sweep, db):
+    run, agent = sweep
+    _raise_both(run)
+    run(**REFUSING)
+    refused = _scrub(db, agent, "git_token_scrub_refused")
+    assert refused["status"] == "pending" and refused["context"]["seen_count"] == 2
+    assert _ended_by_platform(_scrub(db, agent, "git_token_scrub_unreadable"))
+
+
+def test_a_person_ending_a_scrub_alarm_stands_and_snoozes_it(sweep, db):
+    run, agent = sweep
+    run(**REFUSING)
+    out = _answer(_scrub(db, agent, "git_token_scrub_refused"))
+    assert out["status"] == "acknowledged"
+    run(**REFUSING)
+    assert _pending(db, agent, f"git_token_scrub_refused:{agent}") == []
+    run()  # a clean, inspected sweep: the clear finds no pending row
+    row = _scrub(db, agent, "git_token_scrub_refused")
+    assert (row["status"], row["disposed_by"]) == ("acknowledged", "person")
+
+
+def test_a_sweep_that_never_raised_an_alarm_writes_nothing(sweep, db):
+    run, agent = sweep
+    run()
+    assert db.list_operator_queue_items(agent_name=agent, limit=1000) == []
+
+
+# ---------------------------------------------------------------------------
 # R1: the key each emitter passes is the subject the upgrade sweep derives
 # from that kind's pre-move rows (so the second sweep stamps the same subject)
 # ---------------------------------------------------------------------------
@@ -540,3 +694,32 @@ def test_r1_system_seed_key_matches_the_legacy_parser(readings, seed_kind):
     assert host == HOST
     assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
 
+
+def test_r1_scrub_refused_key_matches_the_legacy_parser(readings):
+    from services import platform_alerts as pa
+    from services.git_service import token_scrub
+
+    report = {"remotes_scrubbed": 0, "refused": 1, "root_readable": 1, "success": True}
+    token_scrub._alarm_git_token_scrub_refused("agent-a", report)
+    [(host, kind, key)] = readings
+    # the pre-move emitter: `ent615-git-token-scrub-<agent>-<UTC day>` on the agent
+    legacy = pa.derive_legacy_subject(
+        "ent615-git-token-scrub-agent-a-2026-09-01", report
+    )
+    assert host == "agent-a"
+    assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
+
+
+def test_r1_scrub_unreadable_key_matches_the_legacy_parser(readings):
+    from services import platform_alerts as pa
+    from services.git_service import token_scrub
+
+    token_scrub._alarm_git_token_scrub_unreadable("agent-a")
+    [(host, kind, key)] = readings
+    # the pre-move emitter: `ent615-git-token-scrub-unreadable-<agent>-<UTC day>`
+    legacy = pa.derive_legacy_subject(
+        "ent615-git-token-scrub-unreadable-agent-a-2026-09-01",
+        {"reason": "root_readable=0"},
+    )
+    assert host == "agent-a"
+    assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
