@@ -148,7 +148,7 @@ _BUILTIN_KINDS = (
     Kind("db_backup_failure", "db-backup-", _D, CLEARS_HOOK),
     Kind("db_backup_stale", "db-backup-", _D, CLEARS_HOOK),
     Kind("log_archive_unwritable", "log-archive-", _D, CLEARS_HOOK),
-    Kind("retention_refused", "retention-guard-", _D, CLEARS_HOOK, material_keys=("reason",)),
+    Kind("retention_refused", "retention-guard-", _D, CLEARS_HOOK, material_keys=("reason", "window_days")),
     Kind("system_seed", "system-seed-", _N, CLEARS_HOOK),
     Kind("git_token_scrub_refused", "ent615-git-token-scrub-", _D, CLEARS_HOOK),
     Kind("git_token_scrub_unreadable", "ent615-git-token-scrub-unreadable-", _D, CLEARS_HOOK),
