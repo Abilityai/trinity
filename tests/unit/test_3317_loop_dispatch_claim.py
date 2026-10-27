@@ -11,8 +11,9 @@ Both are only as good as two facts this file pins:
 
 1. **Every inserter of `agent_loop_runs` takes the parent row first.** That holds
    while `start_loop_run` is the only inserter, so a static guard fails the build
-   on any other insert, in any spelling, anywhere in the backend (the private
-   submodule included when it is mounted) or the scheduler.
+   on any other insert it can see — raw SQL (schema-qualified, quoted or not) and
+   SQLAlchemy inserts through any import or table alias — anywhere in the backend
+   (the private submodule included when it is mounted) or the scheduler.
 2. **A second writer really waits on the first one's row lock, then decides on
    the committed state.** Four two-connection races, run against the real SQL: a
    holder opens a transaction and takes the loop row exactly as the competing
@@ -59,17 +60,70 @@ pytestmark = pytest.mark.unit
 # private tree is covered too) and the scheduler, which shares the database.
 _SCAN_ROOTS = (_REPO / "src" / "backend", _REPO / "src" / "scheduler")
 
-_INSERT = re.compile(
-    # insert(agent_loop_runs …), make_insert(…), pg_insert(tables.agent_loop_runs …)
-    r"insert\s*\(\s*(?:[\w.]+\.)?agent_loop_runs\b"
-    # agent_loop_runs.insert(…)
-    r"|\bagent_loop_runs\s*\.\s*insert\s*\("
-    # raw SQL: INSERT [OR …] INTO [quote, escaped or not]agent_loop_runs
-    r"|\binsert\s+(?:or\s+\w+\s+)?into\s+\\?[\"'`\[]?agent_loop_runs\b",
+# Raw SQL anywhere in the file text: INSERT [OR …] INTO [schema.]agent_loop_runs,
+# each identifier optionally quoted (escaped or not, as it appears in a Python
+# string).
+_Q_OPEN, _Q_CLOSE = r"\\?[\"'`\[]?", r"\\?[\"'`\]]?"
+_SQL_INSERT = re.compile(
+    r"\binsert\s+(?:or\s+\w+\s+)?into\s+"
+    rf"(?:{_Q_OPEN}\w+{_Q_CLOSE}\s*\.\s*)?"
+    rf"{_Q_OPEN}agent_loop_runs\b",
     re.IGNORECASE,
 )
 
+_TABLE = "agent_loop_runs"
 _ALLOWED = {("src/backend/db/loops.py", "LoopOperations.start_loop_run")}
+
+
+def _sqlalchemy_insert_lines(tree: ast.AST) -> list:
+    """Lines of SQLAlchemy inserts into the run table, through any import alias
+    (`insert as ins`, `make_insert`, a dialect `insert`, `sa.insert`) and any
+    module-level or local alias of the table (`... import agent_loop_runs as t`,
+    `t = agent_loop_runs`, `tables.agent_loop_runs`). Not resolved: a table name
+    built at runtime, a reflected `Table("agent_loop_runs", …)`, or a table passed
+    in as a function argument — this guard cannot see those."""
+    table_names, insert_names = {_TABLE}, set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name == _TABLE:
+                    table_names.add(a.asname or a.name)
+                if "insert" in a.name.lower():
+                    insert_names.add(a.asname or a.name)
+    changed = True
+    while changed:  # follow `t = agent_loop_runs` / `t2 = t` to a fixed point
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _is_table(node.value, table_names):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id not in table_names:
+                        table_names.add(target.id)
+                        changed = True
+
+    def _is_insert_fn(func) -> bool:
+        if isinstance(func, ast.Name):
+            return func.id in insert_names or "insert" in func.id.lower()
+        return isinstance(func, ast.Attribute) and "insert" in func.attr.lower()
+
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if (isinstance(func, ast.Attribute) and func.attr == "insert"
+                and _is_table(func.value, table_names)):
+            lines.append(node.lineno)  # agent_loop_runs.insert()
+        elif _is_insert_fn(func):
+            args = list(node.args) + [k.value for k in node.keywords if k.arg == "table"]
+            if args and _is_table(args[0], table_names):
+                lines.append(node.lineno)  # insert(agent_loop_runs)
+    return lines
+
+
+def _is_table(node, table_names) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id in table_names
+    return isinstance(node, ast.Attribute) and node.attr == _TABLE
 
 
 def _enclosing_def(tree: ast.AST, line: int) -> str:
@@ -89,6 +143,14 @@ def _enclosing_def(tree: ast.AST, line: int) -> str:
     return ".".join(best) or "<module>"
 
 
+def _sites_in(text: str) -> tuple:
+    """(tree, sorted insert lines) for one module's source."""
+    tree = ast.parse(text)
+    lines = {text.count("\n", 0, m.start()) + 1 for m in _SQL_INSERT.finditer(text)}
+    lines.update(_sqlalchemy_insert_lines(tree))
+    return tree, sorted(lines)
+
+
 def _insert_sites() -> tuple[list, int]:
     sites, scanned = [], 0
     for root in _SCAN_ROOTS:
@@ -97,14 +159,11 @@ def _insert_sites() -> tuple[list, int]:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             scanned += 1
-            hits = list(_INSERT.finditer(text))
-            if not hits:
+            if _TABLE not in text:
                 continue
-            tree = ast.parse(text, filename=str(path))
+            tree, lines = _sites_in(text)
             rel = path.relative_to(_REPO).as_posix()
-            for m in hits:
-                line = text.count("\n", 0, m.start()) + 1
-                sites.append((rel, _enclosing_def(tree, line), line))
+            sites.extend((rel, _enclosing_def(tree, line), line) for line in lines)
     return sites, scanned
 
 
@@ -121,35 +180,45 @@ def test_start_loop_run_is_the_only_inserter_of_agent_loop_runs():
     assert len(sites) == 1, sites
 
 
+_T = "from db.tables import agent_loop_runs\n"
+
+
 @pytest.mark.parametrize(
     "src",
     [
-        "insert(agent_loop_runs).values(x=1)",
-        "stmt = insert( agent_loop_runs )",
-        "make_insert(agent_loop_runs)",
-        "pg_insert(tables.agent_loop_runs)",
-        "agent_loop_runs.insert().values(x=1)",
-        '"INSERT INTO agent_loop_runs (id) VALUES (?)"',
-        "'insert or ignore into agent_loop_runs values (1)'",
-        '"INSERT INTO \\"agent_loop_runs\\" (id)"',
+        "from sqlalchemy import insert\n" + _T + "insert(agent_loop_runs).values(x=1)",
+        "from sqlalchemy import insert as ins\nfrom db.tables import agent_loop_runs as alr\nins(alr)",
+        "import sqlalchemy as sa\nfrom db import tables\nsa.insert(tables.agent_loop_runs)",
+        "from db.engine import make_insert\n" + _T + "make_insert(agent_loop_runs)",
+        "from sqlalchemy.dialects.postgresql import insert as pg_insert\n" + _T + "pg_insert(agent_loop_runs)",
+        _T + "t = agent_loop_runs\nu = t\nfrom sqlalchemy import insert\ninsert(u)",
+        _T + "agent_loop_runs.insert().values(x=1)",
+        "from sqlalchemy import insert\n" + _T + "insert(table=agent_loop_runs)",
+        'q = "INSERT INTO agent_loop_runs (id) VALUES (?)"',
+        "q = 'insert or ignore into agent_loop_runs values (1)'",
+        'q = "INSERT INTO \\"agent_loop_runs\\" (id)"',
+        'q = "INSERT INTO public.agent_loop_runs (id) VALUES (1)"',
+        'q = "INSERT INTO \\"public\\".\\"agent_loop_runs\\" (id)"',
+        "q = 'INSERT INTO [dbo].[agent_loop_runs] (id)'",
     ],
 )
-def test_the_guard_matches_every_insert_spelling(src):
-    assert _INSERT.search(src), src
+def test_the_guard_finds_every_spelling_it_claims(src):
+    assert _sites_in(src)[1], src
 
 
 @pytest.mark.parametrize(
     "src",
     [
-        "select(agent_loop_runs)",
-        "update(agent_loop_runs).where(x)",
-        '"DELETE FROM agent_loop_runs WHERE loop_id = ?"',
-        '"CREATE TABLE IF NOT EXISTS agent_loop_runs ("',
-        "insert(agent_loops).values(x=1)",
+        "from sqlalchemy import select\n" + _T + "select(agent_loop_runs)",
+        "from sqlalchemy import update\n" + _T + "update(agent_loop_runs).where(x)",
+        'q = "DELETE FROM agent_loop_runs WHERE loop_id = ?"',
+        'q = "CREATE TABLE IF NOT EXISTS agent_loop_runs ("',
+        "from sqlalchemy import insert\nfrom db.tables import agent_loops\ninsert(agent_loops)",
+        'q = "INSERT INTO agent_loop_runs_archive (id) VALUES (1)"',
     ],
 )
 def test_the_guard_ignores_what_is_not_an_insert_into_the_run_table(src):
-    assert not _INSERT.search(src), src
+    assert not _sites_in(src)[1], src
 
 
 # ---------------------------------------------------------------------------
@@ -248,29 +317,37 @@ def _race(db_backend, hold, contend):  # noqa: F811
         except BaseException as exc:  # noqa: BLE001 — reported by the assertion below
             box["error"] = exc
 
-    contender = threading.Thread(target=_run_contender, name="contender")
+    # A daemon thread, and joined in `finally`: whatever fails below, the holder's
+    # transaction ends (commit, or rollback on the way out), so the contender is
+    # never left blocked on our lock and cannot outlive the test's teardown.
+    contender = threading.Thread(target=_run_contender, name="contender", daemon=True)
     event.listen(engine, "before_cursor_execute", _flag)
     try:
         with engine.connect() as holder:
             tx = holder.begin()
-            holder_pid = (holder.exec_driver_sql("SELECT pg_backend_pid()").scalar()
-                          if db_backend == "postgres" else None)
-            hold(holder)
-            contender.start()
-            deadline = time.monotonic() + 15
-            waited = False
-            while time.monotonic() < deadline and not waited:
-                if db_backend == "postgres":
-                    waited = _waiting_on(holder_pid)
-                else:
-                    # Issued its lock-taking write, and still has no answer.
-                    waited = issued.is_set() and (time.sleep(0.3) or contender.is_alive())
-                if not waited:
-                    time.sleep(0.05)
-            box["waited"] = waited
-            tx.commit()
-        contender.join(30)
+            try:
+                holder_pid = (holder.exec_driver_sql("SELECT pg_backend_pid()").scalar()
+                              if db_backend == "postgres" else None)
+                hold(holder)
+                contender.start()
+                deadline = time.monotonic() + 15
+                waited = False
+                while time.monotonic() < deadline and not waited:
+                    if db_backend == "postgres":
+                        waited = _waiting_on(holder_pid)
+                    else:
+                        # Issued its lock-taking write, and still has no answer.
+                        waited = issued.is_set() and (time.sleep(0.3) or contender.is_alive())
+                    if not waited:
+                        time.sleep(0.05)
+                box["waited"] = waited
+                tx.commit()
+            finally:
+                if tx.is_active:
+                    tx.rollback()
     finally:
+        if contender.ident is not None:
+            contender.join(30)
         event.remove(engine, "before_cursor_execute", _flag)
     assert not contender.is_alive(), "the contender never finished"
     assert "error" not in box, box.get("error")
