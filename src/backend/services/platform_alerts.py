@@ -111,6 +111,11 @@ class Kind:
     budgeted_type: Optional[str] = None
     material_keys: Tuple[str, ...] = ()
     event: bool = False
+    # #3254 (D11): a person's ending of the subject is final, not a 7-day
+    # snooze: a later reading files nothing unless its priority rose or a
+    # material key changed. For a condition that keeps reading true after a
+    # person resolved it, because the platform cannot see the resolution.
+    person_ending_is_final: bool = False
 
     def __post_init__(self):
         if not re.fullmatch(r"[a-z][a-z0-9_]*", self.name or ""):
@@ -160,7 +165,8 @@ _BUILTIN_KINDS = (
     Kind("validation_failed", "val_", _D, CLEARS_LIFETIME_ONLY),
     # -- a person must act: no lifetime ----------------------------------
     Kind("poison", "poison-", None, CLEARS_PERSON),
-    Kind("portal_inbox_collision", "portal-inbox-collision-", None, CLEARS_PERSON),
+    Kind("portal_inbox_collision", "portal-inbox-collision-", None, CLEARS_PERSON,
+         material_keys=("claimants_digest",), person_ending_is_final=True),
     Kind("gitignore_untracked", "gitignore-untracked-", None, CLEARS_PERSON,
          budgeted_type="gitignore_untracked", event=True),
     Kind("workspace_problem_report", "workspace-problem-", None, CLEARS_PERSON,
@@ -555,7 +561,10 @@ def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Ma
     if _PRIORITY_RANK.get(priority, 0) > _PRIORITY_RANK.get(ended.get("priority"), 0):
         return False
     old = _as_context(ended.get("context"))
-    return all(context.get(k) == old.get(k) for k in kind.material_keys)
+    # #3254 (D11): a material key the ended row does not carry is not a change.
+    # An unknown old value shows nothing moved, and rows filed before the key
+    # existed (pre-seam legacy rows) carry none.
+    return all(k not in old or context.get(k) == old.get(k) for k in kind.material_keys)
 
 
 def _spawn(factory: Callable[[], Any]) -> None:
@@ -615,7 +624,9 @@ def observe(
         ctx = dict(context) if isinstance(context, Mapping) else {}
         now = datetime.now(timezone.utc)
         if subject is not None and db.find_pending_operator_queue_by_subject(agent_name, subject) is None:
-            since = _iso_z(now - snooze_window())
+            # #3254 (D11): a final person ending is read whenever it happened.
+            since = (_iso_z(datetime(1970, 1, 1, tzinfo=timezone.utc)) if k.person_ending_is_final
+                     else _iso_z(now - snooze_window()))
             ended = db.find_person_ended_operator_queue_by_subject(agent_name, subject, since)
             if _snoozed_by(k, ended, priority, ctx):
                 return OBSERVED_SNOOZED
