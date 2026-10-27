@@ -782,6 +782,17 @@
       "description": "#3246 C4: the seam's static guards — two-way prefix parity between the kind registry and _RESERVED_ID_PREFIXES (the four newly reserved families are platform-minted); the EMITTERS_NOT_YET_ON_SEAM ratchet (every direct or #1677-budgeted platform emitter listed with its follow-up, no stale entries, prefixes registered); the clear-site check (every hook kind on the seam has a platform_alerts.clear/reconcile call naming it, or a named NO_CLEAR_SITE reason); the caller guard (only the seam calls the #3246 accessors). AST, no DB."
     },
     {
+      "file": "unit/test_3254_budgeted_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal. Fresh DB per test (db_backend), both clocks frozen."
+    },
+    {
       "file": "unit/test_3246_platform_alert_sweep.py",
       "feature": "#3246",
       "added": "2026-10-05",

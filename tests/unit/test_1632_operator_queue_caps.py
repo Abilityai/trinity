@@ -65,8 +65,34 @@ def _denied():
     return RateLimitResult(False, 0, 60, 60)
 
 
+def _seam(monkeypatch, db, *, raises=None):
+    """#3254 re-pin (write-observation point): the flood alert reports through
+    ``platform_alerts.observe``, which writes through the seam's one locked
+    create (``database.db.create_platform_operator_queue_item``), not
+    ``oqs.db.create_operator_queue_item``. Recorded here; a fault the test
+    injects into the db is injected here too (R5). Asserted outcomes unchanged."""
+    import database
+    from services import operator_resume_service
+
+    db.seam_calls = []
+
+    def _create(agent, item, *, subject, max_pending_for_type=None, **_kw):
+        db.seam_calls.append({"agent": agent, "item": item, "subject": subject,
+                              "cap": max_pending_for_type})
+        if raises is not None:
+            raise raises
+        return {"outcome": "created", "row": {**item, "subject": subject}, "changed": True}
+
+    monkeypatch.setattr(database.db, "create_platform_operator_queue_item", _create)
+    monkeypatch.setattr(database.db, "find_pending_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(database.db, "find_person_ended_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
+    return db
+
+
 def _fake_db(pending=0, exists=False, create_side_effect=None):
     db = MagicMock()
+    db.seam_raises = create_side_effect
     db.operator_queue_item_exists.return_value = exists
     # Keyed on the read's kwargs (#3130): the flood alert is now created through
     # the #1677 budget, whose `item_type="queue_flood"` read must not see the
@@ -102,6 +128,7 @@ def _wire(monkeypatch, db, requests, rate=None):
     """Wire a service instance to a fake db + fake agent file. `rate` optionally
     stubs rate_limiter.check (default: allow all)."""
     monkeypatch.setattr(oqs, "db", db)
+    _seam(monkeypatch, db, raises=db.seam_raises)
     client = MagicMock()
     client.read_file = AsyncMock(return_value={
         "success": True,
@@ -126,10 +153,11 @@ def _created_agent_items(db):
 
 
 def _flood_alerts(db):
+    """#3254 re-pin: the flood alert's writes, at the seam (see `_seam`)."""
     return [
-        c.args[1]
-        for c in db.create_operator_queue_item.call_args_list
-        if str(c.args[1].get("id", "")).startswith("queue-flood-")
+        c["item"]
+        for c in db.seam_calls
+        if str(c["item"].get("id", "")).startswith("queue-flood-")
     ]
 
 
@@ -502,15 +530,19 @@ class TestExemptionAndFloodAlert:
     def test_flood_alert_is_direct_create_not_rate_limited_or_clamped(self, monkeypatch):
         db = MagicMock()
         monkeypatch.setattr(oqs, "db", db)
+        _seam(monkeypatch, db)
         rate = MagicMock()
         monkeypatch.setattr(oqs.rate_limiter, "check", rate)
         svc = OperatorQueueSyncService()
 
         asyncio.run(svc._maybe_emit_flood_alert("a", held=7))
 
-        assert db.create_operator_queue_item.call_count == 1
-        item = db.create_operator_queue_item.call_args.args[1]
-        assert item["id"].startswith("queue-flood-a-")   # un-guessable id (C2)
+        (item,) = _flood_alerts(db)                       # #3254 re-pin: at the seam
+        # #3254 re-pin (id shape): the seam mints `queue-flood-<reason>-<ts>`
+        # on the agent's queue, one subject per reason.
+        assert item["id"].startswith("queue-flood-")      # un-guessable id (C2)
+        assert db.seam_calls[0]["agent"] == "a"
+        assert db.seam_calls[0]["subject"] == "queue_flood:ingestion_cap"
         assert item["type"] == "queue_flood"            # budgeted (#3130)
         assert item["priority"] == "high"
         assert "7 request(s)" in item["question"]        # not clamped
@@ -519,13 +551,14 @@ class TestExemptionAndFloodAlert:
     def test_flood_alert_cooldown_emits_once_per_episode(self, monkeypatch):
         db = MagicMock()
         monkeypatch.setattr(oqs, "db", db)
+        _seam(monkeypatch, db)
         monkeypatch.setattr(oqs.rate_limiter, "check", MagicMock())
         svc = OperatorQueueSyncService()
 
         asyncio.run(svc._maybe_emit_flood_alert("a", held=1))
         asyncio.run(svc._maybe_emit_flood_alert("a", held=1))  # within cooldown
 
-        assert db.create_operator_queue_item.call_count == 1
+        assert len(_flood_alerts(db)) == 1                     # #3254 re-pin: at the seam
 
     def test_first_alert_emits_when_monotonic_below_cooldown(self, monkeypatch):
         # Regression: on a freshly-booted process `time.monotonic()` can be
@@ -535,15 +568,17 @@ class TestExemptionAndFloodAlert:
         # the first alert regardless of monotonic's absolute value.
         db = MagicMock()
         monkeypatch.setattr(oqs, "db", db)
+        _seam(monkeypatch, db)
         monkeypatch.setattr(oqs.rate_limiter, "check", MagicMock())
         # Simulate a fresh runner: monotonic well below COOLDOWN (300s).
         monkeypatch.setattr(oqs.time, "monotonic", lambda: 5.0)
         svc = OperatorQueueSyncService()
 
+        # #3254 re-pin: counted at the seam.
         asyncio.run(svc._maybe_emit_flood_alert("a", held=1))
-        assert db.create_operator_queue_item.call_count == 1   # emits despite low monotonic
+        assert len(_flood_alerts(db)) == 1                     # emits despite low monotonic
         asyncio.run(svc._maybe_emit_flood_alert("a", held=1))  # still within cooldown
-        assert db.create_operator_queue_item.call_count == 1   # cooldown still holds
+        assert len(_flood_alerts(db)) == 1                     # cooldown still holds
 
     def test_flood_alert_create_failure_does_not_kill_sync(self, monkeypatch):
         # A create raise inside the alert path must be swallowed.
@@ -556,6 +591,7 @@ class TestExemptionAndFloodAlert:
     def test_oversize_file_skipped_with_alert(self, monkeypatch):
         db = _fake_db(pending=0)
         monkeypatch.setattr(oqs, "db", db)
+        _seam(monkeypatch, db)
         monkeypatch.setattr(oqs, "OPERATOR_QUEUE_MAX_FILE_BYTES", 100)
         big = json.dumps({"requests": _pending(50)})
         assert len(big) > 100

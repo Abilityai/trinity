@@ -21,6 +21,14 @@ a timestamped id meant distinct unknown slash-commands each minted a new
     ``DatabaseManager`` facade (a missed ``item_type`` delegation + the
     helper's swallow silently voids the whole budget — learnings 2026-07-06);
   - the ``create_item`` execution_id COLUMN belt (non-str / >512 → None).
+
+#3254 re-pin (write-observation point, D13 class 2): ``create_bounded_alert``
+is now a thin delegate of ``platform_alerts.observe``, which writes through
+``database.db.create_platform_operator_queue_item`` (find → touch → typed
+count → insert, one locked transaction) instead of ``oqs.db``, and spawns the
+episode instead of awaiting it. ``_seam`` stands in for that one create with
+the same budget arithmetic and ``_drain`` runs what ``observe`` spawned; every
+asserted outcome is unchanged. Id-shape re-pins are marked where they are.
 """
 from __future__ import annotations
 
@@ -64,16 +72,64 @@ def _reset_budget_state():
     oqs._websocket_manager = saved_ws
 
 
+def _seam(monkeypatch, db, pending=0, count_side_effect=None, create_side_effect=None):
+    """#3254 re-pin: the seam's locked create, faked with the old arithmetic.
+
+    The typed count runs only for a budgeted kind (a cap was passed), as the
+    old helper's count ran for the item and never for its episode. A count that
+    raises (or reads back non-int) and a create that raises are one exception
+    path inside that call now. ``observe``'s spawns are collected, and
+    ``_drain`` runs them the way the event loop would: a spawned task's
+    exception stays in that task.
+    """
+    import database
+    from services import operator_resume_service
+
+    db.seam_calls = []
+    db.spawned = []
+    db.spawn_errors = []
+
+    def _create(agent, item, *, subject, max_pending_for_type=None, **_kw):
+        call = {"agent": agent, "item": item, "subject": subject,
+                "cap": max_pending_for_type, "outcome": "raised"}
+        db.seam_calls.append(call)
+        if max_pending_for_type is not None:
+            if count_side_effect is not None:
+                raise count_side_effect
+            if int(pending) >= max_pending_for_type:
+                call["outcome"] = "refused_at_budget"
+                return {"outcome": "refused_at_budget", "row": None, "changed": False}
+        if create_side_effect is not None:
+            raise create_side_effect
+        call["outcome"] = "created"
+        return {"outcome": "created", "row": {**item, "subject": subject}, "changed": True}
+
+    monkeypatch.setattr(database.db, "create_platform_operator_queue_item", _create)
+    monkeypatch.setattr(database.db, "find_pending_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(database.db, "find_person_ended_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", db.spawned.append)
+    return db
+
+
+def _drain(db):
+    while db.spawned:
+        factory = db.spawned.pop(0)
+        try:
+            asyncio.run(factory())
+        except Exception as e:  # noqa: BLE001 — a background task's failure stays in it
+            db.spawn_errors.append(e)
+
+
+def _calls(db):
+    _drain(db)
+    return db.seam_calls
+
+
 def _budget_db(monkeypatch, pending=0, count_side_effect=None, create_side_effect=None):
     db = MagicMock()
-    db.count_operator_queue_pending_for_agent.return_value = pending
-    if count_side_effect is not None:
-        db.count_operator_queue_pending_for_agent.side_effect = count_side_effect
-    if create_side_effect is not None:
-        db.create_operator_queue_item.side_effect = create_side_effect
     monkeypatch.setattr(oqs, "db", db)
     monkeypatch.setattr(oqs, "_websocket_manager", None)
-    return db
+    return _seam(monkeypatch, db, pending, count_side_effect, create_side_effect)
 
 
 def _skill_item(agent="a", command="/x", triggered_by="schedule"):
@@ -91,19 +147,23 @@ def _skill_item(agent="a", command="/x", triggered_by="schedule"):
 
 
 def _budget_alerts(db):
-    return [
-        c.args[1]
-        for c in db.create_operator_queue_item.call_args_list
-        if str(c.args[1].get("id", "")).startswith("alert-budget-")
-    ]
+    """Every episode write attempted (the old ``create_operator_queue_item``
+    calls with the ``alert-budget-`` id, raised ones included)."""
+    return [c["item"] for c in _calls(db)
+            if str(c["item"].get("id", "")).startswith("alert-budget-")]
 
 
 def _non_budget_creates(db):
-    return [
-        c.args[1]
-        for c in db.create_operator_queue_item.call_args_list
-        if not str(c.args[1].get("id", "")).startswith("alert-budget-")
-    ]
+    """Every write of the item itself that reached the insert: a budget
+    refusal writes nothing, as the old helper never called create at cap."""
+    return [c["item"] for c in _calls(db)
+            if not str(c["item"].get("id", "")).startswith("alert-budget-")
+            and c["outcome"] != "refused_at_budget"]
+
+
+def _count_reads(db):
+    """The typed budget reads (each capped call carries one)."""
+    return [c for c in _calls(db) if c["cap"] is not None]
 
 
 # ---------------------------------------------------------------------------
@@ -119,9 +179,11 @@ class TestBudgetArms:
         assert _budget_alerts(db) == []
         # The count is TYPED — item_type derived from item["type"], never a
         # separate parameter (S5/F2: two sources of one fact void the bound).
-        db.count_operator_queue_pending_for_agent.assert_called_once_with(
-            "a", item_type="skill_not_found"
-        )
+        # #3254 re-pin: the typed count is the seam's, read once with the cap
+        # for the registered type the item names.
+        (read,) = _count_reads(db)
+        assert read["agent"] == "a" and read["cap"] == _CAP
+        assert read["item"]["type"] == "skill_not_found"
 
     def test_refuses_at_cap_with_one_episode_alert(self, monkeypatch):
         db = _budget_db(monkeypatch, pending=_CAP)
@@ -135,20 +197,19 @@ class TestBudgetArms:
         with caplog.at_level(logging.ERROR, logger="services.operator_queue_service"):
             ok = asyncio.run(create_bounded_alert("a", {"type": "made_up_type"}))
         assert ok is False
-        db.create_operator_queue_item.assert_not_called()
-        db.count_operator_queue_pending_for_agent.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: no count, no create at the seam
         assert any("[#1677 budget]" in r.message for r in caplog.records)
 
     def test_absent_type_fail_closed(self, monkeypatch):
         db = _budget_db(monkeypatch, pending=0)
         assert asyncio.run(create_bounded_alert("a", {"id": "x"})) is False
-        db.create_operator_queue_item.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: nothing reached the seam
 
     def test_non_dict_item_fail_closed_never_raises(self, monkeypatch):
         db = _budget_db(monkeypatch, pending=0)
         for bad in (None, "a string", ["list"], 42):
             assert asyncio.run(create_bounded_alert("a", bad)) is False
-        db.create_operator_queue_item.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: nothing reached the seam
 
     def test_count_raise_fail_closed_no_episode(self, monkeypatch, caplog):
         db = _budget_db(monkeypatch, count_side_effect=Exception("db down"))
@@ -157,14 +218,19 @@ class TestBudgetArms:
         assert ok is False
         # Fail-closed: NO create attempt AND NO episode alert — an unreadable
         # count is "DB broken", not "at cap" (Gemini MF2; the #1632 mirror).
-        db.create_operator_queue_item.assert_not_called()
+        # #3254 re-pin: the count runs inside the seam's create, so the one
+        # call that raised wrote nothing and spawned no episode.
+        assert [c["outcome"] for c in _calls(db)] == ["raised"]
+        assert _budget_alerts(db) == []
         assert any("[#1677 budget]" in r.message for r in caplog.records)
 
     def test_count_non_int_fail_closed(self, monkeypatch):
         # int(None) raises inside the guarded read — same fail-closed arm.
         db = _budget_db(monkeypatch, pending=None)
         assert asyncio.run(create_bounded_alert("a", _skill_item())) is False
-        db.create_operator_queue_item.assert_not_called()
+        # #3254 re-pin: the read is the seam's; it raised, nothing was written.
+        assert [c["outcome"] for c in _calls(db)] == ["raised"]
+        assert _budget_alerts(db) == []
 
     def test_create_raise_returns_false_no_episode(self, monkeypatch, caplog):
         db = _budget_db(monkeypatch, pending=0, create_side_effect=Exception("boom"))
@@ -172,7 +238,7 @@ class TestBudgetArms:
             ok = asyncio.run(create_bounded_alert("a", _skill_item()))
         assert ok is False
         # One attempted create (the item), zero episode alerts.
-        assert db.create_operator_queue_item.call_count == 1
+        assert len(_non_budget_creates(db)) == 1   # #3254 re-pin: at the seam
         assert _budget_alerts(db) == []
         assert any("[#1677 budget]" in r.message for r in caplog.records)
 
@@ -196,15 +262,17 @@ class TestEpisodeAlert:
         assert len(_budget_alerts(db)) == 1
 
     def test_deterministic_bucketed_id_with_reserved_prefix(self, monkeypatch):
+        """#3254 re-pin (id shape): the bucketed id that let every worker land on
+        one row is replaced by the episode's SUBJECT, ``alert_budget:<type>``,
+        which the partial unique index holds to one pending row per agent."""
         db = _budget_db(monkeypatch, pending=_CAP)
-        monkeypatch.setattr(oqs.time, "time", lambda: 1000.0)
         asyncio.run(create_bounded_alert("a", _skill_item()))
-        (alert,) = _budget_alerts(db)
-        bucket = int(1000.0 // oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
-        assert alert["id"] == f"alert-budget-a-skill_not_found-b{bucket}"
+        (call,) = [c for c in _calls(db) if c["item"]["id"].startswith("alert-budget-")]
+        assert call["subject"] == "alert_budget:skill_not_found"
+        assert call["agent"] == "a"
         # The prefix is platform-reserved so an agent can't pre-create (and via
         # on_conflict_do_nothing suppress) the alert the bucketed id relies on.
-        assert alert["id"].startswith("alert-budget-")
+        assert call["item"]["id"].startswith("alert-budget-")
         assert "alert-budget-" in oqs._RESERVED_ID_PREFIXES
 
     def test_content_hygiene_no_held_no_command_text(self, monkeypatch):
@@ -241,8 +309,10 @@ class TestEpisodeAlert:
         asyncio.run(create_bounded_alert("a", _skill_item()))
         # Exactly one typed count (for the refused item) — the episode alert's
         # own create consults no budget, so it cannot recurse into itself.
-        assert db.count_operator_queue_pending_for_agent.call_count == 1
+        # #3254 re-pin: the episode's seam call carries no cap.
+        assert len(_count_reads(db)) == 1
         assert len(_budget_alerts(db)) == 1
+        assert [c["cap"] for c in _calls(db) if c["item"]["id"].startswith("alert-budget-")] == [None]
 
     def test_ws_broadcast_failure_swallowed(self, monkeypatch):
         db = _budget_db(monkeypatch, pending=_CAP)
@@ -252,6 +322,11 @@ class TestEpisodeAlert:
         asyncio.run(create_bounded_alert("a", _skill_item()))  # must not raise
         assert len(_budget_alerts(db)) == 1
         assert ws.broadcast.await_count == 1
+        # #3254 re-pin: the broadcast is the seam's thin `operator_queue_sync`
+        # trigger (#918), sent from a spawned task — its failure stays there.
+        assert json.loads(ws.broadcast.await_args.args[0]) == {
+            "type": "operator_queue_sync", "data": {"agent_name": "a"}}
+        assert [str(e) for e in db.spawn_errors] == ["ws down"]
 
     def test_episode_create_failure_swallowed_cooldown_prestamped(self, monkeypatch):
         # The cooldown is stamped BEFORE the create, so a persistently-failing
@@ -260,7 +335,7 @@ class TestEpisodeAlert:
         db = _budget_db(monkeypatch, pending=_CAP, create_side_effect=Exception("down"))
         asyncio.run(create_bounded_alert("a", _skill_item()))
         asyncio.run(create_bounded_alert("a", _skill_item(command="/y")))
-        assert db.create_operator_queue_item.call_count == 1  # one attempt, then cooldown
+        assert len(_budget_alerts(db)) == 1  # one attempt, then cooldown (#3254 re-pin: at the seam)
 
     def test_cooldown_is_per_agent_and_type(self, monkeypatch):
         db = _budget_db(monkeypatch, pending=_CAP)
@@ -276,26 +351,31 @@ class TestEpisodeAlert:
         # flood alert's behavior at 0), never a raise.
         db = _budget_db(monkeypatch, pending=_CAP)
         monkeypatch.setattr(oqs, "OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", 0)
-        monkeypatch.setattr(oqs.time, "time", lambda: 1000.0)
         ok = asyncio.run(create_bounded_alert("a", _skill_item()))  # must not raise
         assert ok is False
-        (alert,) = _budget_alerts(db)
-        assert alert["id"] == "alert-budget-a-skill_not_found-b1000"  # // max(1, 0)
+        # #3254 re-pin (id shape): no bucket is computed any more; the episode
+        # still lands, on its subject.
+        (call,) = [c for c in _calls(db) if c["item"]["id"].startswith("alert-budget-")]
+        assert call["subject"] == "alert_budget:skill_not_found"
+        assert db.spawn_errors == []
 
     def test_episode_helper_raise_swallowed_refusal_stands(self, monkeypatch, caplog):
         # The never-raises contract is structural, not incidental: even if the
         # episode helper itself raises, the at-cap refusal (False) stands and
         # nothing propagates to the caller.
+        # #3254 re-pin: the episode is spawned, so its raise stays in its task;
+        # the refusal's own `[#1677 budget]` line is the delegate's WARNING.
         db = _budget_db(monkeypatch, pending=_CAP)
 
         async def _boom(*a, **k):
             raise RuntimeError("episode helper broke")
 
         monkeypatch.setattr(oqs, "_maybe_emit_alert_budget_episode", _boom)
-        with caplog.at_level(logging.ERROR, logger="services.operator_queue_service"):
+        with caplog.at_level(logging.WARNING, logger="services.operator_queue_service"):
             ok = asyncio.run(create_bounded_alert("a", _skill_item()))
         assert ok is False
-        db.create_operator_queue_item.assert_not_called()  # item stays refused
+        assert _non_budget_creates(db) == []  # item stays refused
+        assert [str(e) for e in db.spawn_errors] == ["episode helper broke"]
         assert any("[#1677 budget]" in r.message for r in caplog.records)
 
 
@@ -308,14 +388,14 @@ import services.task_execution_service as tes  # noqa: E402
 
 def _wire_skill_alert(monkeypatch, pending=0, existing=None):
     """One MagicMock db shared by task_execution_service (dedup list +
-    notification) and operator_queue_service (count + create)."""
+    notification) and operator_queue_service; #3254 re-pin: the count and the
+    create are the seam's (`_seam`)."""
     db = MagicMock()
     db.list_operator_queue_items.return_value = list(existing or [])
-    db.count_operator_queue_pending_for_agent.return_value = pending
     monkeypatch.setattr(tes, "db", db)
     monkeypatch.setattr(oqs, "db", db)
     monkeypatch.setattr(oqs, "_websocket_manager", None)
-    return db
+    return _seam(monkeypatch, db, pending)
 
 
 class TestSkillNotFoundIntegration:
@@ -323,7 +403,12 @@ class TestSkillNotFoundIntegration:
         db = _wire_skill_alert(monkeypatch, pending=0)
         asyncio.run(tes._alert_skill_not_found("a", "/gen", "exec-1", "schedule"))
         (item,) = _non_budget_creates(db)
-        assert item["id"].startswith("skill-not-found-a-")   # reserved prefix kept
+        # #3254 re-pin (id shape): the seam mints `<prefix><key>-<ts>`; the
+        # agent is the row's host, and the subject is the command's.
+        assert item["id"].startswith("skill-not-found-")    # reserved prefix kept
+        from services import platform_alerts
+        assert _calls(db)[0]["subject"] == platform_alerts.subject_for("skill_not_found", "/gen")
+        assert _calls(db)[0]["agent"] == "a"
         assert item["type"] == "skill_not_found"             # the registered literal (MF3/S5)
         assert item["context"]["command"] == "/gen"
         assert db.create_notification.call_count == 1
@@ -334,9 +419,8 @@ class TestSkillNotFoundIntegration:
         existing = [{"context": {"command": "/gen"}}]
         db = _wire_skill_alert(monkeypatch, pending=0, existing=existing)
         asyncio.run(tes._alert_skill_not_found("a", "/gen", "exec-1", "schedule"))
-        db.create_operator_queue_item.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: no count, no create at the seam
         db.create_notification.assert_not_called()
-        db.count_operator_queue_pending_for_agent.assert_not_called()
 
     def test_at_cap_suppresses_item_and_notification(self, monkeypatch):
         db = _wire_skill_alert(monkeypatch, pending=_CAP)
@@ -351,7 +435,7 @@ class TestSkillNotFoundIntegration:
         existing = [{"context": {"command": "/gen"}}]
         db = _wire_skill_alert(monkeypatch, pending=_CAP, existing=existing)
         asyncio.run(tes._alert_skill_not_found("a", "/gen", "exec-1", "schedule"))
-        db.create_operator_queue_item.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: nothing reached the seam
         assert _budget_alerts(db) == []
         db.create_notification.assert_not_called()
 
@@ -379,7 +463,7 @@ class TestSkillNotFoundIntegration:
         existing = [{"context": {"command": truncated}}]
         db = _wire_skill_alert(monkeypatch, pending=0, existing=existing)
         asyncio.run(tes._alert_skill_not_found("a", long_cmd, "exec-1", "schedule"))
-        db.create_operator_queue_item.assert_not_called()
+        assert _calls(db) == []          # #3254 re-pin: nothing reached the seam
 
     def test_never_raises_even_when_everything_breaks(self, monkeypatch):
         db = _wire_skill_alert(monkeypatch, pending=0)

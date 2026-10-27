@@ -1424,35 +1424,47 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
 
 
 async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
-    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters.
+    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters,
+    since #3254 a thin delegate of ``platform_alerts.observe``.
 
-    Platform-only emitters (edge-triggered, idempotent-id, operator-cadence
-    creates) keep calling ``db.create_operator_queue_item`` directly; an
-    emitter whose volume an agent can drive routes through here instead. The
-    budget type is derived from ``item["type"]`` — never a separate parameter
-    (two sources of one fact silently void the bound) — and MUST be a static
-    literal registered in ``_BUDGETED_ALERT_TYPES`` (a caller-interpolated
-    type would mint a fresh budget per distinct string).
+    Every in-repo budgeted emitter now reports through ``observe`` itself, which
+    composes the same per-(agent, registered-type) pending budget inside its
+    locked create (``OPERATOR_ALERT_MAX_PENDING_PER_TYPE``) and spawns the budget
+    episode on a refusal. This helper keeps its signature and its outcome
+    contract for any caller still on it; the #3246 ratchet counts each such
+    caller as off the seam, which steers new code to ``observe``.
 
-    Four-outcome contract (never raises):
-      * type not registered      → ERROR log, ``False`` (fail-closed, no create,
-        no episode alert — register the type, a one-line reviewed act);
-      * pending-count read raises → ERROR log, ``False`` (fail-closed, NO
-        episode alert: that path is "DB broken", not "at cap" — the #1632
-        mirror, whose depth count also runs outside the per-item try; the
-        FAILED execution rows remain the primary observability surface);
-      * count ≥ cap               → ONE cooldown-gated, bucketed-id episode
-        alert per window (``_maybe_emit_alert_budget_episode``), ``False``;
-      * else                      → create; ``True`` on success, ERROR log +
-        ``False`` on a create raise (NO episode alert).
+    The budget type is derived from ``item["type"]`` (never a separate
+    parameter: two sources of one fact silently void the bound) and MUST be a
+    static literal registered in ``_BUDGETED_ALERT_TYPES``. That type names its
+    platform-alert kind (the kind whose ``budgeted_type`` it is), and the key is
+    read back from ``item["id"]`` + ``item["context"]`` by
+    ``platform_alerts.derive_legacy_subject``, which must resolve to that same
+    kind. The two kinds whose ids carry no derivable subject (the gitignore
+    sweep's alert and the Workspace problem report) are keyed by the request id
+    minus the kind's prefix: for the problem report that is the per-person /
+    target / day digest its own emitter keys by; for gitignore it is the old
+    per-call id, so a call still files one row.
 
-    Returns one of the ``ALERT_*`` outcome constants (the bullets above map
-    onto them in order); ``create_bounded_alert`` is the bool view.
+    Outcomes (never raises; every refused or failed arm logs ``[#1677 budget]``):
+      * type not registered          → ``ALERT_REFUSED_UNREGISTERED`` (fail-closed,
+        nothing written: register the type, a one-line reviewed act);
+      * the id does not read back as the type's kind, or carries no key
+                                     → ``ALERT_FAILED_CREATE`` (fail-closed);
+      * else ``observe``'s outcome: ``ALERT_CREATED``; ``"updated"`` (the
+        subject's pending row was rewritten in place); ``"snoozed"`` (a person
+        ended the subject inside the snooze window, nothing written);
+        ``ALERT_REFUSED_AT_BUDGET`` (the budget was full; the episode alert is
+        spawned by ``observe``); ``ALERT_FAILED_CREATE`` for its ``"failed"``.
 
-    Callers gate every paired side-effect (e.g. the skill-not-found
-    notification) on the returned bool, so a secondary surface can never
-    outlive its queue item.
+    ``ALERT_FAILED_COUNT`` stays importable and is no longer returned: the
+    per-type count now runs inside the seam's locked create, where a failed
+    count and a failed create are one exception path. ``create_bounded_alert``
+    is the bool view and is true for ``ALERT_CREATED`` only, so a paired side
+    effect (a notification) never fires twice for one pending row.
     """
+    from services import platform_alerts
+
     item_type = item.get("type") if isinstance(item, dict) else None
     if item_type not in _BUDGETED_ALERT_TYPES:
         logger.error(
@@ -1464,74 +1476,71 @@ async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
         )
         return ALERT_REFUSED_UNREGISTERED
 
-    try:
-        pending = int(
-            db.count_operator_queue_pending_for_agent(agent_name, item_type=item_type)
-        )
-    except Exception as e:
+    kind = next(
+        (k for k in platform_alerts.KINDS.values() if k.budgeted_type == item_type), None
+    )
+    match = platform_alerts.derive_legacy_subject(item.get("id"), item.get("context"))
+    key = None
+    if kind is not None and match is not None and match.kind == kind.name:
+        if match.subject is not None:
+            key = match.subject[len(kind.name) + 1:]
+        elif kind.name in ("gitignore_untracked", "workspace_problem_report"):
+            key = item["id"][len(kind.prefix):] or None
+    if key is None:
         logger.error(
-            "[#1677 budget] pending-count read failed for %s/%s (%s) — alert "
-            "suppressed (fail-closed, NO episode alert; the FAILED execution "
-            "rows remain the primary surface)",
-            agent_name, item_type, e,
-        )
-        return ALERT_FAILED_COUNT
-
-    if pending >= OPERATOR_ALERT_MAX_PENDING_PER_TYPE:
-        context = item.get("context")
-        last_triggered_by = (
-            context.get("triggered_by") if isinstance(context, dict) else None
-        )
-        # Guarded so the four-outcome never-raises contract holds structurally:
-        # the episode alert is a secondary signal over an already-refused item,
-        # and a raise here (review fix: the cooldown-knob=0 ZeroDivisionError
-        # in the bucket computation was one such path) must never leak into a
-        # caller that trusts the docstring.
-        try:
-            await _maybe_emit_alert_budget_episode(
-                agent_name, item_type, last_triggered_by
-            )
-        except Exception as e:
-            logger.error(
-                "[#1677 budget] episode-alert emit raised for %s/%s (%s) — "
-                "swallowed (the refusal itself stands)",
-                agent_name, item_type, e,
-            )
-        return ALERT_REFUSED_AT_BUDGET
-
-    # NO `await` between the count read above and this create — the
-    # check-then-act overshoot window stays cross-worker-only (bounded by the
-    # number of concurrent terminal writers for one agent), never widened by a
-    # yield on this worker.
-    try:
-        db.create_operator_queue_item(agent_name, item)
-    except Exception as e:
-        logger.error(
-            "[#1677 budget] operator alert create failed for %s/%s (%s) — "
-            "suppressed (fail-closed, NO episode alert)",
-            agent_name, item_type, e,
+            "[#1677 budget] refusing operator alert for '%s': id %r does not read "
+            "back as a keyed %r alert, the kind its type %r registers "
+            "(fail-closed; no item created)",
+            agent_name, item.get("id"), kind.name if kind else None, item_type,
         )
         return ALERT_FAILED_CREATE
-    return ALERT_CREATED
+
+    outcome = platform_alerts.observe(
+        agent_name, kind.name, key,
+        title=item.get("title") or "",
+        question=item.get("question") or "",
+        priority=item.get("priority") or "high",
+        context=item.get("context"),
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
+        logger.error(
+            "[#1677 budget] operator alert create failed for %s/%s — suppressed "
+            "(fail-closed; the seam logged the cause)",
+            agent_name, item_type,
+        )
+        return ALERT_FAILED_CREATE
+    if outcome == ALERT_REFUSED_AT_BUDGET:
+        logger.warning(
+            "[#1677 budget] alert budget full for %s/%s (cap=%d) — refused; the "
+            "budget episode alert reports it",
+            agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        )
+    return outcome
 
 
 async def _maybe_emit_alert_budget_episode(
     agent_name: str, item_type: str, last_triggered_by=None
 ) -> None:
-    """#1677: ONE aggregated budget-hit episode alert per cooldown window.
+    """#1677: ONE budget-hit episode reading per cooldown window.
 
-    Mirrors `_maybe_emit_flood_alert`'s pattern (cooldown stamped BEFORE the
-    create, direct DB create, swallowed emit failure, best-effort WS
-    broadcast) with two deliberate differences: module-level cooldown state
-    (see `_alert_budget_cooldown`) and a **deterministic time-bucketed id** —
-    `alert-budget-{agent}-{type}-b{bucket}` — so under `--workers 2` / worker
-    churn every worker computes the SAME id within a window and the DB
-    `(agent_name, request_id)` on_conflict_do_nothing target dedups the
-    duplicate at the sink (#1816 bucketed-id precedent). A boundary-straddling
-    episode may emit 2 alerts — the same acceptance as the #1632 cooldown.
-    The `alert-budget-` prefix is in `_RESERVED_ID_PREFIXES`, so an agent
-    cannot pre-create (and thereby on-conflict-suppress) the alert.
+    Reported through ``platform_alerts.observe`` as kind ``alert_budget`` keyed by
+    the budgeted type (#3254): one pending row per (agent, type), subject
+    ``alert_budget:<type>``, which a later refusal outside the window rewrites
+    in place rather than filing again. No emitter observes the budget freeing
+    up (it is measured only inside the seam's own create), so a row nobody
+    re-reads ends with its 14-day lifetime (``NO_CLEAR_SITE`` in the #3246
+    registry test). Two workers' readings land on the one subject row, which is
+    what the old time-bucketed id approximated.
+
+    The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
+    BEFORE the reading, so a persistently failing write backs off for the
+    window instead of retrying on every refusal (#1632 shape). The kind is
+    unbudgeted, so the episode can never recurse into the budget. ``observe``
+    never raises and sends the thin ``operator_queue_sync`` trigger (#918) when
+    a rendered field changed.
     """
+    from services import platform_alerts
+
     now = time.monotonic()
     key = (agent_name, item_type)
     # `None` = never alerted (the #1632 sentinel shape — a 0.0 default would
@@ -1539,15 +1548,8 @@ async def _maybe_emit_alert_budget_episode(
     last = _alert_budget_cooldown.get(key)
     if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
         return  # already alerted this episode
-    # Stamped BEFORE the create so a persistently-failing create backs off for
-    # the window instead of retrying on every refusal (#1632 shape).
     _alert_budget_cooldown[key] = now
 
-    # max(1, …): the cooldown knob at 0 (the natural "no cooldown" spelling)
-    # must degrade to a 1s bucket — matching the flood alert's alert-every-
-    # episode behavior at 0 — never a ZeroDivisionError on the at-cap path.
-    bucket = int(time.time() // max(1, OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS))
-    now_iso = utc_now_iso()
     title = f"Agent '{agent_name}' exceeded its '{item_type}' alert budget"
     # No `held` count (untruthful at a first-trip emit — true volume lives in
     # the FAILED executions list) and no agent-controlled text (no command
@@ -1573,53 +1575,21 @@ async def _maybe_emit_alert_budget_episode(
     ):
         context["last_triggered_by"] = last_triggered_by
 
-    alert = {
-        "id": f"alert-budget-{agent_name}-{item_type}-b{bucket}",
-        "type": "alert",
-        "status": "pending",
-        "priority": "high",
-        "title": title,
-        "question": question,
-        "context": context,
-        "created_at": now_iso,
-    }
-
-    # Direct DB create — a PLATFORM-only emitter by construction (this
-    # function never re-enters create_bounded_alert, so the budget cannot
-    # recurse into itself). Emit failure swallowed: the episode alert is a
-    # secondary signal over an already-suppressed alert.
-    try:
-        db.create_operator_queue_item(agent_name, alert)
-    except Exception as e:
+    outcome = platform_alerts.observe(
+        agent_name, "alert_budget", item_type,
+        title=title, question=question, priority="high", context=context,
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
         logger.error(
-            "[#1677 budget] failed to emit budget episode alert for %s/%s: %s",
-            agent_name, item_type, e,
+            "[#1677 budget] failed to emit budget episode alert for %s/%s "
+            "(the seam logged the cause)",
+            agent_name, item_type,
         )
         return
-
     logger.warning(
-        "[#1677 budget] alert budget hit for %s/%s (cap=%d) — episode alert emitted",
-        agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "[#1677 budget] alert budget hit for %s/%s (cap=%d) — episode alert %s",
+        agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE, outcome,
     )
-
-    if _websocket_manager:
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "operator_queue_new",
-                "data": {
-                    "id": alert["id"],
-                    "agent_name": agent_name,
-                    "type": "alert",
-                    "priority": "high",
-                    "title": alert["title"],
-                    "created_at": alert["created_at"],
-                },
-            }))
-        except Exception as e:
-            logger.error(
-                "[#1677 budget] failed to broadcast budget episode alert for %s: %s",
-                agent_name, e,
-            )
 
 
 class OperatorQueueSyncService:

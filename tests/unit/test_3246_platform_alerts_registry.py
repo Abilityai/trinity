@@ -66,11 +66,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
     ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
-    ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
-        ("alert-budget-", _PR2),
-    # The #1677 budget helper stays as it is in PR 1; the budgeted emitters
-    # below call it and move onto the seam (which composes the budget) in PR 2.
-    ("services/operator_queue_service.py", "create_bounded_alert_outcome"): (None, _PR2),
     ("services/operator_queue_service.py", "OperatorQueueSyncService._maybe_emit_flood_alert"):
         ("queue-flood-", _PR2),
     ("services/idempotency_service.py", "_on_unguarded_effect"): ("effect-unguarded-", _PR2),
@@ -93,7 +88,12 @@ _NOT_EMITTERS = {
 
 # A hook kind on the seam whose emitter has no place that knows the condition
 # cleared: kind -> the reason, so "reviewed" is told apart from "forgotten".
-NO_CLEAR_SITE: dict = {}
+NO_CLEAR_SITE: dict = {
+    # #3254: the per-type budget is measured only inside the seam's own locked
+    # create, so no emitter observes it freeing up.
+    "alert_budget": "the budget is measured only inside the seam's create; each "
+                    "further refusal re-reads it, otherwise its 14-day lifetime ends it",
+}
 
 _DIRECT = ("create_operator_queue_item", "create_operator_queue_item_with_outcome",
            "create_native_operator_queue_item")

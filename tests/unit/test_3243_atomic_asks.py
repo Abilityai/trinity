@@ -397,10 +397,19 @@ class TestFileHold:
         assert _created_ids(db) == ["five-plus"]
 
     def test_a_cap_hold_never_fires_the_flood_alert(self, monkeypatch):
+        # #3254 re-pin (write-observation point): the flood alert reports
+        # through `platform_alerts.observe`, never `db.create_operator_queue_item`,
+        # so the reading is watched there — asserting on `_created_ids` alone
+        # would pass whether or not it fired.
+        from services import platform_alerts
+        readings = []
+        monkeypatch.setattr(platform_alerts, "observe",
+                            lambda agent, kind, *a, **k: readings.append(kind) or "created")
         db = _fake_db()
         svc, _ = _wire(monkeypatch, db, [_entry(f"bad-{i}", options=list("abcdef")) for i in range(30)])
         _run(svc, cycles=3)
         assert not [i for i in _created_ids(db) if str(i).startswith("queue-flood-")]
+        assert "queue_flood" not in readings
 
     def test_a_full_queue_keeps_its_reason_and_still_names_the_held_ids(self, monkeypatch):
         import services.operator_queue_service as oqs
