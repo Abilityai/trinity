@@ -68,7 +68,7 @@ import hashlib
 import json
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from database import db
@@ -84,6 +84,17 @@ logger = logging.getLogger(__name__)
 
 # Truncate previous_response to its trailing 2000 chars per spec
 PREV_RESPONSE_TRUNCATE_CHARS = 2000
+
+# #3317: how long after a loop's last recorded close a re-armed park falls due.
+# A precedence margin, not a bound and not the correctness guarantee. A live
+# worker that closed run N normally claims run N+1 well inside it (a handful of
+# synchronous DB calls) and its claim spends the park, so the worker that ran
+# run N's post-run gates decides what comes next; a worker that really died is
+# recovered at most this long after its last close. One dispatch per run comes
+# from the claim in `db.start_loop_run` whatever this is. Same order as
+# RETAINED_RESULT_CLAIM_GRACE_SECONDS, for the same reason: a live writer reads
+# as absent for a window.
+LOOP_REARM_GRACE_SECONDS = 180
 
 
 # WebSocket manager injected from main.py
@@ -155,6 +166,67 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(str(value).replace("Z", "").replace("+00:00", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _utc_naive(value: Any) -> Optional[datetime]:
+    """A stored timestamp as naive UTC whatever its suffix or offset.
+
+    None when it cannot be read, the empty string included. Not `_parse_iso`,
+    which keeps a non-UTC offset aware and so cannot be compared with the
+    naive clock.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed
+
+
+def _rearm_due_at(loop: dict, runs: list, now: datetime) -> datetime:
+    """When a re-armed loop's park falls due: `max(now, anchor + grace)` (#3317).
+
+    `anchor` is the newest `completed_at` among the loop's closed runs. A loop
+    with no closed run uses its `started_at`, and its `created_at` only when
+    `started_at` is absent (missing or NULL). Conservative on bad input: a stamp
+    that is present but unreadable (the empty string included; any closed run's,
+    or the start or creation stamp it would use), no stamp at all, or an anchor
+    in the future (clock skew) treats the loop as just closed, due at
+    `now + grace`, and logs a WARNING. For any `now` at which `now + grace` is
+    representable the result lies in `[now, now + grace]` and no input raises;
+    at an unrepresentable instant it returns `now`.
+
+    Pure (no I/O): `rearm_lost_dispatch` calls it while holding the loop row.
+    """
+    grace = timedelta(seconds=LOOP_REARM_GRACE_SECONDS)
+    try:
+        just_closed = now + grace
+    except OverflowError:
+        return now
+    closed = [r for r in runs if r.get("status") != "running"]
+    if closed:
+        source = "last close"
+        stamps = [_utc_naive(r.get("completed_at")) for r in closed]
+        anchor = None if any(s is None for s in stamps) else max(stamps)
+    else:
+        source, raw = "start", loop.get("started_at")
+        if raw is None:
+            source, raw = "creation", loop.get("created_at")
+        anchor = _utc_naive(raw)
+    if anchor is None:
+        logger.warning(
+            "[Loop] %s re-arm: %s timestamp unreadable; due %ds from now",
+            loop.get("id"), source, LOOP_REARM_GRACE_SECONDS,
+        )
+        return just_closed
+    if anchor > now:
+        logger.warning(
+            "[Loop] %s re-arm: %s timestamp %s is in the future; due %ds from now",
+            loop.get("id"), source, anchor.isoformat(), LOOP_REARM_GRACE_SECONDS,
+        )
+        return just_closed
+    return max(now, anchor + grace)
 
 
 class _DerivedState:
@@ -413,17 +485,21 @@ class LoopService:
             it: the event was lost with the restart, and `runs_completed` has
             not moved, so re-arming would dispatch a second row for the same
             `run_number`;
-          * a loop with no open run is re-armed by parking it.
+          * a loop with no open run is re-armed by parking it, due
+            `LOOP_REARM_GRACE_SECONDS` after its last recorded close
+            (`_rearm_due_at`), or at once when that is already past.
 
         #3317: "no open run" is also what a LIVE advance on another worker looks
         like between closing run N and claiming run N+1; in the row the two are
         identical. So the snapshot only pre-filters. The decision is
         `db.rearm_lost_dispatch`, made under the loop row's lock on what the row
         and its runs say at that moment, and the claim in `db.start_loop_run`
-        keeps run N+1 to one dispatch whichever worker gets there. A closed run
-        numbered past `runs_completed` with nothing in flight is reported
-        (`stuck`), not re-armed: that would dispatch a run number that already
-        exists.
+        keeps run N+1 to one dispatch whichever worker gets there. The grace on
+        the park gives a live worker the first claim, so the worker that ran
+        run N's post-run gates (stop signal, failure policy, pause) decides
+        what follows it. A closed run numbered past `runs_completed` with
+        nothing in flight is reported (`stuck`), not re-armed: that would
+        dispatch a run number that already exists.
 
         Returns the number of loops this call moved (re-armed or advanced).
         """
@@ -439,7 +515,7 @@ class LoopService:
                 if loop.get("next_run_at"):
                     continue  # parked in the snapshot — the sweep owns it
                 outcome, open_run = db.rearm_lost_dispatch(
-                    loop["id"], due_for=lambda _loop, _runs: utc_now_iso()
+                    loop["id"], due_for=self._rearm_due_for
                 )
                 if outcome == "armed":
                     moved += 1
@@ -468,6 +544,12 @@ class LoopService:
         return moved
 
     # ---- Internals ----------------------------------------------------------
+
+    @staticmethod
+    def _rearm_due_for(loop: dict, runs: list) -> str:
+        """`rearm_lost_dispatch`'s `due_for`: the park, in the sweep's format."""
+        due = _rearm_due_at(loop, runs, datetime.utcnow())
+        return due.isoformat(timespec="microseconds") + "Z"
 
     @staticmethod
     def _execution_is_live(execution_id: Optional[str]) -> bool:
