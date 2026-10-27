@@ -732,3 +732,38 @@ async def test_an_inconclusive_poll_never_ends_the_alert(
     clock.advance(**_MIN)
     await _poll(service, sc["recover"])
     assert db.get_operator_queue_item(row["id"])["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_a_worker_that_found_no_divergence_row_looks_again_after_a_hand_off(
+        service, seed_agent, db, clock):
+    """Worker B looks for the episode's row under a precedence and finds none;
+    leadership moves to worker A, where divergence is the cause again and A
+    raises the row; the failure resumes and leadership returns to B. B's miss
+    must not stand for the rest of the episode, or A's row expires under it."""
+    seed_agent()
+    worker_b, worker_a = service, type(service)(poll_interval=0)
+    failing = _payload(status="failed", error="boom", ahead=7)
+    for _ in range(3):
+        await _poll(worker_b, failing)
+        clock.advance(**_MIN)
+    clock.advance(hours=25)
+    await _poll(worker_b, failing)  # under the precedence, no row yet: B caches the miss
+    assert _rows(db, "sync-diverged-") == []
+
+    clock.advance(**_MIN)
+    await _poll(worker_a, _AHEAD)  # the sync recovers on A; divergence is the cause
+    (row,) = _rows(db, "sync-diverged-")
+    for _ in range(3):
+        clock.advance(**_MIN)
+        await _poll(worker_a, failing)  # the failure resumes: the precedence again
+
+    expired = []
+    for _ in range(0, 31 * 24 + 1, 2):  # leadership is back with B for 31 days
+        clock.advance(hours=2)
+        await _poll(worker_b, failing)
+        expired += [r for r in db.mark_operator_queue_expired() if r["agent_name"] == "alpha"]
+    assert expired == []
+    again = db.get_operator_queue_item(row["id"])
+    assert again["status"] == "pending"
+    assert _ts(again["expires_at"]) > clock.now + timedelta(days=29)
