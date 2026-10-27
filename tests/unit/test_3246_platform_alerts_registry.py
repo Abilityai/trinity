@@ -54,7 +54,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
         ("sync-diverged-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         ("git-bloat-", _PR2),
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
     ("services/retention_guard.py", "announce_refusal"): ("retention-guard-", _PR2),
     ("services/system_seed_service.py", "SystemSeedService._notify_operator"): ("system-seed-", _PR2),
     ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):

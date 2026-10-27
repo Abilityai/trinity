@@ -1,7 +1,8 @@
-"""#3254: the database-backup alarms report through the platform alert seam
-(#3246), against the unit island's real SQLite.
+"""#3254: the database-backup and log-archive alarms report through the
+platform alert seam (#3246), against the unit island's real SQLite.
 
-Pinned here, for `db_backup_failure` and `db_backup_stale`:
+Pinned here, for `db_backup_failure`, `db_backup_stale` and
+`log_archive_unwritable`:
 
 * Two readings of one condition are ONE pending row updated in place. The row
   carries the subject `<kind>:<key>`, and a second reading bumps
@@ -9,9 +10,10 @@ Pinned here, for `db_backup_failure` and `db_backup_stale`:
   seam-property assertion the old direct create fails).
 * The place the code knows the condition cleared ends the row as the PLATFORM
   (`cancelled` / `platform` / `condition_cleared`): a successful backup ends
-  both backup kinds, and a fresh success the staleness check reads ends the
-  stale row. An outcome that is not positive evidence of recovery ends nothing: a
-  further failure, a no-space skip, a status reset with no success on record.
+  both backup kinds, a fresh success the staleness check reads ends the stale
+  row, and a successful write probe ends the archive row. An outcome that is
+  not positive evidence of recovery ends nothing: a further failure, a
+  no-space skip, a status reset with no success on record, a skipped probe.
 * The backup's two conditions are two subjects on one host (AC 5).
 * A person's ending through `ask_service.answer` lands `acknowledged`, is
   never overwritten by the platform's clear, and snoozes the next reading.
@@ -34,6 +36,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -173,6 +176,17 @@ def backup(db, clock, monkeypatch, tmp_path):
                            host=svc_mod.ALARM_AGENT_NAME)
 
 
+@pytest.fixture
+def archive(db, clock, monkeypatch, tmp_path):
+    from services import archive_storage
+
+    monkeypatch.setenv("LOG_ARCHIVE_ENABLED", "true")
+    path = tmp_path / "archives"
+    storage = archive_storage.LocalArchiveStorage(str(path))
+    monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: storage)
+    return SimpleNamespace(mod=archive_storage, path=str(path), host=archive_storage.ALARM_AGENT_NAME)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -208,6 +222,13 @@ def _ack(row):
     from services import ask_service
     return ask_service.answer(row, response="acknowledged", response_text=None,
                               actor=ask_service.Actor(email="op@example.com")).rows[0]
+
+
+def _probe(a, *, writable):
+    if writable:
+        return a.mod.probe_archive_writability()
+    with patch("pathlib.Path.touch", side_effect=PermissionError(13, "Permission denied")):
+        return a.mod.probe_archive_writability()
 
 
 # ---------------------------------------------------------------------------
@@ -459,9 +480,78 @@ class TestThirtyDaysAhead:
         assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
 
 
+# ---------------------------------------------------------------------------
+# log_archive_unwritable
+# ---------------------------------------------------------------------------
+
+class TestArchiveUnwritable:
+    def test_two_readings_are_one_row_with_the_seam_properties(self, db, archive, clock):
+        assert _probe(archive, writable=False) is False
+        rows = _pending(db, archive.host)
+        assert len(rows) == 1
+        first = rows[0]
+        assert first["subject"] == pa.subject_for("log_archive_unwritable", archive.path)
+        assert first["request_id"].startswith("log-archive-")
+        assert (first["type"], first["priority"]) == ("alert", "high")
+        assert first["context"]["seen_count"] == 1
+
+        clock.set(DAY0 + timedelta(days=1))          # the next nightly archival run
+        assert _probe(archive, writable=False) is False
+        rows = _pending(db, archive.host)
+        assert [r["id"] for r in rows] == [first["id"]]
+        row = rows[0]
+        assert row["context"]["seen_count"] == 2
+        assert row["last_seen_at"] > first["last_seen_at"]
+        assert row["expires_at"] > first["expires_at"]
+
+        clock.set(DAY0 + timedelta(days=2))
+        assert _probe(archive, writable=True) is True
+        assert _pending(db, archive.host) == []
+        _assert_platform_ended(db, row)
+
+    def test_a_skipped_probe_ends_nothing(self, db, archive, clock, monkeypatch):
+        """Archival switched off, or a non-local backend, probes nothing: not
+        evidence that the directory became writable."""
+        _probe(archive, writable=False)
+        clock.set(DAY0 + timedelta(days=1))
+        monkeypatch.setenv("LOG_ARCHIVE_ENABLED", "false")
+        assert _probe(archive, writable=True) is True
+        monkeypatch.setenv("LOG_ARCHIVE_ENABLED", "true")
+        monkeypatch.setattr(archive.mod, "get_archive_storage", lambda: object())
+        assert _probe(archive, writable=True) is True
+        assert len(_pending(db, archive.host)) == 1
+
+    def test_a_persons_ending_stands_and_snoozes_the_next_reading(self, db, archive, clock, outcomes):
+        _probe(archive, writable=False)
+        row = _pending(db, archive.host)[0]
+        clock.set(DAY0 + timedelta(hours=1))
+        assert _ack(row)["status"] == "acknowledged"
+        clock.set(DAY0 + timedelta(days=1))
+        _probe(archive, writable=False)
+        assert _pending(db, archive.host) == []
+        assert outcomes[-1] == ("log_archive_unwritable", pa.OBSERVED_SNOOZED)
+        clock.set(DAY0 + timedelta(days=2))
+        _probe(archive, writable=True)
+        kept = db.get_operator_queue_item(row["id"])
+        assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
+
+    def test_the_key_is_the_sweeps_reading_of_a_legacy_row(self, db, archive, clock):
+        # The pre-move `_alarm_unwritable_archive_dir` id and context.
+        legacy_id = (f"log-archive-{archive.path.strip('/').replace('/', '-')}-"
+                     f"{_iso(DAY0 - timedelta(days=1))[:10]}")
+        legacy_ctx = {"path": archive.path, "detail": "PermissionError: [Errno 13] Permission denied"}
+        _probe(archive, writable=False)
+        row = _pending(db, archive.host)[0]
+        assert pa.derive_legacy_subject(legacy_id, legacy_ctx).subject == row["subject"]
+        assert pa.derive_legacy_subject(row["request_id"], row["context"]) == \
+            pa.LegacyMatch("log_archive_unwritable", row["subject"])
+
+
 def test_the_module_prefix_constants_are_the_kinds_prefixes():
-    """The module keeps its `ALARM_ID_PREFIX` constant (the reserved-prefix tests
-    read it); the seam mints ids from the kind registry, so they must agree."""
+    """The two modules keep their `ALARM_ID_PREFIX` constants (the reserved-prefix
+    tests read them); the seam mints ids from the kind registry, so they must agree."""
     import services.db_backup_service as svc_mod
+    from services import archive_storage
     assert svc_mod.ALARM_ID_PREFIX == pa.KINDS["db_backup_failure"].prefix == \
         pa.KINDS["db_backup_stale"].prefix
+    assert archive_storage.ALARM_ID_PREFIX == pa.KINDS["log_archive_unwritable"].prefix

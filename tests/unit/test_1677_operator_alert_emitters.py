@@ -71,11 +71,6 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
-        "platform-only: raised from probe_archive_writability() at the start of an "
-        "archival RUN (daily maintenance cadence), and the id is bucketed per path "
-        "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
-        "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
     ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
         "platform-only: the ent#615 sweep refused to strip a credential URL it "
         "could not replace. Raised from a start hook / boot one-shot, so the "
