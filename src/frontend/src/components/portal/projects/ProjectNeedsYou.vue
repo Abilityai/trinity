@@ -66,9 +66,11 @@
         >
           <div class="flex items-center gap-2 min-w-0">
             <!-- The Inbox row's shape: the agent keeps its width (to 60%), the
-                 rest truncates. -->
-            <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100">{{ row.agent_name }}</span>
-            <span class="shrink-0 text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{{ kindLabel(row.kind) }}</span>
+                 rest truncates. The time never shrinks; the kind label gives way
+                 first, then the agent name (#3994 — all three were shrink-0, so
+                 in the narrow column the row overflowed its card). -->
+            <span class="min-w-0 shrink-[0.25] max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100">{{ row.agent_name }}</span>
+            <span class="min-w-0 truncate text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{{ kindLabel(row.kind) }}</span>
             <!-- #2915 / ent#610 B5: the Workspace's coarse sync badge, only
                  while pending — the same rule as the ask card's header. -->
             <BaseBadge
