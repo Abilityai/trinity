@@ -528,3 +528,27 @@ def test_r1_git_bloat_is_exempt_and_a_legacy_row_gets_a_lifetime_stamp_only(pa):
     assert plan.survivor_stamps == () and plan.ended_ids == ()
     (stamp,) = plan.lifetime_stamps
     assert _ts(stamp.expires_at) == T0 + timedelta(days=30)
+
+
+# --------------------------------------------------------------------------
+# /cso: an agent cannot silence the alarm about itself
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_an_oversized_agent_error_cannot_keep_the_sync_failing_alert_out(
+        service, seed_agent, db, clock):
+    """`last_error_summary` comes from the agent-writable `sync-state.json`. A
+    compromised agent writing one past the queue's 64 KiB context belt made
+    every write of its own sync_failing alert fail, and the seam's retry turned
+    that into a loop. The alert carries the agent writer's own 240-char excerpt
+    (`_summarize_git_error`), so it lands; the stored sync state is untouched."""
+    seed_agent()
+    huge = "remote: Write access to repository not granted. " + "x" * (70 * 1024)
+    failing = _payload(status="failed", error=huge)
+    for _ in range(3):
+        await _poll(service, failing)
+        clock.advance(**_MIN)
+    (row,) = _pending(db, "sync-failing-")
+    assert row["title"] == "Git token can't push"
+    assert row["context"]["last_error_summary"] == huge[:240]
+    assert db.get_sync_state("alpha")["last_error_summary"] == huge

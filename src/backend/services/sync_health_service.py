@@ -70,6 +70,13 @@ ALERT_THRESHOLD = 3  # emit sync_failing entry after N consecutive failures
 # holds. #3255's base-image alarm cooldown is the precedent.
 ALERT_REFRESH_SECONDS = 6 * 60 * 60
 
+# #3254: the git error a sync_failing alert carries. The agent server writes at
+# most this much (`agent_server/routers/git.py::_summarize_git_error`), but
+# `sync-state.json` is agent-writable: an agent writing more could push its own
+# alert past the queue's 64 KiB context belt, so every write of it failed and the
+# alarm about that agent was silenced. The stored sync state keeps the full text.
+ALERT_ERROR_EXCERPT_CHARS = 240
+
 # #2742: single Redis key holding the current sync-health leader's worker id.
 # One poller across all uvicorn workers. Collides with none of the five existing
 # leases (monitoring / opqueue / skills:sync / canary / subscription:recovery).
@@ -764,7 +771,7 @@ class SyncHealthService:
         error = state.get("last_error_summary") or ""
         failures = state["consecutive_failures"]
         context = {
-            "last_error_summary": error,
+            "last_error_summary": error[:ALERT_ERROR_EXCERPT_CHARS],
             "last_sync_at": last_sync_at,
             "consecutive_failures": failures,
         }
