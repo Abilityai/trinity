@@ -539,7 +539,9 @@ def announce_refusal(
     # comes and goes) makes every cycle "fresh", so the transition ERROR fires
     # every 5 minutes — up to 288/day, which is the alert-muting mode this memo
     # exists to prevent — and each fresh episode resets `first_refused_at`, so the
-    # escalation below never trips. Judged the better trade anyway: the alternative
+    # escalation below never trips. Since #3254 each fresh episode also rewrites
+    # the alarm row, so a flap is one row update and one thin `operator_queue_sync`
+    # broadcast per cycle as well. Judged the better trade anyway: the alternative
     # (window-only freshness) silently swallowed #1833's new signal entirely, and a
     # flapping count function is itself a defect that ought to be loud. If this is
     # ever observed in the wild, dampen it with a per-key minimum re-ERROR interval
