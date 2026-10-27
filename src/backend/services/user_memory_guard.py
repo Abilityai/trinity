@@ -419,6 +419,7 @@ STRUCTURAL_HEADINGS = frozenset({
     "remembering things about users (public & channel sessions)",
     "speaking (voice replies)", "a person is reading this room", "mcp tools (codex runtime)",
     "hearing you on this surface (client-controlled narration)",
+    "stay inside trinity's execution ledger",
 })
 
 # -- memory_instruction ------------------------------------------------------
