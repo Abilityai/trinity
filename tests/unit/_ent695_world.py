@@ -160,6 +160,10 @@ def make_world(monkeypatch, tmp_path=None) -> World:
     monkeypatch.setattr(crud, "get_agent_by_name",
                         lambda n: SimpleNamespace(name=n) if n in docker.containers else None)
     monkeypatch.setattr(docker_service, "list_all_agents_fast", _raise_fast)
+    # `get_accessible_agents` reaches it through a by-name import, so patching
+    # the module attribute alone would leave that path silently working.
+    from services.agent_service import helpers as _helpers
+    monkeypatch.setattr(_helpers, "list_all_agents_fast", _raise_fast)
     if tmp_path is not None:
         curated, deployed = tmp_path / "templates-curated", tmp_path / "templates-deployed"
         deployed.mkdir(parents=True, exist_ok=True)

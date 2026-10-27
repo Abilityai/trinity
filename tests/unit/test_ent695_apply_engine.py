@@ -241,6 +241,13 @@ class TestRoster:
         snap = world.snapshot(_manifest("a"))
         assert ("membership_evidence_prefix_only", "acme-a") in _codes(snap)
 
+    def test_an_unreadable_docker_is_seen_through_the_tri_state_reader_only(self, world):
+        """`get_accessible_agents` answers `[]` when Docker cannot be asked, which
+        would read as "no containers"; the tri-state reader answers None."""
+        world.seed_agent("acme-a")
+        world.docker.readable = False
+        assert ("roster_unreadable", None) in _codes(world.snapshot(_manifest("a")))
+
     def test_names_the_caller_cannot_access_are_not_in_the_roster(self, world):
         world.seed_agent("acme-bobs", owner=W.BOB)
         snap = world.snapshot(_manifest("a"))
@@ -871,6 +878,15 @@ class TestH2NeverRemoves:
         assert W.Witness.dump_tables()["agent_peer_skill_grants"] != []
         a = next(m for m in result.members if m.short_name == "a")
         assert [(c.code, c.current) for c in a.changes] == [("permission_extra", ["acme-b"])]
+
+    def test_adding_a_tag_keeps_the_operators_tags(self, ew):
+        """The write path: `set_agent_tags` is a full replacement. Apply adds
+        `team-x` and leaves the operator's `operator-pick` where it was."""
+        ew.seed_agent("acme-a", tags=(SYSTEM, "operator-pick"))
+        mf = f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n    tags: [team-x]\n"
+        result = W.apply(ew, mf, dry_run=False)
+        assert result.status == "applied", result.failed
+        assert db.get_agent_tags("acme-a") == ["acme", "operator-pick", "team-x"]
 
     def test_adding_an_edge_keeps_a_hand_granted_edge_and_its_skill_grant(self, ew):
         """The write path, not only the report: `set_permissions` is a full
