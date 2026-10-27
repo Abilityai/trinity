@@ -563,9 +563,17 @@ def _switch_failure_kind(
     #3012: a worker older than #3012 reports a model the CLI refused as 503 →
     ``auth``. No subscription can fix that, so the text overrides the code.
     """
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import (
+        is_model_rejection,
+        is_prompt_too_long,
+        is_turn_limit,
+    )
 
     if is_model_rejection(error_text):
+        return None
+    # #3984 / #3849: a worker reports the agent's prompt-length 503 as `auth`;
+    # no credential changes a turn cap or a prompt's length.
+    if is_turn_limit(error_text) or is_prompt_too_long(error_text):
         return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
 

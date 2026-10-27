@@ -3129,9 +3129,22 @@ class TaskExecutionService:
         # #3012: Claude Code refused the model. An agent image older than #3012
         # answers that 503, which read as auth below and rotated the agent
         # through every subscription. No subscription can fix it — never switch.
-        from services.failure_classifier import is_model_rejection
+        from services.failure_classifier import (
+            is_model_rejection,
+            is_prompt_too_long,
+            is_turn_limit,
+        )
         model_rejected = is_model_rejection(error_msg)
-        if not state.subscription_switch_attempted and not model_rejected:
+        # #3984 / #3849: a turn that hit its cap, or a prompt the API refused
+        # for its length, fails the same way on every credential. The length
+        # rejection answers 503 (zero tokens), so the status test below would
+        # otherwise switch on it and code it AUTH for the dispatch breaker.
+        credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+        if (
+            not state.subscription_switch_attempted
+            and not model_rejected
+            and not credential_independent
+        ):
             try:
                 from services.subscription_auto_switch import (
                     handle_subscription_failure,
@@ -3158,6 +3171,9 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 503 and is_prompt_too_long(error_msg):
+            logger.warning(f"[TaskExecService] Prompt too long on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.AGENT_ERROR
         elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH

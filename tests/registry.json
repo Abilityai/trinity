@@ -6607,6 +6607,18 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_3984_3849_not_a_credential_failure.py",
+      "feature": "#3984, #3849",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "agent",
+        "subscriptions",
+        "unit"
+      ],
+      "description": "Two agent failures no credential can fix never drive SUB-003. The agent's turn-limit 422 at caps 401 and 403 (CLI text and fallback, through the real _finalize_headless_result) no longer trips the bare 401/403 auth indicators; the API's 'Prompt is too long' 503 (current and pre-#3340 images) is not auth. classify_switch_failure returns None for both; execute_task calls the agent once with no walk, no legacy switch, no key fallback and no AUTH code; /chat never switches and codes agent_error; the pull terminal and #1083 callback do not count a prompt-length 503 as auth. Genuine auth (503, 401/403, auth text) and 429 keep their classification; the turn-limit marker is pinned to the agent's source and the scheduler mirror carries both lists. Mutations: dropping the call-site guards turns 8 red; dropping the turn-limit exclusion in is_auth_failure turns 7 red."
     }
   ]
 }

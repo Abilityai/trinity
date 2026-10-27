@@ -184,6 +184,9 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     true (not just 429/503 by status code):
 
         model rejection (#3012)      -> None, whatever the status
+        container fault (#3470)      -> None, whatever the status
+        turn limit (#3984)           -> None, whatever the status
+        prompt too long (#3849)      -> None, whatever the status
         429                          -> "rate_limit"
         503 / 401 / 403 / 402        -> "auth"
         other 4xx/5xx whose body trips ``is_auth_failure`` -> "auth"
@@ -195,7 +198,12 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
     """
     # Imported here (not at module scope) to match the except-handler import and
     # keep the test patch target `subscription_auto_switch.is_auth_failure` live.
-    from services.failure_classifier import is_container_fault, is_model_rejection
+    from services.failure_classifier import (
+        is_container_fault,
+        is_model_rejection,
+        is_prompt_too_long,
+        is_turn_limit,
+    )
     from services.subscription_auto_switch import is_auth_failure
 
     code = response.status_code
@@ -207,6 +215,10 @@ def classify_switch_failure(response: httpx.Response) -> Optional[str]:
         # container at all" too. No credential fixes that, and a walk would
         # record an auth refusal against every subscription and the key.
         if is_container_fault(error_msg):
+            return None
+        # #3984 / #3849: a turn that hit its cap, or a prompt the API refused
+        # for its length, fails the same way on every credential.
+        if is_turn_limit(error_msg) or is_prompt_too_long(error_msg):
             return None
     if code == 429:
         return "rate_limit"

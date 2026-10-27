@@ -689,12 +689,16 @@ def _classify_agent_http_failure(
     older agent image answers it 503), the agent answered 503 → AUTH,
     429 → BILLING, never answered → NETWORK, any other agent status →
     AGENT_ERROR."""
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import is_model_rejection, is_prompt_too_long
 
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
     if is_model_rejection(error_msg):
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
+    # #3849: the API refused the prompt's length — a 503 from the agent, but
+    # not a credential fault.
+    if is_prompt_too_long(error_msg):
+        return TaskExecutionErrorCode.AGENT_ERROR
     if agent_status_code == 503:
         return TaskExecutionErrorCode.AUTH
     if agent_status_code == 429:
@@ -817,7 +821,11 @@ async def _apply_sub003_autoswitch(
             )
         raise ChatDispatchError(429, error_msg, headers=code_headers)
 
-    if agent_status_code == 503 or is_auth_failure(error_msg):
+    from services.failure_classifier import is_prompt_too_long, is_turn_limit
+
+    # #3984 / #3849: no credential changes a turn cap or a prompt's length.
+    credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+    if not credential_independent and (agent_status_code == 503 or is_auth_failure(error_msg)):
         try:
             switch_result = await handle_subscription_failure(
                 agent_name=name,

@@ -111,6 +111,17 @@ it). `is_auth_failure` itself returns False on a model rejection. The Workspace 
 `model_unsupported` (the agent's default was refused) or `invalid_model` (the client's pick,
 which self-heals).
 
+**Never a trigger (#3984, #3849):** a turn that stopped at its cap, or a prompt the API refused
+for its length. Both fail the same way on every credential. The turn-limit answer is a 422
+whose text carries the CLI's turn count, so at a cap of 401 or 403 the bare `"401"`/`"403"`
+auth indicators matched it; `is_turn_limit` keys on the agent's own `Task exceeded turn
+limit:` prefix (`TURN_LIMIT_MARKERS`, pinned to the producer). The length rejection is a
+zero-token exit, so the agent answers 503; `is_prompt_too_long` matches the API's sentence
+(`PROMPT_LENGTH_MARKERS`). Both are checked at the same sites as a model rejection, and
+`is_auth_failure` returns False on either. A prompt-length 503 is coded `agent_error`, not
+`auth`, on the TES, `/chat` and #1083 callback paths, so the AUTH dispatch breaker does not
+count it. Pinned by `test_3984_3849_not_a_credential_failure.py`.
+
 `AUTH_INDICATORS` (canonical list in
 `src/backend/services/failure_classifier.py::is_auth_failure`, #1088):
 `credit balance`, `unauthorized`, `authentication`, `credentials`,
