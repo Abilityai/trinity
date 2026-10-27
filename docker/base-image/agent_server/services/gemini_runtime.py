@@ -328,7 +328,34 @@ class GeminiRuntime(AgentRuntime):
                 process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
-                get_process_registry().unregister(_registered_id)
+                # #3408: since #3307 `unregister()` keeps a live child, so a
+                # write that fails while the child lives must end it first (no
+                # reader yet, stdin still open). PID ONLY: a Gemini child shares
+                # the agent server's process group (no start_new_session), so a
+                # group kill would signal the server itself. Off the event loop;
+                # `loop` is assigned only below.
+                def _abort_handoff():
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"[Gemini] pid={process.pid} did not exit after SIGKILL ({_registered_id})")
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(f"[Gemini] pipe close after failed handoff of {_registered_id} raised", exc_info=True)
+
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this
+                    # await was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        get_process_registry().unregister(_registered_id)
+                    else:
+                        teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output (runs in thread pool)
@@ -784,7 +811,28 @@ class GeminiRuntime(AgentRuntime):
                 process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
-                get_process_registry().unregister(_registered_id)
+                # #3408: as on the chat path above. PID ONLY, never the group:
+                # it is the agent server's own.
+                def _abort_handoff():
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"[Headless Task {session_id}] pid={process.pid} did not exit after SIGKILL")
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(f"[Headless Task {session_id}] pipe close after failed handoff raised", exc_info=True)
+
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    if teardown.done():
+                        get_process_registry().unregister(_registered_id)
+                    else:
+                        teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output
