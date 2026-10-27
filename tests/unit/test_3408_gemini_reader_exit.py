@@ -228,7 +228,7 @@ def _assert_released(gemini, execution_id):
 @pytest.mark.asyncio
 async def test_inner_timeout_reaps_the_child_before_raising(gemini, refused_signals):
     with pytest.raises(HTTPException) as error:
-        await gemini.run("s5-timeout", _LINE_AFTER_THE_BUDGET, hold_kill=True, timeout_seconds=0)
+        await gemini.run("3408-timeout", _LINE_AFTER_THE_BUDGET, hold_kill=True, timeout_seconds=0)
 
     assert error.value.status_code == 504, "control: the inner per-line timeout fired"
     child = gemini.children[0]
@@ -236,7 +236,7 @@ async def test_inner_timeout_reaps_the_child_before_raising(gemini, refused_sign
     # The SIGKILL is held until wait() is entered, so a dead child here also
     # means the reader waited for it.
     assert child.poll() is not None, "the reader raised with its child still alive"
-    _assert_released(gemini, "s5-timeout")
+    _assert_released(gemini, "3408-timeout")
     assert gemini.sweep_allowlists and child.pid not in gemini.sweep_allowlists[0], (
         "the error-path sweep ran while the child was still allowlisted"
     )
@@ -246,7 +246,7 @@ async def test_inner_timeout_reaps_the_child_before_raising(gemini, refused_sign
 @pytest.mark.asyncio
 async def test_a_non_object_json_line_reaps_the_child_before_raising(gemini, refused_signals):
     with pytest.raises(HTTPException) as error:
-        await gemini.run("s5-non-object", _NON_OBJECT_LINE)
+        await gemini.run("3408-non-object", _NON_OBJECT_LINE)
 
     assert error.value.status_code == 500
     assert "'list' object has no attribute 'get'" in error.value.detail, (
@@ -255,7 +255,7 @@ async def test_a_non_object_json_line_reaps_the_child_before_raising(gemini, ref
     child = gemini.children[0]
     _assert_child_was_gemini_shaped(gemini)
     assert child.poll() is not None, "the reader raised with its child still alive"
-    _assert_released(gemini, "s5-non-object")
+    _assert_released(gemini, "3408-non-object")
     assert gemini.sweep_allowlists and child.pid not in gemini.sweep_allowlists[0], (
         "the error-path sweep ran while the child was still allowlisted"
     )
@@ -266,7 +266,7 @@ async def test_a_non_object_json_line_reaps_the_child_before_raising(gemini, ref
 async def test_an_exit_never_observed_keeps_the_entry_and_the_reader_error(gemini, refused_signals):
     with pytest.raises(HTTPException) as error:
         await gemini.run(
-            "s5-unobserved", _LINE_AFTER_THE_BUDGET,
+            "3408-unobserved", _LINE_AFTER_THE_BUDGET,
             hold_kill=True, exit_unobserved=True, timeout_seconds=0,
         )
 
@@ -275,7 +275,7 @@ async def test_an_exit_never_observed_keeps_the_entry_and_the_reader_error(gemin
     _assert_child_was_gemini_shaped(gemini)
     assert child.kill_calls >= 1, "control: the error path tried to end the child"
     assert child.poll() is None, "control: the child's exit was never observed"
-    assert gemini.registry.is_execution_running("s5-unobserved"), (
+    assert gemini.registry.is_execution_running("3408-unobserved"), (
         "a child whose exit was not observed must stay registered, so it can be stopped again"
     )
     assert gemini.subscribers[0].empty(), "a still-owned child must not end its stream"
@@ -284,12 +284,12 @@ async def test_an_exit_never_observed_keeps_the_entry_and_the_reader_error(gemin
 
 @pytest.mark.asyncio
 async def test_empty_output_takes_the_normal_path_and_never_kills(gemini, refused_signals):
-    response, _log, _metadata, _session = await gemini.run("s5-empty", _PRINTS_NOTHING)
+    response, _log, _metadata, _session = await gemini.run("3408-empty", _PRINTS_NOTHING)
 
     assert response == "(No response from model)"
     child = gemini.children[0]
     _assert_child_was_gemini_shaped(gemini)
     assert child.returncode == 0, "control: the child exited on its own"
     assert child.kill_calls == 0, "the error-path kill fired on a clean exit"
-    _assert_released(gemini, "s5-empty")
+    _assert_released(gemini, "3408-empty")
     assert refused_signals == []
