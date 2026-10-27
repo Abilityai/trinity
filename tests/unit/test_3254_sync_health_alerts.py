@@ -579,6 +579,28 @@ async def test_an_oversized_agent_error_cannot_keep_the_sync_failing_alert_out(
 
 
 @pytest.mark.asyncio
+async def test_the_process_memos_follow_the_live_git_enabled_fleet(
+        service, seed_agent, db, clock):
+    """The poller's memos (when each condition was last read, a divergence
+    lookup miss, a maintenance drop not yet confirmed) are per agent. An agent
+    that is deleted or has git switched off must not stay in them for the life
+    of the process; an empty fleet empties them."""
+    seed_agent()
+    service._alert_read_at[("sync_failing", "ghost")] = (None, 0.0)
+    service._divergence_looked_up["ghost"] = ("2026-01-01T00:00:00Z", 0.0)
+    service._maintenance_drop_unconfirmed.update({"ghost", "alpha"})
+    await _poll(service, _OK)
+    assert all(agent != "ghost" for _kind, agent in service._alert_read_at)
+    assert "ghost" not in service._divergence_looked_up
+    assert service._maintenance_drop_unconfirmed == {"alpha"}
+
+    _hrun("DELETE FROM agent_git_config WHERE agent_name = 'alpha'")
+    await _poll(service, _OK)
+    assert service._maintenance_drop_unconfirmed == set()
+    assert service._alert_read_at == {} and service._divergence_looked_up == {}
+
+
+@pytest.mark.asyncio
 async def test_an_oversized_last_sync_at_cannot_keep_the_sync_failing_alert_out(
         service, seed_agent, db, clock):
     """`last_sync_at` is agent-written too. 30,000 non-ASCII characters fit the

@@ -48,7 +48,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
@@ -525,6 +525,8 @@ class SyncHealthService:
             logger.debug("could not list git-enabled agents", exc_info=True)
             return
 
+        self._forget_agents_not_in(
+            {getattr(c, "agent_name", None) or c["agent_name"] for c in configs})
         if not configs:
             return
 
@@ -823,6 +825,15 @@ class SyncHealthService:
             return True
         self._divergence_looked_up[agent_name] = (episode, time.monotonic())
         return False
+
+    def _forget_agents_not_in(self, live: Set[str]) -> None:
+        """#3254: the process memos follow the live git-enabled fleet, not its
+        history, so a deleted agent or one whose git was switched off leaves no
+        entry behind. An agent that returns re-reads at once (a restart's cost)."""
+        self._alert_read_at = {k: v for k, v in self._alert_read_at.items() if k[1] in live}
+        self._divergence_looked_up = {
+            a: v for a, v in self._divergence_looked_up.items() if a in live}
+        self._maintenance_drop_unconfirmed &= live
 
     def _forget_reading(self, kind: str, agent_name: str) -> None:
         self._alert_read_at.pop((kind, agent_name), None)
