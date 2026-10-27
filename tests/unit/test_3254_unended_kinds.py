@@ -117,6 +117,33 @@ def agent():
     return f"agent-3254u-{uuid.uuid4().hex[:6]}"
 
 
+@pytest.fixture
+def private_queue_db(tmp_path, monkeypatch):
+    """A private SQLite file, for a test that runs the fleet-wide expiry sweep.
+
+    The unit island's database is shared by the whole run, and
+    `mark_expired` has no agent filter: a sweep 30 days ahead would expire
+    every other test's pending rows. The DB layer resolves its engine from
+    `TRINITY_DB_PATH` on every call, so pointing it at a file built from the
+    fresh-install DDL (`db/schema.py`) isolates the flow."""
+    import sqlite3
+
+    import db.connection as conn_mod
+    from db.engine import get_engine
+    from db.schema import init_schema
+
+    path = str(tmp_path / "s6-thirty-days.db")
+    conn = sqlite3.connect(path)
+    try:
+        init_schema(conn.cursor(), conn)
+    finally:
+        conn.close()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("TRINITY_DB_PATH", path)
+    monkeypatch.setattr(conn_mod, "DB_PATH", path)
+    assert get_engine().url.database == path
+
+
 def _pending(db, agent):
     return db.list_operator_queue_items(agent_name=agent, status="pending")
 
@@ -478,16 +505,15 @@ class TestKeyParityWithTheSweep:
 # ---------------------------------------------------------------------------
 
 def test_thirty_days_later_the_must_act_rows_are_still_pending_and_validation_expired(
-        db, pa, cps, clock, agent):
+        private_queue_db, db, pa, cps, clock, agent):
     _park(agent, "exec-30")
     cps._alert_collided_inbox(agent, LEGACY_DIR, CLAIMANTS)
     _validation_failed(agent, "exec-30v")
     assert len(_pending(db, agent)) == 3
 
     clock.advance(days=30)
-    for _ in range(50):                      # the island's DB is shared: drain every batch
-        if not db.mark_operator_queue_expired():
-            break
+    expired = db.mark_operator_queue_expired()
+    assert [r["subject"] for r in expired] == ["validation_failed:exec-30v"]
 
     rows = {r["subject"].split(":")[0]: r for r in _all(db, agent)}
     for kind in ("poison", "portal_inbox_collision"):
