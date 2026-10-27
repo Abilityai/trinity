@@ -574,10 +574,10 @@ def _sync(monkeypatch, responded, *entries):
     client = MagicMock()
     client.read_file = AsyncMock(return_value={"success": True, "content": content})
     client.write_file = AsyncMock(return_value={"success": True})
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
-    monkeypatch.setattr(oqs, "_audit_sync", AsyncMock())
+    monkeypatch.setattr(oqs.deps, "_audit_sync", AsyncMock())
     asyncio.run(oqs.OperatorQueueSyncService()._sync_agent("a"))
     return db, client
 

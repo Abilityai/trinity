@@ -136,6 +136,53 @@ def unresolved_names(tree: ast.Module) -> set:
     return out
 
 
+def defined_names(tree: ast.AST) -> set:
+    """Every name a module binds anywhere, in any scope (G4: a function-local
+    `from database import db` is a second binding too)."""
+    defined = set()
+    for n in ast.walk(tree):
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defined.add(n.name)
+        if isinstance(n, (ast.Import, ast.ImportFrom)):
+            defined.update((a.asname or a.name).split(".")[0] for a in n.names)
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = n.args
+            defined.update(x.arg for x in a.args + a.kwonlyargs + a.posonlyargs + [a.vararg, a.kwarg] if x)
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            defined.add(n.id)
+        if isinstance(n, ast.ExceptHandler) and n.name:
+            defined.add(n.name)
+        if isinstance(n, (ast.Global, ast.Nonlocal)):
+            defined.update(n.names)
+    return defined
+
+
+def imported_sources(tree: ast.AST):
+    """(line, dotted, local name) for every import in ANY scope of a package
+    module: the dotted name of the object it pulls in, whatever it is bound as.
+    `from X import Y [as Z]` is `X.Y`; `import X.Y [as Z]` is `X.Y`; a star
+    import is `X.*`. Relative imports resolve against the package."""
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            for a in n.names:
+                yield n.lineno, a.name, a.asname or a.name.split(".")[0]
+        elif isinstance(n, ast.ImportFrom):
+            base = n.module or ""
+            if n.level:
+                parts = NAME.split(".")
+                base = ".".join(parts[:len(parts) - (n.level - 1)] + ([n.module] if n.module else []))
+            for a in n.names:
+                yield n.lineno, f"{base}.{a.name}", a.asname or a.name
+
+
+def reaches_source(dotted: str, source: str) -> bool:
+    """`dotted` imports `source` itself, a module it is reached through
+    (`import database` reaches `database.db`), or its module by star."""
+    if dotted.endswith(".*"):
+        return source.startswith(dotted[:-1])
+    return dotted == source or source.startswith(dotted + ".")
+
+
 def is_backend_module(dotted: str) -> bool:
     path = BACKEND.joinpath(*dotted.split("."))
     return path.with_suffix(".py").is_file() or (path / "__init__.py").is_file()
@@ -456,6 +503,85 @@ def sentinel_defaults():
     for mod, path in modules().items():
         visit(mod, parse(path).body, [])
     return found
+
+
+def globals_sites(path: Path):
+    """(line, what) for every `__globals__` reached through a package function:
+    `<package or submodule>.f.__globals__` (any attribute chain under it), or a
+    name that holds one — from-imported from the package, or assigned from such
+    an expression (`f = oqs.list_for_principal`) — plus `getattr(<that>,
+    "__globals__")`. A function's `__globals__` is the namespace of the module
+    that DEFINES it, so once code moves, a `setitem` on it adds a key no reader
+    reads.
+
+    Provenance is per scope, like `scoped`: a name is a package function where
+    THIS scope binds it so, or an enclosing function's (the module's, for a top
+    level def) does and this scope does not rebind it. A parameter, or any
+    other binding, shadows it; a sibling function's import is never seen."""
+    aliases_of = {id(node): aliases for node, aliases in scoped(path)}
+
+    def through(expr, aliases, fns):
+        while isinstance(expr, ast.Attribute):
+            target = resolve(expr.value, aliases)
+            if target is not None and not target.startswith("@"):
+                return f"{NAME}{'.' + target if target else ''}.{expr.attr}"
+            expr = expr.value
+        return fns.get(expr.id) if isinstance(expr, ast.Name) else None
+
+    def visit(scope, inherited):
+        nodes = list(scope_nodes(scope))
+        local, other = {}, set()
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            a = scope.args
+            other.update(x.arg for x in a.args + a.kwonlyargs + a.posonlyargs + [a.vararg, a.kwarg] if x)
+        assigns = []
+        for node in nodes:
+            if isinstance(node, ast.ImportFrom) and node.level == 0 and node.module and (
+                    node.module == NAME or node.module.startswith(NAME + ".")):
+                for a in node.names:
+                    if a.name != "*" and a.name not in submodules():
+                        local[a.asname or a.name] = f"{node.module}.{a.name}"
+                    else:
+                        other.add(a.asname or a.name)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                other.update((a.asname or a.name).split(".")[0] for a in node.names)
+            elif (isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+                  and all(isinstance(t, ast.Name) for t in (node.targets if isinstance(node, ast.Assign) else [node.target]))):
+                assigns.append(node)
+            elif isinstance(node, SCOPES) and not isinstance(node, ast.Lambda):
+                other.add(node.name)
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                other.add(node.name)
+        held = set()
+        for _ in range(len(assigns) + 1):  # flow-insensitive: chains of assignments
+            for node in assigns:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                what = through(node.value, aliases_of.get(id(node.value), {}), {**inherited, **local})
+                if what is not None:
+                    for t in targets:
+                        local[t.id] = what
+                        held.add(id(t))
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)) and id(node) not in held:
+                other.add(node.id)
+        here = {k: v for k, v in inherited.items() if k not in other and k not in local}
+        here.update(local)
+        for node in nodes:
+            fn = None
+            if isinstance(node, ast.Attribute) and node.attr == "__globals__":
+                fn = node.value
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "getattr"
+                  and len(node.args) >= 2 and isinstance(node.args[1], ast.Constant)
+                  and node.args[1].value == "__globals__"):
+                fn = node.args[0]
+            if fn is not None:
+                what = through(fn, aliases_of.get(id(fn), {}), here)
+                if what is not None:
+                    yield node.lineno, what
+            if isinstance(node, SCOPES):
+                yield from visit(node, inherited if isinstance(scope, ast.ClassDef) else here)
+
+    yield from visit(parse(path), {})
 
 
 def patch_sites(path: Path):

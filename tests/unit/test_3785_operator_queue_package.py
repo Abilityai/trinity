@@ -13,7 +13,9 @@ The ownership model (Invariant #1(a)/(b), the PR #2487 rule):
     Submodules read them as `_oq.NAME` (`from services import
     operator_queue_service as _oq`), never a copy: one binding, so a patch on
     `oqs.NAME` reaches every reader inside and outside.
-  * O2 — collaborators (`db`, `AgentClient`, …) are bound once, in `deps.py`.
+  * O2 — collaborators (`db`, `AgentClient`, …) are bound once, in `deps.py`,
+    and are absent from the package: a stale `monkeypatch.setattr(oqs, "db", …)`
+    raises. Tests patch `oqs.deps.X`.
   * O3 — everything else has one owner module, and siblings are read through
     the OWNING module object, never through a re-export alias.
   * O4 — every module logs as `services.operator_queue_service`.
@@ -69,6 +71,12 @@ _HANDOFF_NAMES = (
 )
 # Read through the package by tests as data, or incidentally (`oqs.time.monotonic`).
 _TEST_INCIDENTAL_NAMES = ("time", "to_utc_iso", "OPTIONS_DROPPED_MARKER", "logger")
+# O2 (G4): the collaborators, bound once, in `deps`. Absent from the package, so a
+# stale `monkeypatch.setattr(oqs, "db", …)` raises instead of patching a copy.
+_COLLABORATORS = frozenset({"db", "_queue_db", "principal_reach", "get_breaker_redis",
+                            "ask_service", "AgentClient", "_audit_sync"})
+# `deps` also binds its O4 logger, which is not a collaborator.
+_DEPS_LOGGING = frozenset({"logging", "logger"})
 # A submodule may never be named like these: importing it would rebind the
 # package attribute, and a stale `monkeypatch.setattr(oqs, "db", …)` would then
 # patch a module object nobody reads instead of raising.
@@ -170,6 +178,86 @@ def test_no_from_import_between_package_modules():
                 offenders.append(f"{mod}.py:{node.lineno}: from {'.' * node.level}{node.module or ''} import "
                                  + ", ".join(a.name for a in node.names))
     assert offenders == [], "from-imports between package modules freeze bindings: " + "; ".join(offenders)
+
+
+# ---------------------------------------------------------------------------
+# G4 — every collaborator is bound once, in `deps`, and nowhere else
+# ---------------------------------------------------------------------------
+
+def test_deps_binds_exactly_the_collaborators():
+    assert "deps" in scan.modules(), "the collaborators' module `deps.py` is gone (O2)"
+    defs, imports = scan.bindings(scan.parse(scan.modules()["deps"]))
+    bound = (set(defs) | set(imports)) - _DEPS_LOGGING
+    assert bound == _COLLABORATORS, (
+        f"deps binds {sorted(bound - _COLLABORATORS)} beyond the collaborators and lacks "
+        f"{sorted(_COLLABORATORS - bound)}")
+
+
+def _collaborator_sources() -> dict:
+    """{dotted source: collaborator} — derived from `deps.py`'s own imports, so a
+    collaborator added there is covered the day it is added."""
+    out = {}
+    for _, dotted, local in scan.imported_sources(ast.Module(body=list(
+            scan.import_time_statements(scan.parse(scan.modules()["deps"]))), type_ignores=[])):
+        if local in _COLLABORATORS:
+            out[dotted] = local
+    return out
+
+
+def test_no_other_package_module_imports_a_collaborators_source():
+    """Keyed on where an import COMES FROM, not on what it is called: `from
+    database import db as alternate_db`, or a function-local `from services
+    import ask_service as _ask`, is a second binding that an `oqs.deps.X` patch
+    misses. No package module but `deps` may import a collaborator's source (or
+    a module it is reached through), in any scope, under any alias."""
+    sources = _collaborator_sources()
+    # Pinned against going blind: every imported collaborator has its source.
+    assert set(sources.values()) == _COLLABORATORS - {"_audit_sync"}, sources
+    problems = []
+    for mod, path in scan.modules().items():
+        if mod == "deps":
+            continue
+        for line, dotted, local in scan.imported_sources(scan.parse(path)):
+            for source, collaborator in sources.items():
+                if scan.reaches_source(dotted, source):
+                    problems.append(f"{mod or '__init__'}.py:{line} imports {dotted} as `{local}` — "
+                                    f"read `deps.{collaborator}`")
+    assert problems == [], "; ".join(problems)
+
+
+def test_no_package_module_holds_a_collaborator_object():
+    """By identity, at module level: catches a collaborator reached through a
+    re-export path the source scan cannot know (`from dependencies import db as
+    _db`), whatever it is named."""
+    deps = _module("deps")
+    objects = {id(getattr(deps, n)): n for n in _COLLABORATORS}
+    held = []
+    for mod in scan.modules():
+        if mod == "deps":
+            continue
+        for name, value in vars(_module(mod)).items():
+            if id(value) in objects:
+                held.append(f"{mod or '__init__'}.{name} is deps.{objects[id(value)]}")
+    assert held == [], f"package modules holding a collaborator of their own: {held}"
+
+
+def test_no_other_package_module_binds_a_collaborator():
+    """By name, anywhere in the module — a function-local `from database import
+    db` is a second binding a `deps` patch misses just as a top-level one is,
+    and a redefined `_audit_sync` (which has no import source) is caught here."""
+    bound = {}
+    for mod, path in scan.modules().items():
+        if mod != "deps":
+            for name in sorted(scan.defined_names(scan.parse(path)) & _COLLABORATORS):
+                bound.setdefault(name, []).append(mod or "__init__")
+    assert bound == {}, f"collaborators bound outside deps (read `deps.X` instead): {bound}"
+
+
+def test_the_package_has_no_collaborator_attribute():
+    """So a stale `monkeypatch.setattr(oqs, "db", …)` raises AttributeError."""
+    package = _module("")
+    present = sorted(n for n in _COLLABORATORS if n in vars(package))
+    assert present == [], f"bound on the package, where a patch reaches no reader: {present}"
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +385,18 @@ def test_a_patch_of_a_re_exported_name_reaches_its_readers():
             elif not inside and target != "":
                 problems.append(f"{rel}:{line}: patches `{name}` on `{target}`, but its readers read the package")
     assert problems == [], "\n".join(problems)
+
+
+def test_no_test_reaches_a_package_function_through_its_globals():
+    """`f.__globals__` is the namespace of the module that DEFINES `f`. After a
+    move — `get_breaker_redis` into `deps`, `list_for_principal` into its own
+    module — a `monkeypatch.setitem(f.__globals__, "X", …)` adds a key no reader
+    reads, and the test runs against the real collaborator. Patch the owning
+    module instead (`oqs.deps.X`, `oqs.<owner>.X`)."""
+    problems = [f"{path.relative_to(scan.REPO).as_posix()}:{line}: {what}.__globals__"
+                for path in scan.files_naming_the_package(scan.TESTS)
+                for line, what in scan.globals_sites(path)]
+    assert problems == [], "patch the owning module, not a function's __globals__: " + "; ".join(problems)
 
 
 # ---------------------------------------------------------------------------

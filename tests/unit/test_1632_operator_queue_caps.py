@@ -127,14 +127,14 @@ def _fake_db(pending=0, exists=False, create_side_effect=None):
 def _wire(monkeypatch, db, requests, rate=None):
     """Wire a service instance to a fake db + fake agent file. `rate` optionally
     stubs rate_limiter.check (default: allow all)."""
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     _seam(monkeypatch, db, raises=db.seam_raises)
     client = MagicMock()
     client.read_file = AsyncMock(return_value={
         "success": True,
         "content": json.dumps({"requests": list(requests)}),
     })
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     if rate is None:
         rate = lambda *a, **k: _allowed()  # noqa: E731
     monkeypatch.setattr(oqs.rate_limiter, "check", rate)
@@ -266,13 +266,13 @@ class TestRealInProcessLimiter:
 
         db = _fake_db(pending=0)
         # NOTE: use the real limiter (do not pass a `rate` stub).
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         client = MagicMock()
         client.read_file = AsyncMock(return_value={
             "success": True,
             "content": json.dumps({"requests": _pending(5)}),
         })
-        monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+        monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
         svc = OperatorQueueSyncService()
         svc._write_responses_to_agent = AsyncMock()
 
@@ -529,7 +529,7 @@ class TestReservedAndMalformedIds:
 class TestExemptionAndFloodAlert:
     def test_flood_alert_is_direct_create_not_rate_limited_or_clamped(self, monkeypatch):
         db = MagicMock()
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         _seam(monkeypatch, db)
         rate = MagicMock()
         monkeypatch.setattr(oqs.rate_limiter, "check", rate)
@@ -550,7 +550,7 @@ class TestExemptionAndFloodAlert:
 
     def test_flood_alert_cooldown_emits_once_per_episode(self, monkeypatch):
         db = MagicMock()
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         _seam(monkeypatch, db)
         monkeypatch.setattr(oqs.rate_limiter, "check", MagicMock())
         svc = OperatorQueueSyncService()
@@ -567,7 +567,7 @@ class TestExemptionAndFloodAlert:
         # first COOLDOWN seconds of uptime. The `None` sentinel must always emit
         # the first alert regardless of monotonic's absolute value.
         db = MagicMock()
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         _seam(monkeypatch, db)
         monkeypatch.setattr(oqs.rate_limiter, "check", MagicMock())
         # Simulate a fresh runner: monotonic well below COOLDOWN (300s).
@@ -590,14 +590,14 @@ class TestExemptionAndFloodAlert:
 
     def test_oversize_file_skipped_with_alert(self, monkeypatch):
         db = _fake_db(pending=0)
-        monkeypatch.setattr(oqs, "db", db)
+        monkeypatch.setattr(oqs.deps, "db", db)
         _seam(monkeypatch, db)
         monkeypatch.setattr(oqs, "OPERATOR_QUEUE_MAX_FILE_BYTES", 100)
         big = json.dumps({"requests": _pending(50)})
         assert len(big) > 100
         client = MagicMock()
         client.read_file = AsyncMock(return_value={"success": True, "content": big})
-        monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+        monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
         monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: _allowed())
         svc = OperatorQueueSyncService()
         svc._write_responses_to_agent = AsyncMock()
@@ -694,19 +694,19 @@ class FakeRedis:
 class TestLeaderLock:
     def test_only_one_worker_becomes_leader(self, monkeypatch):
         fake = FakeRedis()
-        monkeypatch.setattr(oqs, "get_breaker_redis", lambda: fake)
+        monkeypatch.setattr(oqs.deps, "get_breaker_redis", lambda: fake)
         a, b = OperatorQueueSyncService(), OperatorQueueSyncService()
         assert a._try_acquire_leadership() is True
         assert b._try_acquire_leadership() is False
         assert fake.get(oqs._LEADER_KEY) == a._worker_id
 
     def test_redis_down_fails_open_to_leader(self, monkeypatch):
-        monkeypatch.setattr(oqs, "get_breaker_redis", lambda: None)
+        monkeypatch.setattr(oqs.deps, "get_breaker_redis", lambda: None)
         assert OperatorQueueSyncService()._try_acquire_leadership() is True
 
     def test_release_only_deletes_own_lease(self, monkeypatch):
         fake = FakeRedis()
-        monkeypatch.setattr(oqs, "get_breaker_redis", lambda: fake)
+        monkeypatch.setattr(oqs.deps, "get_breaker_redis", lambda: fake)
         a, b = OperatorQueueSyncService(), OperatorQueueSyncService()
         assert a._try_acquire_leadership() is True
         b._release_leadership()                       # b doesn't hold it

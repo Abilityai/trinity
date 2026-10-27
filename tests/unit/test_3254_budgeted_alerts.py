@@ -572,7 +572,7 @@ def _sync_loop(monkeypatch, *, over_cap=True):
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.refresh_operator_queue_last_confirmed.return_value = 0
     db.get_setting_value.return_value = "24"
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
 
     requests = [{"id": f"req-{i}", "status": "pending", "title": "t", "question": "q"}
                 for i in range(3)]
@@ -588,7 +588,7 @@ def _sync_loop(monkeypatch, *, over_cap=True):
 
     client.read_file = AsyncMock(side_effect=_read)
     client.write_file = AsyncMock(side_effect=_write)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     svc = oqs.OperatorQueueSyncService()

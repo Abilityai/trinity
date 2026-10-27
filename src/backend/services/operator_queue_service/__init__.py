@@ -14,6 +14,12 @@ Polling cycle:
   6. Handle expired entries
 """
 
+# ruff: noqa: F401
+# #3785: this external block stays whole, first, even where `__init__` itself
+# no longer reads a name. A submodule may import at module level only what is
+# already imported here (test_3785's G13), so an ImportError fires before any
+# `_oq`-holding submodule has loaded; and several names here are read through
+# the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
 import asyncio
 import base64
 import hashlib
@@ -26,18 +32,19 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence, Tuple
 
-from database import db
-from db import operator_queue as _queue_db
-from dependencies import principal_reach
-from redis_breaker_util import get_breaker_redis
-from services import ask_service, rate_limiter
+from services import rate_limiter
 from services.operator_queue_choices import (
     OPTIONS_DROPPED_MARKER,
     options_cap_violation,
     title_cap_violation,
 )
-from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+
+# #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
+# `deps`, and read as `deps.X`, never bound here — a stale
+# `monkeypatch.setattr(oqs, "db", …)` raises; patch `oqs.deps.X`. Imported
+# after every external import, so a failed first import leaves nothing stale.
+from . import deps
 
 logger = logging.getLogger(__name__)
 
@@ -423,7 +430,7 @@ def narrow_to_agent_key(current_user, accessible):
     """
     if getattr(current_user, "mcp_scope", None) != "agent":
         return accessible
-    allowed = principal_reach(current_user)
+    allowed = deps.principal_reach(current_user)
     if allowed is None:
         raise QueueListError(403, "agent key carries no agent identity")
     return allowed if accessible is None else allowed & set(accessible)
@@ -550,7 +557,7 @@ def decode_cursor(token: str) -> dict:
 
 
 def _walk_redis():
-    r = get_breaker_redis()
+    r = deps.get_breaker_redis()
     if r is None:
         raise QueueListError(
             503, "cursor walks need Redis, which is unreachable; retry, or page with offset")
@@ -655,7 +662,7 @@ def list_for_principal(
     warnings = []
     next_cursor = None
     if cursor is None:
-        rows = db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
+        rows = deps.db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
         has_more = len(rows) > limit
         page = rows[:limit]
         next_offset = offset + limit if has_more else None
@@ -665,8 +672,8 @@ def list_for_principal(
                 422, "cursor and offset cannot be combined: page a walk with cursor alone")
         fingerprint = filter_fingerprint(filters)
         if cursor == "start":
-            watermark = iso_cutoff(seconds=_queue_db.WALK_WATERMARK_MARGIN_S)
-            snapshot = db.operator_queue_walk_alert_priorities(watermark=watermark, **where)
+            watermark = iso_cutoff(seconds=deps._queue_db.WALK_WATERMARK_MARGIN_S)
+            snapshot = deps.db.operator_queue_walk_alert_priorities(watermark=watermark, **where)
             walk_id = _start_walk_snapshot(snapshot)
             after = None
         else:
@@ -676,7 +683,7 @@ def list_for_principal(
                                           "restart with cursor=start")
             watermark, after, walk_id = token["w"], token["after"], token["walk"]
             snapshot = _load_walk_snapshot(walk_id)
-        keyed = db.list_operator_queue_items_walk(
+        keyed = deps.db.list_operator_queue_items_walk(
             watermark=watermark, snapshot=snapshot, after=after, limit=limit + 1, **where)
         has_more = len(keyed) > limit
         keyed = keyed[:limit]
@@ -687,8 +694,8 @@ def list_for_principal(
             next_cursor = encode_cursor(watermark, last_key, fingerprint, walk_id)
             if next_cursor is None:
                 warnings.append(_UNCARRIABLE_KEY_WARNING.format(prefix=str(last_key[3])[:32]))
-    total = db.count_operator_queue_items(**where)
-    flags = db.count_operator_queue_flags(accessible_agent_names=agents)
+    total = deps.db.count_operator_queue_items(**where)
+    flags = deps.db.count_operator_queue_flags(accessible_agent_names=agents)
 
     items = project(page)
     dropped = len(page) - len(items)
@@ -1322,7 +1329,7 @@ def _is_our_answer(req: dict, resp: dict) -> bool:
 def aging_hours() -> int:
     """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
     try:
-        raw = db.get_setting_value(
+        raw = deps.db.get_setting_value(
             OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
         )
         return max(0, int(str(raw).strip()))
@@ -1365,23 +1372,6 @@ def annotate_aging(items: list, hours: Optional[int] = None) -> list:
         item["aging"] = aged
         item["aged_since"] = to_utc_iso(at) if aged else None
     return items
-
-
-async def _audit_sync(action: str, agent_name: str, item_id: str, details: dict) -> None:
-    """Accountability transitions only (ingested · diverged · reconciled ·
-    written_back · undeliverable) — ids and enums, never agent text; best-effort."""
-    try:
-        from services.platform_audit_service import platform_audit_service, AuditEventType
-        await platform_audit_service.log(
-            event_type=AuditEventType.OPERATOR_QUEUE,
-            event_action=action,
-            source="system",
-            target_type="operator_queue",
-            target_id=str(item_id),
-            details={"agent_name": agent_name, **details},
-        )
-    except Exception as e:  # noqa: BLE001 — audit never breaks the sync
-        logger.debug("[OperatorQueue] audit %s for %s skipped: %s", action, item_id, e)
 
 
 def set_websocket_manager(manager):
@@ -1684,7 +1674,7 @@ class OperatorQueueSyncService:
         cycle. Fail-open: if Redis is unreachable, act as leader (single-worker
         dev keeps syncing; in a Redis-down prod the DB depth cap still bounds a
         double feed, and duplicate creates are idempotent via on_conflict)."""
-        r = get_breaker_redis()
+        r = deps.get_breaker_redis()
         if r is None:
             return True  # fail-open: no Redis → behave as the sole worker
         ttl = self._leader_ttl()
@@ -1703,7 +1693,7 @@ class OperatorQueueSyncService:
     def _release_leadership(self) -> None:
         """Delete the lease iff we hold it (best-effort, never raises)."""
         try:
-            r = get_breaker_redis()
+            r = deps.get_breaker_redis()
             if r is not None and r.get(_LEADER_KEY) == self._worker_id:
                 r.delete(_LEADER_KEY)
         except Exception:
@@ -1752,7 +1742,7 @@ class OperatorQueueSyncService:
         # audit row per ask, and the wake for each filer; the sink sends no
         # trigger of its own — this cycle's ONE trigger announces it.
         try:
-            expired = ask_service.expire().rows
+            expired = deps.ask_service.expire().rows
             if expired:
                 self._changed_this_cycle = True
                 logger.info(f"Expired {len(expired)} operator queue items")
@@ -1794,7 +1784,7 @@ class OperatorQueueSyncService:
         # WHERE matches nothing. An empty running list sweeps every open row
         # (an explicit branch in the accessor; never `notin_([])`).
         try:
-            swept = db.mark_operator_queue_unconfirmed(
+            swept = deps.db.mark_operator_queue_unconfirmed(
                 "agent_not_running", now, exclude_agents=running_agents,
                 exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
             )
@@ -1809,7 +1799,7 @@ class OperatorQueueSyncService:
         # and audited once per transition; the write-back flips it to `delivered`
         # when the agent is back. Platform alarms (`not_applicable`) are skipped.
         try:
-            stalled = db.mark_operator_queue_undelivered_for_stopped_agents(
+            stalled = deps.db.mark_operator_queue_undelivered_for_stopped_agents(
                 now, running_agents=running_agents,
                 exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
             )
@@ -1818,8 +1808,8 @@ class OperatorQueueSyncService:
             stalled = []
         for row in stalled:
             self._changed_this_cycle = True
-            await _audit_sync("undeliverable", row.get("agent_name") or "", row["id"],
-                              {"status": row.get("status"), "detail": "agent_not_running"})
+            await deps._audit_sync("undeliverable", row.get("agent_name") or "", row["id"],
+                                   {"status": row.get("status"), "detail": "agent_not_running"})
 
         if running_agents:
             # Sync each agent concurrently (with a reasonable limit)
@@ -1870,7 +1860,7 @@ class OperatorQueueSyncService:
         if prior == state and (row.get("sync_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_sync_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_sync_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record sync state for {row.get('id')}: {e}")
             return False
@@ -1880,10 +1870,10 @@ class OperatorQueueSyncService:
         row["sync_detail"] = detail
         self._changed_this_cycle = True
         if state in DIVERGED_STATES:
-            await _audit_sync("diverged", agent_name, row["id"],
-                              {"from": prior, "to": state, "detail": detail})
+            await deps._audit_sync("diverged", agent_name, row["id"],
+                                   {"from": prior, "to": state, "detail": detail})
         elif state == SYNC_CONFIRMED and prior in DIVERGED_STATES:
-            await _audit_sync("reconciled", agent_name, row["id"], {"from": prior})
+            await deps._audit_sync("reconciled", agent_name, row["id"], {"from": prior})
         return True
 
     async def _apply_delivery_state(self, agent_name: str, row: dict, state: str,
@@ -1896,7 +1886,7 @@ class OperatorQueueSyncService:
         if row.get("delivery_state") == state and (row.get("delivery_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_delivery_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_delivery_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record delivery state for {row.get('id')}: {e}")
             return False
@@ -1906,10 +1896,10 @@ class OperatorQueueSyncService:
         row["delivery_detail"] = detail
         self._changed_this_cycle = True
         if state == DELIVERY_DELIVERED:
-            await _audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
+            await deps._audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
         elif state == DELIVERY_UNDELIVERED:
-            await _audit_sync("undeliverable", agent_name, row["id"],
-                              {"status": row.get("status"), "detail": detail})
+            await deps._audit_sync("undeliverable", agent_name, row["id"],
+                                   {"status": row.get("status"), "detail": detail})
         return True
 
     def _notice_file_channel(self, agent_name: str) -> None:
@@ -1928,7 +1918,7 @@ class OperatorQueueSyncService:
 
     async def _sync_agent(self, agent_name: str):
         """Sync a single agent's operator queue file."""
-        client = AgentClient(agent_name)
+        client = deps.AgentClient(agent_name)
         now = utc_now_iso()
 
         # 1. Read the queue file from the agent
@@ -1948,7 +1938,7 @@ class OperatorQueueSyncService:
             self._read_failures[agent_name] = failures
             if failures >= READ_FAILURE_THRESHOLD:
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         _read_failure_detail(result), now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -1973,7 +1963,7 @@ class OperatorQueueSyncService:
             )
             await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
             try:
-                if db.mark_operator_queue_unconfirmed(
+                if deps.db.mark_operator_queue_unconfirmed(
                     "oversize_file", now, agent_name=agent_name,
                     exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                 ):
@@ -1994,7 +1984,7 @@ class OperatorQueueSyncService:
                 # file with the reconstructed responses alone.
                 logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "invalid_json", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2008,7 +1998,7 @@ class OperatorQueueSyncService:
                     f"(an object with a `requests` list); not reconciling, not writing"
                 )
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "wrong_shape", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2032,7 +2022,7 @@ class OperatorQueueSyncService:
         # silently: a phantom admit against the depth cap and a "new" broadcast
         # every cycle). Replaces the per-entry `exists()` probe.
         try:
-            index = db.get_operator_queue_sync_index_for_agent(agent_name)
+            index = deps.db.get_operator_queue_sync_index_for_agent(agent_name)
         except Exception as e:
             logger.error(f"Failed to read the sync index for {agent_name}: {e}")
             return
@@ -2055,7 +2045,7 @@ class OperatorQueueSyncService:
         # cycle's creates so the cap holds without re-counting per item.
         # #3130: the agent's OWN rows only — a platform row about the agent (its
         # flood alarm above all) never spends the agent's budget.
-        pending_count = db.count_operator_queue_pending_for_agent(
+        pending_count = deps.db.count_operator_queue_pending_for_agent(
             agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
         )
         admitted = 0
@@ -2153,7 +2143,7 @@ class OperatorQueueSyncService:
                 # platform uuid (returned here), not the agent's `req_id` — the
                 # frontend store keys items by uuid `id`, so an ack keyed on
                 # request_id would never match a live item.
-                ack_uuid = db.mark_operator_queue_acknowledged(agent_name, req_id)
+                ack_uuid = deps.db.mark_operator_queue_acknowledged(agent_name, req_id)
                 if ack_uuid:
                     acknowledged_items.append(ack_uuid)
                     open_by_rid.pop(req_id, None)  # it just went terminal
@@ -2314,7 +2304,7 @@ class OperatorQueueSyncService:
                 # trinity-enterprise#611: provenance from what the POLLER knows,
                 # keyword-only — never from the entry, which could claim any
                 # channel it likes.
-                new_id, inserted = db.create_operator_queue_item_with_outcome(
+                new_id, inserted = deps.db.create_operator_queue_item_with_outcome(
                     agent_name, clamped, channel="file", raised_by="agent",
                 )
                 self._create_failures.pop(fail_key, None)  # recovered — clear count
@@ -2358,8 +2348,8 @@ class OperatorQueueSyncService:
             # audit row is durable operator-visible state (G-04), so it carries
             # the folded token or `other` — never the string itself. `req_id`
             # passed the `_ID_RE` shape check above.
-            await _audit_sync("ingested", agent_name, new_id,
-                              {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
+            await deps._audit_sync("ingested", agent_name, new_id,
+                                   {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
 
         # #2915: open rows the file no longer carries. The entry was pruned or the
         # file is gone — the platform used to keep showing a live card for it.
@@ -2381,7 +2371,7 @@ class OperatorQueueSyncService:
         # #2915: "last confirmed at HH:MM" without a write per row per cycle —
         # one batched UPDATE per agent, for confirmed rows older than a minute.
         try:
-            db.refresh_operator_queue_last_confirmed(
+            deps.db.refresh_operator_queue_last_confirmed(
                 agent_name, now, iso_cutoff(minutes=LAST_CONFIRMED_REFRESH_SECONDS // 60)
             )
         except Exception as e:
@@ -2431,8 +2421,8 @@ class OperatorQueueSyncService:
         # them — as in-place status flips on entries still in the file; an
         # entry that is gone is recorded `undelivered:entry_missing` (#2915),
         # never silently skipped. The aging receipt rides the same write.
-        responded_items = db.get_operator_queue_responded_for_agent(agent_name)
-        terminal_items = db.get_operator_queue_terminal_for_agent(agent_name)
+        responded_items = deps.db.get_operator_queue_responded_for_agent(agent_name)
+        terminal_items = deps.db.get_operator_queue_terminal_for_agent(agent_name)
         # #3130: tell a held file so — but only when the marker it carries is not
         # already the one wanted, and never again against a file a write was
         # already refused on.
@@ -2458,7 +2448,7 @@ class OperatorQueueSyncService:
     async def _write_responses_to_agent(
         self,
         agent_name: str,
-        client: AgentClient,
+        client: deps.AgentClient,
         queue_data: dict,
         responded_items: list,
         terminal_items: Optional[list] = None,
