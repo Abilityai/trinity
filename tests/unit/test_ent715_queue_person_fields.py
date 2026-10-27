@@ -932,7 +932,7 @@ _ROW_READERS = {
     (_ASKS, "withdraw"): (
         "agent", "the receipt of the agent's own ask; a row it did not raise, or one about a "
                  "person, is the uniform 404 (§2 drives it)"),
-    (_OQS, "OperatorQueueSyncService._poll_cycle"): (
+    ("services/operator_queue_service/poller.py", "PollerCoreMixin._poll_cycle"): (
         "internal", "marks answers owed to stopped agents, reserved prefixes excluded; audits ids"),
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
