@@ -23,7 +23,7 @@ from fastapi.responses import JSONResponse
 
 from ..models import GitSyncRequest, GitPullRequest
 from ..utils.git_conflict import classify_conflict
-from ..utils.registered_run import run_registered
+from ..utils.registered_run import GIT_NO_AUTO_MAINTENANCE, run_registered
 from .files import _read_persistent_state
 from .snapshot import build_snapshot, restore_from_tar
 
@@ -745,8 +745,9 @@ def _reap_stale_git_litter(home_dir: Path, *, repack_budget_seconds: int) -> Non
     Runs at the TOP of every cycle (not only on the success+threshold path —
     a repo wedged on `index.lock` fails at `git add` and would never reach a
     maintenance-only placement). Age gates make removal race-free:
-    - gc.pid / index.lock older than 1h: no legitimate git op holds either
-      that long; a stale index.lock silently froze agents for 12 days.
+    - gc.pid / index.lock / objects/maintenance.lock (#4001) older than 1h:
+      no legitimate git op holds any of them that long; a stale index.lock
+      silently froze agents for 12 days.
     - tmp_pack_*/tmp_obj_*/tmp_idx_* older than the repack budget + 300s:
       maintenance is serialized (repo lock), so anything older than the
       current attempt's budget is definitionally abandoned.
@@ -755,7 +756,9 @@ def _reap_stale_git_litter(home_dir: Path, *, repack_budget_seconds: int) -> Non
     if not git_dir.exists():
         return
     now = time.time()
-    for rel in ("gc.pid", "index.lock"):
+    # #4001: `objects/maintenance.lock` too — git never expires it, and with
+    # `--auto` a stale one disables auto-maintenance for good, silently.
+    for rel in ("gc.pid", "index.lock", "objects/maintenance.lock"):
         target = git_dir / rel
         try:
             if target.exists() and now - target.stat().st_mtime > 3600:
@@ -2237,7 +2240,7 @@ async def sync_to_github(request: GitSyncRequest):
         if strategy == "pull_first":
             # Fetch first
             fetch_result = subprocess.run(
-                ["git", "fetch", "origin"],
+                ["git", *GIT_NO_AUTO_MAINTENANCE, "fetch", "origin"],
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
@@ -2286,7 +2289,7 @@ async def sync_to_github(request: GitSyncRequest):
 
                 # Pull with rebase (from upstream branch, not working branch)
                 pull_result = subprocess.run(
-                    ["git", "pull", "--rebase", "origin", pull_branch],
+                    ["git", *GIT_NO_AUTO_MAINTENANCE, "pull", "--rebase", "origin", pull_branch],
                     capture_output=True,
                     text=True,
                     cwd=str(home_dir),
@@ -2368,7 +2371,7 @@ async def sync_to_github(request: GitSyncRequest):
         # 2. Create commit
         commit_message = request.message or f"Trinity sync: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         commit_result = subprocess.run(
-            ["git", "commit", "-m", commit_message],
+            ["git", *GIT_NO_AUTO_MAINTENANCE, "commit", "-m", commit_message],
             capture_output=True,
             text=True,
             cwd=str(home_dir),
@@ -2574,7 +2577,7 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
     try:
         # Always fetch first to update remote refs
         fetch_result = subprocess.run(
-            ["git", "fetch", "origin"],
+            ["git", *GIT_NO_AUTO_MAINTENANCE, "fetch", "origin"],
             capture_output=True,
             text=True,
             cwd=str(home_dir),
@@ -2661,7 +2664,7 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
 
             # Pull with rebase (from upstream branch, not working branch)
             pull_result = subprocess.run(
-                ["git", "pull", "--rebase", "origin", pull_branch],
+                ["git", *GIT_NO_AUTO_MAINTENANCE, "pull", "--rebase", "origin", pull_branch],
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
@@ -2727,7 +2730,7 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
 
             # Try simple pull with rebase (from upstream branch)
             pull_result = subprocess.run(
-                ["git", "pull", "--rebase", "origin", pull_branch],
+                ["git", *GIT_NO_AUTO_MAINTENANCE, "pull", "--rebase", "origin", pull_branch],
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),
@@ -2777,7 +2780,7 @@ def _git(
     args: list[str], cwd: Path, timeout: int = 60
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["git", *args],
+        ["git", *GIT_NO_AUTO_MAINTENANCE, *args],  # #4001
         cwd=str(cwd),
         capture_output=True,
         text=True,

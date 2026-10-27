@@ -306,6 +306,15 @@ run_one_cycle (every tick, #4000)
   `/etc/gitconfig`; `git_service.setup_git_in_container` mirrors them into
   `~/.gitconfig` for older images. With auto-gc off, garbage accumulates
   as LOOSE objects — hence the loose-count trigger condition.
+- **Platform git children never start auto-maintenance (#4001).** A
+  repo-local config can re-enable it, and then `fetch`/`pull`/`commit`/
+  `merge`/`rebase` wait on `maintenance run --auto → gc → repack`; the
+  child's timeout kills it mid-repack and strands `objects/maintenance.lock`,
+  which git never expires (auto-maintenance then stays off for that repo,
+  silently). `run_registered` splices `GIT_NO_AUTO_MAINTENANCE`
+  (`-c maintenance.auto=false`) after `git` for every git child, the raw
+  `subprocess.run` sites in the sync/pull/reset endpoints prepend it, and
+  `_reap_stale_git_litter` removes a `maintenance.lock` older than 1 h.
 - **Prune grace:** Claude executions run git concurrently by design;
   `--prune=now` would delete their just-written, not-yet-referenced
   objects (repo corruption). 1h grace > any single git op and still
