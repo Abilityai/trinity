@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import itertools
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -122,13 +123,15 @@ def children(monkeypatch):
     def spawn(_command, **kwargs):
         process = real_popen([sys.executable, "-c", script["source"]], **kwargs)
         spawned.append(process)
+        if script.get("on_spawn"):
+            script["on_spawn"](process)
         return process
 
     monkeypatch.setattr(subprocess, "Popen", spawn)
     yield spawned, script
     for process in spawned:
         if process.poll() is None:
-            process.kill()
+            real_popen.kill(process)  # the class method: bypasses an injected kill
         process.wait(timeout=5)
         for pipe in (process.stdin, process.stdout, process.stderr):
             if pipe is not None and not pipe.closed:
@@ -342,3 +345,91 @@ async def test_a_cancel_during_the_teardown_still_releases_once_the_child_is_dea
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+def _make_the_kill_raise(site, script, monkeypatch, *, after_killing):
+    """Fault injection: the site's kill raises, after doing its work or before
+    sending anything."""
+    def fail():
+        raise PermissionError("injected: the kill raised")
+
+    if site in GEMINI_SITES:
+        assert not after_killing, "a Gemini kill that signals then raises skips the wait"
+
+        def on_spawn(process):
+            process.kill = fail
+
+        script["on_spawn"] = on_spawn
+        return
+    module = {"claude_chat": chat, "claude_headless": headless, "codex": codex_runtime}[site]
+    real_terminate = module._terminate_process_group
+
+    def terminate(process, *args, **kwargs):
+        if after_killing:
+            real_terminate(process, *args, **kwargs)
+        fail()
+
+    monkeypatch.setattr(module, "_terminate_process_group", terminate)
+
+
+def _logged_a_kill_failure(caplog):
+    return any(
+        "failed handoff raised" in record.getMessage() and record.levelno >= logging.ERROR
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["claude_chat", "claude_headless", "codex"])
+async def test_a_kill_helper_that_raises_after_killing_does_not_replace_the_handoff_error(
+    site, registry, signals, pools, children, monkeypatch, tmp_path, caplog,
+):
+    """The group-kill helper raises after it has killed and reaped the child.
+    The caller still sees the handoff error, the error is logged, and the rest
+    of the teardown still runs: the pipes close, headless still drains, and
+    the dead child is released."""
+    spawned, script = children
+    _make_the_kill_raise(site, script, monkeypatch, after_killing=True)
+    call = _prepare(site, monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises((UnicodeEncodeError, HTTPException)) as raised:
+            await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
+
+    assert _is_the_handoff_failure(raised.value), repr(raised.value)
+    assert _logged_a_kill_failure(caplog)
+    [child] = spawned
+    assert child.poll() is not None
+    assert child.stdin.closed
+    if site != "claude_headless":  # headless never closes stdout/stderr under its readers
+        assert child.stdout.closed and child.stderr.closed
+    _assert_released(registry, child)
+    assert signals["refused"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["claude_chat", "codex", "gemini_chat", "gemini_headless"])
+async def test_a_kill_that_raises_before_signalling_keeps_the_live_child_owned(
+    site, registry, signals, pools, children, monkeypatch, tmp_path, caplog,
+):
+    """The kill raises without sending anything. The caller still sees the
+    handoff error, the error is logged, the pipes still close, and the child,
+    still alive, stays registered and allowlisted: the registry never reports
+    a live child as gone. (Claude headless is not here: its drain escalates to
+    a group kill of its own when the readers stay blocked.)"""
+    spawned, script = children
+    _make_the_kill_raise(site, script, monkeypatch, after_killing=False)
+    call = _prepare(site, monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises((UnicodeEncodeError, HTTPException)) as raised:
+            await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
+
+    assert _is_the_handoff_failure(raised.value), repr(raised.value)
+    assert _logged_a_kill_failure(caplog)
+    [child] = spawned
+    assert child.stdin.closed and child.stdout.closed and child.stderr.closed
+    assert child.poll() is None, "control: nothing was signalled, so the child lives"
+    assert registry.is_execution_running(EID), "a live child must stay owned"
+    assert child.pid in registry.active_execution_pids()
+    assert signals["sent"] == [] and signals["refused"] == [], signals

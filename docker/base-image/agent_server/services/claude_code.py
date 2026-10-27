@@ -373,13 +373,19 @@ async def _execute_claude_code_once(
             # end it first: no reader exists yet and its stdin is still open.
             # The kill waits up to ~2s, so it runs off the event loop; this
             # coroutine's `loop` is assigned only further down.
+            # Best-effort and logged, never raised: the caller must see the
+            # handoff error, and the pipes close even if the kill fails.
             def _abort_handoff():
-                _terminate_process_group(process, graceful_timeout=0, pgid=process_pgid, execution_tag=execution_id)
-                for pipe in (process.stdin, process.stdout, process.stderr):
-                    try:
-                        pipe.close()
-                    except Exception:  # noqa: BLE001 — a close after a failed write flushes again
-                        logger.debug(f"[Chat] pipe close after failed handoff of {execution_id} raised", exc_info=True)
+                try:
+                    _terminate_process_group(process, graceful_timeout=0, pgid=process_pgid, execution_tag=execution_id)
+                except Exception:
+                    logger.exception(f"[Chat] killing {execution_id} after its failed handoff raised")
+                finally:
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(f"[Chat] pipe close after failed handoff of {execution_id} raised", exc_info=True)
 
             teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
             try:

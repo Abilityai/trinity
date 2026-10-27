@@ -1175,8 +1175,12 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         # prompt, say) must end it here; this already runs off the event loop.
         # The reader threads are running, so drain them as the normal path
         # does and never close stdout/stderr under them. No unregister here:
-        # the caller's `finally` releases the now-dead child.
-        _terminate_process_group(process, graceful_timeout=0, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+        # the caller's `finally` releases the now-dead child. Each step is
+        # best-effort and logged, so the caller still sees the handoff error.
+        try:
+            _terminate_process_group(process, graceful_timeout=0, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+        except Exception:
+            logger.exception(f"[Headless Task] killing {ctx.task_session_id} after its failed handoff raised")
         try:
             process.stdin.close()
         except Exception:  # noqa: BLE001 — a close after a failed write flushes again

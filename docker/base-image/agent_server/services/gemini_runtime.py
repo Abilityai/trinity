@@ -334,17 +334,22 @@ class GeminiRuntime(AgentRuntime):
                 # the agent server's process group (no start_new_session), so a
                 # group kill would signal the server itself. Off the event loop;
                 # `loop` is assigned only below.
+                # Best-effort and logged, never raised: the caller must see the
+                # handoff error, and the pipes close even if the kill fails.
                 def _abort_handoff():
-                    process.kill()
                     try:
+                        process.kill()
                         process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         logger.error(f"[Gemini] pid={process.pid} did not exit after SIGKILL ({_registered_id})")
-                    for pipe in (process.stdin, process.stdout, process.stderr):
-                        try:
-                            pipe.close()
-                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
-                            logger.debug(f"[Gemini] pipe close after failed handoff of {_registered_id} raised", exc_info=True)
+                    except Exception:
+                        logger.exception(f"[Gemini] killing {_registered_id} after its failed handoff raised")
+                    finally:
+                        for pipe in (process.stdin, process.stdout, process.stderr):
+                            try:
+                                pipe.close()
+                            except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                                logger.debug(f"[Gemini] pipe close after failed handoff of {_registered_id} raised", exc_info=True)
 
                 teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
                 try:
@@ -814,16 +819,19 @@ class GeminiRuntime(AgentRuntime):
                 # #3408: as on the chat path above. PID ONLY, never the group:
                 # it is the agent server's own.
                 def _abort_handoff():
-                    process.kill()
                     try:
+                        process.kill()
                         process.wait(timeout=2)
                     except subprocess.TimeoutExpired:
                         logger.error(f"[Headless Task {session_id}] pid={process.pid} did not exit after SIGKILL")
-                    for pipe in (process.stdin, process.stdout, process.stderr):
-                        try:
-                            pipe.close()
-                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
-                            logger.debug(f"[Headless Task {session_id}] pipe close after failed handoff raised", exc_info=True)
+                    except Exception:
+                        logger.exception(f"[Headless Task {session_id}] kill after the failed handoff raised")
+                    finally:
+                        for pipe in (process.stdin, process.stdout, process.stderr):
+                            try:
+                                pipe.close()
+                            except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                                logger.debug(f"[Headless Task {session_id}] pipe close after failed handoff raised", exc_info=True)
 
                 teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
                 try:
