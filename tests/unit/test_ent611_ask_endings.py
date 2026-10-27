@@ -1532,7 +1532,7 @@ class TestFileIngestProvenance:
         monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
         monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
         monkeypatch.setattr(oqs.deps, "_audit_sync", AsyncMock())
-        monkeypatch.setattr(oqs, "_validated_addressee", lambda agent, raw: None)
+        monkeypatch.setattr(oqs.filechannel, "_validated_addressee", lambda agent, raw: None)
         asyncio.run(oqs.OperatorQueueSyncService()._sync_agent("agent-611-file"))
         call = db.create_operator_queue_item.call_args
         assert call.kwargs == {"channel": "file", "raised_by": "agent"}

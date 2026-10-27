@@ -934,7 +934,7 @@ _ROW_READERS = {
                  "person, is the uniform 404 (§2 drives it)"),
     ("services/operator_queue_service/poller.py", "PollerCoreMixin._poll_cycle"): (
         "internal", "marks answers owed to stopped agents, reserved prefixes excluded; audits ids"),
-    (_OQS, "OperatorQueueSyncService._sync_agent"): (
+    ("services/operator_queue_service/ingest.py", "IngestMixin._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
     ("services/operator_queue_service/listing.py", "list_for_principal"): (

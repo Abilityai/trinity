@@ -98,7 +98,7 @@ _ALLOWED_CALLERS = {
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",
-    ("services/operator_queue_service/__init__.py", "OperatorQueueSyncService._sync_agent"):
+    ("services/operator_queue_service/ingest.py", "IngestMixin._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
     ("services/retention_guard.py", "announce_refusal"):
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
