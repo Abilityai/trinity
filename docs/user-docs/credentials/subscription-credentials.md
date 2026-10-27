@@ -144,7 +144,7 @@ Retention for probe history and failure events is 30 days each (`subscription_he
 
 - `register_subscription(name, token, subscription_type?, rate_limit_tier?)` -- Register a new subscription (or replace the token of an existing name). Admin.
 - `list_subscriptions()` -- List subscriptions and their assigned agents.
-- `assign_subscription(agent_name, subscription_name)` -- Assign a subscription to an agent. Owner or admin.
+- `assign_subscription(agent_name, subscription_name)` -- Assign a subscription to an agent. Owner or admin, signed in: an MCP API key is refused. Assign from the **Funding** row of the agent's **Settings** → **General**, or, as an admin, from **Settings** → **Integrations** → **Claude Subscriptions**. The Funding row offers every subscription to an admin; any other owner sees only the subscriptions they registered, and registering is admin-only.
 - `clear_agent_subscription(agent_name)` -- Remove the subscription assignment from an agent. Owner or admin.
 - `get_agent_auth(agent_name)` -- Get the auth configuration for an agent.
 - `delete_subscription(subscription_name)` -- Delete a subscription. Admin.

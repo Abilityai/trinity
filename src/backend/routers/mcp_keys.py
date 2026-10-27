@@ -17,6 +17,7 @@ from dependencies import (
     reject_agent_principal,
     reject_non_interactive_principal,
     require_interactive,
+    require_person,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -202,7 +203,7 @@ async def get_mcp_api_key_endpoint(
     return key
 
 
-@router.post("/keys/{key_id}/revoke")
+@router.post("/keys/{key_id}/revoke", dependencies=[Depends(require_person)])
 async def revoke_mcp_api_key_endpoint(
     key_id: str,
     request: Request,
@@ -239,7 +240,7 @@ async def revoke_mcp_api_key_endpoint(
     return {"message": f"MCP API key {key_id} revoked"}
 
 
-@router.delete("/keys/{key_id}")
+@router.delete("/keys/{key_id}", dependencies=[Depends(require_person)])
 async def delete_mcp_api_key_endpoint(
     key_id: str,
     request: Request,

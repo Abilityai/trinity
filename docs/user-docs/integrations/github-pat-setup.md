@@ -298,12 +298,12 @@ Content-Type: application/json
 
 ### Per-agent PAT override
 
-An agent's own token sits on its **Git** tab under **GitHub Authentication** (**Configure** / **Change**, and **Clear agent PAT (revert to global)**). The agent must already have Git sync configured.
+An agent's own token sits in its **Settings → Storage → Repository → GitHub authentication** (**Set token** / **Replace**, and **Clear**). The agent must already have Git sync configured.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/github-pat` | GET | Status only — `configured`, `source` (`agent` or `global`), `has_global`; never the token |
-| `/api/agents/{name}/github-pat` | PUT | Set the agent's token (body `{pat}`, owner-only). Validated against GitHub (`400` when rejected), encrypted at rest, and pushed into the running agent at once; the response's `note` says whether it applied live |
+| `/api/agents/{name}/github-pat` | PUT | Set the agent's token (body `{pat}`; the owner, from a signed-in session: every MCP API key is refused). Validated against GitHub (`400` when rejected), encrypted at rest, and pushed into the running agent at once; the response's `note` says whether it applied live |
 | `/api/agents/{name}/github-pat` | DELETE | Clear it; the agent falls back to the global PAT. Restart the agent to apply the change |
 
 A stopped agent picks up a newly set token on its next start.
@@ -313,10 +313,10 @@ A stopped agent picks up a newly set token on its next start.
 ```
 initialize_github_sync(agent_name, repo_owner, repo_name, create_repo?, private?, description?)
 get_agent_github_pat_status(agent_name)
-set_agent_github_pat(agent_name, pat)      # pass an empty string to clear
+set_agent_github_pat(agent_name, "")       # clears the override; setting one needs a signed-in session
 ```
 
-`initialize_github_sync` uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent. `get_agent_github_pat_status` and `set_agent_github_pat` read and set the per-agent override above; the status never includes the token.
+`initialize_github_sync` uses the configured PAT to create (by default, private) or connect a GitHub repository for the agent; it takes a person, so call it with your own user-scoped key. `get_agent_github_pat_status` reads the per-agent override above and never includes the token. `set_agent_github_pat` with an empty string clears the override; setting a token binds a credential, so an MCP API key cannot do it; set it from a signed-in session in the agent's **Settings → Storage → Repository → GitHub authentication**.
 
 ## Troubleshooting
 

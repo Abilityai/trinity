@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import RenameAgentRequest, User
 from database import db
-from dependencies import get_current_user, reject_agent_principal
+from dependencies import get_current_user, reject_agent_principal, require_person
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
@@ -35,7 +35,7 @@ def set_filtered_websocket_manager(ws_manager):
     filtered_manager = ws_manager
 
 
-@router.put("/{agent_name}/rename")
+@router.put("/{agent_name}/rename", dependencies=[Depends(require_person)])
 async def rename_agent_endpoint(
     agent_name: str,
     body: RenameAgentRequest,

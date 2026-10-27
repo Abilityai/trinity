@@ -265,7 +265,7 @@ from services.settings_service import get_anthropic_api_key  # Line 29 - central
 > They are added after creation via:
 > - Quick Inject (paste .env text in Credentials tab)
 > - Import from `.credentials.enc` on startup
-> - `inject_credentials` MCP tool
+> - `POST /api/agents/{name}/credentials/inject` with a signed-in session (an MCP API key, the `inject_credentials` tool included, is refused)
 >
 > **Bug Fix (2026-02-05)**: Removed orphaned credential injection loop (lines 312-332 in crud.py) that referenced undefined `agent_credentials` variable. This dead code was left behind during the CRED-002 refactor but never executed since the variable was already removed.
 

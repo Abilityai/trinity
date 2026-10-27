@@ -1088,9 +1088,10 @@ Credentials are managed as files in the agent workspace:
 
 ### Injecting Credentials
 
-- **Via UI**: Agent Detail → Credentials tab → Quick Inject (paste KEY=VALUE text)
-- **Via MCP**: `inject_credentials(agent_name, {".env": "KEY=value\n"})`
-- **Via API**: `POST /api/agents/{name}/credentials/inject`
+- **Via UI**: Agent Detail → **Settings › Credentials** → Quick Inject (paste KEY=VALUE text)
+- **Via API**: `POST /api/agents/{name}/credentials/inject`, with a signed-in session
+
+Injecting takes a signed-in session, so an MCP API key (the `inject_credentials` tool included) is refused.
 
 ### Export/Import for Git
 
@@ -1098,7 +1099,7 @@ To persist credentials across deployments:
 
 1. **Export**: Click "Export to Git" → encrypts `.env` and `.mcp.json` → writes `.credentials.enc`
 2. **Commit**: The `.credentials.enc` file is safe to commit (AES-256-GCM encrypted)
-3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there the owner imports it once with **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool)
+3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there an operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written with and restarts the backend, and the platform imports it at the agent's next start, or the owner, signed in, imports it at once with **Import from Git** under the agent's **Settings › Credentials**
 
 ### Your Agent Should
 

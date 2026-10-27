@@ -78,7 +78,14 @@ def client(monkeypatch):
     # Read routes use AuthorizedAgentByName; the mutating /scope uses OwnedAgentByName.
     app.dependency_overrides[get_authorized_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
-    app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(id=7, username="u", email="u@example.com")
+    # A signed-in person (a JWT session: `mcp_scope` None). The voice-token mint is
+    # INTERACTIVE and the postprocess write is PERSON (trinity-enterprise#719), and
+    # both fail closed on a principal that does not state its scope.
+    app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
+        id=7, username="u", email="u@example.com", role="admin", agent_name=None,
+        connector_agent=None, portal_delegate=False, mcp_scope=None,
+        vouched_source_agent=None, is_event_loopback=False,
+    )
     # Flags ON by default; individual tests flip them off. Since #85 the gates
     # are runtime resolvers imported into the router's namespace — patch the
     # module-level names (the DB-backed resolution itself is covered by

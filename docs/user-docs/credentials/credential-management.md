@@ -114,7 +114,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." and the owner imports it once with **Import from Git** under Settings › Storage (or the `import_credentials` MCP tool). The credentials persist from then on.
+- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." An operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written with and restarts the backend; the platform then imports it at the agent's next start, or the owner, signed in, imports it at once with **Import from Git** under Settings › Credentials. The credentials persist from then on.
 
 ### Rotating the Encryption Key
 
@@ -175,9 +175,9 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 ### MCP Tools
 
 - `get_credential_status(name)` -- Check credential file status.
-- `inject_credentials(name, credentials)` -- Inject credentials into the agent.
-- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
-- `import_credentials(name)` -- Import credentials from encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
+- `inject_credentials(name, credentials)` -- Inject credentials into the agent. Injecting takes a signed-in session, so an MCP API key is refused: inject from the agent's **Settings › Credentials**.
+- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, signed in or with their own user-scoped key.
+- `import_credentials(name)` -- Import credentials from encrypted file. Importing takes a signed-in session, so an MCP API key is refused: use **Import from Git** under Settings › Credentials.
 - `get_credential_encryption_key()` -- Retrieve the encryption key. An administrator only, with a user-scoped or system-scoped key.
 - `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
 

@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, require_person
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -1166,7 +1166,7 @@ async def get_circuit_breaker_endpoint(
     return {"agent_name": agent_name, **build_circuit_breaker_block(agent_name)}
 
 
-@router.put("/{agent_name}/circuit-breaker")
+@router.put("/{agent_name}/circuit-breaker", dependencies=[Depends(require_person)])
 async def set_circuit_breaker_endpoint(
     agent_name: OwnedAgentByName,
     body: CircuitBreakerConfigUpdate,
@@ -1232,7 +1232,7 @@ async def get_agent_label_endpoint(
     }
 
 
-@router.put("/{agent_name}/label")
+@router.put("/{agent_name}/label", dependencies=[Depends(require_person)])
 async def set_agent_label_endpoint(
     agent_name: OwnedAgentByName,
     body: AgentLabelUpdate,
@@ -1318,7 +1318,7 @@ async def get_mcp_exposed_endpoint(
     }
 
 
-@router.put("/{agent_name}/mcp-exposed")
+@router.put("/{agent_name}/mcp-exposed", dependencies=[Depends(require_person)])
 async def set_mcp_exposed_endpoint(
     agent_name: OwnedAgentByName,
     body: McpExposedUpdate,
@@ -1377,7 +1377,7 @@ async def get_operator_resume_endpoint(
     }
 
 
-@router.put("/{agent_name}/operator-resume")
+@router.put("/{agent_name}/operator-resume", dependencies=[Depends(require_person)])
 async def set_operator_resume_endpoint(
     agent_name: OwnedAgentByName,
     body: OperatorResumeUpdate,
@@ -1442,7 +1442,7 @@ async def get_voice_replies_endpoint(
     }
 
 
-@router.put("/{agent_name}/voice-replies")
+@router.put("/{agent_name}/voice-replies", dependencies=[Depends(require_person)])
 async def set_voice_replies_endpoint(
     agent_name: OwnedAgentByName,
     body: VoiceRepliesUpdate,

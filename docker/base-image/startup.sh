@@ -716,7 +716,7 @@ if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc but no .env: this script does not decrypt it."
     echo "  The platform imports it once the agent is ready (not when no encryption"
     echo "  key is configured). If .env is still missing,"
-    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
+    echo "  the owner imports it, signed in, once a key is set: Settings > Credentials > Import from Git."
 fi
 
 # === Render .mcp.json.template (#2007) ===

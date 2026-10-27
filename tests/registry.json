@@ -1,6 +1,32 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_credential_and_key_routes_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "credentials",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "Human-only gates on the credential, paid-account and key routes, through the real routers over a real temp schema. Per route, every refused principal (the own agent key, an in-reach sibling, the system key, connector, ops, portal_delegate, an unknown scope, no mcp_scope, a vouched loopback, and the user key on an INTERACTIVE route) gets the same 403 on an existing and a missing target, well-formed or schema-invalid, with no ownership lookup and no state change; a real unvouched loopback JWT is refused by the entry fence; a signed-in person succeeds, and the user key succeeds on a PERSON route. Other shape: with the feature off the person gets today's error and every machine principal 403 first."
+    },
+    {
+      "file": "unit/test_ent719_own_settings_identity_git_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "auth",
+        "unit"
+      ],
+      "description": "Owner-tier routes that change an agent's own settings, identity or git are human-only, through the real routers (agents, agent_brain_orb, agent_rename, git): circuit-breaker, label, mcp-exposed, operator-resume, voice-replies, rename, brain-orb postprocess, PAT clear, git auto-sync, freeze-schedules-if-failing and initialize are PERSON (Depends(require_person) in the decorator); the brain-orb voice token, the per-agent PAT set and bind-to-own-repo (it persists the caller's GitHub token as the agent's) are INTERACTIVE. Matrix: the agent's own key, a spawning sibling inside manage reach, an edge sibling (voice token), the system key and the owner's user key as real seeded bearers; connector, ops, portal_delegate, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope as stated principals; a real unvouched loopback JWT through the entry fence. Every refusal leaves the stored value unmoved; for every principal the route's rule refuses it is identical for a nonexistent agent and stays 403 for a schema-invalid body on the 11 routes that validate one; the stated principals, and the real keys on a fresh install, are refused with no agent lookup; the owner's session (and user key on PERSON routes) and a shared person on the voice token still succeed; the user key is refused on the voice token, the PAT set and the repository binding (supplied or saved token) and clears the PAT; send_voice_reply and GET git/auto-sync still admit the own key; fresh install with git never configured (a person gets 404 Git not configured on auto-sync and freeze and initializes; machine keys get 403 before any lookup); the census classifies each route by its rule."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",

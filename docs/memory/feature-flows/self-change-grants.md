@@ -116,9 +116,7 @@ The fence covers the platform routes listed above, and nothing else:
   home-level `.claude.json`, a symlink inside the target workspace, and the
   DB-stored prompts (`PUT /{agent}/public-prompt`, `PUT /{name}/voice/prompt`).
 - **Other owner-tier writes** stay agent-reachable without a grant:
-  `circuit-breaker`, `mcp-exposed`, `folders`, `file-sharing`,
-  `git/auto-sync`, `github-pat`, `access-policy`, and
-  `git/freeze-schedules-if-failing`.
+  `folders`, `file-sharing`, and `access-policy`.
 - **Calibration** is checked at grant time, for the holder only: a ready
   holder can still rewrite a calibrating sibling's `CLAUDE.md`, and a grant
   made before the calibrating stamp persists.

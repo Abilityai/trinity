@@ -147,7 +147,7 @@ Agent Detail → Credentials tab
       │
       ▼
 routers/credentials.py
-  get_owned_agent_by_name  ──►  reject_agent_principal  ──►  rate_limiter.enforce
+  require_person  ──►  get_owned_agent_by_name  ──►  reject_agent_principal  ──►  rate_limiter.enforce
       │
       ▼
 services/credential_requirements_service.py
@@ -180,6 +180,8 @@ CredentialsPanel.saveChecklistCredentials
 ### 1. Router — owner-only AND human-only
 
 `GET /api/agents/{agent_name}/credential-requirements`, gated by
+`require_person` (a signed-in session or the person's own `user` key; every other
+scope gets 403 before any lookup, trinity-enterprise#719), then
 `get_owned_agent_by_name` + `reject_agent_principal`.
 
 This is deliberately stricter than the `/credentials/status` route beside it.

@@ -28,9 +28,9 @@ the public repo and the entitlement gate was dropped front and back. Part B
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
 | GET | `/{name}/connector` | `OwnedAgentByName` | Owner status: enabled, allow-list, `has_key`, `key_prefix`, `mcp_url`, snippets (placeholder key) |
-| PUT | `/{name}/connector` | `OwnedAgentByName` | Set enable + `exposed_playbooks` (or `expose_all_playbooks` to clear the allow-list) |
-| POST | `/{name}/connector/key` | `OwnedAgentByName` | Mint/regenerate the scoped key — **secret returned once**; auto-enables; snippets embed the real key. Atomic delete-old + insert-new (single-active-key invariant) |
-| DELETE | `/{name}/connector/key` | `OwnedAgentByName` | Revoke all connector-scoped keys (idempotent) |
+| PUT | `/{name}/connector` | `require_person` + `OwnedAgentByName` | Set enable + `exposed_playbooks` (or `expose_all_playbooks` to clear the allow-list) |
+| POST | `/{name}/connector/key` | `require_interactive` + `OwnedAgentByName` | Mint/regenerate the scoped key — **secret returned once**; auto-enables; snippets embed the real key. Atomic delete-old + insert-new (single-active-key invariant) |
+| DELETE | `/{name}/connector/key` | `require_person` + `OwnedAgentByName` | Revoke all connector-scoped keys (idempotent) |
 | GET | `/{name}/connector/playbooks` | `AuthorizedAgentByName` (accepts a `scope='connector'` key) | Effective exposed playbooks the connector advertises |
 
 ## Key + policy

@@ -528,12 +528,15 @@ def test_a_schedules_holder_enables_a_siblings_schedule_through_the_real_route(f
 
 
 def test_credential_export_refuses_an_agent_key_by_name_before_the_owner_fence(fleet):
-    """Review point 4: without the route-level `human_only`, the narrowed owner
-    fence answers a sibling with 404 and the agent never learns the rule."""
+    """Review point 4: without the route-level gate, the narrowed owner fence
+    answers a sibling with 404 and the agent never learns the rule. The gate is
+    `require_person` since trinity-enterprise#719, so the rule is named in an
+    object detail."""
     import routers.credentials as rc
     r = _real_app(rc).post(f"/api/agents/{C}/credentials/export")
     assert r.status_code == 403
-    assert "human-only" in r.json()["detail"]
+    assert r.json()["detail"] == dependencies.HUMAN_ONLY_DETAIL
+    assert "human-only" in r.json()["detail"]["message"]
 
 
 def test_the_queue_reach_stays_inside_a_non_admin_owners_agents(db_backend, monkeypatch):

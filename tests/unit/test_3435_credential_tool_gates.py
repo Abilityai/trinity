@@ -1,24 +1,28 @@
 """The backend gates behind the three credential MCP tools, by principal (#3435).
 
 `export_credentials` / `import_credentials` / `get_credential_encryption_key`
-are advertised by the MCP server only to `user` and `system` keys (a per-tool
-`canAccess` allow-list). That is correct only while the backend refuses every
-agent-scoped key on all three routes — this file pins those EXISTING gates so
-the MCP advertisement and the backend admission cannot drift apart silently:
+are advertised by the MCP server to keys it does not give an agent session (a
+per-tool `canAccess` allow-list). This file pins the backend admission behind
+each route, by principal, so the MCP advertisement and the backend cannot drift
+apart silently:
 
-  POST /api/agents/{name}/credentials/export|import
-      get_owned_agent_by_name (owner or admin, else a uniform 404, #186)
-      + reject_agent_principal (agent key -> 403 "human-only", ent#69 Part 2)
+  POST /api/agents/{name}/credentials/export
+      require_person (a session or the person's own `user` key; every other scope,
+      `system` included, gets 403 `HUMAN_ONLY_DETAIL`; trinity-enterprise#719)
+      + get_owned_agent_by_name (owner or admin, else a uniform 404, #186)
+  POST /api/agents/{name}/credentials/import
+      require_interactive (a signed-in session only: a restore installs whatever
+      the archive holds, so it is a bind; every key gets 403; trinity-enterprise#719)
+      + get_owned_agent_by_name
   GET /api/credentials/encryption-key
       require_admin (admin role, human, scope in {None, user, system}; #1890, #2323)
       + 503 when CREDENTIAL_ENCRYPTION_KEY is unset
 
-A pin of current behaviour — no backend code changes with it. Principals are
-real `models.User` objects with `role`, `agent_name`, `mcp_scope` declared
-explicitly: a MagicMock caller carries a truthy `agent_name` and would read as
-an agent key, and a stand-in lacking `mcp_scope` fails closed at the admin gate
-— both a red (or green) for the wrong reason. The MCP mapper keys on the
-literal "human-only" in the 403 detail, so that string is pinned exactly.
+Principals are real `models.User` objects with `role`, `agent_name`, `mcp_scope`
+declared explicitly: a MagicMock caller carries a truthy `agent_name` and would
+read as an agent key, and a stand-in lacking `mcp_scope` fails closed at the
+admin gate — both a red (or green) for the wrong reason. Each refusal's detail is
+pinned exactly, because the MCP mapper reads it.
 """
 
 import importlib
@@ -33,6 +37,11 @@ from models import User
 
 _AGENT = "acme-bot"
 _HUMAN_ONLY = "This operation is human-only; agent-scoped keys cannot perform it"
+# trinity-enterprise#719: the export and import gates' refusals.
+_HUMAN_ONLY_DETAIL = rc.get_current_user.__globals__["HUMAN_ONLY_DETAIL"]
+_INTERACTIVE_ONLY = (
+    "This operation requires an interactive session; MCP API keys cannot perform it"
+)
 
 
 def _owner_jwt():
@@ -65,7 +74,8 @@ def _agent_key_of_admin():
 
 
 def _stranger():
-    return User(id=3, username="stranger", role="user", agent_name=None, mcp_scope="user")
+    # A signed-in session, so both gates admit it and the owner fence answers.
+    return User(id=3, username="stranger", role="user", agent_name=None, mcp_scope=None)
 
 
 def _ops_key_of_admin():
@@ -121,16 +131,45 @@ ROUTES = [
     ("export", f"/api/agents/{_AGENT}/credentials/export", "export_to_agent"),
     ("import", f"/api/agents/{_AGENT}/credentials/import", "import_to_agent"),
 ]
+EXPORT, IMPORT = ROUTES
+
+# Who reaches the service: export is PERSON (a session or the person's own `user`
+# key), import is INTERACTIVE (a session only). Every other principal is refused
+# with the route's own detail.
+_ADMITTED = [
+    (EXPORT, _owner_jwt), (EXPORT, _owner_user_key), (EXPORT, _admin_jwt), (EXPORT, _admin_user_key),
+    (IMPORT, _owner_jwt), (IMPORT, _admin_jwt),
+]
+_REFUSAL = {"export": _HUMAN_ONLY_DETAIL, "import": _INTERACTIVE_ONLY}
 
 
 class TestImportExportGate:
-    @pytest.mark.parametrize("op,path,method", ROUTES)
-    @pytest.mark.parametrize("principal", [_owner_jwt, _owner_user_key, _admin_jwt, _admin_user_key, _admin_system_key])
-    def test_owner_or_admin_human_reaches_the_service(self, harness, op, path, method, principal):
+    @pytest.mark.parametrize("route,principal", _ADMITTED)
+    def test_owner_or_admin_person_reaches_the_service(self, harness, route, principal):
+        op, path, method = route
         as_, service = harness
         r = as_(principal()).post(path)
         assert r.status_code == 200, r.text
         getattr(service, method).assert_awaited_once_with(_AGENT)
+
+    @pytest.mark.parametrize("op,path,method", ROUTES)
+    def test_the_system_key_is_refused(self, harness, op, path, method):
+        """trinity-enterprise#719: was admitted on both; a machine key that holds
+        no grant power neither backs up nor restores an agent's credentials."""
+        as_, service = harness
+        r = as_(_admin_system_key()).post(path)
+        assert r.status_code == 403
+        assert r.json()["detail"] == _REFUSAL[op]
+        getattr(service, method).assert_not_awaited()
+
+    @pytest.mark.parametrize("principal", [_owner_user_key, _admin_user_key])
+    def test_import_refuses_the_persons_user_key(self, harness, principal):
+        op, path, method = IMPORT
+        as_, service = harness
+        r = as_(principal()).post(path)
+        assert r.status_code == 403
+        assert r.json()["detail"] == _INTERACTIVE_ONLY
+        service.import_to_agent.assert_not_awaited()
 
     @pytest.mark.parametrize("op,path,method", ROUTES)
     @pytest.mark.parametrize("principal", [_agent_key_of_owner, _agent_key_of_admin])
@@ -138,7 +177,7 @@ class TestImportExportGate:
         as_, service = harness
         r = as_(principal()).post(path)
         assert r.status_code == 403
-        assert r.json()["detail"] == _HUMAN_ONLY
+        assert r.json()["detail"] == _REFUSAL[op]
         getattr(service, method).assert_not_awaited()
 
     @pytest.mark.parametrize("op,path,method", ROUTES)

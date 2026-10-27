@@ -231,21 +231,21 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/log` | GET | Recent commits |
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
 | `/api/agents/{name}/git/config` | GET | The agent's stored git configuration (repo, mode, branch) |
-| `/api/agents/{name}/git/initialize` | POST | Connect an agent created without a repository to GitHub |
-| `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT) |
+| `/api/agents/{name}/git/initialize` | POST | Connect an agent created without a repository to GitHub; it takes a person — a browser session or your own user key; agent keys are refused |
+| `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT). Setting one takes a signed-in session, so every MCP API key is refused; clearing it takes a person |
 | `/api/agents/{name}/git/reset-to-main-preserve-state` | POST | Adopt `origin/main` as the new baseline while keeping the agent's persisted state |
-| `/api/agents/{name}/git/auto-sync` | GET / PUT | The 15-minute auto-sync heartbeat for this agent. A change applies on the agent's next cycle, with no restart |
+| `/api/agents/{name}/git/auto-sync` | GET / PUT | The 15-minute auto-sync heartbeat for this agent. A change applies on the agent's next cycle, with no restart; turning it on or off takes a person — a browser session or your own user key; agent keys are refused |
 | `/api/agents/{name}/git/pull-sync` | GET / PUT | Whether the container pulls origin on its own. The agent reads it every cycle; turning it on or off takes a person — a browser session or your own user key; agent keys are refused |
-| `/api/agents/{name}/git/freeze-schedules-if-failing` | GET / PUT | Pause scheduled executions while sync is failing |
+| `/api/agents/{name}/git/freeze-schedules-if-failing` | GET / PUT | Pause scheduled executions while sync is failing; turning it on or off takes a person — a browser session or your own user key; agent keys are refused |
 | `/api/agents/{name}/git/sync-state` | GET | The persisted sync-state row for this agent, including the pull-cycle fields |
-| `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, human-only) |
+| `/api/agents/{name}/git/bind-to-own-repo` | POST | Bind to a repository you own (owner-only, from a signed-in session: every MCP API key is refused) |
 | `/api/agents/{name}/git/bind-to-own-repo/status` | GET | Reconcile a binding whose response was lost |
 | `/api/agents/sync-health` | GET | Per-agent sync health for the fleet |
 | `/api/fleet/sync-audit` | GET | Fleet sync audit, including duplicate repository bindings, ahead/behind, dirty files, last push and the sync state per agent |
 
 `POST /api/agents` and the MCP `create_agent` tool take an optional `kind` — `agent` (default) or `deployment` — on a `github:` create, and the response's `git_mode` says which mode was chosen and why (see [Creating an agent with sync](#creating-an-agent-with-sync)).
 
-MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`, and fleet-wide `get_fleet_sync_audit` (scoped to the agents you can access; an agent key sees its owner's). Mutating tools are owner-only; a shared key gets read and pull.
+MCP tools: `initialize_github_sync`, `get_git_status`, `git_sync`, `get_git_log`, `git_pull`, `get_git_sync_state`, `reset_to_main_preserve_state`, and fleet-wide `get_fleet_sync_audit` (scoped to the agents you can access; an agent key sees its owner's). Mutating tools are owner-only, and `initialize_github_sync` takes a person, so call it with your own user-scoped key; a shared key gets read and pull.
 
 There is no MCP tool for binding to your own repository — it requires your personal token. The auto-sync, pull-sync and schedule-pause switches have no MCP tools either; use **Settings › Storage › Repository › Sync** or the endpoints above.
 
