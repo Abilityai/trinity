@@ -186,6 +186,18 @@ class TestAC5OverTheRealAuthPath:
             ("membership_tags_unreadable", True)]
 
 
+    def test_unreadable_docker_is_a_503_not_a_409(self, http):
+        """An existing member must not pick up a non-retryable
+        `member_container_missing` while Docker cannot be asked (review I1):
+        a caller that retries on 503 and stops on 409 would stop for good."""
+        http.seed_agent("acme-a")
+        http.docker.readable = False
+        res = http.client.post(APPLY, json={"manifest": _manifest("a"), "dry_run": False},
+                               headers=_jwt(W.ALICE))
+        assert res.status_code == 503, res.text
+        assert [b["code"] for b in res.json()["blockers"]] == ["roster_unreadable"]
+
+
 class TestD12PersonsOnly:
     def test_an_agent_key_is_refused_before_any_read(self, http, monkeypatch):
         http.seed_agent("acme-a")

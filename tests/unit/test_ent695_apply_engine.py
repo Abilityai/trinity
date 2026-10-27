@@ -98,12 +98,14 @@ class TestEvidenceGate:
         assert not [x for x in snap.blockers if x.code == "membership_evidence_prefix_only"]
 
     def test_unreadable_docker_is_retryable_never_an_empty_roster(self, world):
+        """The ONLY blocker: an existing member's container is unknown, not
+        missing, so no non-retryable `member_container_missing` turns the
+        503 into a 409 (review I1)."""
         world.seed_agent("acme-a")
         world.docker.readable = False
-        snap = world.snapshot(_manifest("a"))
+        snap = world.snapshot(_manifest("a", "b"))
 
-        (b,) = _blocker(snap, "roster_unreadable")
-        assert b.retryable is True
+        assert [(b.code, b.retryable) for b in snap.blockers] == [("roster_unreadable", True)]
 
     def test_a_label_read_returning_nothing_is_a_read_failure_not_a_missing_container(self, world):
         """`get_agent_container` turns every Docker error into None; a name the
@@ -823,8 +825,8 @@ class TestAC5WeakEvidenceRefusedBeforeAnyWrite:
     def test_unreadable_docker_refuses_retryably(self, ew, tmp_path):
         ew.seed_agent("acme-a")
         ew.docker.readable = False
-        codes = {(b.code, b.retryable) for b in self._refused(ew, tmp_path, _manifest("a")).blockers}
-        assert ("roster_unreadable", True) in codes
+        blockers = self._refused(ew, tmp_path, _manifest("a")).blockers
+        assert [(b.code, b.retryable) for b in blockers] == [("roster_unreadable", True)]
 
     def test_a_label_read_returning_nothing_refuses_retryably(self, ew, tmp_path):
         ew.seed_agent("acme-a")

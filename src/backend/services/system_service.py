@@ -2368,7 +2368,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
 
     # 1. Roster (tri-state containers U live ownership rows, access-filtered).
     states = docker_service.agent_container_states()
-    roster_ok = states is not None
+    roster_ok = docker_ok = states is not None
     if states is None:
         blockers.append(_apply_blocker(
             "roster_unreadable", None,
@@ -2474,6 +2474,12 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             gate = ("member_is_ephemeral",
                     f"'{name}' is an ephemeral agent (budgeted, discarded at its budget).",
                     "Remove it from the manifest, or let it be discarded and re-apply.")
+        elif not docker_ok:
+            # Docker could not be asked: `roster_unreadable` already refuses
+            # the run, and "no container" is unknown here, not absent (P-B,
+            # #2196) — never a `member_container_missing` that says otherwise.
+            state.blocked = True
+            continue
         elif name not in states:
             gate = ("member_container_missing",
                     f"'{name}' has an ownership row but no container.",
