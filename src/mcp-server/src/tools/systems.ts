@@ -91,12 +91,13 @@ function teardownFailure(error: unknown): string {
  *   403      an authorization refusal, serialised through `accessDenied` so
  *            the tool-call audit row records a denial (#2807)
  *
- * Every other non-2xx with a JSON body (the 409 / 503 / 500 apply reports, a
- * 400 or 422) IS the result: the body comes back with `http_status` and
- * `success: false` added, so `status`, `blockers[]` and `failed[]` reach the
- * caller intact. Those are operational refusals, not denials, and are NOT
- * stamped as such: `ToolOutcome` has no non-denial kind yet (types.ts). A
- * non-JSON body comes back as `{success: false, http_status, detail}`.
+ * Every other non-2xx with a JSON OBJECT body (the 409 / 503 / 500 apply
+ * reports, a 400, 401 or 422) IS the result: the body comes back with
+ * `http_status` and `success: false` added, so `status`, `blockers[]` and
+ * `failed[]` reach the caller intact. Those are not authorization denials and
+ * are NOT stamped as such: `ToolOutcome` has no non-denial kind yet
+ * (types.ts). Anything else (a JSON scalar, array or null, or a non-JSON body)
+ * comes back as `{success: false, http_status, detail}`.
  */
 function applyFailure(error: unknown, context: DenyCallContext | undefined): string {
   if (!(error instanceof ApiError)) {

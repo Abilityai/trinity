@@ -1429,15 +1429,16 @@ contract cannot silently break the tool:
 | 2xx | the body, verbatim | `success: true` |
 | 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | not a denial |
 | 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
-| any other non-2xx with a JSON body (the 409 / 503 / 500 apply reports, 400, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | not a denial (an operational refusal; `ToolOutcome` has no non-denial kind yet, so the row reads like any returned failure today) |
-| a non-JSON body | `{success: false, http_status, detail}` (the raw text) | not a denial |
+| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | not a denial (`ToolOutcome` has no non-denial kind yet, so the row reads like any returned failure today) |
+| a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | not a denial |
 | no HTTP status (missing API key, transport failure) | `{success: false, error}` | not a denial |
 
 Policy row in `access.ts`: `kind: "none"` (a manifest, not an agent target; the backend enforces
 the per-member manage checks and refuses every non-person key). With API-key auth on, each call
 builds a client on the server's configured backend URL carrying the calling session's own key.
-Tests: `src/mcp-server/src/tools/systems.apply.test.ts`, through the registered, audit-wrapped
-tool over the real MCP transport.
+Tests: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered,
+audit-wrapped tool: over the real MCP transport, and in-process through FastMCP's own session
+for the two shapes that transport cannot produce (a keyless session, another hostname).
 
 #### list_systems (Lines 105-133)
 ```typescript
