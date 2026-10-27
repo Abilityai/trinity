@@ -491,6 +491,26 @@ def test_the_episode_is_one_row_reread_by_a_refusal_after_the_cooldown(seam):
     assert again["expires_at"] > first["expires_at"]
 
 
+def test_a_person_ending_of_the_episode_stands_through_a_later_refusal(seam):
+    """AC 8 for `alert_budget`: a person acknowledges the budget episode through
+    `ask_service.answer`; the next refusal past the cooldown re-reads the
+    subject, and the person's ending stands (snoozed, no new episode row)."""
+    from services import operator_queue_service as oqs
+
+    for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
+        asyncio.run(oqs.create_bounded_alert_outcome(AGENT, _legacy("skill_not_found", command=f"/c{i}")))
+    asyncio.run(oqs.create_bounded_alert_outcome(AGENT, _legacy("skill_not_found", command="/x1")))
+    drain(seam)
+    episode = one(seam, kind="alert_budget")
+    person_ends(seam, episode)
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 60)
+    asyncio.run(oqs.create_bounded_alert_outcome(AGENT, _legacy("skill_not_found", command="/x2")))
+    drain(seam)
+    episodes = [r for r in rows(seam) if (r.get("subject") or "").startswith("alert_budget:")]
+    assert [(r["id"], r["status"], r["disposed_by"]) for r in episodes] == [
+        (episode["id"], "acknowledged", "person")]
+
+
 def test_the_episode_is_unbudgeted_so_it_cannot_recurse(seam):
     from services import platform_alerts as pa
 
@@ -655,8 +675,9 @@ def test_a_failed_flood_reading_is_retried_after_the_cooldown(seam, monkeypatch)
 
 
 def test_a_failed_reread_is_retried_no_sooner_than_the_cooldown(seam, monkeypatch):
-    """#3130 I1 on R9's re-read: a re-read whose write fails releases the
-    episode, and the retry waits out the cooldown like any other attempt."""
+    """#3130 I1 on R9's re-read: a re-read whose write fails keeps the episode
+    (its alert was filed by an earlier reading), and the retry waits out the
+    cooldown like any other attempt."""
     from services import operator_queue_service as oqs
 
     real = seam.db.create_platform_operator_queue_item
@@ -682,6 +703,33 @@ def test_a_failed_reread_is_retried_no_sooner_than_the_cooldown(seam, monkeypatc
     assert len(attempts) == 3
     (row,) = _flood_rows(seam)
     assert row["context"]["seen_count"] == 2
+
+
+def test_a_failed_reread_keeps_the_episode_so_its_end_still_clears_the_alert(seam, monkeypatch):
+    """AC 2 through a failed re-read: the 6-hourly re-read's write fails, the
+    condition then clears before the retry; the episode was kept, so the cycle
+    that holds nothing still ends the alert as the platform."""
+    real = seam.db.create_platform_operator_queue_item
+    attempts = []
+
+    def _flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 2:                     # the 6-hourly re-read fails
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", _flaky)
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()                                   # the alert files
+    seam.clock.advance(hours=6, seconds=1)
+    loop.cycle()                                   # the re-read fails
+    loop.state["over_cap"] = False
+    seam.clock.advance(seconds=5)
+    loop.cycle()                                   # nothing held: the condition cleared
+    (row,) = _flood_rows(seam)
+    assert (row["status"], row["disposed_by"], row["disposition_reason"]) == (
+        "cancelled", "platform", "condition_cleared")
+    assert len(attempts) == 2
 
 
 def test_a_person_ending_of_the_flood_stands_through_the_reread_and_the_clear(seam, monkeypatch):
@@ -839,6 +887,29 @@ def test_at_the_budget_a_new_command_is_refused_without_a_notification(seam, not
     assert len(notifications) == sent
     assert "/one-more" not in str([r["context"] for r in rows(seam)])
     assert one(seam, kind="alert_budget")["subject"] == "alert_budget:skill_not_found"
+
+
+def test_a_person_ending_of_a_missing_skill_stands_and_sends_no_notification(
+        seam, notifications, monkeypatch):
+    """AC 8 for `skill_not_found`: a person acknowledges the alert through
+    `ask_service.answer`; the next scheduled run of the same command is
+    `snoozed`, files no row, and sends no paired notification (D3: only a
+    `created` row is notified)."""
+    from services import platform_alerts as pa
+
+    _missing_skill(seam)
+    (row,) = rows(seam)
+    assert len(notifications) == 1
+    person_ends(seam, row)
+    seam.clock.advance(days=1)
+    outcomes = []
+    real = pa.observe
+    monkeypatch.setattr(pa, "observe", lambda *a, **k: outcomes.append(real(*a, **k)) or outcomes[-1])
+    _missing_skill(seam)
+    assert outcomes == ["snoozed"]
+    assert [(r["id"], r["status"], r["disposed_by"]) for r in rows(seam)] == [
+        (row["id"], "acknowledged", "person")]
+    assert len(notifications) == 1
 
 
 def test_legacy_skill_rows_derive_the_subject_observe_uses():

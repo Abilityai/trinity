@@ -2735,10 +2735,15 @@ class OperatorQueueSyncService:
         included). Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
             episode; a snoozed reading is a person's ending, which stands);
-          * failed → the episode is RELEASED so the alarm is retried, and the
-            cooldown stamp spaces those retries to at most one per window
-            (review I1: holding the episode on a failure silenced the alarm until
-            the condition cleared — for a runaway agent, never);
+          * failed on the episode's first reading → the episode is RELEASED so
+            the alarm is retried, and the cooldown stamp spaces those retries to
+            at most one per window (review I1: holding the episode on a failure
+            silenced the alarm until the condition cleared — for a runaway agent,
+            never);
+          * failed on a re-read → the episode is KEPT: an earlier reading filed
+            its alert, and only a live episode lets `_end_flood_episode` end it
+            when the condition clears (AC 2). The re-read is retried after the
+            cooldown, not after the full 6 hours;
           * refused at budget → the episode is consumed. The agent already has
             a full budget of pending flood alerts and the budget emits its own
             `alert-budget-` episode alert, so re-knocking every window would
@@ -2751,7 +2756,8 @@ class OperatorQueueSyncService:
         key = (agent_name, reason)
         now = time.monotonic()
         refreshed = vars(self).setdefault("_flood_refreshed_at", {})
-        if key in self._flood_episodes:
+        rereading = key in self._flood_episodes
+        if rereading:
             # R9: the 6-hour re-read of a persisting episode, the #3255
             # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
             last_read = refreshed.get(key)
@@ -2797,8 +2803,13 @@ class OperatorQueueSyncService:
             context={"held": held, "reason": reason},
         )
         if outcome == platform_alerts.OBSERVED_FAILED:
-            self._flood_episodes.discard(key)  # retry next window (I1)
-            refreshed.pop(key, None)
+            if rereading:
+                # keep the episode so its end still clears the alert; retry the
+                # re-read once the cooldown has passed
+                refreshed[key] = now - 6 * 60 * 60 + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS
+            else:
+                self._flood_episodes.discard(key)  # retry next window (I1)
+                refreshed.pop(key, None)
             return
         if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
             logger.warning(
