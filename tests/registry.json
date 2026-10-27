@@ -4619,6 +4619,19 @@
       "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport — an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
+      "file": "mcp-server/src/tools/systems.apply.test.ts",
+      "feature": "abilityai/trinity-enterprise#695",
+      "added": "2026-10-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "systems",
+        "transport"
+      ],
+      "description": "apply_system, the reconcile sibling of deploy_system, through the REGISTERED audit-wrapped tool: a real createServer in key mode, a real MCP client presenting a person's user-scoped key over streamable HTTP, and a stub backend on a non-default origin that records every request and every audit row. Pins dry_run ?? true (default and explicit true/false send exactly {manifest, dry_run}), 404 and 405 -> not_available with no fallback to /api/systems/deploy, 409/503/500 JSON reports returned AS the result with http_status and success:false and NOT audited as denials, 400/422 passed through, a non-JSON body -> {success:false, http_status, detail}, 403 -> not_permitted through accessDenied (audited denied:true) and a 403-then-409 on one session leaving no stale marker, a missing API key and a status-less failure RETURNED not thrown, the access.ts row (none) and the advertised {manifest, dry_run?} schema. deploy_system unchanged (AC6): its request body and defaults and its throw-on-500. Other shape: each call reaches the configured origin with THAT session's own key, and another hostname (https, non-default port) through the real TrinityClient with a stubbed fetch."
+    },
+    {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
       "feature": "abilityai/trinity#2915",
       "added": "2026-09-23",
