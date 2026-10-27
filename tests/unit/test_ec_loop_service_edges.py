@@ -1181,10 +1181,13 @@ class TestReconcileDuringLiveAdvance:
         lid = _start(ls, max_runs=3)
         assert fired["v"]
         end = _grace_end(db, lid)
-        assert _sweep_at(ls, monkeypatch, end - timedelta(microseconds=1)) == 0
-        assert _sweep_at(ls, monkeypatch, end + timedelta(microseconds=1)) == 0
+        swept = (
+            _sweep_at(ls, monkeypatch, end - timedelta(microseconds=1)),
+            _sweep_at(ls, monkeypatch, end + timedelta(microseconds=1)),
+        )
         assert _nums(db, lid) == [1, 2], _nums(db, lid)
         assert len(ts.calls) == 2
+        assert swept == (0, 0)
         assert _loop(db, lid)["next_run_at"] is None  # A's claim spent B's park
 
     def test_t3_start_loop_window_on_a_fresh_install(self, env, monkeypatch):
@@ -1197,21 +1200,21 @@ class TestReconcileDuringLiveAdvance:
         assert count("agent_loops") == 0 and count("agent_loop_runs") == 0
         worker_b = ls.LoopService()
         seen = _record_rearms(db)
-        once = {"v": False}
+        b: dict = {}
 
         def _b_reconciles(*a, **k):
-            if not once["v"]:
-                once["v"] = True
-                assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+            if "moved" not in b:
+                b["moved"] = _on_another_worker(worker_b.reconcile_after_restart)
 
         db.hooks["start_loop_run"] = _b_reconciles
         ts.script = ["queued", "queued"]
         lid = _start(ls, max_runs=3)
-        assert [o for _, o in seen] == ["armed"]
-        assert _loop(db, lid)["next_run_at"] is None
-        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
-        assert _nums(db, lid) == [1]
+        park_after_claim = _loop(db, lid)["next_run_at"]
+        swept = _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1))
+        assert _nums(db, lid) == [1], _nums(db, lid)
         assert len(ts.calls) == 1
+        assert (b["moved"], [o for _, o in seen], swept) == (1, ["armed"], 0)
+        assert park_after_claim is None  # A's claim spent B's park
 
     def test_t3b_a_queued_read_overtaken_leaves_one_run_1_and_no_park(self, env, monkeypatch):
         """B reads the loop while it is still `queued`, then decides after A has
@@ -1220,22 +1223,22 @@ class TestReconcileDuringLiveAdvance:
         worker_b = ls.LoopService()
         snap: dict = {}
         db.hooks["mark_loop_running"] = lambda lid: snap.setdefault("v", db.ops.list_non_terminal_loops())
-        once = {"v": False}
+        b: dict = {}
 
         def _b_reconciles(*a, **k):
-            if not once["v"]:
-                once["v"] = True
-                assert snap["v"][0]["status"] == "queued"
+            if "moved" not in b:
                 with _SnapshotReadAs(db, snap["v"]):
-                    assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+                    b["moved"] = _on_another_worker(worker_b.reconcile_after_restart)
 
         db.hooks["start_loop_run"] = _b_reconciles
         ts.script = ["queued", "queued"]
         lid = _start(ls, max_runs=3)
-        assert _loop(db, lid)["next_run_at"] is None
-        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
-        assert _nums(db, lid) == [1]
+        park_after_claim = _loop(db, lid)["next_run_at"]
+        swept = _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1))
+        assert _nums(db, lid) == [1], _nums(db, lid)
         assert len(ts.calls) == 1
+        assert snap["v"][0]["status"] == "queued"
+        assert (b["moved"], swept, park_after_claim) == (1, 0, None)
 
     def test_t4_sweep_window(self, env, monkeypatch):
         """A's own sweep took the delay park and is about to insert run 2 when
@@ -1245,21 +1248,20 @@ class TestReconcileDuringLiveAdvance:
         lid = _start(ls, max_runs=3, delay_seconds=30)
         park = _naive(_loop(db, lid)["next_run_at"])
         worker_b = ls.LoopService()
-        once = {"v": False}
+        b: dict = {}
 
         def _b_reconciles(*a, **k):
-            if not once["v"]:
-                once["v"] = True
-                assert _on_another_worker(worker_b.reconcile_after_restart) == 1
+            if "moved" not in b:
+                b["moved"] = _on_another_worker(worker_b.reconcile_after_restart)
 
         db.hooks["start_loop_run"] = _b_reconciles
-        assert _sweep_at(ls, monkeypatch, park) == 1  # worker A's tick
+        a_swept = _sweep_at(ls, monkeypatch, park)  # worker A's tick
         db.hooks.pop("start_loop_run")
-        assert once["v"]
-        assert _loop(db, lid)["next_run_at"] is None
-        assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
+        park_after_claim = _loop(db, lid)["next_run_at"]
+        b_swept = _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1))
         assert _nums(db, lid) == [1, 2], _nums(db, lid)
         assert len(ts.calls) == 2
+        assert (a_swept, b["moved"], park_after_claim, b_swept) == (1, 1, None, 0)
 
     def test_t7_a_stale_read_does_not_erase_a_pause(self, env):
         """B read the loop before A parked it for an hour; B's decision lands
@@ -1284,22 +1286,21 @@ class TestReconcileDuringLiveAdvance:
         nothing, and A's pause stands."""
         ls, db, ts = env
         worker_b = ls.LoopService()
-        fired = {"v": False}
+        b: dict = {}
 
         async def _broadcast(event):
-            if event.get("type") == "loop_run_completed" and not fired["v"]:
-                fired["v"] = True
-                assert await worker_b.reconcile_after_restart() == 1
-                assert await worker_b.dispatch_due_loops() == 0
+            if event.get("type") == "loop_run_completed" and "moved" not in b:
+                b["moved"] = await worker_b.reconcile_after_restart()
+                b["swept"] = await worker_b.dispatch_due_loops()
 
         monkeypatch.setattr(ls, "_broadcast", _broadcast)
         ts.script = [{"response": "r1"}, "queued"]
         lid = _start(ls, max_runs=3, delay_seconds=3600)
-        assert fired["v"]
+        assert _nums(db, lid) == [1], _nums(db, lid)
+        assert len(ts.calls) == 1
+        assert (b["moved"], b["swept"]) == (1, 0)
         park = _naive(_loop(db, lid)["next_run_at"])
         assert park - _naive(_runs(db, lid)[0]["completed_at"]) >= timedelta(seconds=3500)
-        assert _nums(db, lid) == [1]
-        assert len(ts.calls) == 1
 
     def test_t8b_a_rearm_decided_after_run_n_plus_1_exists_arms_nothing(self, env, monkeypatch):
         """B's read saw no open run (A between close and claim); B's decision
@@ -1333,21 +1334,21 @@ class TestLiveWorkerKeepsItsDecision:
     def test_t13r_a_stop_signal_match_is_not_overtaken(self, env, monkeypatch):
         ls, db, ts = env
         worker_b = ls.LoopService()
-        fired = {"v": False}
+        b: dict = {}
 
         async def _broadcast(event):
-            if event.get("type") == "loop_run_completed" and not fired["v"]:
-                fired["v"] = True
-                assert await worker_b.reconcile_after_restart() == 1
-                assert await worker_b.dispatch_due_loops() == 0
+            if event.get("type") == "loop_run_completed" and "moved" not in b:
+                b["moved"] = await worker_b.reconcile_after_restart()
+                b["swept"] = await worker_b.dispatch_due_loops()
 
         monkeypatch.setattr(ls, "_broadcast", _broadcast)
         ts.script = [{"response": "r1 DONE"}, "queued", "queued"]
         lid = _start(ls, max_runs=3, stop_signal="DONE")
         loop = _loop(db, lid)
-        assert (loop["status"], loop["stop_reason"]) == ("completed", "stop_signal_matched")
-        assert _nums(db, lid) == [1]
+        assert _nums(db, lid) == [1], _nums(db, lid)
         assert len(ts.calls) == 1
+        assert (loop["status"], loop["stop_reason"]) == ("completed", "stop_signal_matched")
+        assert (b["moved"], b["swept"]) == (1, 0)
         # B's park outlives the loop; every reader of a park skips a terminal loop.
         assert loop["next_run_at"] is not None
         assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
@@ -1357,26 +1358,24 @@ class TestLiveWorkerKeepsItsDecision:
         write instead (A blocked in a synchronous call, B on its own loop)."""
         ls, db, ts = env
         worker_b = ls.LoopService()
-        once = {"v": False}
+        b: dict = {}
+
+        async def _b():
+            return (await worker_b.reconcile_after_restart(),
+                    await worker_b.dispatch_due_loops())
 
         def _b_reconciles_and_sweeps(*a, **k):
-            if once["v"]:
-                return
-            once["v"] = True
-
-            async def _b():
-                assert await worker_b.reconcile_after_restart() == 1
-                return await worker_b.dispatch_due_loops()
-
-            assert _on_another_worker(_b) == 0
+            if "moved_swept" not in b:
+                b["moved_swept"] = _on_another_worker(_b)
 
         db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
         ts.script = [{"status": "failed", "error": "boom"}, "queued", "queued"]
         lid = _start(ls, max_runs=3, on_failure="abort")
         loop = _loop(db, lid)
-        assert (loop["status"], loop["stop_reason"]) == ("failed", "error")
-        assert _nums(db, lid) == [1]
+        assert _nums(db, lid) == [1], _nums(db, lid)
         assert len(ts.calls) == 1
+        assert (loop["status"], loop["stop_reason"]) == ("failed", "error")
+        assert b["moved_swept"] == (1, 0)
 
     def test_t14_runs_completed_is_not_rewound(self, env):
         """B re-arms and sweeps while A sits before run 1's progress write. Had
@@ -1384,18 +1383,15 @@ class TestLiveWorkerKeepsItsDecision:
         B's run 2 and strand the loop."""
         ls, db, ts = env
         worker_b = ls.LoopService()
-        once = {"v": False}
+        b: dict = {}
+
+        async def _b():
+            await worker_b.reconcile_after_restart()
+            return await worker_b.dispatch_due_loops()
 
         def _b_reconciles_and_sweeps(*a, **k):
-            if once["v"]:
-                return
-            once["v"] = True
-
-            async def _b():
-                await worker_b.reconcile_after_restart()
-                return await worker_b.dispatch_due_loops()
-
-            assert _on_another_worker(_b) == 0
+            if "swept" not in b:
+                b["swept"] = _on_another_worker(_b)
 
         db.hooks["update_loop_progress"] = _b_reconciles_and_sweeps
         ts.script = [{"response": "r1"}, {"status": "failed", "error": "boom"}, "queued", "queued"]
@@ -1403,11 +1399,12 @@ class TestLiveWorkerKeepsItsDecision:
         loop = _loop(db, lid)
         runs = _runs(db, lid)
         closed = [r["run_number"] for r in runs if r["status"] != "running"]
-        assert loop["runs_completed"] == max(closed) == 2
+        assert loop["runs_completed"] == max(closed) == 2, (loop["runs_completed"], closed)
         assert [(r["run_number"], r["status"]) for r in runs] == [
             (1, "completed"), (2, "failed"), (3, "running"),
         ]
         assert loop["status"] == "running"
+        assert b["swept"] == 0
 
     def test_t13_rtail_a_park_forced_due_inside_the_window_still_dispatches_once(self, env, monkeypatch):
         """The stated residual (R-tail): when the park is due inside A's window

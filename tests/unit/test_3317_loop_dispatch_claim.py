@@ -290,6 +290,32 @@ def _never(_loop, _runs):  # a due_for that must not be reached
     raise AssertionError("due_for called on a refused re-arm")
 
 
+def test_reconcile_and_the_claim_reach_the_real_sql_through_the_facade(db_backend, monkeypatch):  # noqa: F811
+    """The loop suites drive `LoopOperations` directly; production goes through
+    the `database.py` facade. Build that facade over the test engine (not the
+    process-wide `database.db`, which other tests may replace) and drive
+    reconcile and a claim through it, so a broken pass-through fails here."""
+    import asyncio
+
+    from database import DatabaseManager
+    from db.loops import LoopOperations
+    from services import loop_service as ls
+
+    facade = object.__new__(DatabaseManager)
+    facade._loop_ops = LoopOperations()
+    monkeypatch.setattr(ls, "db", facade)
+    lid = facade.create_loop(agent_name="a3317f", message_template="m", max_runs=3)["id"]
+    facade.mark_loop_running(lid)
+
+    assert asyncio.run(ls.LoopService().reconcile_after_restart()) == 1
+    assert facade.get_loop(lid)["next_run_at"] is not None
+    assert facade.rearm_lost_dispatch(lid, due_for=_never) == ("parked", None)
+    assert facade.start_loop_run(lid, 2, execution_id="e_wrong") is None
+    assert facade.start_loop_run(lid, 1, execution_id="e_facade") is not None
+    assert facade.get_loop(lid)["next_run_at"] is None  # the claim spent the park
+    assert [r["execution_id"] for r in facade.list_loop_runs(lid)] == ["e_facade"]
+
+
 @pytest.mark.requires_postgres
 def test_claim_vs_claim_the_second_claim_waits_and_loses(db_backend):  # noqa: F811
     lid = _loop_after_run1()
