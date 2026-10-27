@@ -504,7 +504,7 @@ class TestExecutionTerminate:
         """While the dispatcher stays parked, every terminate answers
         `cancelled_while_parked`, but only the call that wins the CANCELLED CAS
         ended anything. A repeat by another credential must not write a second
-        row crediting itself (Codex, Stage 2 review)."""
+        row crediting itself (found in review)."""
         eid = _seed("s2-3180-parked-twice", "running")
         limiter = chat_router.chat_execution_service.agent_call_limiter
         world.redis.set(
