@@ -2268,6 +2268,10 @@ class ApplySnapshot:
     caller_role: str
     caller_is_admin: bool
     stored_prompt: Optional[str] = None
+    # The fleet default a member to create gets when it declares no resources
+    # (`_manifest_default_resources`, a settings read): read here so a failure
+    # is a blocker, never an exception after the first write (Codex 2).
+    default_resources: Optional[Dict[str, str]] = None
     views: List = field(default_factory=list)
 
 
@@ -2539,7 +2543,15 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                 _evidence_remedy(member, system, is_declared),
             ))
 
-    # 4. The platform prompt and the system view (only when the manifest asks).
+    # 4. The default resources for members to create that declare none.
+    if any(st.status == "absent" and not st.blocked and not manifest.agents[st.short_name].resources
+           for st in snapshot.members.values()):
+        try:
+            snapshot.default_resources = dict(_manifest_default_resources())
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the default agent resources", e))
+
+    # 5. The platform prompt and the system view (only when the manifest asks).
     if manifest.prompt:
         try:
             setting = db.get_setting("trinity_prompt")
@@ -2772,6 +2784,7 @@ class ApplyPlan:
     prompt_op: Optional[ApplyOp] = None
     view_op: Optional[ApplyOp] = None
     warnings: List[str] = field(default_factory=list)
+    default_resources: Optional[Dict[str, str]] = None
 
 
 def _apply_change(field_name: str, action: str, code: str, *, current=None,
@@ -3219,7 +3232,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
-        view_op=view_op, warnings=warnings,
+        view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
     )
 
 
@@ -3333,14 +3346,18 @@ def _default_start_agent_fn():
     return start_agent_internal
 
 
-def _member_agent_config(name: str, cfg: SystemAgentConfig) -> AgentConfig:
+def _member_agent_config(name: str, cfg: SystemAgentConfig,
+                         default_resources: Optional[Dict[str, str]]) -> AgentConfig:
     """The `AgentConfig` create mode builds for a member, field for field
     (bootstrap equivalence). The resources dict is copied so the create path's
-    template merge never writes into the parsed manifest."""
+    template merge never writes into the parsed manifest; the fleet default
+    was read by the snapshot (create mode reads the same setting per member)."""
+    if not cfg.resources and default_resources is None:
+        raise ValueError("the default agent resources were not read")
     return AgentConfig(
         name=name,
         template=cfg.template,
-        resources=dict(cfg.resources) if cfg.resources else _manifest_default_resources(),
+        resources=dict(cfg.resources) if cfg.resources else dict(default_resources),
         kind=cfg.kind,
     )
 
@@ -3399,9 +3416,10 @@ async def execute_apply_plan(
     for mp in plan.members.values():
         if not mp.creating:
             continue
-        config = _member_agent_config(mp.name, mp.config)
-        created = await attempt(mp.name, mp.short_name, "create", lambda c=config: _created(
-            create_agent_fn(config=c, current_user=current_user, request=request,
+        # Built INSIDE the attempt: nothing may raise past a write (P-C).
+        created = await attempt(mp.name, mp.short_name, "create", lambda m=mp: _created(
+            create_agent_fn(config=_member_agent_config(m.name, m.config, plan.default_resources),
+                            current_user=current_user, request=request,
                             skip_name_sanitization=True)))
         if not created:
             continue
@@ -3429,7 +3447,10 @@ async def execute_apply_plan(
                 fail(op.member, op.short_name, op.kind,
                      f"skipped_member_not_created: '{op.args['target']}' was not created")
                 continue
-            await _run_op(op, current_user, out, attempt)
+            try:
+                await _run_op(op, current_user, out, attempt)
+            except Exception as e:  # noqa: BLE001 — never lose the report after a write
+                fail(op.member, op.short_name, op.kind, _failure_reason(e)[0])
 
     # 3. The platform prompt and the view.
     if plan.prompt_op is not None:

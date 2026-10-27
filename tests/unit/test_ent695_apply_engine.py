@@ -1363,6 +1363,37 @@ class TestOtherShapeEmptyData:
 
 
 class TestExecutionNeverLosesTheReport:
+    def test_an_unreadable_resource_default_is_a_retryable_blocker_not_a_500(self, ew, tmp_path, monkeypatch):
+        """Codex pass 1 #2: the fleet default a member to create takes is a
+        settings read; it happens in the snapshot, so its failure refuses the
+        run before any write instead of raising after the first create."""
+        def _boom():
+            raise RuntimeError("settings table locked")
+
+        monkeypatch.setattr(system_service, "_manifest_default_resources", _boom)
+        with _witness(ew, tmp_path) as w:
+            result = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        assert result.status == "refused"
+        assert [(b.code, b.retryable) for b in result.blockers] == [("member_reads_unavailable", True)]
+        w.assert_no_fleet_write()
+
+    def test_a_failure_preparing_a_later_create_keeps_the_report(self, ew, monkeypatch):
+        """Anything that can raise while preparing a create runs inside the
+        write's own attempt, so member A's create and tag are reported and
+        member B's failure is a `failed[]` row, never a bare 500."""
+        real = system_service._member_agent_config
+
+        def flaky(name, cfg, defaults):
+            if name == "acme-b":
+                raise RuntimeError("config build failed")
+            return real(name, cfg, defaults)
+
+        monkeypatch.setattr(system_service, "_member_agent_config", flaky)
+        result = W.apply(ew, _manifest("a", "b"), dry_run=False)
+        assert result.status == "partial"
+        assert db.get_agent_owner("acme-a") and SYSTEM in db.get_agent_tags("acme-a")
+        assert ("acme-b", "create") in [(f.name, f.step) for f in result.failed]
+
     def test_a_writer_that_raises_is_recorded_and_the_run_continues(self, ew, monkeypatch):
         ew.seed_agent("acme-a")
         ew.seed_agent("acme-b")
