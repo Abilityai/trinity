@@ -734,28 +734,60 @@ def test_r1_scrub_refused_key_matches_the_legacy_parser(readings):
     assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#3254 residual (pre-existing in the #3246 legacy parser): prefixes match "
-        "longest first, so a pre-move REFUSAL id of an agent named `unreadable-...` "
-        "reads as the unreadable kind with the name's tail as the key. The parser is "
-        "in services/platform_alerts.py, outside this slice; an XPASS means it was "
-        "fixed, so drop this marker then."
-    ),
-)
-def test_r1_scrub_refused_key_for_an_agent_named_unreadable_(readings):
+# Agent names that collide with the nested `ent615-git-token-scrub-unreadable-`
+# prefix: the legacy parser reads the row's context to tell the two kinds apart.
+COLLIDING_AGENTS = ("unreadable-agent-a", "unreadable", "unreadable-unreadable-x")
+
+
+@pytest.mark.parametrize("agent", COLLIDING_AGENTS)
+def test_r1_scrub_refused_key_for_a_colliding_agent_name(readings, agent):
     from services import platform_alerts as pa
     from services.git_service import token_scrub
 
     report = {"remotes_scrubbed": 0, "refused": 1, "root_readable": 1, "success": True}
-    token_scrub._alarm_git_token_scrub_refused("unreadable-agent-a", report)
+    token_scrub._alarm_git_token_scrub_refused(agent, report)
+    [(host, kind, key)] = readings
+    legacy = pa.derive_legacy_subject(f"ent615-git-token-scrub-{agent}-2026-09-01", report)
+    assert host == agent
+    assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
+
+
+@pytest.mark.parametrize("agent", COLLIDING_AGENTS)
+def test_r1_scrub_unreadable_key_for_a_colliding_agent_name(readings, agent):
+    from services import platform_alerts as pa
+    from services.git_service import token_scrub
+
+    token_scrub._alarm_git_token_scrub_unreadable(agent)
     [(host, kind, key)] = readings
     legacy = pa.derive_legacy_subject(
-        "ent615-git-token-scrub-unreadable-agent-a-2026-09-01", report
+        f"ent615-git-token-scrub-unreadable-{agent}-2026-09-01", {"reason": "root_readable=0"}
     )
-    assert host == "unreadable-agent-a"
+    assert host == agent
     assert (legacy.kind, legacy.subject) == (kind, pa.subject_for(kind, key))
+
+
+def test_the_upgrade_sweep_ends_a_colliding_agents_legacy_refusal_duplicate():
+    """The consequence the misread had: next to the seam's row, the pre-move
+    refusal row of an `unreadable-…` agent formed its own group and survived."""
+    from datetime import timezone
+
+    from services import platform_alerts as pa
+
+    agent = "unreadable-agent-a"
+    report = {"remotes_scrubbed": 0, "refused": 1, "root_readable": 1, "success": True}
+    rows = [
+        {"id": "legacy", "agent_name": agent, "request_id": f"ent615-git-token-scrub-{agent}-2026-10-20",
+         "status": "pending", "created_at": "2026-10-20T00:00:00.000000Z", "expires_at": None,
+         "context": report, "subject": None, "raised_by": None},
+        {"id": "seam", "agent_name": agent,
+         "request_id": f"ent615-git-token-scrub-{agent}-2026-10-27T00:00:00.000000Z",
+         "status": "pending", "created_at": "2026-10-27T00:00:00.000000Z",
+         "expires_at": "2026-11-10T00:00:00.000000Z", "context": report,
+         "subject": pa.subject_for("git_token_scrub_refused", agent), "raised_by": None},
+    ]
+    plan = pa.plan_sweep(rows, now=datetime(2026, 10, 28, tzinfo=timezone.utc))
+    assert plan.ended_ids == ("legacy",)
+    assert plan.survivor_stamps == () and plan.lifetime_stamps == ()
 
 
 def test_r1_scrub_unreadable_key_matches_the_legacy_parser(readings):
