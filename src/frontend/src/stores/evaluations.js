@@ -185,11 +185,28 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     .map(([id, count]) => ({ id, count })))
 
   // Delegated pairs; with an agent selected, only the pairs it is a side of.
+  // The edge's own numbers come from the group's `pair` block (ent#940) — the
+  // group's top-level `checks_passed_rate` is the callee runs' Tier-0 rate,
+  // which is the agent table's number, not this edge's.
   const pairRows = computed(() => (pairsAggregate.value?.groups || [])
     .filter((g) => g.key?.caller && g.key?.callee)
     .filter((g) => !agent.value || g.key.caller === agent.value || g.key.callee === agent.value)
-    .map((g) => ({ caller: g.key.caller, callee: g.key.callee, evaluated: g.evaluated,
-      checksPassedRate: g.checks_passed_rate ?? null })))
+    .map((g) => {
+      const p = g.pair || {}
+      return {
+        caller: g.key.caller, callee: g.key.callee,
+        graded: p.pair_graded ?? 0,
+        checksPassedRate: p.pair_checks_passed_rate ?? null,
+        topFailedCheck: topFailedCheck(p.pair_per_check_fail),
+        roundTrips: p.round_trips_mean ?? null,
+        costPerVerified: p.cost_per_verified_outcome ?? null,
+      }
+    })
+    .sort((a, b) => {
+      const ra = a.checksPassedRate ?? Infinity
+      const rb = b.checksPassedRate ?? Infinity
+      return ra - rb || `${a.caller}>${a.callee}`.localeCompare(`${b.caller}>${b.callee}`)
+    }))
 
   // The chart's axis and values: one slot per UTC day of the window the
   // aggregate answered with, the stored point's rate as a percentage, `null`

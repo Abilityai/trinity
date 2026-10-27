@@ -18,6 +18,7 @@
           <tr>
             <th scope="col" class="px-4 py-2 text-left font-medium">Project</th>
             <th scope="col" class="px-4 py-2 text-right font-medium">Done / planned</th>
+            <th scope="col" class="px-4 py-2 text-right font-medium">vs last week</th>
             <th scope="col" class="px-4 py-2 text-right font-medium">Stalled</th>
             <th scope="col" class="px-4 py-2 text-right font-medium">Claims rejected</th>
             <th scope="col" class="px-4 py-2 text-right font-medium">Asks late</th>
@@ -39,6 +40,9 @@
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">
               {{ num(r.signals?.completion?.done) }} / {{ num(r.signals?.completion?.planned) }}
             </td>
+            <td class="px-4 py-2 text-right tabular-nums text-xs" :class="deltaOf(r)?.tone || 'text-gray-500 dark:text-gray-400'" data-testid="outcomes-project-delta">
+              {{ deltaOf(r)?.text?.replace(' vs last week', '') || '—' }}
+            </td>
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{{ num(r.signals?.stalls?.stalled_count) }}</td>
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{{ pct(r.signals?.done_claims?.rejection_rate) }}</td>
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{{ num(r.signals?.asks?.unanswered) }}</td>
@@ -52,7 +56,14 @@
 </template>
 
 <script setup>
-import { num, pct, usd } from './format'
+import { num, pct, usd, weekDelta } from './format'
 
-defineProps({ rows: { type: Array, default: () => [] } })
+const props = defineProps({
+  rows: { type: Array, default: () => [] },
+  /** `store.priorByProject` — scope_ref → last week's record, or null. */
+  prior: { type: Object, default: () => ({}) },
+})
+
+// Done-count movement, the one number every project row has.
+const deltaOf = (r) => weekDelta(r.signals?.completion?.done, props.prior?.[r.scope_ref]?.signals?.completion?.done)
 </script>

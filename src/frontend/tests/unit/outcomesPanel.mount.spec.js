@@ -35,7 +35,7 @@ import OutcomesPanel from '../../src/components/OutcomesPanel.vue'
 import { useAuthStore } from '../../src/stores/auth'
 import { useEnterpriseStore } from '../../src/stores/enterprise'
 import { useOperatorQueueStore } from '../../src/stores/operatorQueue'
-import { useOutcomesStore, PROJECTS_URL, PROPOSALS_URL } from '../../src/stores/outcomes'
+import { useOutcomesStore, PROJECTS_URL, PROPOSALS_URL, ANALYSES_URL, priorOf } from '../../src/stores/outcomes'
 
 const proposal = (id, extra = {}) => ({
   id, status: 'proposed', title: `Proposal ${id}`, summary: 'Do the thing.', owner: 'trinity-pm',
@@ -55,6 +55,20 @@ const OVERVIEW = {
   proposal_counts: { proposed: 2, accepted: 0, rejected: 0, shipped: 0 },
 }
 
+// Two earlier weeks for the fleet and one for the project: the week before
+// this one, and one more so the trend has a line to draw.
+const week = (scope_kind, scope_ref, window_start, signals) => ({
+  id: `${scope_ref}-${window_start}`, scope_kind, scope_ref, window_start, signals,
+})
+const HISTORY = { analyses: [
+  week('fleet', 'fleet', '2026-10-12T00:00:00.000Z', OVERVIEW.fleet.signals),
+  week('fleet', 'fleet', '2026-10-05T00:00:00.000Z', { completion: { rate: 0.25 }, done_claims: { rejection_rate: 0.5 },
+    asks: { unanswered: 3 }, latency: { dispatch_to_verified_hours_median: 5 }, runs: { checks_failed_rate: 0.2 } }),
+  week('fleet', 'fleet', '2026-09-28T00:00:00.000Z', { completion: { rate: 0.4 }, runs: { checks_failed_rate: 0.1 } }),
+  week('project', 'p1', '2026-10-12T00:00:00.000Z', OVERVIEW.projects[0].signals),
+  week('project', 'p1', '2026-10-05T00:00:00.000Z', { completion: { done: 3, planned: 3 } }),
+] }
+
 async function flush() {
   for (let i = 0; i < 4; i++) { await nextTick(); await flushPromises() }
 }
@@ -63,6 +77,7 @@ function mountPanel({ get, post } = {}) {
   http.get = vi.fn(get || (async (url) => {
     if (url === PROJECTS_URL) return { data: OVERVIEW }
     if (url === PROPOSALS_URL) return { data: { proposals: [proposal('a'), proposal('b', { owner: 'operator' })] } }
+    if (url === ANALYSES_URL) return { data: HISTORY }
     return { data: {} }
   }))
   http.post = vi.fn(post || (async () => ({ data: {} })))
@@ -82,6 +97,48 @@ describe('OutcomesPanel', () => {
     expect(w.find('[data-testid="outcomes-unreachable"]').text()).toContain('acme/gone (http_404)')
     expect(w.findAll('[data-testid^="outcomes-proposal-"]')).toHaveLength(2)
     expect(http.get).toHaveBeenCalledWith(PROPOSALS_URL, { params: { status: 'proposed' } })
+  })
+
+  it('says which way each fleet tile moved against last week, and draws the weeks', async () => {
+    const w = mountPanel()
+    await flush()
+    // completion 25% → 50%: up is good; claims rejected 50% → 25%: down is good;
+    // asks 3 → 2: down is good; latency 5h → 3h: down is good.
+    expect(w.find('[data-testid="outcomes-kpi-completion-delta"]').text()).toBe('+25 pts vs last week')
+    expect(w.find('[data-testid="outcomes-kpi-completion-delta"]').classes().join(' ')).toContain('status-success')
+    expect(w.find('[data-testid="outcomes-kpi-claims-delta"]').text()).toBe('−25 pts vs last week')
+    expect(w.find('[data-testid="outcomes-kpi-claims-delta"]').classes().join(' ')).toContain('status-success')
+    expect(w.find('[data-testid="outcomes-kpi-asks-delta"]').text()).toBe('−1 vs last week')
+    expect(w.find('[data-testid="outcomes-kpi-latency-delta"]').text()).toBe('−2h vs last week')
+    expect(w.find('[data-testid="outcomes-trend-weeks"]').text()).toBe('3 weeks · fleet')
+    // The project row: done 3 → 1 is a drop.
+    const delta = w.find('[data-testid="outcomes-project-p1"] [data-testid="outcomes-project-delta"]')
+    expect(delta.text()).toBe('−2')
+    expect(delta.classes().join(' ')).toContain('status-danger')
+    expect(http.get.mock.calls.find(([u]) => u === ANALYSES_URL)[1]).toEqual({ params: { limit: 16 } })
+  })
+
+  it('with no earlier week the tiles say so and there is no trend block; a failed history read is the same, with no banner', async () => {
+    const w = mountPanel({ get: async (url) => {
+      if (url === PROJECTS_URL) return { data: OVERVIEW }
+      if (url === PROPOSALS_URL) return { data: { proposals: [] } }
+      if (url === ANALYSES_URL) { const e = new Error('500'); e.response = { status: 500, data: {} }; throw e }
+      return { data: {} }
+    } })
+    await flush()
+    expect(w.find('[data-testid="outcomes-ready"]').exists()).toBe(true)
+    expect(w.find('[data-testid="outcomes-kpi-completion-delta"]').text()).toBe('no earlier week')
+    expect(w.find('[data-testid="outcomes-trend"]').exists()).toBe(false)
+    expect(w.find('[data-testid="outcomes-project-delta"]').text()).toBe('—')
+    expect(w.find('[data-testid="outcomes-failed"]').exists()).toBe(false)
+  })
+
+  it('priorOf picks the newest record strictly before the latest, in the same scope only', () => {
+    const latest = HISTORY.analyses[0]
+    expect(priorOf(latest, HISTORY.analyses).window_start).toBe('2026-10-05T00:00:00.000Z')
+    expect(priorOf(HISTORY.analyses[3], HISTORY.analyses).window_start).toBe('2026-10-05T00:00:00.000Z')
+    expect(priorOf(HISTORY.analyses[2], HISTORY.analyses)).toBeNull()
+    expect(priorOf(null, HISTORY.analyses)).toBeNull()
   })
 
   it('filters by owner on the client and by status on the server', async () => {

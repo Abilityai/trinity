@@ -54,12 +54,16 @@
             <p class="text-xs text-gray-500 dark:text-gray-400">{{ k.label }}</p>
             <p class="mt-1 text-2xl font-bold text-gray-900 dark:text-gray-100 tabular-nums">{{ k.value }}</p>
             <p class="text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ k.sub }}</p>
+            <p class="text-xs tabular-nums" :class="k.delta ? k.delta.tone : 'text-gray-500 dark:text-gray-400'" :data-testid="`outcomes-kpi-${k.id}-delta`">
+              {{ k.delta ? k.delta.text : 'no earlier week' }}
+            </p>
           </BaseCard>
         </div>
         <p v-if="unreachable.length" class="text-sm text-status-warning-700 dark:text-status-warning-400" data-testid="outcomes-unreachable">
           Not read this week: {{ unreachable.map((u) => `${u.repo} (${u.reason})`).join(', ') }}.
         </p>
-        <OutcomesProjects :rows="store.projects" />
+        <OutcomesTrend v-if="store.fleetHistory.length > 1" :records="store.fleetHistory" />
+        <OutcomesProjects :rows="store.projects" :prior="store.priorByProject" />
         <OutcomesProposals
           :items="store.visibleProposals"
           :status="store.statusFilter"
@@ -88,9 +92,10 @@ import LoadFailed from './LoadFailed.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import OutcomesProjects from './outcomes/OutcomesProjects.vue'
 import OutcomesProposals from './outcomes/OutcomesProposals.vue'
+import OutcomesTrend from './outcomes/OutcomesTrend.vue'
 import { useOutcomesStore } from '../stores/outcomes'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
-import { pct, hours, usd, num } from './outcomes/format'
+import { pct, hours, usd, num, weekDelta } from './outcomes/format'
 
 const store = useOutcomesStore()
 
@@ -103,15 +108,21 @@ const view = computed(() => viewState({
 
 const kpis = computed(() => {
   const s = store.fleet?.signals || {}
+  const b = store.priorFleet?.signals || {}
   return [
     { id: 'completion', label: 'Tasks done / planned', value: pct(s.completion?.rate),
-      sub: `${num(s.completion?.done)} of ${num(s.completion?.planned)}` },
+      sub: `${num(s.completion?.done)} of ${num(s.completion?.planned)}`,
+      delta: weekDelta(s.completion?.rate, b.completion?.rate, { kind: 'pct' }) },
     { id: 'claims', label: 'Done claims rejected', value: pct(s.done_claims?.rejection_rate),
-      sub: `${num(s.done_claims?.rejected)} of ${num(s.done_claims?.claims_resolved)} · reopened ${num(s.done_claims?.reopened)}` },
+      sub: `${num(s.done_claims?.rejected)} of ${num(s.done_claims?.claims_resolved)} · reopened ${num(s.done_claims?.reopened)}`,
+      delta: weekDelta(s.done_claims?.rejection_rate, b.done_claims?.rejection_rate, { kind: 'pct', lowerIsBetter: true }) },
     { id: 'asks', label: 'Asks unanswered', value: num(s.asks?.unanswered),
-      sub: `${num(s.asks?.no_human_surface)} reach no person` },
+      sub: `${num(s.asks?.no_human_surface)} reach no person`,
+      delta: weekDelta(s.asks?.unanswered, b.asks?.unanswered, { lowerIsBetter: true }) },
     { id: 'latency', label: 'Dispatch → verified', value: hours(s.latency?.dispatch_to_verified_hours_median),
-      sub: `cost / task ${usd(s.cost?.per_verified_task)}` },
+      sub: `cost / task ${usd(s.cost?.per_verified_task)}`,
+      delta: weekDelta(s.latency?.dispatch_to_verified_hours_median, b.latency?.dispatch_to_verified_hours_median,
+        { kind: 'hours', lowerIsBetter: true }) },
   ]
 })
 

@@ -40,6 +40,7 @@ from dependencies import (
     require_admin,
     require_person,
 )
+from db.evaluations import TIER0_PAIR_EVALUATOR
 from models import (
     AgentIndicatorRunsResponse,
     AgentIndicatorsResponse,
@@ -49,6 +50,7 @@ from models import (
     EvaluationCreate,
     EvaluationFailedResponse,
     EvaluationResponse,
+    EvaluationRunRows,
     EvaluationTrendResponse,
     User,
 )
@@ -576,6 +578,31 @@ async def get_execution_evaluation(
             or not _scope(current_user).sees_row(row)):
         raise HTTPException(status_code=404, detail="not_evaluated")
     return _to_response(row, current_user, _operator_for([row], current_user))
+
+
+@router.get("/agents/{agent_name}/executions/{execution_id}/evaluations",
+            response_model=EvaluationRunRows)
+async def get_execution_evaluations(
+    execution_id: str,
+    agent_name: str = Depends(get_authorized_agent_by_name),
+    current_user: User = Depends(get_current_user),
+):
+    """How one run graded under every grader (trinity-enterprise#938): the
+    Tier-0 row, the judge's row (ent#936) and the pair row (ent#940) in one
+    read, for the execution page. The Tier-0 row is the gate — same rule and
+    the same `not_evaluated` as the singular route — and every row goes
+    through the one projection, so an agent key reads findings and reason
+    codes here exactly as it does there."""
+    tier0 = db.latest_tier0_for_execution(execution_id)
+    if (not tier0 or tier0.get("agent_name") != agent_name
+            or not _scope(current_user).sees_row(tier0)):
+        raise HTTPException(status_code=404, detail="not_evaluated")
+    judge = db.latest_tier1_for_execution(execution_id)
+    pair = db.latest_tier0_for_execution(execution_id, evaluator=TIER0_PAIR_EVALUATOR)
+    rows = [r for r in (tier0, judge, pair) if r]
+    operators = _operator_for(rows, current_user)
+    view = lambda r: _to_response(r, current_user, operators) if r else None  # noqa: E731
+    return EvaluationRunRows(tier0=view(tier0), judge=view(judge), pair=view(pair))
 
 
 @router.post("/agents/{agent_name}/evaluations", response_model=EvaluationResponse)
