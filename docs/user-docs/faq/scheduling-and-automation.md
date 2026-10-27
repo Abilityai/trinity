@@ -60,7 +60,7 @@ Deleting a schedule is a soft delete: it stops firing immediately, but the sched
 
 ## Can my agent skip a scheduled run when there's nothing to do?
 
-Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
+Yes, with the pre-check hook. If the agent's template ships an executable at `~/.trinity/pre-check`, Trinity runs it before each cron tick: empty stdout with exit 0 records a `skipped` execution at zero cost without ever invoking the model, while non-empty stdout becomes the actual task message. The hook is language-agnostic (any shebang works) and fail-open — a broken or slow hook never suppresses a run. It runs before every cron schedule on the agent, and `TRINITY_SCHEDULE_ID`, `TRINITY_SCHEDULE_NAME` and `TRINITY_SCHEDULE_MESSAGE` in its environment say which one is firing — so a hook can gate one schedule and print the others' own message back. Manual **Run now** triggers bypass it. See [Scheduling](../automation/scheduling.md).
 
 ## Can an agent schedule itself to run again later?
 
@@ -69,6 +69,14 @@ Yes, with a self-reminder. While it's running, an agent can set a one-shot remin
 ## How is an agent self-reminder different from a cron schedule?
 
 A schedule is a recurring, owner-created cron job that fires on a cadence you define in the UI or API. A reminder is one-shot and agent-initiated: the agent decides during a run to wake itself once at a later time, without an owner setting anything up. Use schedules for standing recurring work; reminders are for an agent deferring a single follow-up it discovered mid-task. See [Agent Reminders](../automation/agent-reminders.md).
+
+## Do agents run on a heartbeat, or on triggers?
+
+Mostly on schedules. A schedule fires one message on a cron cadence, ideally a one-line playbook call such as `/daily-briefing`, so each standard operating procedure becomes its own schedule, and an agent can have as many as it needs. The triggered cases have their own tools: a webhook fires a schedule from an outside system, event subscriptions react to other agents, loops run bounded back-to-back work, and reminders let an agent wake itself once. Polling on a schedule ("check the inbox every hour") is often simpler and sturdier than waiting for a push, and a pre-check hook keeps the empty runs free. See [Scheduling](../automation/scheduling.md), [What should a schedule's message contain?](#what-should-a-schedules-message-contain) and [How do I trigger a schedule from an external system like CI/CD?](#how-do-i-trigger-a-schedule-from-an-external-system-like-cicd).
+
+## How does an agent carry a piece of work that takes many days across many sessions?
+
+Through a project and a steward that runs on a schedule. The `agent-dev` project skills keep the project's goal, tasks and log outside any single chat, and the steward skill (`/agent-dev:project-steward`) runs on its own schedule. Each pass reads what needs attention, checks finished work, moves the next task forward and raises an ask when something is stalled. Trinity doesn't run the steward for you: an agent steward needs that schedule, and the project's Steward card says **No sweep scheduled** until it has one. On instances licensed for Projects the same record appears in the Workspace, and elsewhere the skills keep it in the agent's repository. See [Workspace Projects → The steward](../sharing-and-access/workspace-projects.md#the-steward) and [What is the Steward card on a project page?](chat-and-sessions.md#what-is-the-steward-card-on-a-project-page).
 
 ## How do I see or cancel the reminders an agent set for itself?
 
@@ -178,6 +186,10 @@ The card shows which agent would run which skill (each with its description), th
 ## Why didn't I receive an approval request for a gated skill?
 
 Most often because you cannot open the agent. An approval reaches only the people in the approver role who own the agent, have it shared with them or are admins; if the role names you but the agent is not shared with you, the request is refused with `approver_cannot_open_agent` and nothing is raised — the agent's **Skills** tab shows the gate as *not shared with them*, and sharing the agent fixes it. If nobody fills the role at all, the request is refused with `role_unassigned` instead. If you asked for the skill yourself, as the approver, it ran at once without a card and was marked *Ran without approval*. And an approval that was raised but already decided, expired or cancelled has left the **Inbox**'s **Action** tab — look under **All**, or on the Operations page's **Resolved** tab. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals).
+
+## What happens when an agent's work needs a human decision?
+
+The agent raises an ask (a question or an approval) with `ask_operator` and ends its turn. The ask doesn't block the agent while it waits. It goes to the person in the role it's addressed to, by default the agent's primary contact, and the owner when nobody holds that seat. That person sees it in their Workspace **Inbox**. *When* to ask is the agent's own rule, written in its instructions or a shared policy. Role assignments under the agent's **Settings › People** decide only *who* gets asked. If a skill must never run without sign-off, don't leave that to the agent's judgment: turn on **Requires approval** for the skill so Trinity holds every request before the agent sees it. See [Approvals → Asks addressed to a Workspace user](../automation/approvals.md#asks-addressed-to-a-workspace-user) and [How do I make a skill wait for someone's approval before it runs?](#how-do-i-make-a-skill-wait-for-someones-approval-before-it-runs).
 
 ## How can I see whether a schedule is actually performing well?
 

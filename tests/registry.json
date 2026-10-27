@@ -3766,7 +3766,7 @@
         "pull-migration",
         "scheduler"
       ],
-      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here."
+      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here. trinity#2328: the queued payload also carries the caller's per-task max_turns, which the claim reads into task_overrides."
     },
     {
       "file": "unit/test_ent437_telemetry_consent.py",
@@ -5181,7 +5181,7 @@
         "security",
         "unit"
       ],
-      "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
+      "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch. trinity#2328: every FREEZE field is both recorded by the execute_task backstop (fields=dict(...)) and replayed by _dispatch_approved (frozen.get), so a FREEZE label nothing honours fails."
     },
     {
       "file": "unit/test_ent752_skill_gate_hook.py",
@@ -5523,7 +5523,7 @@
         "security",
         "unit"
       ],
-      "description": "trinity#3274 item 5: an approved /task or fan-out run is sent the caller's message as the message and its system prompt as the system prompt (frozen_replay), never their concatenation; a record frozen before the split replays its request text. Driven through the /task seam, the fan-out runner and the backstop into the real _dispatch_approved over the real row writer. Mutation-proven."
+      "description": "trinity#3274 item 5: an approved /task or fan-out run is sent the caller's message as the message and its system prompt as the system prompt (frozen_replay), never their concatenation; a record frozen before the split replays its request text. Driven through the /task seam, the fan-out runner and the backstop into the real _dispatch_approved over the real row writer. Mutation-proven. trinity#2328: the caller's per-task max_turns is frozen and reaches the approved run — admitted, queued (the overflow payload's request) and from a backstop producer."
     },
     {
       "file": "unit/test_3274_gate_notice.py",
@@ -6574,6 +6574,159 @@
         "guard"
       ],
       "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor."
+    },
+    {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
+      "file": "unit/test_181_ip_rate_limit_spoofing.py",
+      "feature": "Issue #181, trinity-enterprise#873",
+      "added": "2026-03-27",
+      "categories": [
+        "backend",
+        "security",
+        "rate-limiting",
+        "unit"
+      ],
+      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+    },
+    {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
+    },
+    {
+      "file": "unit/test_migrations.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "guard"
+      ],
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
+    },
+    {
+      "file": "unit/test_schema_parity.py",
+      "feature": "#713, #3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "unit",
+        "guard"
+      ],
+      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
+      "file": "unit/test_3825_password_change.py",
+      "feature": "#3825",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
+    },
+    {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadTail.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "The open Workspace thread's catch-up read, pure half: the watcher's signature is a string over message_count|last_message_at (stable across the tick's re-stamped objects, blind to unread/stars/drafts); the read limit is unread + the reply-poll depth capped at the server's 50; the person's own id-less local question adopts the server row's id in place; fresh rows are the unseen ids in server order; a full-length read that is entirely unseen reports overflow."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalOpenThreadRefresh.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "PortalConversation mounted: when its own thread row in `threads` gains a message it reads the tail with {limit: unread+8}, appends the new row once and emits thread-caught-up; a re-stamp with the same values does not read; a moved time with nothing new appends and emits nothing; the local just-sent question is not duplicated (takes the server id); an all-fresh read at the cap merges the window read; another thread's row is ignored; a failed read is swallowed and never thread-missing."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadCaughtUpShell.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "Portal shell mounted: thread-caught-up marks the OPEN thread read once (markChatReadStrict) and re-reads no list, leaves another thread's badge alone; visibilitychange to visible runs the 20 s tick body at once (asks + thread list), hidden does nothing, and the listener is removed with the view."
+    },
+    {
+      "file": "unit/test_2328_per_task_max_turns_wire.py",
+      "feature": "#2328",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "trinity#2328: a per-task max_turns (POST /task) reaches the agent on the push path, measured at the wire (the payload the real execute_task hands to agent_post_with_retry), one hop past where #2317's guard stubbed: the async run_async_task, the sync _dispatch_sync_immediate, a backlog row written by the real enqueue and drained by the real _spawn_drain, and both retries (#678 reader race, SUB-003 switch). A parity case parametrized over pull_coordination_service._TASK_OVERRIDE_KEYS compares the push wire with the pull claim envelope from one producer-built row, so the next per-task key is wire-checked automatically. Other shape (empty data): no value, a backlog row without the key and a gate record frozen without it all send None and nothing raises. Mutation-proven per call site. Backend bound, independent of the agent image: ParallelTaskRequest.max_turns is limited to the owner guardrail's own range (pinned to routers/agent_config._GUARDRAILS_NUMBER_BOUNDS), so 0, negatives and values above it are a 422 at the HTTP boundary; and the real POST /{name}/task handler clamps the value to the owner's max_turns_task when one is set, before dispatch."
+    },
+    {
+      "file": "unit/test_2328_turn_cap_tighten_only.py",
+      "feature": "#2328",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "agent-server",
+        "headless-executor",
+        "guardrails",
+        "security"
+      ],
+      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. Pins as CURRENT behaviour (known exposure, backend follow-up) that a turn-limit 422 at a cap of 401/403, per-task or guardrail, reads as auth on push through the real classify_switch_failure."
+    },
+    {
+      "file": "unit/test_3966_pre_check_schedule_context.py",
+      "feature": "#3966",
+      "added": "2026-10-26",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
     }
   ]
 }

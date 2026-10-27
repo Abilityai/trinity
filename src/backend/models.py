@@ -566,7 +566,12 @@ class ParallelTaskRequest(BaseModel):
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
     timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
-    max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
+    # Maximum agentic turns (--max-turns) for runaway prevention. #2328: bounded to the
+    # owner guardrail's own legal range (routers/agent_config.py
+    # `_GUARDRAILS_NUMBER_BOUNDS["max_turns_task"]`, parity-tested), so 0, a negative
+    # or an unbounded value is a 422 here whatever image the agent runs; the /task
+    # route then clamps it to the owner's configured `max_turns_task`.
+    max_turns: Optional[int] = Field(None, ge=1, le=500)
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
     user_message: Optional[str] = None  # Original user message (without context), used when save_to_session=True
@@ -3326,6 +3331,14 @@ class InternalTaskExecutionRequest(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
 
 
+class InternalPreCheckRequest(BaseModel):
+    """The schedule a pre-check is gating (#3966). Every field is optional: a
+    bodyless request (an older scheduler) runs the hook exactly as before."""
+    schedule_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_message: Optional[str] = None
+
+
 class ValidateExecutionRequest(BaseModel):
     """Request model for triggering execution validation."""
     execution_id: str
@@ -4561,6 +4574,31 @@ class SlackChannelMessageRequest(IntentKeyFields):
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / portal
+    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
 
 
 class UpdateMyEmailRequest(BaseModel):

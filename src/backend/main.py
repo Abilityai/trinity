@@ -1321,7 +1321,8 @@ async def add_security_headers(request: Request, call_next):
 
     # HSTS only when we know the wire is HTTPS — checking both the
     # direct scheme and the X-Forwarded-Proto header set by upstream
-    # reverse proxies (uvicorn launched with --proxy-headers honours it).
+    # reverse proxies. uvicorn runs with --no-proxy-headers (ent#873), so
+    # the scheme is always the raw hop's and the header is what carries it.
     is_https = (
         request.url.scheme == "https"
         or request.headers.get("x-forwarded-proto", "").lower() == "https"
@@ -1334,6 +1335,20 @@ async def add_security_headers(request: Request, call_next):
 
     return response
 
+
+# trinity-enterprise#873 — one canonical client address per request, before any
+# route, limiter or audit writer reads `request.client`. Registered just before
+# the Host guard so it runs immediately INSIDE it and outside everything else;
+# it rewrites `scope["client"]` in place and leaves every header untouched.
+# The proxy-trust configuration is validated here, at import: an invalid
+# TRUSTED_PROXIES stops the backend with the offending entry named rather than
+# serving with a partial list. uvicorn's own forwarded-header processing is
+# switched OFF in every launcher (`--no-proxy-headers`), so this is the only
+# place a forwarded address is ever believed.
+from utils.client_ip import ClientAddressMiddleware, get_config as _client_ip_config
+
+_client_ip_config()
+app.add_middleware(ClientAddressMiddleware)
 
 # #3102 — reject a Host header that would shift the Host-built request URL.
 # Registered LAST so it runs FIRST (add_middleware prepends); keep every other
@@ -1949,6 +1964,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
+    from utils.admin_identity import is_usable_password_hash
     user_data = db.get_user_by_username(current_user.username)
     if user_data:
         return {
@@ -1956,11 +1972,16 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "picture": user_data.get("picture"),
-            "role": user_data["role"]
+            "role": user_data["role"],
+            # #3825: whether this account can change a password in Settings —
+            # a boolean only, never the hash. Email-only accounts have none.
+            "has_password": is_usable_password_hash(user_data.get("password")),
         }
-    return {"username": current_user.username, "role": current_user.role}
+    return {"username": current_user.username, "role": current_user.role, "has_password": False}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # proxy_headers=False: client addresses are resolved by ClientAddressMiddleware
+    # from explicitly trusted proxies only (trinity-enterprise#873).
+    uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False)

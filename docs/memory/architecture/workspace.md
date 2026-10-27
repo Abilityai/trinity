@@ -44,7 +44,13 @@ with the code. Inside the Workspace such a member keeps the **team view**: signe
 (`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
 (`agent_page._client_scope`), voice and model choice — the narrower client view is for people
 without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
-before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+before). **The code page is not a second door for a platform account (#3922).** An address with a
+platform account that `/login` can sign in (`service.platform_login_admits`: a `users` row, and
+either a password or the email login would admit it — email login on, the policy allows codes,
+allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
+409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
+platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
+prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -98,6 +104,25 @@ the **per-tab** portal token from the store, not shared `localStorage`, so a cli
 signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
 Full model and the verdict table:
 [workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
+
+**The open thread catches up on the 20 s tick; the sidebar is not the only reader of
+the list (#3439).** `PortalConversation.loadThread` runs on mount and on a thread switch,
+and the Workspace has no history poll — so a row the agent wrote after the person's turn
+ended (a completion report, an approval outcome #3709, a recovered lost turn #2319, a
+background task's reply) used to badge the open chat on the shell's 20 s tick while the
+transcript stayed stale until a reload. The conversation now watches its OWN row in the
+`threads` prop the shell already hands it, compared as the string
+`` `${message_count}|${last_message_at}` `` (`portalThreadTail.tailSignature`) — never the
+object, which `decorate()` re-creates every tick, and never `unread`, which counts assistant
+rows only and is reset by the turn-end mark-read. When it moves and no turn or call is in
+flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopts the server
+id onto its own id-less local question (or that question renders twice), appends the unseen
+ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
+event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
+answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
+`visibilitychange` → visible. See
+[workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).
 
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
