@@ -244,3 +244,93 @@ class TestRoster:
         snap = world.snapshot(_manifest("a"))
         assert "acme-bobs" not in snap.roster
         assert "acme-bobs" not in snap.membership.members
+
+
+# ===========================================================================
+# 2. The schedule matcher (H3, section 7: the ent#694 seam). Pure.
+# ===========================================================================
+
+def _row(name, *, cron="0 9 * * *", message="/daily", enabled=True, timezone="UTC",
+         description=None, owner_id=1, sid=None):
+    """A real `db_models.Schedule`, never a mock."""
+    from datetime import datetime, timezone as _tz
+
+    from db_models import Schedule
+    pinned = datetime(2026, 10, 1, tzinfo=_tz.utc)
+    return Schedule(id=sid or f"sid-{name}", agent_name="acme-a", name=name,
+                    cron_expression=cron, message=message, enabled=enabled,
+                    timezone=timezone, description=description, owner_id=owner_id,
+                    created_at=pinned, updated_at=pinned)
+
+
+def _kinds(actions):
+    return [(a.kind, a.name) for a in actions]
+
+
+class TestScheduleMatcher:
+    resolve = staticmethod(system_service.resolve_declared_schedule_actions)
+
+    def test_a_matched_row_updates_only_the_declared_fields_that_differ(self):
+        live = [_row("daily", timezone="Europe/Berlin", description="from the template")]
+        (action,) = self.resolve([{"name": "daily", "cron": "0 10 * * *", "message": "/daily"}], live)
+        assert action.kind == "update"
+        # An omitted timezone / description keeps the row's (engineering F2).
+        assert action.fields == {"cron_expression": "0 10 * * *"}
+        assert action.current == {"cron_expression": "0 9 * * *"}
+
+    def test_declared_timezone_and_description_are_compared_when_present(self):
+        live = [_row("daily")]
+        (action,) = self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily",
+                                   "timezone": "Europe/London", "description": "d"}], live)
+        assert action.fields == {"timezone": "Europe/London", "description": "d"}
+
+    def test_an_unchanged_row_is_in_sync(self):
+        assert _kinds(self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily"}],
+                                   [_row("daily")])) == [("in_sync", "daily")]
+
+    def test_enabled_is_never_a_write_only_a_report(self):
+        """A template row left disabled under a manifest whose entry defaults
+        to armed: reported, never armed (#1198 §5)."""
+        actions = self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily"}],
+                               [_row("daily", enabled=False)])
+        assert _kinds(actions) == [("in_sync", "daily"), ("enabled_differs", "daily")]
+        assert "enabled" not in actions[0].fields
+
+    def test_an_undeclared_row_is_reported_and_left(self):
+        assert ("undeclared", "weekly") in _kinds(self.resolve([], [_row("weekly")]))
+
+    def test_two_live_rows_with_one_name_are_ambiguous(self):
+        actions = self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily"}],
+                               [_row("daily", sid="s1"), _row("daily", sid="s2")])
+        assert _kinds(actions) == [("ambiguous", "daily")]
+
+    def test_one_name_declared_twice(self):
+        entry = {"name": "daily", "cron": "0 9 * * *", "message": "/daily"}
+        assert _kinds(self.resolve([entry, dict(entry)], [])) == [("declared_twice", "daily")]
+
+    def test_a_rename_is_a_create_and_the_old_row_reported_still_armed(self):
+        actions = self.resolve([{"name": "morning", "cron": "0 9 * * *", "message": "/daily"}],
+                               [_row("daily", enabled=True)])
+        assert _kinds(actions) == [("create", "morning"), ("undeclared", "daily")]
+        assert actions[1].row.enabled is True
+
+    def test_the_default_policy_never_produces_unlinked(self):
+        entry = {"name": "daily", "cron": "0 9 * * *", "message": "/daily"}
+        for live in ([], [_row("daily")], [_row("daily", sid="a"), _row("daily", sid="b")]):
+            assert system_service.schedule_match_policy(entry, live).kind != "unlinked"
+
+    def test_an_identity_policy_plugs_in_without_touching_the_writers(self):
+        """ent#694 / #1198: declared id first; the same name but no id link is
+        `unlinked` — reported, never adopted. Only the policy changes."""
+        def by_declared_id(entry, rows):
+            same_id = [r for r in rows if r.id == entry.get("id")]
+            if same_id:
+                return system_service.ScheduleMatch("matched", row=same_id[0])
+            if any(r.name == entry["name"] for r in rows):
+                return system_service.ScheduleMatch("unlinked",
+                                                    row=next(r for r in rows if r.name == entry["name"]))
+            return system_service.ScheduleMatch("missing")
+
+        actions = self.resolve([{"name": "daily", "cron": "0 9 * * *", "message": "/daily", "id": "x"}],
+                               [_row("daily", sid="y")], match=by_declared_id)
+        assert _kinds(actions) == [("unlinked", "daily")]

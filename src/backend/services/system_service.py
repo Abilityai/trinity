@@ -2538,3 +2538,143 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             blockers.append(_read_failed(None, "your system views", e))
 
     return snapshot
+
+
+# ----------------------------------------------------------------------------
+# Schedule matching: the seam schedule identity (trinity-enterprise#694 /
+# trinity#1198) plugs into.
+#
+# No identity column exists on `agent_schedules` (`db/tables.py`), so the
+# default policy matches by exact name, unique on BOTH sides, and fails closed
+# otherwise. The policy is a function over the declaration and the candidate
+# rows rather than a scalar key, because the id-first search those issues
+# describe is two-stage with an extra outcome: declared id -> stored id; no id
+# match but the same name -> `unlinked` (reported, never adopted). The writers
+# consume ACTIONS, never matches, so that policy replaces this one without
+# touching a writer.
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ScheduleMatch:
+    """How one declared schedule relates to the member's live rows."""
+
+    kind: str  # "matched" | "missing" | "unlinked" | "ambiguous"
+    row: Optional[object] = None
+    rows: Tuple = ()
+
+
+def schedule_match_policy(declared_entry: dict, live_rows) -> ScheduleMatch:
+    """The default policy: exact name, unique on both sides.
+
+    Never produces `unlinked`: with no identity to link by, every row is
+    "unlinked", so the #1198 rule read literally ("never adopt an unlinked
+    row") would make an in-place update impossible (AC2). Two live rows with
+    the declared name are `ambiguous`, which refuses the run.
+    """
+    same = [r for r in live_rows if getattr(r, "name", None) == declared_entry.get("name")]
+    if not same:
+        return ScheduleMatch("missing")
+    if len(same) > 1:
+        return ScheduleMatch("ambiguous", rows=tuple(same))
+    return ScheduleMatch("matched", row=same[0])
+
+
+@dataclass(frozen=True)
+class ScheduleAction:
+    """What apply does about one declared entry or one live row.
+
+    `create` / `update` are writes; `in_sync` is nothing; `enabled_differs`,
+    `undeclared` and `unlinked` are reports; `ambiguous` and `declared_twice`
+    are blockers.
+    """
+
+    kind: str
+    name: str
+    entry: Optional[dict] = None
+    row: Optional[object] = None
+    fields: Dict = field(default_factory=dict)   # update: column -> declared value
+    current: Dict = field(default_factory=dict)  # update: column -> live value
+
+
+# The manifest keys a MATCHED row is compared on, the `Schedule` column each
+# maps to, and whether the key is always compared. `timezone` and
+# `description` only when the entry declares them: comparing the defaults
+# `_build_schedule_create` fills in would reset a row's `Europe/Berlin` to UTC
+# and wipe a template's `purpose:` description (engineering F2). `enabled` is
+# never compared for a write (H3).
+_SCHEDULE_DECLARED_FIELDS = (
+    ("cron", "cron_expression", True),
+    ("message", "message", True),
+    ("timezone", "timezone", False),
+    ("description", "description", False),
+)
+
+
+def resolve_declared_schedule_actions(
+    declared, live, *, match: Callable = schedule_match_policy
+) -> List[ScheduleAction]:
+    """Diff a member's declared schedules against its live rows (pure).
+
+    * declared, no match -> `create` (through the shared `_build_schedule_create`);
+    * matched -> `update` of only the declared fields that differ, or `in_sync`;
+      a different `enabled` is reported (`enabled_differs`), never written, so
+      apply cannot arm a row a template left off (#1198 §5) nor disarm one an
+      operator turned on;
+    * a live row no entry names -> `undeclared` (reported, left as it is: a
+      declared RENAME is therefore a `create` plus the old row reported, still
+      armed as it was, never presented as an update);
+    * two live rows with one name -> `ambiguous`; one name declared twice ->
+      `declared_twice` (both refuse the run; the writers never guess).
+    """
+    entries = list(declared or [])
+    counts: Dict = {}
+    for entry in entries:
+        counts[entry.get("name")] = counts.get(entry.get("name"), 0) + 1
+
+    actions: List[ScheduleAction] = []
+    named = set()
+    twice_reported = set()
+    for entry in entries:
+        name = entry.get("name")
+        named.add(name)
+        if counts[name] > 1:
+            if name not in twice_reported:
+                twice_reported.add(name)
+                actions.append(ScheduleAction("declared_twice", name, entry=entry))
+            continue
+        found = match(entry, live)
+        if found.kind == "missing":
+            actions.append(ScheduleAction("create", name, entry=entry))
+            continue
+        if found.kind == "ambiguous":
+            actions.append(ScheduleAction("ambiguous", name, entry=entry))
+            continue
+        if found.kind == "unlinked":
+            actions.append(ScheduleAction("unlinked", name, entry=entry, row=found.row))
+            continue
+        row = found.row
+        fields, current = {}, {}
+        for key, column, always in _SCHEDULE_DECLARED_FIELDS:
+            if not always and key not in entry:
+                continue
+            if entry.get(key) != getattr(row, column, None):
+                fields[column] = entry.get(key)
+                current[column] = getattr(row, column, None)
+        actions.append(ScheduleAction(
+            "update" if fields else "in_sync", name,
+            entry=entry, row=row, fields=fields, current=current,
+        ))
+        # P-F: a schedule the manifest creates is armed unless it says
+        # otherwise, so that is what "the manifest wants" means here too.
+        wanted = bool(entry.get("enabled", True))
+        if wanted != bool(getattr(row, "enabled", False)):
+            actions.append(ScheduleAction(
+                "enabled_differs", name, entry=entry, row=row,
+                fields={"enabled": wanted},
+                current={"enabled": bool(getattr(row, "enabled", False))},
+            ))
+
+    for row in live:
+        if getattr(row, "name", None) not in named:
+            actions.append(ScheduleAction("undeclared", row.name, row=row))
+    return actions
