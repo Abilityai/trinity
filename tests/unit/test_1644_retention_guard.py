@@ -188,14 +188,27 @@ class TestFailsClosed:
         assert v.reason == "ack_lookup_failed"
 
     def test_alarm_failure_never_flips_the_refusal(self):
-        """A failed alarm must not become a permitted prune."""
+        """A failed alarm must not become a permitted prune.
+
+        #3254 re-pin (write-observation point): the alarm is written by
+        `platform_alerts.observe` with the seam's create, so the fault is injected
+        there (on `database.db`, the object `observe` reads), and the seam's two
+        reads see an empty queue so no row another test left can snooze it. The
+        added `called` check keeps the injection from going unreached."""
+        import database
         rg = self._guard()
         v = rg.GuardVerdict(False, 5000, 1000, "over_threshold")
-        with patch.object(rg.db, "create_operator_queue_item",
-                          side_effect=RuntimeError("queue down")), \
+        seam = database.db
+        with patch.object(seam, "create_platform_operator_queue_item",
+                          side_effect=RuntimeError("queue down")) as create, \
+             patch.object(seam, "find_pending_operator_queue_by_subject", return_value=None), \
+             patch.object(seam, "find_person_ended_operator_queue_by_subject",
+                          return_value=None), \
              patch.object(rg.db, "get_setting_value", return_value=None):
             rg.announce_refusal("execution_row_retention_days", "rows", 5, v)
+        assert create.called, "the failure must actually be reached"
         assert v.allowed is False
+        assert rg._refusal_episodes["execution_row_retention_days"].alarm_delivered is False
 
 
 # ---------------------------------------------------------------------------

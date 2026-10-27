@@ -32,6 +32,12 @@ HOUSE RULE THIS FILE OBEYS (docs/memory/learnings.md:291)
 a bare `does_not_raise`: every error path asserts the refusing verdict, its
 reason, and — where it is the point — the alarm the refusal produces.
 
+#3254 RE-PIN (write-observation point): the refusal alarm is written by
+`platform_alerts.observe` through `database.db.create_platform_operator_queue_item`,
+not by `_RG.db.create_operator_queue_item`. `_DbDouble` now stands in for that
+seam create (`_route_seam`), so `queue_items` still holds every alarm write and
+every assertion on it is unchanged; the guard's settings stay on the double.
+
 Invocation: `cd tests && python -m pytest unit/test_1833_retention_guard_contract.py`.
 """
 
@@ -67,8 +73,9 @@ class _DbDouble:
     """In-memory stand-in for the four `db` methods this subsystem touches.
 
     Signatures verified against `database.py`: `get_setting_value(key, default)`,
-    `set_setting(key, value)`, `delete_setting(key)`,
-    `create_operator_queue_item(agent_name, item)`.
+    `set_setting(key, value)`, `delete_setting(key)`, and (#3254 re-pin) the
+    seam's `create_platform_operator_queue_item(agent_name, item, *, subject,
+    max_pending_for_type)`, which `_route_seam` puts where `observe` calls it.
     """
 
     def __init__(self, settings=None):
@@ -85,11 +92,28 @@ class _DbDouble:
     def delete_setting(self, key):
         self.settings.pop(key, None)
 
-    def create_operator_queue_item(self, agent_name, item):
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
         if self.raise_on_create:
             raise RuntimeError("operator queue is down")
         self.queue_items.append((agent_name, item))
-        return item["id"]
+        return {"outcome": "created", "row": dict(item, subject=subject), "changed": True}
+
+
+def _route_seam(monkeypatch, double):
+    """#3254 re-pin (write-observation point): `observe` reads the queue through
+    `database.db` (resolved now, R6). Its create goes to the double; its two
+    reads see an empty queue, so no row another test left can update or snooze
+    a reading here; its thin broadcast stays off the loop."""
+    import database
+    from services import operator_resume_service
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
+    monkeypatch.setattr(database.db, "find_pending_operator_queue_by_subject",
+                        lambda agent_name, subject: None)
+    monkeypatch.setattr(database.db, "find_person_ended_operator_queue_by_subject",
+                        lambda agent_name, subject, since: None)
+    monkeypatch.setattr(database.db, "create_platform_operator_queue_item",
+                        double.create_platform_operator_queue_item)
 
 
 @pytest.fixture(autouse=True)
@@ -110,6 +134,7 @@ def guard_db(monkeypatch):
     module-global — patching `database.db` is inert here (learnings.md:99)."""
     double = _DbDouble()
     monkeypatch.setattr(_RG, "db", double)
+    _route_seam(monkeypatch, double)
     return double
 
 
@@ -370,6 +395,7 @@ class TestRefusalReachesTheOperator:
         """
         double = _DbDouble()
         monkeypatch.setattr(_RG, "db", double)
+        _route_seam(monkeypatch, double)
 
         allowed = _CS._guard_allows(_KEY, "execution rows", 90, lambda limit: None)
 

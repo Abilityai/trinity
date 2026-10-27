@@ -40,6 +40,13 @@ TWO TRAPS THIS FILE HANDLES EXPLICITLY (both produce silent FALSE GREENS)
    fixture unsets both env vars and ASSERTS the resolved URL points at its own
    temp file before any test issues a DELETE.
 
+#3254 RE-PINS: the refusal alarm is written by `platform_alerts.observe` through
+`database.db.create_platform_operator_queue_item`. `isolated_guard` now routes that
+seam create to the per-example double (write-observation point), so
+`queue_items` keeps every alarm write; without it `test_evaluate_never_writes_to_
+the_database`'s `queue_items == []` would hold vacuously. The payload property
+names its two id-shape / fixture-shape re-pins.
+
 Invocation: `cd tests && python -m pytest unit/test_1771a_retention_properties.py`.
 """
 
@@ -77,13 +84,15 @@ class _DbDouble:
     """In-memory stand-in for the four `db` methods this subsystem touches.
 
     Verified signatures: `get_setting_value(key, default=None)`,
-    `set_setting(key, value)`, `delete_setting(key)` (database.py:1705-1711),
-    `create_operator_queue_item(agent_name, item)` (database.py:2513).
+    `set_setting(key, value)`, `delete_setting(key)` (database.py:1705-1711), and
+    (#3254 re-pin) the seam's `create_platform_operator_queue_item(agent_name,
+    item, *, subject, max_pending_for_type)`, routed by `isolated_guard`.
     """
 
     def __init__(self):
         self.settings = {}
         self.queue_items = []
+        self.subjects = []
         self.writes = 0
 
     def get_setting_value(self, key, default=None):
@@ -97,9 +106,12 @@ class _DbDouble:
         self.writes += 1
         self.settings.pop(key, None)
 
-    def create_operator_queue_item(self, agent_name, item):
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None):
         self.writes += 1
         self.queue_items.append((agent_name, item))
+        self.subjects.append(subject)
+        return {"outcome": "created", "row": dict(item, subject=subject), "changed": True}
 
 
 @contextmanager
@@ -131,9 +143,25 @@ def isolated_guard():
     Both patches are BY OBJECT: `retention_guard.py` does
     `from database import db`, binding its own module-global, so patching
     `database.db` would be inert (learnings.md:99).
+
+    #3254 re-pin (write-observation point): the alarm itself is written by
+    `platform_alerts.observe`, which DOES read `database.db` (at call time, so
+    resolved here, R6). Its create goes to the same double, its two reads see an
+    empty queue (no row another test left can update or snooze a reading), and
+    its thin broadcast stays off the loop.
     """
+    import database
+    from services import operator_resume_service
     double = _DbDouble()
-    with patch.object(_RG, "db", double), patch.object(_RG, "_refusal_episodes", {}):
+    seam = database.db
+    with patch.object(_RG, "db", double), patch.object(_RG, "_refusal_episodes", {}), \
+            patch.object(operator_resume_service, "spawn_on_loop", lambda factory: None), \
+            patch.object(seam, "find_pending_operator_queue_by_subject",
+                         lambda agent_name, subject: None), \
+            patch.object(seam, "find_person_ended_operator_queue_by_subject",
+                         lambda agent_name, subject, since: None), \
+            patch.object(seam, "create_platform_operator_queue_item",
+                         double.create_platform_operator_queue_item):
         yield double
 
 
@@ -541,13 +569,17 @@ class TestAlarmTransitions:
             )
             _agent, item = db.queue_items[0]
 
+            # #3254 re-pin (fixture shape): the seam composes the item, adding its
+            # own `status` and `created_at`; still no free-form field beyond these.
             assert set(item) == {
                 "id",
                 "type",
+                "status",
                 "priority",
                 "title",
                 "question",
                 "context",
+                "created_at",
                 "expires_at",
             }
             assert set(item["context"]) == {
@@ -561,10 +593,12 @@ class TestAlarmTransitions:
             }
             for name, value in item["context"].items():
                 assert isinstance(value, (str, int, type(None))), name
-            # `expires_at` must stay NULL: `mark_operator_queue_expired` flips any
-            # pending row past it to `expired` fleet-wide every 5s.
-            assert item["expires_at"] is None
-            assert item["id"] == _RG._alarm_id(key, window)
+            # #3254 re-pin (id shape): the deadline is the kind's lifetime, kept
+            # moving by the R9 refresh, not NULL; the natural key is the subject
+            # (the setting), and the id keeps the reserved prefix and the setting.
+            assert item["expires_at"] is not None
+            assert db.subjects == [f"retention_refused:{key}"]
+            assert item["id"].startswith(f"retention-guard-{key}-")
 
 
 class TestRetentionSettingsTotality:
