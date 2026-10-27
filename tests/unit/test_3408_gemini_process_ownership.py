@@ -42,10 +42,14 @@ pytestmark = pytest.mark.unit
 
 EXECUTION_ID = "abandoned-gemini"
 
-# Reads its prompt to EOF, then stays alive until the test kills it.
-HOLD = "import sys,time; sys.stdin.read(); time.sleep(60)"
-# Reads its prompt, prints one assistant message, exits 0.
 _ASSISTANT_LINE = json.dumps({"type": "message", "role": "assistant", "content": "done"})
+# Reads its prompt, prints one assistant message, marks the path in argv[1] as
+# printed, then stays alive until the test kills it.
+ANSWER_THEN_HOLD = (
+    f"import pathlib,sys,time; sys.stdin.read(); print({_ASSISTANT_LINE!r}, flush=True); "
+    "pathlib.Path(sys.argv[1]).touch(); time.sleep(60)"
+)
+# Reads its prompt, prints one assistant message, exits 0.
 ANSWER = f"import sys; sys.stdin.read(); print({_ASSISTANT_LINE!r}, flush=True)"
 # Reads its prompt, prints nothing, exits 0 once the path in argv[1] exists.
 SILENT_UNTIL_RELEASED = (
@@ -112,7 +116,10 @@ class _Turn:
 
     def __init__(self, monkeypatch, registry, argv, *, queued=False):
         self.loop = asyncio.get_running_loop()
+        self.monkeypatch = monkeypatch
         self.children = []
+        self.lines = []
+        self.line_processed = asyncio.Event()
         self.prompt_delivered = asyncio.Event()
         self.reader_started = asyncio.Event()
         self.subscriber = None
@@ -159,6 +166,15 @@ class _Turn:
         monkeypatch.setattr(subprocess, "Popen", spawn)
 
     def start(self, runtime, path):
+        real_process_line = runtime._process_stream_line
+
+        def process_line(line, *args, **kwargs):
+            # Runs on the reader thread, once per line the child printed.
+            self.lines.append(line)
+            self.loop.call_soon_threadsafe(self.line_processed.set)
+            return real_process_line(line, *args, **kwargs)
+
+        self.monkeypatch.setattr(runtime, "_process_stream_line", process_line)
         if path == "chat":
             coro = runtime._execute_chat_once("hello", None, None, EXECUTION_ID, None)
         else:
@@ -184,6 +200,14 @@ class _Turn:
             for pipe in (process.stdin, process.stdout, process.stderr):
                 if pipe is not None and not pipe.closed:
                     pipe.close()
+
+
+async def _wait_for_path(path):
+    for _ in range(500):
+        if path.exists():
+            return
+        await asyncio.sleep(0.01)
+    pytest.fail(f"control: the child never reached {path.name}")
 
 
 def _assert_retained(registry, child):
@@ -215,24 +239,32 @@ async def _assert_released(registry, subscriber, child):
 @pytest.mark.parametrize("path", ["chat", "headless"])
 @pytest.mark.parametrize("reader", ["running", "queued"])
 async def test_a_cancelled_waiter_hands_release_to_its_reader(
-    path, reader, runtime, registry, own_group_signals, monkeypatch
+    path, reader, runtime, registry, own_group_signals, monkeypatch, tmp_path
 ):
-    turn = _Turn(monkeypatch, registry, [HOLD], queued=reader == "queued")
+    printed = tmp_path / "printed"
+    turn = _Turn(monkeypatch, registry, [ANSWER_THEN_HOLD, str(printed)], queued=reader == "queued")
     try:
         turn.start(runtime, path)
         await asyncio.wait_for(turn.prompt_delivered.wait(), timeout=5)
         if reader == "running":
-            # Executing, so its executor future can no longer be cancelled.
+            # Executing (so its executor future can no longer be cancelled),
+            # and it has already processed the child's output.
             await asyncio.wait_for(turn.reader_started.wait(), timeout=5)
+            await asyncio.wait_for(turn.line_processed.wait(), timeout=5)
         child = turn.children[0]
         await turn.cancel_waiter()
         if reader == "queued":
             assert not turn.reader_started.is_set(), "control: the reader was still queued at the cancel"
+            assert turn.lines == [], "control: nothing was read before the cancel"
         _assert_retained(registry, child)
+        # The child's output is in the pipe before it dies, so a queued reader
+        # has something to drain once it runs.
+        await _wait_for_path(printed)
         child.kill()
         turn.release_queue.set()
         await asyncio.to_thread(child.wait, 5)
         await _assert_released(registry, turn.subscriber, child)
+        assert len(turn.lines) == 1, "the reader drained what the child printed"
         assert own_group_signals == []
     finally:
         await turn.close()
@@ -303,6 +335,7 @@ async def test_empty_data_an_abandoned_child_that_printed_nothing_still_ends_the
         sentinel.touch()
         assert await asyncio.to_thread(child.wait, 5) == 0, "control: the child exited by itself"
         await _assert_released(registry, turn.subscriber, child)
+        assert turn.lines == [], "control: the child printed nothing, so no line was processed"
         assert own_group_signals == []
     finally:
         await turn.close()
