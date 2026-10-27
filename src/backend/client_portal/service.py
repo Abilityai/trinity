@@ -6290,23 +6290,31 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
     redaction (`comment_withheld`) is untouched. The operator sees the comment;
     the agent still does not.
 
-    **Routed through the #1677 budget, never a direct create.** The volume is
-    driven by a client clicking, so by the classification rule this is an
-    agent-influenceable emitter: a direct `create_operator_queue_item` would fail
-    the CI emitter guard, and reusing the generic `alert` type would have let five
-    unrelated alerts on that agent silence every problem report (the budget counts
-    pending rows OF THAT TYPE, including ones other emitters wrote).
+    **Reported through the platform-alert seam (#3254), budgeted there (#1677).**
+    The volume is driven by a client clicking, so by the classification rule this
+    is an agent-influenceable emitter, and it carries its own type,
+    `workspace_problem_report`: reusing the generic `alert` type would have let
+    five unrelated alerts on that agent silence every problem report (the budget
+    counts pending rows OF THAT TYPE, including ones other emitters wrote).
 
-    Never raises, and returns whether an item was raised. The client's rating is
-    already recorded by the time this runs: their action must never fail because
-    the operator's copy could not be written.
+    One row per person per target per UTC day: the subject is the digest
+    `_problem_report_id` computes. A person must act on it, so it never expires
+    and the platform never ends it. The click and the comment arrive as two
+    requests that meet on that row inside the seam's lock: a reading with words
+    writes them, and a bare one only counts (`keep_text`), so a re-rate can never
+    erase a comment, whichever lands first (trinity#3521). An item a person
+    already ended is not rewritten or reopened: a later reading that day is
+    snoozed. The `workspace-problem-` id prefix keeps it owner-only
+    (trinity-enterprise#866).
+
+    Never raises, and returns whether the operator's item was written (created,
+    or updated in place). The client's rating is already recorded by the time
+    this runs: their action must never fail because the operator's copy could not
+    be written.
     """
     try:
-        from database import db as core_db
-        from services.operator_queue_service import (
-            _truncate_with_marker,
-            create_bounded_alert,
-        )
+        from services import platform_alerts
+        from services.operator_queue_service import _truncate_with_marker
 
         evaluator = workspace_evaluator(email, is_platform=is_platform)
         text = (comment or "").strip()
@@ -6330,33 +6338,17 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
             "target_id": target_id,
             "has_comment": bool(text),
         }
-        request_id = _problem_report_id(evaluator, target_kind, target_id)
-
-        def _attach_comment() -> bool:
-            # trinity#3521: the comment usually arrives as a SECOND request, after
-            # the click already raised the item. Only words ever write text, so a
-            # bare re-rate can never erase a comment. No new row, so no budget.
-            return bool(text) and core_db.update_pending_problem_report(
-                agent_name, request_id, question=question, context=context)
-
-        if _attach_comment():
-            return True
-        item = {
-            "id": request_id,
-            "agent_name": agent_name,
-            "type": "workspace_problem_report",
-            "status": "pending",
-            "priority": "medium",
-            "title": "A Workspace client rated a response as not useful",
-            "question": question,
-            "context": context,
-            "created_at": utc_now_iso(),
-        }
-        created = await create_bounded_alert(agent_name, item)
-        # Both requests run as background tasks. If the bare click's create
-        # landed between the miss above and this create, ours was the ON
-        # CONFLICT no-op, so attach once more. Idempotent.
-        return _attach_comment() or created
+        kind = platform_alerts.KINDS["workspace_problem_report"]
+        key = _problem_report_id(evaluator, target_kind, target_id)[len(kind.prefix):]
+        outcome = platform_alerts.observe(
+            agent_name, kind.name, key,
+            title="A Workspace client rated a response as not useful",
+            question=question,
+            priority="medium",
+            context=context,
+            keep_text=not text,
+        )
+        return outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED)
     except Exception as e:  # noqa: BLE001 — the rating is already recorded
         logger.warning("[ent#499] problem report failed for %s/%s: %s",
                        agent_name, target_kind, e)

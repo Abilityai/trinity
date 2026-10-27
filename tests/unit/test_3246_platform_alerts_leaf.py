@@ -180,11 +180,17 @@ class TestSubject:
         with pytest.raises(ValueError):
             pa.subject_for("circuit_dormant", bad)
 
-    def test_event_kind_has_no_subject(self):
-        # #3254 re-pin: gitignore_untracked is a condition now (keyed by the
-        # change-set digest), so it no longer serves as the event example.
-        assert pa.subject_for("workspace_problem_report", "anything") is None
+    def test_event_kind_has_no_subject(self, monkeypatch):
+        # #3254 re-pin: no built-in kind is an event any more (gitignore and the
+        # problem report got a subject), so the property is pinned on a
+        # registered-for-the-test event kind, and the two former events are keyed.
+        monkeypatch.setitem(pa.KINDS, "test_event", pa.Kind(
+            "test_event", "test-event-", None, pa.CLEARS_PERSON, event=True))
+        assert pa.subject_for("test_event", None) is None
+        assert pa.subject_for("test_event", "anything") is None
         assert pa.subject_for("gitignore_untracked", "a" * 32) == "gitignore_untracked:" + "a" * 32
+        assert pa.subject_for("workspace_problem_report", "b" * 32) == \
+            "workspace_problem_report:" + "b" * 32
 
     def test_unregistered_kind_raises(self):
         with pytest.raises(KeyError):

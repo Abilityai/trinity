@@ -4022,12 +4022,6 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
-    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
-        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
-        return self._operator_queue_ops.update_pending_problem_report(
-            agent_name, request_id, question=question, context=context, now=now,
-        )
-
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
@@ -4156,10 +4150,11 @@ class DatabaseManager:
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
 
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None):
+                                            max_pending_for_type=None, keep_text=False):
         # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
         return self._operator_queue_ops.create_platform_item(
             agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+            keep_text=keep_text,
         )
 
     def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):

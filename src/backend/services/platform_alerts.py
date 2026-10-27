@@ -164,7 +164,7 @@ _BUILTIN_KINDS = (
     Kind("gitignore_untracked", "gitignore-untracked-", None, CLEARS_PERSON,
          budgeted_type="gitignore_untracked"),
     Kind("workspace_problem_report", "workspace-problem-", None, CLEARS_PERSON,
-         budgeted_type="workspace_problem_report", event=True),
+         budgeted_type="workspace_problem_report"),
 )
 
 KINDS: Dict[str, Kind] = {k.name: k for k in _BUILTIN_KINDS}
@@ -592,6 +592,7 @@ def observe(
     question: str,
     priority: str = "high",
     context: Optional[Mapping] = None,
+    keep_text: bool = False,  # #3254: a pending row keeps its text; the reading only counts
 ) -> str:
     """Report a new reading of a platform condition (#3246). Never raises.
 
@@ -637,7 +638,8 @@ def observe(
             from services import operator_queue_service as oqs
             cap = oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE
         out = db.create_platform_operator_queue_item(
-            agent_name, item, subject=subject, max_pending_for_type=cap)
+            agent_name, item, subject=subject, max_pending_for_type=cap,
+            keep_text=keep_text)
         if out["outcome"] == OBSERVED_REFUSED_AT_BUDGET:
             from services import operator_queue_service as oqs
             _spawn(lambda: oqs._maybe_emit_alert_budget_episode(

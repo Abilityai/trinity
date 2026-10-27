@@ -863,7 +863,7 @@ _NON_ROW_ACCESSORS = frozenset({
     "get_operator_queue_stats", "list_operator_queue_agent_names",
     "operator_queue_walk_alert_priorities", "operator_queue_item_exists",
     "prune_operator_queue_terminal_items", "clear_resolved_operator_queue_items",
-    "update_pending_problem_report", "mark_operator_queue_acknowledged",
+    "mark_operator_queue_acknowledged",   # #3254: update_pending_problem_report retired
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
 })

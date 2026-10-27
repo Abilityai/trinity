@@ -277,9 +277,8 @@ def test_the_delegate_admits_every_budgeted_type_onto_its_kind(
     assert row["type"] == item_type
     assert row["request_id"].startswith(pa.KINDS[kind].prefix)
     assert row["subject"] == pa.subject_for(kind, key)
-    assert row["status"] == "pending"
-    # an event kind (no subject) counts no readings
-    assert row["context"].get("seen_count") == (1 if row["subject"] else None)
+    assert row["subject"] is not None
+    assert row["status"] == "pending" and row["context"]["seen_count"] == 1
 
 
 def test_a_second_reading_through_the_delegate_is_an_update_and_not_created(seam):
@@ -883,17 +882,125 @@ def test_a_person_ending_of_a_change_set_stands(seam):
 
 
 # ---------------------------------------------------------------------------
+# The Workspace problem report (`workspace_problem_report`, must-act, D1/D10)
+# ---------------------------------------------------------------------------
+
+CLIENT = "client@example.com"
+
+
+def _rate(comment=None, *, target=("message", "msg-1"), email=CLIENT):
+    from client_portal import service
+    return asyncio.run(service.raise_problem_report(
+        AGENT, email, target_kind=target[0], target_id=target[1], comment=comment))
+
+
+def _reports(seam, status=None):
+    return [r for r in rows(seam, status=status) if r["type"] == "workspace_problem_report"]
+
+
+def test_keep_text_counts_a_reading_and_leaves_the_text(seam):
+    """D10 at the sink: with `keep_text` the pending row's title, question,
+    priority and context stand; `seen_count`, `last_seen_at` and the deadline
+    move. With no pending row the reading files as usual."""
+    def reading(question, keep_text, **ctx):
+        return seam.db.create_platform_operator_queue_item(AGENT, {
+            "id": f"cb-dormant-{question}", "type": "alert", "status": "pending",
+            "priority": "high", "title": f"title {question}", "question": question,
+            "context": ctx, "expires_at": seam.clock.iso()}, subject="circuit_dormant:x",
+            keep_text=keep_text)
+
+    first = reading("bare", True, words=False)
+    assert first["outcome"] == "created" and first["row"]["question"] == "bare"
+    seam.clock.advance(hours=1)
+    second = reading("with words", False, words=True)
+    assert second["outcome"] == "updated" and second["row"]["question"] == "with words"
+    seam.clock.advance(hours=1)
+    third = reading("bare again", True, words=False)
+    assert third["outcome"] == "updated" and third["changed"] is False
+    row = third["row"]
+    assert (row["title"], row["question"], row["priority"]) == ("title with words", "with words", "high")
+    assert row["context"] == {"words": True, "seen_count": 3}
+    assert row["last_seen_at"] > second["row"]["last_seen_at"]
+    assert row["expires_at"] > second["row"]["expires_at"]
+
+
+def test_the_comment_first_order_keeps_the_words(seam):
+    """The two requests in the order the old pre-check could not handle: the
+    comment's reading files the row, then the bare click lands on it."""
+    assert _rate("I wanted Q3, not Q2.") is True
+    seam.clock.advance(seconds=2)
+    assert _rate(None) is True                      # updated: the reading is counted
+    (row,) = _reports(seam)
+    assert "I wanted Q3, not Q2." in row["question"]
+    assert "They left no comment." not in row["question"]
+    assert row["context"]["has_comment"] is True and row["context"]["seen_count"] == 2
+
+
+def test_the_click_first_order_lands_the_words(seam):
+    assert _rate(None) is True
+    seam.clock.advance(seconds=2)
+    assert _rate("Wrong customer.") is True
+    (row,) = _reports(seam)
+    assert "Wrong customer." in row["question"] and row["context"]["has_comment"] is True
+
+
+def test_the_report_is_one_must_act_row_per_person_target_and_day(seam):
+    _rate(None)
+    _rate(None, target=("message", "msg-2"))
+    _rate(None, email="someone-else@example.com")
+    assert len(_reports(seam)) == 3
+    assert {r["expires_at"] for r in _reports(seam)} == {None}
+    seam.clock.advance(days=1)
+    _rate(None)                                     # tomorrow's bucket is a new subject
+    assert len(_reports(seam)) == 4
+
+
+def test_the_report_stays_owner_only_and_about_a_person(seam):
+    """trinity-enterprise#866 and the machine-key exclusion both key on the
+    `workspace-problem-` request-id prefix, which the seam's ids keep."""
+    from services import operator_queue_service as oqs
+    _rate("words")
+    (row,) = _reports(seam)
+    assert row["request_id"].startswith("workspace-problem-")
+    assert oqs.is_owner_only(row) and oqs.is_platform_minted(row)
+    assert CLIENT not in row["subject"] and "words" not in str(row["context"])
+
+
+def test_the_delegate_and_the_emitter_land_on_one_subject(seam):
+    """D12: the delegate's request-id key for the problem report is the same day
+    digest the emitter keys by."""
+    from client_portal.service import _problem_report_id, workspace_evaluator
+    from services import operator_queue_service as oqs
+
+    rid = _problem_report_id(workspace_evaluator(CLIENT), "message", "msg-1")
+    item = {**_legacy("workspace_problem_report"), "id": rid}
+    assert asyncio.run(oqs.create_bounded_alert_outcome(AGENT, item)) == oqs.ALERT_CREATED
+    assert _rate("the words") is True
+    (row,) = _reports(seam)
+    assert "the words" in row["question"] and row["context"]["seen_count"] == 2
+
+
+def test_a_person_ending_of_the_report_is_not_rewritten_or_reopened(seam):
+    _rate(None)
+    person_ends(seam, _reports(seam)[0])
+    assert _rate("arrived after the operator looked") is False      # snoozed
+    (row,) = _reports(seam)
+    assert row["status"] == "acknowledged" and "arrived after" not in row["question"]
+
+
+# ---------------------------------------------------------------------------
 # The other shape: the clock 30 days ahead
 # ---------------------------------------------------------------------------
 
 def test_the_clock_30_days_ahead(seam, notifications):
-    """A must-act gitignore row is still pending after the real expiry sweep;
-    a full `skill_not_found` budget frees itself: its rows pass their 14-day
-    lifetime and the sweep ends them, so a new distinct command files (with
-    its notification)."""
+    """The must-act gitignore and problem-report rows are still pending after
+    the real expiry sweep; a full `skill_not_found` budget frees itself: its
+    rows pass their 14-day lifetime and the sweep ends them, so a new distinct
+    command files (with its notification)."""
     from services import operator_queue_service as oqs
 
     _push(removed=("a.env",))
+    _rate("still waiting for a person")
     for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
         _missing_skill(seam, f"/cmd-{i}")
     _missing_skill(seam, "/refused-today")
@@ -906,6 +1013,8 @@ def test_the_clock_30_days_ahead(seam, notifications):
 
     (must_act,) = _gitignore_rows(seam)
     assert must_act["status"] == "pending" and must_act["expires_at"] is None
+    (report,) = _reports(seam)
+    assert report["status"] == "pending" and report["expires_at"] is None
 
     sent = len(notifications)
     _missing_skill(seam, "/a-new-command")
