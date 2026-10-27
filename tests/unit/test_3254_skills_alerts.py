@@ -290,6 +290,32 @@ class TestReconcileRefusal:
         assert [(r["id"], r["context"]["seen_count"]) for r in _pending(db, self.SUBJECT)] == [
             (first["id"], 1)]                                 # untouched, not ended
 
+    def test_entries_that_can_never_be_skills_never_block_the_inventory(
+            self, db, svc, agent_home):
+        """Only a name that could be a platform skill (`SKILL_NAME_RE`) is
+        inspected. A looping `.loop` symlink, and an inaccessible `.cache` dir
+        when not root, sit beside three managed orphans: the pass still sees
+        the orphans, reconciles, and ends the refusal, as before the explicit
+        stat."""
+        skills = self._managed(agent_home, 12)
+        assert asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))["status"] == "refused"
+        [row] = _pending(db, self.SUBJECT)
+        for d in sorted(skills.iterdir())[3:]:
+            shutil.rmtree(d)                       # three managed orphans remain
+        (skills / ".loop").symlink_to(skills / ".loop")
+        cache = skills / ".cache"
+        (cache / "inner").mkdir(parents=True)
+        if os.geteuid() != 0:
+            cache.chmod(0)
+        try:
+            result = asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))
+        finally:
+            cache.chmod(0o755)
+        assert result["status"] == "reconciled"
+        assert result["skills"] == ["orphan-00", "orphan-01", "orphan-02"]
+        assert _pending(db, self.SUBJECT) == []
+        _assert_ended_by_platform(db, row)
+
     def test_an_absent_skills_dir_is_a_clean_pass_that_ends_the_refusal(
             self, db, svc, agent_home, clock):
         """No `~/.claude/skills` at all is positive evidence: nothing is managed,

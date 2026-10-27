@@ -1597,10 +1597,13 @@ print(json.dumps(out))
         reaches path math.
 
         An ABSENT skills directory is an empty inventory (nothing is managed),
-        and so is an entry or marker that is simply not there. Anything that
-        could not be INSPECTED is a failure and the script prints ``null``: a
-        directory that cannot be listed, or an entry or marker whose stat fails
-        (a skills dir that lists but cannot be searched, a child dir with no
+        and so is an entry or marker that is simply not there. Only an entry
+        whose NAME could be a platform skill (`SKILL_NAME_RE`) is inspected at
+        all; anything else (`.cache`, a stray symlink) can never be managed and
+        is skipped unstat'ed, as it always was. Anything that could not be
+        INSPECTED is a failure and the script prints ``null``: a directory that
+        cannot be listed, or a candidate entry or marker whose stat fails (a
+        skills dir that lists but cannot be searched, a child dir with no
         permissions). The script used to print ``[]`` for a failed listing, and
         `os.path.isdir`/`isfile` turn a failed stat into False, so an
         uninspectable inventory read as smaller than it is. A clean or
@@ -1609,9 +1612,10 @@ print(json.dumps(out))
         "could not look" must never read as "nothing there".
         """
         script = f"""
-import json, os, stat
+import json, os, re, stat
 base = os.path.expanduser("~/.claude/skills")
 meta_name = {json.dumps(pkg.META_FILENAME)}
+skill_name = re.compile({json.dumps(pkg.SKILL_NAME_RE.pattern)})
 
 def mode_of(path):
     # None: not there. Raises: could not look.
@@ -1627,6 +1631,8 @@ def inventory():
         return []
     out = []
     for name in names:
+        if not skill_name.match(name):
+            continue
         d = os.path.join(base, name)
         mode = mode_of(d)
         if mode is None or not stat.S_ISDIR(mode):
