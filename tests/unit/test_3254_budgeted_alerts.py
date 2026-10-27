@@ -75,6 +75,19 @@ def clock(monkeypatch):
     monkeypatch.setattr(dbq, "utc_now_iso", c.iso)
     monkeypatch.setattr(portal, "utc_now_iso", c.iso)
     monkeypatch.setattr(oqs.time, "monotonic", lambda: c.mono)
+    # R6: freeze the clocks the RUNNING methods read too. A test file that pops
+    # `database` and `db.*` from sys.modules and restores only some of them
+    # (test_1595_sync_health_signals does) leaves `database.db` and
+    # `ask_service.db` on an older `db.operator_queue` module than the one
+    # imported above, so the module patches would miss the create, the expiry
+    # sweep and the answer's compare-and-set, which then read the real clock.
+    import database
+    from services import ask_service
+    for ops in (database.db._operator_queue_ops, ask_service.db._operator_queue_ops):
+        live = type(ops).create_platform_item.__globals__
+        if live is not vars(dbq):
+            monkeypatch.setitem(live, "utc_now_iso", c.iso)
+            monkeypatch.setitem(live, "datetime", _FrozenDatetime)
     return c
 
 
