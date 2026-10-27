@@ -1009,23 +1009,12 @@ async def terminate_agent_execution(
     # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
     # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
-    try:
-        result = await chat_execution_service.terminate_execution(
-            name=name,
-            execution_id=execution_id,
-            task_execution_id=task_execution_id,
-            current_user=current_user,
-        )
-    except ChatDispatchError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
-
-    # #3180: a terminate had no audit row. One is written only for the three
-    # outcomes in which work was actually ended (cancelled while queued or
-    # parked, or terminated in the container); an `already_finished` answer
-    # ended nothing (#679), and every error arm raised above. `log` derives the
-    # key fields from the principal (#2389), so a key's terminate names the key.
-    outcome = result.get("status")
-    if outcome in ("cancelled_while_queued", "cancelled_while_parked", "terminated"):
+    # #3180: a terminate had no audit row. The service calls this once, and
+    # only when THIS request ended work (queued or parked cancel that won its
+    # CAS, or the agent answered `terminated`); a repeat, `already_finished` and
+    # every error arm write nothing. `log` derives the key fields from the
+    # principal (#2389), so a key's terminate names the key.
+    async def _audit_terminate(outcome: str) -> None:
         await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="execution_terminate",
@@ -1039,7 +1028,17 @@ async def terminate_agent_execution(
                 "status": outcome,
             },
         )
-    return result
+
+    try:
+        return await chat_execution_service.terminate_execution(
+            name=name,
+            execution_id=execution_id,
+            task_execution_id=task_execution_id,
+            current_user=current_user,
+            on_ended=_audit_terminate,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
 
 
 @router.post("/{name}/executions/{execution_id}/report-back")

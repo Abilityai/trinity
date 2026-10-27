@@ -498,6 +498,35 @@ class TestExecutionTerminate:
         assert len(rows) == 1
         _assert_terminate_row(rows[0], None, eid, "cancelled_while_parked")
 
+    def test_a_repeated_parked_cancel_writes_one_row_for_the_call_that_ended_it(
+        self, world
+    ):
+        """While the dispatcher stays parked, every terminate answers
+        `cancelled_while_parked`, but only the call that wins the CANCELLED CAS
+        ended anything. A repeat by another credential must not write a second
+        row crediting itself (Codex, Stage 2 review)."""
+        eid = _seed("s2-3180-parked-twice", "running")
+        limiter = chat_router.chat_execution_service.agent_call_limiter
+        world.redis.set(
+            limiter._marker_key(eid), json.dumps({"agent": AGENT, "phase": "parked"})
+        )
+        repeat_headers, repeat_key_id = _owner_user_key()
+
+        first = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+        second = world.client.post(_terminate_path(eid), headers=repeat_headers)
+
+        assert first.status_code == second.status_code == 200, (first.text, second.text)
+        assert (
+            first.json()["status"]
+            == second.json()["status"]
+            == "cancelled_while_parked"
+        )
+        assert _status_of(eid) == "cancelled"
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], None, eid, "cancelled_while_parked")
+        assert rows[0]["mcp_key_id"] != repeat_key_id
+
     @pytest.mark.parametrize(
         "credential, status",
         [
