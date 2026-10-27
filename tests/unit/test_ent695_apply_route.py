@@ -188,7 +188,7 @@ class TestAC5OverTheRealAuthPath:
 
     def test_unreadable_docker_is_a_503_not_a_409(self, http):
         """An existing member must not pick up a non-retryable
-        `member_container_missing` while Docker cannot be asked (review I1):
+        `member_container_missing` while Docker cannot be asked:
         a caller that retries on 503 and stops on 409 would stop for good."""
         http.seed_agent("acme-a")
         http.docker.readable = False
@@ -231,7 +231,7 @@ class TestAgentsTheCallerCannotManage:
         assert http.create_calls == [] and http.audits == []
 
 
-class TestD12PersonsOnly:
+class TestPersonsOnly:
     def test_an_agent_key_is_refused_before_any_read(self, http, monkeypatch):
         http.seed_agent("acme-a")
 
@@ -280,7 +280,7 @@ class TestStatusMapping:
                                headers=_jwt(W.ALICE))
         assert res.status_code == 500
         assert res.json()["status"] == "failed" and res.json()["failed"][0]["step"] == "create"
-        # The audit row records what happened (Codex pass 1 #7): nothing.
+        # The audit row records what happened: nothing.
         (audit,) = http.audits
         assert audit["details"]["created"] == [] and audit["details"]["writes"] == {}
 

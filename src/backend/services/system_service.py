@@ -2224,7 +2224,7 @@ def _apply_blocker(
 def _read_error(exc: Exception) -> str:
     """What a caller is told about a failed READ: the exception class only.
     A database error's message carries the SQL text and its parameters, which
-    belong in the server log, not in an API response (cso H2)."""
+    belong in the server log, not in an API response."""
     logger.warning("system apply: read failed (%s): %s", type(exc).__name__, exc)
     return type(exc).__name__
 
@@ -2280,7 +2280,7 @@ class ApplySnapshot:
     stored_prompt: Optional[str] = None
     # The fleet default a member to create gets when it declares no resources
     # (`_manifest_default_resources`, a settings read): read here so a failure
-    # is a blocker, never an exception after the first write (Codex 2).
+    # is a blocker, never an exception after the first write.
     default_resources: Optional[Dict[str, str]] = None
     views: List = field(default_factory=list)
 
@@ -2290,7 +2290,7 @@ def _member_container(name: str):
 
     `get_agent_container` turns every Docker error into None, so a caller must
     never read None as "no container" for a name the tri-state roster already
-    showed (Codex B-AC5): the snapshot treats it as a read failure.
+    showed: the snapshot treats it as a read failure.
     """
     from services.docker_service import get_agent_container
     return get_agent_container(name)
@@ -2310,8 +2310,8 @@ async def _restart_pending(name: str, container) -> bool:
     """Does the stored config differ from what this container runs?
 
     The platform's OWN start-path drift predicates, so apply's
-    `restart_required` cannot disagree with what the next start will do
-    (H4): computed every run from the container, never from this run's writes,
+    `restart_required` cannot disagree with what the next start will do:
+    computed every run from the container, never from this run's writes,
     so an override stored by an earlier apply keeps reporting until a restart.
     """
     from services.agent_service.helpers import (
@@ -2320,7 +2320,7 @@ async def _restart_pending(name: str, container) -> bool:
     )
     resources_match = check_resource_limits_match(container, name)
     # strict: a failed source-volume inspect raises (a read failure, P-B)
-    # instead of reading as "mounts match" (Codex 3).
+    # instead of reading as "mounts match".
     folders_match = await check_shared_folder_mounts_match(container, name, strict=True)
     return not (resources_match and folders_match)
 
@@ -2344,7 +2344,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     """Read what apply needs to plan. Reads only, never writes (AC4).
 
     Roster: the live ownership rows (a recovered agent with no container
-    included) the caller may manage, by the predicate H1 uses (a live owner +
+    included) the caller may manage, by the name classification's predicate (a live owner +
     `can_user_share_agent` + `agent_may_reach(manage=True)`): an agent merely
     shared with the caller, or a container nobody owns, is outside it, so it
     never blocks the run or shows as drift. The tri-state container list is
@@ -2352,10 +2352,10 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `get_accessible_agents`, which is built on `list_all_agents_fast` and
     returns `[]` without a Docker client, so the evidence gate would pass over
     an empty membership (#2196 class). The ownership rows bring in a recovered
-    agent with no container (Codex 6).
+    agent with no container.
 
-    Each declared name is classified GLOBALLY, never from the caller's roster
-    (H1): taken (a container, the #1790 predicate, or a reserved volume base)
+    Each declared name is classified GLOBALLY, never from the caller's roster:
+    taken (a container, the #1790 predicate, or a reserved volume base)
     AND a live agent the caller may manage (the deploy-local predicate,
     `can_user_share_agent` + `agent_may_reach(manage=True)`) -> the specific
     gates, then reconcile; taken but not manageable -> one uniform
@@ -2363,6 +2363,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     taken name, so apply cannot suffix.
     """
     from dependencies import agent_may_reach, assert_admin
+
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
 
@@ -2410,7 +2411,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         ))
     if roster_ok:
         try:
-            # A live owner row first, as H1 requires (`bool(owner)`): an admin
+            # A live owner row first (`bool(owner)`): an admin
             # passes `can_user_share_agent` for ANY name, so a container with no
             # live owner row (nobody's to manage; its tag route 404s) would
             # otherwise refuse an admin's run or show as drift.
@@ -2439,7 +2440,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                 "Retry; apply refuses on unverified membership rather than guess.",
             ))
 
-    # 3. Each declared name, classified globally (H1).
+    # 3. Each declared name, classified globally.
     for short, name in declared.items():
         state = ApplyMemberState(short_name=short, name=name)
         snapshot.members[short] = state
@@ -2552,7 +2553,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             state.blocked = True
             continue
 
-    # The evidence gate, literally (AC5, H11): ANY computed member, declared or
+    # The evidence gate, literally (AC5): ANY computed member, declared or
     # not, matched by name only. Before any write, and before the lock.
     if roster_ok and snapshot.membership.tags_readable:
         unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
@@ -2653,8 +2654,8 @@ class ScheduleAction:
 # maps to, and whether the key is always compared. `timezone` and
 # `description` only when the entry declares them: comparing the defaults
 # `_build_schedule_create` fills in would reset a row's `Europe/Berlin` to UTC
-# and wipe a template's `purpose:` description (engineering F2). `enabled` is
-# never compared for a write (H3).
+# and wipe a template's `purpose:` description. `enabled` is
+# never compared for a write.
 _SCHEDULE_DECLARED_FIELDS = (
     ("cron", "cron_expression", True),
     ("message", "message", True),
@@ -2738,7 +2739,7 @@ def resolve_declared_schedule_actions(
 # real run compute it with the same functions).
 # ----------------------------------------------------------------------------
 
-# Field coverage census (strategy F4). Every `SystemManifest` /
+# Field coverage census. Every `SystemManifest` /
 # `SystemAgentConfig` field and every schedule key `_build_schedule_create`
 # reads appears here exactly once, so a new manifest key fails CI
 # (`test_ent695_apply_engine.py`) until someone decides what apply does with
@@ -2840,7 +2841,7 @@ def _desired_tags(system_name: str, default_tags, agent_tags) -> List[str]:
 def _desired_edges(agent_names: Dict[str, str], permissions) -> Dict[str, List[str]]:
     """The edges the manifest wants, per source: what `set_permissions` would
     STORE after create mode's writes — the last write per source wins (it is a
-    full replacement), self-edges dropped (it never stores one, Codex 9),
+    full replacement), self-edges dropped (it never stores one),
     duplicates removed."""
     write_set, _count = resolve_permission_edges(agent_names, permissions)
     final: Dict[str, List[str]] = {}
@@ -2855,7 +2856,7 @@ def _desired_edges(agent_names: Dict[str, str], permissions) -> Dict[str, List[s
 def _folders_error(folders) -> Optional[str]:
     """`folders` must map `expose` / `consume` to booleans. Create mode does
     not check (and stays as it is); apply must, or a `null` would compare
-    unequal on every run and break AC1 (Codex 8)."""
+    unequal on every run and break AC1."""
     if folders is None:
         return None
     if not isinstance(folders, dict):
@@ -2921,7 +2922,7 @@ def _well_formed_schedule_entries(cfg: SystemAgentConfig, name: str, blockers: L
 
     `validate_manifest` checks only that `name` / `cron` / `message` are
     PRESENT, so `{name: [daily]}` reaches here; matching hashes the name and
-    would raise an unnamed 500 (Codex 5). Each rejected entry is a
+    would raise an unnamed 500. Each rejected entry is a
     `schedule_definition_invalid` blocker, and only accepted entries are
     matched.
     """
@@ -2963,7 +2964,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
     cfg, name, short = mp.config, mp.name, mp.short_name
     labels = state.labels or {}
 
-    # Tags: additive. Extra tags are not drift and are not reported (H2).
+    # Tags: additive. Extra tags are not drift and are not reported.
     live_tags = set(_normalized_tags(state.tags))
     missing = [t for t in _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
                if t not in live_tags]
@@ -2973,7 +2974,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
         mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in missing)
 
     # Edges: missing ones added; a live edge between two declared members that
-    # the manifest does not want is reported, never removed (H2).
+    # the manifest does not want is reported, never removed.
     live_edges = set(state.edges)
     wanted = desired_edges.get(name, [])
     add = [t for t in wanted if t not in live_edges]
@@ -2988,7 +2989,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
             "permissions", "report", "permission_extra", current=extra,
             note="apply never removes an edge; remove it by hand if it is unwanted"))
 
-    # Folders: only the declared keys (H4b).
+    # Folders: only the declared keys.
     folder_write: Dict[str, bool] = {}
     if isinstance(cfg.folders, dict):
         live = {
@@ -3006,7 +3007,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
             "consume_enabled": folder_write.get("consume"),
         }))
 
-    # Resources: declared keys win as a per-agent override (H4, P-F exception 2).
+    # Resources: declared keys win as a per-agent override (P-F exception 2).
     stored = dict(state.resource_limits or {})
     resource_write: Dict[str, str] = {}
     label_mismatch = False
@@ -3022,20 +3023,20 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
                 label_mismatch = True
     if resource_write:
         # The omitted key keeps its stored value: `set_resource_limits` writes
-        # both columns, and None would clear it (engineering F2).
+        # both columns, and None would clear it.
         mp.ops.append(ApplyOp("resources", name, short, {
             "cpu": resource_write.get("cpu", stored.get("cpu")),
             "memory": resource_write.get("memory", stored.get("memory")),
         }))
 
-    # Template: reported, never recreated (H5). `kind` is create-only.
+    # Template: reported, never recreated. `kind` is create-only.
     live_template = labels.get("trinity.template") or ""
     if live_template != cfg.template:
         mp.changes.append(_apply_change(
             "template", "report", "template_differs", current=live_template or None,
             desired=cfg.template, note="apply never recreates an agent"))
 
-    # Schedules (H3, H3b).
+    # Schedules.
     entries = _well_formed_schedule_entries(cfg, name, blockers)
     for action in resolve_declared_schedule_actions(entries, state.schedules):
         field_name = f"schedule:{action.name}"
@@ -3048,7 +3049,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
             mp.changes.append(_apply_change(field_name, "write", "schedule_create",
                                             desired=_schedule_view(action.entry)))
             # Created as the AGENT OWNER, like a template-materialized row, so
-            # the owner can still edit and delete it (H3b).
+            # the owner can still edit and delete it.
             mp.ops.append(ApplyOp("schedule_create", name, short, {
                 "entry": action.entry, "owner_username": state.owner_username}))
         elif action.kind == "update":
@@ -3062,7 +3063,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
                                                "Fix the schedule in the manifest."))
                 continue
             # `update_schedule` is owner-or-admin and returns None otherwise —
-            # silently. Refuse up front instead (H3b).
+            # silently. Refuse up front instead.
             if not (snapshot.caller_role == "admin" or action.row.owner_id == snapshot.caller_id):
                 blockers.append(_apply_blocker(
                     "schedule_not_updatable_by_caller", name,
@@ -3125,7 +3126,7 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
 
     tags = _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
     mp.changes.append(_apply_change("tags", "write", "tag_missing", current=[], desired=tags))
-    # The system tag is written by the executor right after create (H11b).
+    # The system tag is written by the executor right after create.
     mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in tags if t != manifest.name)
 
     wanted = desired_edges.get(name, [])
@@ -3136,7 +3137,7 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
 
     if isinstance(cfg.folders, dict) and cfg.folders and _folders_error(cfg.folders) is None:
         # Both keys, an omitted one False, and nothing for `{}` (the template's
-        # settings stand): create's `configure_folders` (Codex 7).
+        # settings stand): create's `configure_folders`.
         expose = cfg.folders.get("expose", False)
         consume = cfg.folders.get("consume", False)
         mp.changes.append(_apply_change("folders", "write", "folder_differs",
@@ -3237,7 +3238,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             mp.restart_required = True
 
     # Drift: tagged members the manifest does not declare (AC3). Reported,
-    # never touched. A prefix-only one never gets here: it blocks (H11).
+    # never touched. A prefix-only one never gets here: it blocks.
     drift: List[SystemApplyDrift] = []
     if snapshot.membership.tags_readable:
         for member in snapshot.membership.members:
@@ -3252,7 +3253,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
 
-    # The platform prompt (H6, P-F exception 3).
+    # The platform prompt (P-F exception 3).
     prompt_op = None
     if not manifest.prompt:
         prompt = SystemApplyPromptVerdict(verdict="not_declared")
@@ -3269,7 +3270,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             note="prompt_requires_admin: the platform-wide prompt changes every agent's "
                  "instructions, so only an admin may change it; nothing was written")
 
-    # The auto-created system view (H7).
+    # The auto-created system view.
     view_op = None
     if not manifest.system_view:
         view = SystemApplyViewVerdict(verdict="not_requested")
@@ -3309,7 +3310,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
 
 
 # ----------------------------------------------------------------------------
-# Execution under a lease (H13) and the orchestrator.
+# Execution under a lease, and the orchestrator.
 # ----------------------------------------------------------------------------
 
 APPLY_LOCK_TTL_SECONDS = 900
@@ -3324,7 +3325,7 @@ class ApplyLeaseKeeper:
     Any renewal result but OWNED — LOST (another holder, or a lapse), or
     DEGRADED (Redis error) — stops the run: the in-flight write finishes and
     every later write and start is reported `lock_lost`. Continuing on
-    DEGRADED would be the fail-open the lock exists to avoid (Codex 3).
+    DEGRADED would be the fail-open the lock exists to avoid.
     Renewal is the atomic compare-and-expire, so a stale holder can never
     extend a successor's lease.
 
@@ -3414,7 +3415,7 @@ class ApplyOutcome:
 def _default_start_agent_fn():
     """The start function, resolved at call time (same reason, and same unit
     seam, as `_default_create_agent_fn`): the `routers/agents` facade over
-    `lifecycle.start_agent_internal`, one created member at a time (H8)."""
+    `lifecycle.start_agent_internal`, one created member at a time."""
     from routers.agents import start_agent_internal
     return start_agent_internal
 
@@ -3447,12 +3448,12 @@ async def execute_apply_plan(
     """Write the plan. Writes only; no exception escapes once a write happened.
 
     Order: create each absent member and tag it with the system tag at once
-    (H11b) -> keep only the writes that name members which exist (existing +
+    -> keep only the writes that name members which exist (existing +
     created), as create scopes to `created_map`, so nothing is ever written for
     an agent whose create failed -> tags, edges, folders, resource overrides,
     schedules (a created member's against a fresh post-create read), prompt,
     view -> start the created members one at a time. The lease's stop flag is
-    checked before every write and every start (H13).
+    checked before every write and every start.
     """
     out = ApplyOutcome()
     system = plan.system_name
@@ -3502,7 +3503,7 @@ async def execute_apply_plan(
         if tagged:
             out.tags_written.append(mp.name)
         else:
-            # The next apply would refuse it as name-only evidence; say so (H11b).
+            # The next apply would refuse it as name-only evidence; say so.
             out.failed[-1].reason += (
                 f"; '{mp.name}' was created but not tagged '{system}', so the next apply "
                 f"refuses it until you add the tag (POST /api/agents/{mp.name}/tags/{system})")
@@ -3545,7 +3546,7 @@ async def execute_apply_plan(
     # 5. `restart_required` for EVERY existing member once anything landed,
     # from the platform's predicates over its container as it now is: a write
     # on one member (a new edge, a peer's expose) changes which shared-folder
-    # mounts another must have (Codex 4).
+    # mounts another must have.
     if out.succeeded:
         for mp in plan.members.values():
             if mp.creating:
@@ -3611,7 +3612,7 @@ async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> N
     """A member apply created runs with its TEMPLATE's resources (create keeps
     template-wins, AC6). A declared key the template overrode is written as an
     override now, before the member's start, so the platform's start path
-    recreates it with the declared values once (H4, P-A)."""
+    recreates it with the declared values once (P-A)."""
     name, short = op.member, op.short_name
     try:
         labels = _container_labels(_member_container(name))
@@ -3641,7 +3642,7 @@ async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOu
     """P-D's one re-read: the template materialized its own rows inside create,
     so a created member's schedules are resolved against a FRESH read. If that
     read fails they go to `failed[]`, never to an unfiltered create (the open
-    failure `create_schedules` falls back to, engineering F5)."""
+    failure `create_schedules` falls back to)."""
     name, short = op.member, op.short_name
     try:
         rows = list(db.list_agent_schedules(name) or [])
@@ -3748,7 +3749,7 @@ async def apply_manifest(
     400, `agents: {}` included) -> snapshot -> plan -> a dry run returns here
     -> blockers refuse with NO lock key written -> acquire the lock and start
     the lease keeper -> snapshot and plan again under it -> blockers refuse and
-    release -> confirm ownership -> execute -> release (H13, Codex 2).
+    release -> confirm ownership -> execute -> release.
 
     `dry_run` has no default here on purpose: the request model's `True` is the
     only default, so a caller cannot reach a real run by omission.

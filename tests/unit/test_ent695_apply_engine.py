@@ -56,7 +56,7 @@ def _blocker(snapshot, code):
 
 
 # ===========================================================================
-# 1. Snapshot + gates (AC5, H1, the roster)
+# 1. Snapshot + gates (AC5, name classification, the roster)
 # ===========================================================================
 
 class TestEvidenceGate:
@@ -74,7 +74,7 @@ class TestEvidenceGate:
 
     def test_an_undeclared_untagged_member_is_refused_too(self, world):
         """The issue names `evidence == "prefix"` without restricting it to
-        declared members; the AC is the bar (Codex 5)."""
+        declared members; the AC is the bar."""
         world.seed_agent("acme-notes", tags=())
         snap = world.snapshot(_manifest("a"))
 
@@ -100,7 +100,7 @@ class TestEvidenceGate:
     def test_unreadable_docker_is_retryable_never_an_empty_roster(self, world):
         """The ONLY blocker: an existing member's container is unknown, not
         missing, so no non-retryable `member_container_missing` turns the
-        503 into a 409 (review I1)."""
+        503 into a 409."""
         world.seed_agent("acme-a")
         world.docker.readable = False
         snap = world.snapshot(_manifest("a", "b"))
@@ -109,7 +109,7 @@ class TestEvidenceGate:
 
     def test_a_label_read_returning_nothing_is_a_read_failure_not_a_missing_container(self, world):
         """`get_agent_container` turns every Docker error into None; a name the
-        tri-state roster already showed is unreadable, not absent (Codex B-AC5)."""
+        tri-state roster already showed is unreadable, not absent."""
         world.seed_agent("acme-a")
         world.docker.unreadable_labels.add("acme-a")
         snap = world.snapshot(_manifest("a"))
@@ -120,7 +120,7 @@ class TestEvidenceGate:
 
 
     def test_a_failed_reads_detail_names_the_error_class_never_its_sql(self, world, monkeypatch):
-        """cso H2: a database error's message embeds the statement and its
+        """A database error's message embeds the statement and its
         parameters; the caller gets the class, the server log gets the rest."""
         world.seed_agent("acme-a")
 
@@ -137,7 +137,7 @@ class TestEvidenceGate:
 
 
 class TestNameClassification:
-    """H1: classified globally, never from the caller's roster; one uniform
+    """Classified globally, never from the caller's roster; one uniform
     refusal for anything the caller may not manage."""
 
     def _unavailable_detail(self, world, setup) -> tuple:
@@ -246,8 +246,8 @@ class TestManagedMemberGates:
 
 
 class TestRoster:
-    """Engineering F1 + Codex 6: the live ownership rows (a container-less one
-    included) the caller may manage (fresh review #1, Codex at Stage 3); never
+    """The live ownership rows (a container-less one
+    included) the caller may manage; never
     `list_all_agents_fast` (the world makes it raise)."""
 
     def test_a_live_row_without_a_container_is_a_member(self, world):
@@ -275,7 +275,7 @@ class TestRoster:
         assert "acme-bobs" not in snap.membership.members
 
     def test_an_agent_shared_with_the_caller_but_not_theirs_to_manage_is_outside_the_roster(self, world):
-        """Fresh review #1: the roster is filtered by H1's manage predicate, not
+        """The roster is filtered by the name classification's predicate, not
         by access. Bob's untagged `acme-notes`, shared with Alice, would
         otherwise refuse her apply with a remedy (tag it) only Bob may follow,
         and Bob's tagged `acme-bobs` would show as her drift."""
@@ -293,7 +293,7 @@ class TestRoster:
         assert ("membership_evidence_prefix_only", "acme-notes") in _codes(bob)
 
     def test_a_container_nobody_owns_is_outside_even_an_admins_roster(self, world):
-        """Codex (Stage 3): `can_user_share_agent` is True for any admin, so the
+        """`can_user_share_agent` is True for any admin, so the
         roster also requires a live owner row, as the name classification does.
         An ownerless container is nobody's to manage (its tag route 404s): it
         must neither refuse an admin's run nor show as drift."""
@@ -316,7 +316,7 @@ class TestRoster:
 
 
 # ===========================================================================
-# 2. The schedule matcher (H3, section 7: the ent#694 seam). Pure.
+# 2. The schedule matcher (the ent#694 seam). Pure.
 # ===========================================================================
 
 def _row(name, *, cron="0 9 * * *", message="/daily", enabled=True, timezone="UTC",
@@ -343,7 +343,7 @@ class TestScheduleMatcher:
         live = [_row("daily", timezone="Europe/Berlin", description="from the template")]
         (action,) = self.resolve([{"name": "daily", "cron": "0 10 * * *", "message": "/daily"}], live)
         assert action.kind == "update"
-        # An omitted timezone / description keeps the row's (engineering F2).
+        # An omitted timezone / description keeps the row's.
         assert action.fields == {"cron_expression": "0 10 * * *"}
         assert action.current == {"cron_expression": "0 9 * * *"}
 
@@ -436,7 +436,7 @@ def _one_member(world, entry: str, **seed):
 class TestTagsAndEdges:
     def test_tags_are_added_never_replaced_and_compared_as_stored(self, world):
         """`Prod` declared, `prod` stored: equal (AC1). An operator tag stays
-        and is not reported (H2)."""
+        and is not reported."""
         world.seed_agent("acme-a", tags=(SYSTEM, "prod", "operator-pick"))
         plan = _plan(world, f"name: {SYSTEM}\ndefault_tags: [Prod]\nagents:\n"
                             "  a:\n    template: local:plain\n    tags: [team-x]\n")
@@ -502,7 +502,7 @@ class TestResources:
         assert _ops(_member(_plan(world, mf), "a")) == []
 
     def test_a_stored_override_not_yet_applied_keeps_reporting_restart_required(self, world):
-        """Codex pass 3: computed from the platform's predicates over the
+        """Computed from the platform's predicates over the
         container every run, never from this run's writes."""
         mf = _one_member(world, "    resources:\n      cpu: '4'\n", cpu="2")
         db.set_resource_limits("acme-a", memory=None, cpu="4")
@@ -528,7 +528,7 @@ class TestTemplate:
 
 class TestSchedulesInThePlan:
     def test_a_row_apply_creates_on_an_existing_member_is_owned_by_the_agent_owner(self, world):
-        """H3b: an admin applying to Alice's agent must not lock her out of the
+        """An admin applying to Alice's agent must not lock her out of the
         row (`update_schedule` is owner-or-admin)."""
         mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '0 9 * * *', message: /d}\n")
         mp = _member(_plan(world, mf, username=W.ADMIN), "a")
@@ -555,7 +555,7 @@ class TestSchedulesInThePlan:
 
     @pytest.mark.parametrize("existing", [True, False])
     def test_a_non_string_schedule_name_is_a_named_blocker_not_a_500(self, world, existing):
-        """Codex pass 1 #5: `validate_manifest` checks presence only, so a list
+        """`validate_manifest` checks presence only, so a list
         name reaches the matcher, whose dict would raise `TypeError`."""
         if existing:
             world.seed_agent("acme-a")
@@ -640,13 +640,13 @@ class TestPromptAndView:
         assert plan.system_view.verdict == "ambiguous" and plan.view_op is None and plan.warnings
 
     def test_another_users_private_view_is_never_matched(self, world):
-        """Engineering F8: the lookup is over the caller's own or shared views."""
+        """The lookup is over the caller's own or shared views."""
         self._view(W.BOB, shared=False)
         assert _plan(world, _manifest("a", extra="system_view:\n  name: Acme\n")).system_view.verdict == "create"
 
 
 class TestFieldCoverageCensus:
-    """Strategy F4: a new manifest key fails CI until it is classified."""
+    """A new manifest key fails CI until it is classified."""
 
     @staticmethod
     def _schedule_keys():
@@ -747,7 +747,7 @@ class TestAC1ApplyTwiceIsANoOp:
         ("view", ("default_tags: [Prod]", "default_tags: [Prod]\nsystem_view: {name: Acme}")),
     ])
     def test_each_writer_converges_after_one_change(self, ew, tmp_path, writer, change):
-        """Codex B-AC1: change one declared value -> apply -> apply again ->
+        """Change one declared value -> apply -> apply again ->
         zero fleet-state statements, for every writer."""
         assert W.apply(ew, FLEET, W.ADMIN, dry_run=False).status == "applied"
         changed = FLEET.replace(*change)
@@ -794,7 +794,7 @@ class TestAC2AChangedFieldUpdatesInPlace:
         assert ew.docker.events.count(("start", "acme-b")) == 1  # only the first run's
 
     def test_an_omitted_timezone_and_description_survive_an_update(self, ew):
-        """Engineering F2: a row on Europe/Berlin with a template description,
+        """A row on Europe/Berlin with a template description,
         under a manifest entry that omits both, keeps both."""
         ew.seed_agent("acme-a")
         db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
@@ -905,7 +905,7 @@ class TestAC5WeakEvidenceRefusedBeforeAnyWrite:
         assert (b.code, b.retryable) == ("member_reads_unavailable", True)
 
 
-class TestF3NothingNamesAMemberWhoseCreateFailed:
+class TestNothingNamesAMemberWhoseCreateFailed:
     def test_a_failed_create_leaves_no_row_naming_it(self, ew):
         ew.fail_create.add("acme-b")
         mf = FLEET.replace("    a: [a, b]", "    a: [a, b]\n    b: [a]").replace(
@@ -920,7 +920,7 @@ class TestF3NothingNamesAMemberWhoseCreateFailed:
         assert "acme-b" not in db.get_permitted_agents("acme-a")
         steps = sorted((f.name, f.step) for f in result.failed)
         assert ("acme-b", "create") in steps
-        # One step name per writer, the same a write that ran reports (fresh review #7).
+        # One step name per writer, the same a write that ran reports.
         assert {s for n, s in steps if n == "acme-b"} >= {"tag", "permissions", "folders", "schedules"}
         assert ("acme-a", "permissions") in steps  # a -> b skipped, b was not created
         assert {s for _, s in steps} <= {"create", "tag", "permissions", "folders", "resources",
@@ -936,7 +936,7 @@ class TestF3NothingNamesAMemberWhoseCreateFailed:
         assert W.apply(ew, FLEET, dry_run=False).status == "failed"
 
 
-class TestH2NeverRemoves:
+class TestNeverRemoves:
     def test_operator_tag_foreign_edge_grant_and_intra_edge_survive(self, ew):
         ew.seed_agent("acme-a", tags=(SYSTEM, "operator-pick"))
         ew.seed_agent("acme-b")
@@ -982,7 +982,7 @@ class TestH2NeverRemoves:
             ("acme-a", "outsider", "review", "alice695", "2026-10-01T00:00:00Z")]
 
 
-class TestH3SchedulesOnACreatedMember:
+class TestSchedulesOnACreatedMember:
     def test_the_templates_same_named_row_is_updated_after_creation(self, ew):
         dry = W.apply(ew, FLEET, dry_run=True)
         a = next(m for m in dry.members if m.short_name == "a")
@@ -1020,7 +1020,7 @@ class TestH3SchedulesOnACreatedMember:
             "daily", "weekly"]
 
 
-class TestH3bOwnerAndInvoker:
+class TestScheduleOwnerAndInvoker:
     def test_an_admins_apply_creates_the_row_as_the_agent_owner(self, ew):
         ew.seed_agent("acme-a")
         mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n"
@@ -1040,7 +1040,7 @@ class TestH3bOwnerAndInvoker:
         assert [(f.name, f.step) for f in result.failed] == [("acme-a", "schedules")]
 
 
-class TestH4Resources:
+class TestDeclaredResources:
     def test_a_created_member_gets_its_override_before_its_first_start(self, ew, monkeypatch):
         """The template ran the container with cpu 4; the declared 2 is
         written BEFORE apply's start step, and the platform's own predicate
@@ -1082,8 +1082,8 @@ class TestH4Resources:
         assert W.apply(ew, mf, dry_run=False).members[0].restart_required is False
 
 
-class TestH4RealStartPathKeepsTheVolumes:
-    """Codex pass 3 point 1: through the REAL `start_agent_internal` ->
+class TestRealStartPathKeepsTheVolumes:
+    """Through the REAL `start_agent_internal` ->
     `recreate_container_with_updated_config`, with Docker mocked at its
     calls. The just-created member's replacement gets the same named volumes,
     and the declared resources."""
@@ -1140,7 +1140,7 @@ class TestH4RealStartPathKeepsTheVolumes:
 
 
 class TestRestartRequiredFollowsTheMounts:
-    """Codex pass 1 #3 and #4: `restart_required` comes from the platform's
+    """`restart_required` comes from the platform's
     own mount predicate, read strictly, for every existing member."""
 
     def _consumer_and_exposer(self, ew):
@@ -1198,7 +1198,7 @@ class TestRestartRequiredFollowsTheMounts:
         assert snap.members["a"].blocked is True
 
 
-class TestH4bFolders:
+class TestDeclaredFolders:
     def test_an_existing_members_omitted_key_keeps_its_value(self, ew):
         ew.seed_agent("acme-a")
         db.upsert_shared_folder_config("acme-a", expose_enabled=False, consume_enabled=True)
@@ -1208,7 +1208,7 @@ class TestH4bFolders:
         assert (cfg.expose_enabled, cfg.consume_enabled) == (True, True)
 
 
-class TestH6Prompt:
+class TestPlatformPrompt:
     def test_written_only_by_an_admin_and_only_when_different(self, ew, monkeypatch):
         ew.seed_agent("acme-a")
         db.set_setting("trinity_prompt", "old")
@@ -1225,7 +1225,7 @@ class TestH6Prompt:
         assert W.apply(ew, _manifest("a", extra='prompt: ""\n'), W.ADMIN, dry_run=False).prompt.verdict == "not_declared"
 
 
-class TestH7H8ViewAndStart:
+class TestViewAndStart:
     def test_a_second_apply_creates_no_second_view(self, ew):
         mf = _manifest("a", extra="system_view: {name: Acme}\n")
         first = W.apply(ew, mf, dry_run=False)
@@ -1251,7 +1251,7 @@ class TestH7H8ViewAndStart:
         assert ew.docker.containers["acme-a"].status == "exited"
 
 
-class TestH11bCreatedMemberTaggedFirst:
+class TestCreatedMemberTaggedFirst:
     def test_a_failed_system_tag_is_named_and_the_next_apply_refuses_it(self, ew, monkeypatch):
         real_add = db.add_agent_tag
 
@@ -1275,7 +1275,7 @@ class TestH11bCreatedMemberTaggedFirst:
 KEY = f"system_apply:{SYSTEM}"
 
 
-class TestH13TheLock:
+class TestTheLock:
     def test_a_held_lock_refuses_and_writes_nothing(self, ew, tmp_path):
         ew.redis.store[KEY] = "someone-else"
         with _witness(ew, tmp_path) as w:
@@ -1363,7 +1363,7 @@ class TestH13TheLock:
             assert ew.redis.store[KEY] == "successor"  # a stale release never deletes it
 
     def test_a_write_that_blocks_the_loop_past_the_ttl_stops_every_later_write(self, ew, monkeypatch):
-        """Codex pass 1 #1: renewals run on the event loop and the writes are
+        """Renewals run on the event loop and the writes are
         synchronous, so a write that blocks the loop past the TTL lets the
         lease lapse (and a successor take it) before the keeper runs again.
         The keeper here never gets to run (300 s interval); only the local
@@ -1395,7 +1395,7 @@ class TestH13TheLock:
         assert ew.redis.store[KEY] == "successor"
 
     def test_the_lease_lost_after_the_first_start_stops_the_second(self, ew, monkeypatch):
-        """H8: started one by one behind the stop flag, never in bulk."""
+        """Started one by one behind the stop flag, never in bulk."""
         monkeypatch.setattr(system_service, "APPLY_LEASE_RENEW_SECONDS", 0.01)
         real_start = ew.docker.start
 
@@ -1417,7 +1417,7 @@ class TestH13TheLock:
 class TestOtherShapeFreshInstall:
     """Bootstrap equivalence: on an instance with no agents, tags, schedules
     or prior deploy, apply builds what create mode builds, but for the two
-    stated differences, asserted as such (Codex B-AC6)."""
+    stated differences, asserted as such."""
 
     def _state(self):
         names = ["acme-a", "acme-b"]
@@ -1528,7 +1528,7 @@ class TestOtherShapeEmptyData:
 
 class TestExecutionNeverLosesTheReport:
     def test_an_unreadable_resource_default_is_a_retryable_blocker_not_a_500(self, ew, tmp_path, monkeypatch):
-        """Codex pass 1 #2: the fleet default a member to create takes is a
+        """The fleet default a member to create takes is a
         settings read; it happens in the snapshot, so its failure refuses the
         run before any write instead of raising after the first create."""
         def _boom():

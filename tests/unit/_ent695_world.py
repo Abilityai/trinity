@@ -5,7 +5,7 @@ through the real writers. Docker is patched at its two read seams only —
 `docker_service.agent_container_states` (the tri-state roster) and
 `system_service._member_container` (the one per-member label read) — plus the
 Docker leg inside `crud.agent_name_is_taken`, which reads the same fake.
-`list_all_agents_fast` RAISES: apply must never depend on it (engineering F1).
+`list_all_agents_fast` RAISES: apply must never depend on it.
 """
 from __future__ import annotations
 
@@ -124,7 +124,7 @@ def _raise_fast(*_a, **_k):
 # folders and `schedules:` reach the member exactly as create applies them).
 TEMPLATES = {
     "plain": "name: plain\n",
-    # Declares a schedule a manifest re-declares (H3, P-F exception 1).
+    # Declares a schedule a manifest re-declares (P-F exception 1).
     "sched": (
         "name: sched\n"
         "schedules:\n"
@@ -133,9 +133,9 @@ TEMPLATES = {
         "    message: /template-daily\n"
         "    description: from the template\n"
     ),
-    # Overrides a declared resource (H4, P-F exception 2).
+    # Overrides a declared resource (P-F exception 2).
     "heavy": "name: heavy\nresources:\n  cpu: '4'\n  memory: '8g'\n",
-    # Declares its own shared-folder settings (fresh review #2: `folders: {}`).
+    # Declares its own shared-folder settings (`folders: {}` on a created member keeps them).
     "exposing": "name: exposing\nshared_folders:\n  expose: true\n",
 }
 
@@ -233,7 +233,7 @@ def install_executor_seams(world: "World", monkeypatch) -> None:
     """The create seam registers ownership in the REAL DB, adds the container,
     records the `AgentConfig` it was handed, resolves `local:` templates through
     the REAL resolver and materializes the template's `schedules:` through the
-    REAL reader and `crud.reconcile_declared_schedules` (engineering F9)."""
+    REAL reader and `crud.reconcile_declared_schedules`."""
     from fastapi import HTTPException
 
     import redis_breaker_util
