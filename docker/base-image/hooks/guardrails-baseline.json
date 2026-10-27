@@ -82,8 +82,8 @@
     {"name": "slack_user_token", "pattern": "xoxp-[0-9a-zA-Z-]{20,}"},
     {"name": "google_api_key", "pattern": "AIza[0-9A-Za-z_-]{35}"}
   ],
-  "max_turns_chat": 50,
-  "max_turns_task": 50,
+  "max_turns_chat": 200,
+  "max_turns_task": 200,
   "execution_timeout_sec": 1800,
   "extra_bash_deny": [],
   "extra_path_deny": [],

@@ -41,6 +41,7 @@ from models import EvaluationCreate, EvaluationResponse, User
 WORKSPACE_EVALUATOR_PREFIX = "workspace:"
 OPERATOR_EVALUATOR_PREFIX = "operator:"
 from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+from services import evaluation_read_service
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +108,11 @@ def _redact_for_agent_principal(row: dict, current_user: User,
         handing it to the rated agent verbatim is a prompt-injection path INTO
         the thing being criticised.
 
-    Only the comment is withheld. Quality, target and evaluator stay, so the
-    agent can count its ratings and an operator surface loses nothing.
+    The comment is withheld and the grader reduced to its kind (ent#781). A
+    rating's quality and target stay, so the agent can count its ratings. This
+    applies to every machine principal and to a human who is not an operator of
+    the row's agent; a human owner or admin of the agent reads the row as stored,
+    so an operator surface loses nothing.
     """
     # A machine never reads the words. Neither does a human who is not an
     # OPERATOR of this agent — a shared non-owner is another client, and the
@@ -128,15 +132,14 @@ def _redact_for_agent_principal(row: dict, current_user: User,
     # is in a better position to change its behaviour toward that person than
     # one that read the text. The KIND survives (`workspace` vs a Tier-0 pass
     # name), because "a person rated this" is the signal; "which person" is not.
-    _evaluator = str(row.get("evaluator") or "")
-    # ent#366 review: the operator form is anonymised on the same terms. An
-    # agent must not learn WHO rated it either way — and leaving the new prefix
-    # out would have made an operator's address the one identity that still
-    # reached the graded agent.
-    for _prefix in (WORKSPACE_EVALUATOR_PREFIX, OPERATOR_EVALUATOR_PREFIX):
-        if _evaluator.startswith(_prefix):
-            redacted["evaluator"] = _prefix.rstrip(":")
-            break
+    #
+    # ent#781: the rule is an ALLOWLIST (`redact_evaluator`). The two-prefix
+    # denylist it replaces anonymised `workspace:` and `operator:` and let the
+    # admin route's `admin:<username>` through verbatim — an email address for
+    # an email-login admin. Now only an exact known non-person name passes, any
+    # other `kind:rest` reads `kind`, and a value with no kind reads `unknown`,
+    # so a fourth person-writing kind is anonymised on the day it appears.
+    redacted["evaluator"] = evaluation_read_service.redact_evaluator(row.get("evaluator"))
     return redacted
 
 

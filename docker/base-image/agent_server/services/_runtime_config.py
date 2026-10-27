@@ -16,8 +16,10 @@ import json
 
 _GUARDRAILS_RUNTIME_PATH = "/opt/trinity/guardrails-runtime.json"
 _GUARDRAILS_BASELINE_PATH = "/opt/trinity/guardrails-baseline.json"
-_DEFAULT_MAX_TURNS_CHAT = 50
-_DEFAULT_MAX_TURNS_TASK = 50
+# Fallbacks for when no guardrails config loads; must equal the baseline JSON
+# (pinned by tests/unit/test_ent471_turn_default_parity.py).
+_DEFAULT_MAX_TURNS_CHAT = 200
+_DEFAULT_MAX_TURNS_TASK = 200
 _DEFAULT_EXECUTION_TIMEOUT_SEC = 1800  # GUARD-003 (#313): 30 min wall clock for chat
 
 

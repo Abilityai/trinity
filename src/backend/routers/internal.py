@@ -156,6 +156,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     if claim is None:
         # §3.2 — no work available.
         return {"envelope": None}
+    await pull_coordination_service.open_claim_activity(claim["execution_id"])
     return claim
 
 

@@ -113,6 +113,8 @@
           <div v-if="authStore.emailCodeLoginEnabled">
             <!-- Step 1: Enter Email -->
             <div v-if="!codeSent">
+              <!-- #3922: the Workspace's code page sent a platform account here. -->
+              <p v-if="workspaceHandoff" data-testid="login-workspace-handoff" :class="[HELP_CLASS, 'mb-4']">This email has a Trinity account. Sign in here to open your Workspace.</p>
               <form @submit.prevent="handleRequestCode" class="space-y-4">
                 <div>
                   <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -330,7 +332,11 @@ const loginLoading = ref(false)
 const loadingMessage = ref('Checking authentication...')
 
 // Email authentication state
-const emailInput = ref('')
+// #3922: the Workspace's code page hands a platform account over with its
+// address in `?email=`, the only producer of that query.
+const handoffEmail = typeof route.query.email === 'string' ? route.query.email.trim() : ''
+const workspaceHandoff = !!handoffEmail
+const emailInput = ref(handoffEmail)
 const codeInput = ref('')
 const codeSent = ref(false)
 const countdown = ref(0)

@@ -1017,7 +1017,8 @@ async def bind_agent_to_own_repo(
             raise fork_pat_required()
 
     destination = body.destination_repo
-    scope = idempotency_service.make_agent_scope(agent_name)
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+    scope = idempotency_service.make_caller_scope(agent_name, current_user)
     # Verb-folded key: a client reusing ONE Idempotency-Key across different
     # actions on the same agent must not replay the wrong snapshot
     # (learnings 2026-07-01). No key is derived when the caller omits the

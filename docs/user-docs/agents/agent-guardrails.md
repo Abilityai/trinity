@@ -71,8 +71,8 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`. Ge
 
 | Mode | Default | Range |
 |------|---------|-------|
-| Chat | 50 turns | 1-500 |
-| Task/Headless | 50 turns | 1-500 |
+| Chat | 200 turns | 1-500 |
+| Task/Headless | 200 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
 

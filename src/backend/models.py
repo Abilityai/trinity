@@ -4209,6 +4209,10 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # RETRY-001: a scheduler retry links to its chain's original execution.
+    # The MCP server scopes a delegation's idempotency key to it (#3296), so a
+    # retried scheduled run replays attempt 1's children instead of re-running.
+    retry_of_execution_id: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001
@@ -4224,6 +4228,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
@@ -4570,6 +4576,31 @@ class SlackChannelMessageRequest(IntentKeyFields):
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / portal
+    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
 
 
 class UpdateMyEmailRequest(BaseModel):
