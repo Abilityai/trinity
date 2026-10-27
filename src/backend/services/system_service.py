@@ -2889,6 +2889,29 @@ def _schedule_entry_error(entry: dict, *, cron: Optional[str] = None,
     return None
 
 
+def _well_formed_schedule_entries(cfg: SystemAgentConfig, name: str, blockers: List) -> List[dict]:
+    """The declared schedule entries the writer's own model accepts.
+
+    `validate_manifest` checks only that `name` / `cron` / `message` are
+    PRESENT, so `{name: [daily]}` reaches here; matching hashes the name and
+    would raise an unnamed 500 (Codex 5). Each rejected entry is a
+    `schedule_definition_invalid` blocker, and only accepted entries are
+    matched.
+    """
+    accepted = []
+    for index, entry in enumerate(cfg.schedules or []):
+        try:
+            _build_schedule_create(entry)
+        except Exception as e:  # noqa: BLE001 — ScheduleCreate rejected a field type
+            blockers.append(_apply_blocker(
+                "schedule_definition_invalid", name,
+                f"Schedule {index} of '{name}': {_failure_reason(e)[0]}",
+                "Give each schedule a string name, cron and message."))
+            continue
+        accepted.append(entry)
+    return accepted
+
+
 def _schedule_view(entry_or_row) -> Dict:
     """The schedule fields a report shows. Never webhook tokens or secrets."""
     if isinstance(entry_or_row, dict):
@@ -2986,7 +3009,8 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
             desired=cfg.template, note="apply never recreates an agent"))
 
     # Schedules (H3, H3b).
-    for action in resolve_declared_schedule_actions(cfg.schedules or [], state.schedules):
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
+    for action in resolve_declared_schedule_actions(entries, state.schedules):
         field_name = f"schedule:{action.name}"
         if action.kind == "create":
             error = _schedule_entry_error(action.entry)
@@ -3100,7 +3124,7 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
         mp.ops.append(ApplyOp("created_resources", name, short,
                               {"declared": dict(normalized_resources)}))
 
-    entries = list(cfg.schedules or [])
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
     for action in resolve_declared_schedule_actions(entries, []):
         if action.kind == "declared_twice":
             blockers.append(_apply_blocker(

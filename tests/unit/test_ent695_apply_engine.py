@@ -495,6 +495,18 @@ class TestSchedulesInThePlan:
         plan = _plan(world, _one_member(world, f"    schedules:\n      - {entry}\n"))
         assert [b.code for b in plan.blockers] == [code]
 
+    @pytest.mark.parametrize("existing", [True, False])
+    def test_a_non_string_schedule_name_is_a_named_blocker_not_a_500(self, world, existing):
+        """Codex pass 1 #5: `validate_manifest` checks presence only, so a list
+        name reaches the matcher, whose dict would raise `TypeError`."""
+        if existing:
+            world.seed_agent("acme-a")
+        mf = (f"name: {SYSTEM}\nagents:\n  a:\n    template: local:plain\n"
+              "    schedules:\n      - {name: [daily], cron: '0 9 * * *', message: /d}\n"
+              "      - {name: ok, cron: '0 9 * * *', message: /d}\n")
+        plan = _plan(world, mf)
+        assert [(b.code, b.member) for b in plan.blockers] == [("schedule_definition_invalid", "acme-a")]
+
     def test_an_invalid_cron_on_an_update_is_refused(self, world):
         mf = _one_member(world, "    schedules:\n      - {name: daily, cron: '61 9 * * *', message: /d}\n")
         db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
