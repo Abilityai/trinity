@@ -26,10 +26,14 @@ Pinned here, for `db_backup_failure`, `db_backup_stale` and
   day 30; the one-off failure reading has expired; a person's ending of the
   stale row silences one weekly re-alarm, not more.
 
-The clock is frozen, at a pinned date in the past (see DAY0), for every module
-the asserted path reads it from (the seam, the DB layer, the backup service,
-`utils.helpers`), by patching each running function's own globals. No literal is
-compared to the real clock.
+Every test runs on its own fresh SQLite database (`db_harness`), so the
+queue's fleet-wide expiry sweep the 30-day tests run reaches only that test's
+rows.
+
+The clock is frozen, at a pinned date, for every module the asserted path reads
+it from (the seam, the DB layer, the backup service, `utils.helpers`), by
+patching each running function's own globals. No literal is compared to the
+real clock.
 """
 import asyncio
 import os
@@ -41,16 +45,12 @@ from unittest.mock import patch
 import pytest
 
 # tests/unit/conftest.py puts src/backend on sys.path before collection.
+from db_harness import sqlite_only_backend  # noqa: F401 — a fixture, used by name
 from services import platform_alerts as pa
 
 pytestmark = pytest.mark.unit
 
-# A pinned Monday, 03:30 UTC: the nightly backup's default slot. Pinned in
-# the past on purpose. The 30-day tests run the queue's real expiry sweep,
-# which is fleet-wide over the unit tier's shared per-process DB. A sweep at a
-# frozen instant before the real clock can only end rows whose deadline is
-# already past in real time, which any other test's real-time sweep would end
-# too, so it never ends another test's live row.
+# A pinned Monday, 03:30 UTC: the nightly backup's default slot.
 DAY0 = datetime(2026, 1, 5, 3, 30, tzinfo=timezone.utc)
 _REAL_DATETIME = datetime
 
@@ -115,27 +115,14 @@ def clock(monkeypatch):
     return c
 
 
-def _purge(db):
-    """Remove every row on the two sentinel hosts. The unit island's DB lives
-    for the whole process, and these hosts are fixed names."""
-    import services.db_backup_service as svc_mod
-    from services import archive_storage
-
-    g = type(db._operator_queue_ops).create_platform_item.__globals__
-    table = g["operator_queue"]
-    with g["get_engine"]().begin() as conn:
-        conn.execute(g["delete"](table).where(table.c.agent_name.in_(
-            (svc_mod.ALARM_AGENT_NAME, archive_storage.ALARM_AGENT_NAME))))
-
-
 @pytest.fixture
-def db(monkeypatch):
+def db(request, monkeypatch):
+    """The real database facade, on a fresh SQLite file for this test alone."""
+    request.getfixturevalue("sqlite_only_backend")
     from database import db
     from services import operator_resume_service
     monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
-    _purge(db)
-    yield db
-    _purge(db)
+    return db
 
 
 @pytest.fixture
