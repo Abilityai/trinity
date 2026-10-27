@@ -22,8 +22,8 @@ Pinned here, for `db_backup_failure`, `db_backup_stale` and
   kinds share the `db-backup-` prefix and are told apart by
   `context.alert_type`).
 * Two workers (the Redis lease failed open): the sibling's outcome landing
-  inside this worker's alarm call waits for it, so the failure alarm always
-  matches the status that stands.
+  inside this worker's alarm call, the outcome's or the staleness check's,
+  waits for it, so the alarms always match the status that stands.
 * The other shape, the clock 30 days ahead: a persisting staleness, re-alarmed
   weekly by the real `_staleness_check`, keeps exactly one pending row through
   day 30; the one-off failure reading has expired; a person's ending of the
@@ -329,16 +329,22 @@ class TestTwoWorkers:
             real_flock = fcntl.flock
 
             def flock(fd, op):
+                # Signal only a sibling that is really blocked by this worker:
+                # an uncontended lock is taken at once, and the hook then waits
+                # for the sibling to finish, so the order stays deterministic.
                 if op == fcntl.LOCK_EX:
-                    state.waiting.set()
+                    try:
+                        return real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        state.waiting.set()
                 return real_flock(fd, op)
 
             monkeypatch.setitem(lock.__wrapped__.__globals__, "fcntl", SimpleNamespace(
-                flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_UN=fcntl.LOCK_UN))
+                flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_NB=fcntl.LOCK_NB, LOCK_UN=fcntl.LOCK_UN))
 
         def land(status, **kw):
             """Start the sibling's outcome in its own thread; return once it
-            has finished or is waiting on the outcome lock."""
+            has finished or is blocked on the outcome lock this worker holds."""
             sib = svc_mod.DBBackupService()
             done = threading.Event()
 
@@ -391,6 +397,20 @@ class TestTwoWorkers:
         assert _pending(db, backup.host) == []
         (row,) = _all_rows(db, backup.host)
         assert (row["status"], row["disposed_by"]) == ("cancelled", "platform")
+
+    def test_a_success_recorded_during_this_workers_stale_alarm_ends_it(self, db, backup, sibling):
+        backup.settings["db_backup_last_status"] = "failed"
+        backup.settings["db_backup_last_success_at"] = _iso(DAY0 - timedelta(days=4))
+        sibling.at_seam_call("observe", "db_backup_stale", "ok",
+                             path=os.path.join(backup.dir, "trinity-backup-x.db"),
+                             size_bytes=1, duration_ms=1)
+        _check(backup)
+        sibling.join()
+        assert backup.settings["db_backup_last_status"] == "ok"
+        assert _pending(db, backup.host) == []
+        (row,) = _all_rows(db, backup.host)
+        assert (row["subject"], row["status"], row["disposed_by"]) == (
+            pa.subject_for("db_backup_stale", backup.dir), "cancelled", "platform")
 
     def test_an_unavailable_lock_fails_open(self, db, backup, monkeypatch):
         """A lock file that cannot be opened (a root-owned data dir) must not

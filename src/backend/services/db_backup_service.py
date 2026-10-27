@@ -482,7 +482,12 @@ class DBBackupService:
         success in the settings without passing through ``_record_outcome``,
         so this is where it is seen. With no success on record the reference
         is the first attempt, and a young one is not evidence that a backup
-        works, so it ends nothing."""
+        works, so it ends nothing.
+
+        The read, the decision and the alarm run under ``_outcome_lock``, like
+        an outcome and its alarm, so a sibling worker's ``ok`` lands wholly
+        before this check (which then reads the fresh success) or wholly after
+        it (and its clear ends what this check filed)."""
         from database import db
         from utils.helpers import utc_now_iso
 
@@ -498,8 +503,8 @@ class DBBackupService:
                     "db_backup_last_staleness_alarm_at", None),
             }
 
-        try:
-            state = await asyncio.to_thread(_read)
+        def _check() -> None:
+            state = _read()
             reference = state["last_success_at"] or state["first_attempt_at"]
             if not reference:
                 return
@@ -515,10 +520,7 @@ class DBBackupService:
                 alarm_age = (now - _parse_iso(last_alarm)).total_seconds() / 86400.0
                 if alarm_age < _STALENESS_REALARM_DAYS:
                     return
-            await asyncio.to_thread(
-                db.set_setting, "db_backup_last_staleness_alarm_at",
-                utc_now_iso(),
-            )
+            db.set_setting("db_backup_last_staleness_alarm_at", utc_now_iso())
             outcome = platform_alerts.observe(
                 ALARM_AGENT_NAME, "db_backup_stale", backup_dir,
                 title="Database backups are stale",
@@ -536,6 +538,13 @@ class DBBackupService:
                 },
             )
             logger.warning("[DBBackup] staleness alarm %s", outcome)
+
+        def _locked_check() -> None:
+            with _outcome_lock():
+                _check()
+
+        try:
+            await asyncio.to_thread(_locked_check)
         except Exception:
             logger.exception("[DBBackup] staleness check failed")
 
