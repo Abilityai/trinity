@@ -454,8 +454,9 @@ async def test_divergence_outlives_a_sync_failing_precedence_and_ends_with_its_e
         service, seed_agent, db, clock):
     """Sync failing takes precedence over divergence as the freeze cause
     (sync_freeze_policy). While it does, the divergence episode still holds:
-    its row is neither ended nor duplicated, and when divergence is the cause
-    again the same row is re-read. Only `diverged_since` clearing ends it."""
+    its row is neither ended nor duplicated, it is still re-read (R9, with the
+    divergence text, not the failure's), and when divergence is the cause again
+    the same row carries on. Only `diverged_since` clearing ends it."""
     import services.sync_health_service as shs
     seed_agent()
     await _poll(service, _AHEAD)
@@ -475,14 +476,16 @@ async def test_divergence_outlives_a_sync_failing_precedence_and_ends_with_its_e
     assert db.get_sync_state("alpha")["diverged_since"] == episode
     assert len(_pending(db, "sync-failing-")) == 1
     held = db.get_operator_queue_item(row["id"])
-    assert held["status"] == "pending" and held["context"]["seen_count"] == 1
+    assert held["status"] == "pending" and held["context"]["seen_count"] == 2
+    assert "diverged 0 behind / 7 ahead" in held["question"]
+    assert "boom" not in held["question"]
 
     clock.advance(**_MIN)
     await _poll(service, _AHEAD)  # the sync recovers; divergence is the cause again
     assert _pending(db, "sync-failing-") == []
     (again,) = _rows(db, "sync-diverged-")
     assert again["id"] == row["id"] and again["status"] == "pending"
-    assert again["context"]["seen_count"] == 2
+    assert again["context"]["seen_count"] == 2  # re-read 7 min ago: not due
 
     clock.advance(**_MIN)
     await _poll(service, _OK)  # the episode ends
@@ -557,3 +560,48 @@ async def test_an_oversized_agent_error_cannot_keep_the_sync_failing_alert_out(
     assert row["title"] == "Git token can't push"
     assert row["context"]["last_error_summary"] == huge[:240]
     assert db.get_sync_state("alpha")["last_error_summary"] == huge
+
+
+@pytest.mark.asyncio
+async def test_a_divergence_under_a_31_day_sync_failing_precedence_keeps_its_row(
+        service, seed_agent, db, clock):
+    """The other shape for the precedence: a divergence reported, then sync
+    failing for 31 days while `diverged_since` holds. Its row is re-read under
+    the precedence, so its 30-day deadline keeps moving and it never expires."""
+    seed_agent()
+    await _poll(service, _AHEAD)
+    clock.advance(hours=25)
+    await _poll(service, _AHEAD)
+    (row,) = _rows(db, "sync-diverged-")
+    failing = _payload(status="failed", error="boom", ahead=7)
+    expired = []
+    for _ in range(0, 31 * 24 + 1, 2):
+        clock.advance(hours=2)
+        await _poll(service, failing)
+        expired += [r for r in db.mark_operator_queue_expired() if r["agent_name"] == "alpha"]
+    assert expired == []
+    (again,) = _rows(db, "sync-diverged-")
+    assert again["id"] == row["id"] and again["status"] == "pending"
+    assert _ts(again["expires_at"]) > clock.now + timedelta(days=29)
+    assert len(_pending(db, "sync-failing-")) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_sync_failing_precedence_never_raises_a_divergence_alert(
+        service, seed_agent, db, clock):
+    """A refused push leaves commits unpushed, so the agent diverges while sync
+    failing is already the freeze cause. Sync failing has its own row; the
+    divergence underneath it is re-read only for an episode already reported."""
+    seed_agent()
+    failing = _payload(status="failed", error=_DENIED, ahead=7)
+    for _ in range(3):
+        await _poll(service, failing)
+        clock.advance(**_MIN)
+    clock.advance(hours=25)
+    for _ in range(2):
+        await _poll(service, failing)
+        clock.advance(hours=7)
+    assert db.get_sync_state("alpha")["diverged_since"] is not None
+    assert len(_pending(db, "sync-failing-")) == 1
+    assert _rows(db, "sync-diverged-") == []
+

@@ -639,16 +639,25 @@ class SyncHealthService:
             self._forget_reading("sync_failing", agent_name)
 
         # trinity-enterprise#706: a divergence freeze in force is one condition
-        # per agent, reported once per episode and re-read while it lasts (#3254
-        # R9). Rule 2 (sync_failing) takes precedence over divergence as the
-        # freeze cause, so the cause moving away is not the divergence ending:
-        # the platform ends the row only when the `diverged_since` episode
-        # itself ends (R10).
+        # per agent, raised once per episode when divergence is the freeze cause
+        # and re-read while the episode lasts (#3254 R9). Rule 2 (sync_failing)
+        # takes precedence over divergence as the freeze cause, so the cause
+        # moving away is not the divergence ending: an episode this process
+        # reported is still re-read under the precedence, from the policy's
+        # verdict with the precedence lifted, and the platform ends the row only
+        # when the `diverged_since` episode itself ends (R10). Sync failing has
+        # its own row, so a precedence never RAISES a divergence alert.
         verdict = sync_view(updated, config)
         episode = updated.get("diverged_since")
+        reported = self._alert_read_at.get(("sync_diverged", agent_name), (None,))[0]
         if verdict["freeze_cause"] == "divergence":
             if self._reading_due("sync_diverged", agent_name, episode=episode):
                 self._observe_sync_diverged(agent_name, updated, verdict)
+        elif (verdict["freeze_cause"] == "sync_failing" and episode and reported == episode
+                and self._reading_due("sync_diverged", agent_name, episode=episode)):
+            underneath = sync_view({**updated, "consecutive_failures": 0}, config)
+            if underneath["freeze_cause"] == "divergence":
+                self._observe_sync_diverged(agent_name, updated, underneath)
         if (prior or {}).get("diverged_since") and not episode:
             platform_alerts.clear(agent_name, "sync_diverged", agent_name)
             self._forget_reading("sync_diverged", agent_name)
