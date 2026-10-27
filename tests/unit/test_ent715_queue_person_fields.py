@@ -937,7 +937,7 @@ _ROW_READERS = {
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
-    (_OQS, "list_for_principal"): (
+    ("services/operator_queue_service/listing.py", "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),
     (_TAGS, "_mine"): ("addressee", "one tag, only for the person it tags"),
