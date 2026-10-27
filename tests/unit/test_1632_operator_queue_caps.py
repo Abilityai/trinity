@@ -575,6 +575,8 @@ class TestExemptionAndFloodAlert:
 # ---------------------------------------------------------------------------
 # 5b. Platform producer — validation_service direct create (#1632)
 # ---------------------------------------------------------------------------
+# Since #3254 `_notify_operator_on_failure` reports through `platform_alerts.observe`
+# (one `validation_failed:<execution>` row); the #1632 contract below still holds.
 # `_notify_operator_on_failure` was converted to a DIRECT db.create_operator_queue_item
 # (#1632): it's a *platform* alert, so it must bypass the agent-authored sync-ingestion
 # caps (routing it through the agent file would flow it through `_sync_agent` and cap it),

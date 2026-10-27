@@ -554,8 +554,9 @@ _PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 
 def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Mapping) -> bool:
-    """A person ended this subject's row inside the snooze window, and the new
-    reading is neither a priority increase nor a material change."""
+    """A person ended this subject's row inside the snooze window (at any time,
+    for a kind whose `person_ending_is_final`), and the new reading is neither
+    a priority increase nor a material change."""
     if not ended:
         return False
     if _PRIORITY_RANK.get(priority, 0) > _PRIORITY_RANK.get(ended.get("priority"), 0):
@@ -606,8 +607,9 @@ def observe(
 
     The subject's pending row is updated in place (one row per subject, the
     latest reading); with no pending row, a reading a person ended inside the
-    snooze window (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`, default 7) files
-    nothing unless its priority rose or a `material_keys` value changed; else
+    snooze window (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`, default 7; at any
+    time, for a kind whose `person_ending_is_final`) files nothing unless its
+    priority rose or a `material_keys` value changed; else
     a fresh row is filed with the kind's lifetime as `expires_at`, measured
     from this reading. Returns one of the ``OBSERVED_*`` outcomes.
     """

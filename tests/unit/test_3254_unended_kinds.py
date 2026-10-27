@@ -362,6 +362,8 @@ class TestPersonEnding:
     def test_an_acknowledged_validation_alert_snoozes_the_next_failure(self, db, pa, clock, agent):
         _validation_failed(agent, "exec-a2")
         (row,) = _pending(db, agent)
+        # The seam's row, not an old per-second id that ON CONFLICT would swallow.
+        assert row["subject"] == "validation_failed:exec-a2"
         _acknowledge(row)
         clock.advance(days=1)
         _validation_failed(agent, "exec-a2")
