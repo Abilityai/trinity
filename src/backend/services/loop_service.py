@@ -413,8 +413,17 @@ class LoopService:
             it: the event was lost with the restart, and `runs_completed` has
             not moved, so re-arming would dispatch a second row for the same
             `run_number`;
-          * a loop with no open run lost its dispatch and is re-armed by making
-            it due now.
+          * a loop with no open run is re-armed by parking it.
+
+        #3317: "no open run" is also what a LIVE advance on another worker looks
+        like between closing run N and claiming run N+1; in the row the two are
+        identical. So the snapshot only pre-filters. The decision is
+        `db.rearm_lost_dispatch`, made under the loop row's lock on what the row
+        and its runs say at that moment, and the claim in `db.start_loop_run`
+        keeps run N+1 to one dispatch whichever worker gets there. A closed run
+        numbered past `runs_completed` with nothing in flight is reported
+        (`stuck`), not re-armed: that would dispatch a run number that already
+        exists.
 
         Returns the number of loops this call moved (re-armed or advanced).
         """
@@ -428,14 +437,22 @@ class LoopService:
         for loop in loops:
             try:
                 if loop.get("next_run_at"):
-                    continue  # parked — the sweep owns it
-                open_run = self._open_run(loop["id"])
-                if open_run is None:
-                    # Nothing in flight and nothing parked: the dispatch was
-                    # lost. Make it due now.
-                    db.schedule_loop_next_run(loop["id"], utc_now_iso())
+                    continue  # parked in the snapshot — the sweep owns it
+                outcome, open_run = db.rearm_lost_dispatch(
+                    loop["id"], due_for=lambda _loop, _runs: utc_now_iso()
+                )
+                if outcome == "armed":
                     moved += 1
                     continue
+                if outcome == "stuck":
+                    logger.warning(
+                        "[Loop] %s has a closed run numbered past runs_completed "
+                        "and nothing in flight; not re-armed (that would dispatch "
+                        "a run number that already exists)", loop["id"],
+                    )
+                    continue
+                if outcome != "open_run":
+                    continue  # parked, finished or deleted since the snapshot
                 if self._execution_is_live(open_run.get("execution_id")):
                     continue  # its terminal will advance the loop
                 # The run's execution is already terminal (or gone) — the
@@ -451,14 +468,6 @@ class LoopService:
         return moved
 
     # ---- Internals ----------------------------------------------------------
-
-    @staticmethod
-    def _open_run(loop_id: str) -> Optional[dict]:
-        """The loop's run row still awaiting a terminal, if any."""
-        for run in db.list_loop_runs(loop_id):
-            if run.get("status") == "running":
-                return run
-        return None
 
     @staticmethod
     def _execution_is_live(execution_id: Optional[str]) -> bool:
