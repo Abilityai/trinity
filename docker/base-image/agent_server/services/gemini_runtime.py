@@ -802,9 +802,30 @@ class GeminiRuntime(AgentRuntime):
                         self._process_stream_line(line, execution_log, metadata, tool_start_times, tool_names, response_parts, model)
                 except Exception as e:
                     logger.error(f"[Headless Task {session_id}] Error: {e}")
+                    # #3408: end the child and observe its exit before raising
+                    # (the inner timeout and any per-line error). The waiter's
+                    # `finally: unregister()` keeps a live child (#3307), so a
+                    # raise with the child alive left its entry registered with
+                    # nothing to release it. Pid only: a Gemini child shares the
+                    # agent server's process group, so a group signal would hit
+                    # the server. An exit not observed keeps the entry, truthfully.
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            f"[Headless Task {session_id}] Gemini child did not "
+                            "exit after SIGKILL — it stays registered"
+                        )
+                    except Exception:
+                        logger.exception(
+                            f"[Headless Task {session_id}] killing the Gemini "
+                            "child raised on error path — continuing"
+                        )
                     # Issue #817 follow-up: even on error, run the cgroup
                     # sweep so leaked descendants don't survive the failed
-                    # task.
+                    # task. After the kill above the dead child is off the
+                    # allowlist, so its descendants are no longer spared.
                     try:
                         kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
                     except Exception:
