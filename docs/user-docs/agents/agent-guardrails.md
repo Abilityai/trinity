@@ -71,8 +71,8 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`. Ge
 
 | Mode | Default | Range |
 |------|---------|-------|
-| Chat | 50 turns | 1-500 |
-| Task/Headless | 50 turns | 1-500 |
+| Chat | 200 turns | 1-500 |
+| Task/Headless | 200 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
 
@@ -100,12 +100,14 @@ Owners can tighten guardrails for specific agents. Overrides are additive -- you
 ### Configure via UI
 
 1. Open the agent detail page
-2. Go to the **Settings** tab (visible to owners; on narrow windows it may sit under the **More ▾** menu)
-3. In the **Guardrails** section, set **Max turns (chat)** and **Max turns (task)**. Leave a field blank to inherit the platform default.
+2. Go to the **Settings** tab (visible to owners; it is pinned at the end of the tab strip, never under **More ▾**) and pick **Guardrails** in the rail (`?tab=settings&section=guardrails`)
+3. The **Guardrail rules** row under **Bounds** summarises the current limits (*Max turns: chat N · task N*, or *default*). Click **Manage rules** to open the editor below the row, then set **Max turns (chat)** and **Max turns (task)**. Leave a field blank to inherit the platform default.
 4. Click **Save**
-5. **Restart the agent** to apply changes
+5. **Restart the agent** — the save is listed as **Guardrail rules** in the bar at the top of Settings, with a **Restart now** button
 
-The UI currently exposes the turn limits only. The other overrides (deny lists, disallowed tools, execution timeout) are API-only -- the UI preserves them when saving, so a UI save never wipes overrides set via the API.
+The UI exposes the turn limits only. Deny lists and disallowed tools are API-only -- the UI preserves them when saving, so a UI save never wipes overrides set via the API. The execution timeout has its own control under **Settings › General › Execution** (see [Agent Configuration](agent-configuration.md#execution-timeout)).
+
+The same pane reads everything else that bounds the agent: [permissions to change itself](agent-configuration.md#permissions-to-change-itself), how many of its skills need approval (**Open Skills** to change them), the autonomy switch (read-only here; the chip in the header is the control), cross-model validation when the instance has the matching entitlement, and the [dispatch circuit breaker](agent-configuration.md#dispatch-circuit-breaker).
 
 ### Configure via API
 
@@ -168,10 +170,10 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## Limitations
 
 - **Baseline cannot be relaxed** -- Per-agent overrides only add restrictions, never remove them.
-- **Restart required** -- Guardrail changes require stopping and starting the agent.
+- **Restart required** -- Guardrail changes require stopping and starting the agent; the bar at the top of Settings lists the pending save and restarts the agent for you.
 - **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection.
 - **Claude Code only** -- The hooks and the turn limit apply to Claude Code. Codex honours read-only mode through its sandbox; Gemini CLI turns are not covered.
-- **Partial UI coverage** -- The Settings tab manages turn limits; deny lists, disallowed tools, and the execution timeout override are configured via the API.
+- **Partial UI coverage** -- Settings › Guardrails manages turn limits and Settings › General the execution timeout; deny lists and disallowed tools are configured via the API.
 
 ## See Also
 

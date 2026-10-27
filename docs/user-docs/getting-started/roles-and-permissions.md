@@ -27,6 +27,8 @@ If two-factor authentication applies to the account (requires an entitlement), a
 
 When you sign up via email (if whitelisted), you receive the **role recorded on your whitelist entry** — `user` unless the admin picked another role when adding the email (Settings → Access → Email Whitelist has a role picker, default `user`).
 
+Adding a whitelist entry takes an admin's signed-in session, whichever role is picked, `user` included: the entry gives the person a signed-in session at that role on their first sign-in. An API key gets a 403, even an admin's own key.
+
 Being granted access to an agent — sharing, or an approved access request — does **not** create a platform account. The person signs in to the [Workspace](../sharing-and-access/workspace.md) with a code emailed to them. Whitelist rows that sharing wrote before this changed are still there, and the accounts they produce are Workspace-only `user` accounts.
 
 Admins can change a user's role at any time via Settings. To give someone the operator UI, raise them to `operator`.
@@ -68,7 +70,7 @@ For monitoring integrations that must keep working under enforced two-factor, an
 
 **Admin only.** A role applies on every agent. Change it in **Settings → Access → User Management**: find the user in the table (when some accounts are Workspace-only, the section says how many; **Show only these** filters the table to them) and pick a new role from the dropdown (`user` reads "user — Workspace only").
 
-An agent's **Access** tab can also show a role select on each person's row; the role it sets applies on every agent. Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
+An agent's **Settings › People** pane can also show a role select on each person's row; the role it sets applies on every agent. Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
 
 The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
 

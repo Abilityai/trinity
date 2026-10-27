@@ -313,6 +313,7 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    Column("a2a_caller_identity", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
@@ -555,6 +556,7 @@ enterprise_portal_messages = Table(
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
     Column("attachments", Text),    # #3265: JSON list on a user turn
     Column("execution_id", Text),   # #3166: the turn that wrote the row
+    Column("gate_hold", Text),      # #3402: held/refused by the gate — never replayed
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -629,6 +631,18 @@ enterprise_room_messages = Table(
     Column("content", Text),
     Column("execution_id", Text),
     Column("created_at", Text),
+)
+
+# trinity#3402 — the room messages one agent's skill gate stopped (DDL comment
+# in db/schema.py). The primary key is the ON CONFLICT target of the write.
+room_gate_holds = Table(
+    "room_gate_holds",
+    metadata,
+    Column("room_id", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),
+    Column("gate_hold", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
 )
 
 
@@ -931,6 +945,9 @@ public_chat_messages = Table(
     # #903: per-message speaker attribution for thread-scoped channel sessions.
     Column("sender_email", Text),
     Column("sender_label", Text),
+    # #3402: held/refused by the skill gate (or written naming a gated skill) —
+    # never replayed to the agent. See the DDL comment in db/schema.py.
+    Column("gate_hold", Text),
 )
 
 public_user_memory = Table(
@@ -1623,6 +1640,43 @@ nevermined_payment_log = Table(
     Column("success", Integer),
     Column("error", Text),
     Column("created_at", Text),
+)
+
+# trinity-enterprise#966 — see the DDL comment in db/schema.py.
+nevermined_organization = Table(
+    "nevermined_organization",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, nullable=False),
+    Column("environment", Text, nullable=False),
+    Column("encrypted_credentials", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_by", Text),
+)
+
+agent_delegations = Table(
+    "agent_delegations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("delegation_id", Text, nullable=False),
+    Column("payment_method_id", Text),
+    Column("provider", Text),
+    Column("environment", Text, nullable=False),
+    Column("api_key_injected", Integer, nullable=False, server_default="0"),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("revoked_at", Text),
+    Column("revoked_by", Text),
+    Column("agent_deleted_at", Text),
+    Index(
+        "uq_agent_delegations_active",
+        "agent_name",
+        unique=True,
+        sqlite_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+        postgresql_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+    ),
 )
 
 agent_event_subscriptions = Table(

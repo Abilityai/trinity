@@ -340,6 +340,12 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
     return True
 
 
+# #3603: what a channel member is told when a turn does not answer. A failed
+# turn's error is for the operator and never reaches the chat.
+CHANNEL_FAILURE_MESSAGE = "Sorry, I encountered an error processing your message. Please try again."
+CHANNEL_CANCELLED_MESSAGE = "That request was cancelled before it was answered."  # always, never the row's error
+
+
 class ChannelMessageRouter:
     """Channel-agnostic message dispatcher."""
 
@@ -382,14 +388,34 @@ class ChannelMessageRouter:
                 agent_name, adapter.get_session_identifier(message), channel
             )
             session_id = session.id if hasattr(session, "id") else session["id"]
+            # trinity#3402: chatter is never dispatched, so the gate never sees
+            # it — one that invokes a gated skill is kept out of the history.
+            from services.skill_gate_service import gate_hold_on_write
             db.add_public_chat_message(
                 session_id, "user", message.text,
                 sender_label=_sender_label(message),
+                **gate_hold_on_write(agent_name, message.text),
             )
             self._prune_group_session_if_due(session_id, _session_count(session), added=1)
             logger.debug(f"[ROUTER:{channel}] observed group message recorded (session={session_id})")
         except Exception as e:  # noqa: BLE001 — observation must never surface as an error
             logger.warning(f"[ROUTER:{channel}] observed-message record failed (non-fatal): {e}")
+
+    @staticmethod
+    def _mark_gate_hold(message: NormalizedMessage, exc, channel: str) -> None:
+        """trinity#3402: a group turn's message is stored as context before it
+        runs (step 7); one the gate stopped is kept out of every later turn's
+        history block. A DM is stored only after a run, so there is nothing to
+        mark. A failure is an ERROR: until fixed, the row would be replayed."""
+        row_id = message.metadata.get("_user_turn_row_id")
+        if not row_id:
+            return
+        from services.skill_gate_errors import hold_marker
+        try:
+            db.mark_public_chat_messages_held([row_id], hold_marker(exc))
+        except Exception:  # noqa: BLE001
+            logger.error(f"[ROUTER:{channel}] could not mark the gated message {row_id}",
+                         exc_info=True)
 
     @staticmethod
     def _prune_group_session_if_due(session_id: str, count_before: int, *, added: int) -> None:
@@ -534,12 +560,18 @@ class ChannelMessageRouter:
                 # run must sort after it (stored order = what the group saw),
                 # and a failed run must not erase the message from the group's
                 # memory. Step 11 skips the user insert for this turn.
-                db.add_public_chat_message(
+                # trinity#3402: marked as stored if it invokes a gated skill (a
+                # channel sender never self-approves, so it will not run as
+                # itself) — and again, with the verdict, if the gate stops it.
+                from services.skill_gate_service import gate_hold_on_write
+                row = db.add_public_chat_message(
                     session_id, "user", message.text,
                     sender_email=verified_email,
                     sender_label=_sender_label(message),
+                    **gate_hold_on_write(agent_name, message.text),
                 )
                 message.metadata["_user_turn_persisted"] = True
+                message.metadata["_user_turn_row_id"] = getattr(row, "id", None)
                 self._prune_group_session_if_due(session_id, _session_count(session), added=2)
             else:
                 # Context OFF ⇒ nothing about this group is recorded: not the
@@ -851,11 +883,19 @@ class ChannelMessageRouter:
                 logger.info(f"[ROUTER:{channel}] Step 9 - task {result.status}: {error_msg}")
                 await self._resolve_indicator(adapter, message, success=False)
 
-                # Reply with the actual error if available, otherwise generic message
-                if error_msg and error_msg != "Unknown error":
-                    response_text = error_msg
+                # #3603: the error is the operator's diagnosis (a missing model
+                # key, an exit code, where to fix a credential) and a channel is
+                # read by its members — every member, in a group. They get a
+                # plain line; the detail stays on the execution row and in the
+                # log line above (the public-chat twin is #3478). A cancelled
+                # turn still says so (#679), in the fixed line: on a pull-pilot
+                # agent a terminated turn keeps the failure body's content and
+                # the pull sink stores it as the cancelled row's error, so that
+                # error can be the operator's too.
+                if result.status == "cancelled":
+                    response_text = CHANNEL_CANCELLED_MESSAGE
                 else:
-                    response_text = "Sorry, I encountered an error processing your message."
+                    response_text = CHANNEL_FAILURE_MESSAGE
 
                 await adapter.send_response(
                     message.channel_id,
@@ -874,6 +914,7 @@ class ChannelMessageRouter:
             # ran. Say so in the conversation (with the request id when an
             # approval was raised) instead of an error or an empty reply.
             logger.info(f"[ROUTER:{channel}] Step 9 - held by the skill gate: {e.code}")
+            self._mark_gate_hold(message, e, channel)
             await self._resolve_indicator(adapter, message, success=False)
             await adapter.send_response(
                 message.channel_id,
@@ -890,7 +931,7 @@ class ChannelMessageRouter:
             await adapter.send_response(
                 message.channel_id,
                 ChannelResponse(
-                    text="Sorry, I encountered an error processing your message. Please try again.",
+                    text=CHANNEL_FAILURE_MESSAGE,
                     metadata={"bot_token": bot_token, "agent_name": agent_name}
                 ),
                 thread_id=message.thread_id,
@@ -972,7 +1013,10 @@ class ChannelMessageRouter:
         outbound_files = []
         send_text = response_text
         try:
-            send_text, outbound_files = self._extract_outbound_files(response_text)
+            # Telegram renders code inline across ordered messages. Extracting
+            # it here used to leave placeholders for files it never uploaded.
+            if channel != "telegram":
+                send_text, outbound_files = self._extract_outbound_files(response_text)
             if outbound_files:
                 logger.info(
                     f"[ROUTER:{channel}] Extracted {len(outbound_files)} outbound file(s) "

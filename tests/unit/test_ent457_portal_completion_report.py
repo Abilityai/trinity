@@ -395,7 +395,13 @@ def _drive(ccr, monkeypatch, row, *, status="success", summary_or_error="done",
 
     # `_resolve_portal` does `from client_portal import db as portal_db` at call
     # time, so the stub has to be installed on the package attribute.
+    #
+    # #3691: import the real modules FIRST. The report path imports
+    # `client_portal.service` lazily; a first import under the stub binds its
+    # module-level `from . import db` to `_PortalDb` for the rest of the
+    # session, and every later portal test then writes to the stub.
     import client_portal
+    import client_portal.service  # noqa: F401 — binds service.db to the real module
     monkeypatch.setattr(client_portal, "db", _PortalDb, raising=False)
     monkeypatch.setitem(
         __import__("sys").modules, "client_portal.db", _PortalDb,

@@ -6,10 +6,12 @@ import logging
 from datetime import timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from jose import JWTError, jwt
 import redis
+from pydantic import ValidationError
 
 from models import Token
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -29,6 +31,7 @@ from dependencies import (
     get_current_user,
     workspace_route,
     is_token_revoked,
+    session_predates_user_revoke,
     oauth2_scheme,
     revoke_token_jti,
 )
@@ -289,6 +292,27 @@ def record_otp_attempt(email: str, success: bool):
         logger.warning(f"Failed to record OTP attempt: {e}")
 
 
+async def _parse_body(request: Request, model):
+    """Build ``model`` from a JSON-object body; a malformed body is a 422 (#3676).
+
+    A ``ValidationError`` becomes ``RequestValidationError`` so the app-level
+    handler shapes it and drops the rejected value, as for a typed body param.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Request body must be a JSON object",
+        )
+    try:
+        return model(**body)
+    except ValidationError as e:
+        raise RequestValidationError(e.errors())
+
+
 def is_setup_completed() -> bool:
     """Check if initial setup is completed."""
     return db.get_setting_value('setup_completed', 'false') == 'true'
@@ -488,7 +512,8 @@ async def validate_token(request: Request):
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         user = db.get_user_by_username(username) if username else None
-        if username is None or user is None or is_token_revoked(payload.get("jti")):
+        if (username is None or user is None or is_token_revoked(payload.get("jti"))
+                or session_predates_user_revoke(payload)):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token",
@@ -568,8 +593,7 @@ async def request_email_login_code(request: Request):
         )
 
     # Parse request
-    body = await request.json()
-    login_request = EmailLoginRequest(**body)
+    login_request = await _parse_body(request, EmailLoginRequest)
     email = login_request.email.lower()
 
     # #186: every branch below returns a byte-identical body + status, and the
@@ -654,8 +678,13 @@ async def verify_email_login_code(request: Request):
     client_ip = request.client.host if request.client else "unknown"
 
     # Parse request first so we can scope rate-limit checks per-account (#591)
-    body = await request.json()
-    verify_request = EmailLoginVerify(**body)
+    try:
+        verify_request = await _parse_body(request, EmailLoginVerify)
+    except (HTTPException, RequestValidationError):
+        # A malformed body still spends per-IP budget, so the parse-error
+        # path is not a free probe.
+        record_login_attempt(client_ip, success=False)
+        raise
     email = verify_request.email.lower()
     code = verify_request.code
 
@@ -841,8 +870,9 @@ async def request_access(request: Request):
     check_login_rate_limit(client_ip)
 
     # Parse request
-    body = await request.json()
-    email = (body.get("email") or "").lower().strip()
+    body = await _parse_body(request, dict)
+    email = body.get("email")
+    email = email.lower().strip() if isinstance(email, str) else ""
     if not email or "@" not in email:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

@@ -1,38 +1,38 @@
-# Code Health Report — 2026-10-13 (`3f60683a0`)
+# Code Health Report — 2026-10-26 (`bbd0d4095`)
 
 > Dashboard committed by `/code-health` (dashboard-only — no GitHub issues; `/groom`'s
-> Debt Health section converts findings). Previous baseline: 2026-10-05 (`482ad0742`).
+> Debt Health section converts findings). Previous baseline: 2026-10-19 (`93b57e43d`).
 
 ## Executive Summary
 
-| Metric | Value | Trend vs 2026-10-05 |
+| Metric | Value | Trend vs 2026-10-19 |
 |--------|-------|-------|
-| Top hotspot score | 17464 (`client_portal/service.py`) | ↑ |
-| Files > 800 lines | 83 | ↑ |
+| Top hotspot score | 19513 (`client_portal/service.py`) | → |
+| Files > 800 lines | 86 | → |
 | Stale TODO/FIXME/HACK | 6 | → |
-| High fan-out files (>20 imports) | 15 | → |
+| High fan-out files (>20 imports) | 16 | → |
 | Circular imports | 0 | → |
 
-`client_portal/service.py` holds #1 for a fourth consecutive run and widened its lead
-again: hotspot score jumped 13390 → 17464 (+30%) as both churn (65 → 74) and complexity
-(206 → 236) rose together — same trajectory as last run, still the clearest refactor
-priority in the tree. The bigger shift is in the #2/#3 slots: `services/operator_queue_service.py`
-jumped into #2 (6160 two runs ago → 10678 now, churn 38, complexity 281 — the single
-highest CC score of any file measured this run), and `services/task_execution_service.py`
-held the #3 slot it entered last run (7371 → 10277, churn 39 → 43, complexity 189 → 239).
-`services/agent_service/crud.py`, #2 last run at 9464, fell to #4 (9932) — its own numbers
-grew too (churn 52, complexity 191), it was simply overtaken by faster-growing neighbors.
-Files > 800 lines rose 75 → 83 (+10.7%, just over the noise band) — broad-based growth
-rather than concentrated in the top hotspots, consistent with ordinary feature churn
-across many files this cycle. Stale TODOs, fan-out, and circular imports are all flat.
+`client_portal/service.py` holds #1 for a sixth consecutive run (18772 → 19513, +3.9%, inside
+the 10% noise band) as churn ticked up 76 → 79 with complexity flat at 247. The reshuffle this
+run is in the #2/#3 slots again: `services/task_execution_service.py` moved from #3 to #2
+(11086 → 11638, +5.1%) on a complexity bump (241 → 253, churn flat at 46), while
+`services/agent_service/crud.py` — #2 last run — dropped to #3 (11492 → 10387, -9.6%) as its
+complexity cooled slightly (221 unchanged, churn rose 52 → 47 — net decrease driven by the
+churn-window dropping older commits out of the 90-day lookback). `services/operator_queue_service.py`
+held #4 (9835 → 9554, -2.9%) and keeps the single highest per-file CC score in the tree (281,
+unchanged). `services/chat_execution_service.py` stayed at #5 but eased back (8296 → 7808,
+-5.9%). All four macro metrics (size violations, stale TODOs, fan-out, circular imports) moved
+by at most one unit and stay inside the noise band — this run's signal, like last run's, is
+entirely in the top-hotspot ordering, not broad-based drift.
 
 ### Top 3 Hotspots (churn × complexity — highest refactoring ROI)
 
 | Rank | File | Churn (90d) | CC Score | Hotspot Score | Lines |
 |------|------|-------------|----------|---------------|-------|
-| 1 | `src/backend/client_portal/service.py` | 74 | 236 | 17464 | 6210 |
-| 2 | `src/backend/services/operator_queue_service.py` | 38 | 281 | 10678 | 2847 |
-| 3 | `src/backend/services/task_execution_service.py` | 43 | 239 | 10277 | 3550 |
+| 1 | `src/backend/client_portal/service.py` | 79 | 247 | 19513 | 6309 |
+| 2 | `src/backend/services/task_execution_service.py` | 46 | 253 | 11638 | 3636 |
+| 3 | `src/backend/services/agent_service/crud.py` | 47 | 221 | 10387 | 3872 |
 
 **Interpretation**: These files are both frequently changed and cognitively expensive.
 Refactoring them reduces ongoing maintenance cost the most.
@@ -41,57 +41,49 @@ Refactoring them reduces ongoing maintenance cost the most.
 
 | File | Lines | Threshold Exceeded | Suggested Action |
 |------|----|------|---------|
-| `src/backend/client_portal/service.py` | 6210 | critical (>800) | Extract per-capability service modules (mirrors `services/agent_service/` package split) |
-| `src/backend/db/migrations.py` | 5711 | critical (>800) | Expected to grow append-only (Invariant #3 migration log) — not a refactor candidate, flagged for awareness only |
-| `src/backend/models.py` | 5523 | critical (>800) | Split by domain (agent/execution/settings request-response groups) per Invariant #14 scope |
+| `src/backend/client_portal/service.py` | 6309 | critical (>800) | Extract per-capability service modules (mirrors the `services/agent_service/` package split, Invariant #1) |
+| `src/backend/db/migrations.py` | 5865 | critical (>800) | Expected to grow append-only (Invariant #3 migration log) — not a refactor candidate, flagged for awareness only |
+| `src/backend/models.py` | 5854 | critical (>800) | Split by domain (agent/execution/settings request-response groups) per Invariant #14 scope |
 
 ### Top 3 Coupling Issues
 
 | File | Import Count | Issue |
 |------|-------------|-------|
-| `src/backend/main.py` | 139 | High fan-out — router registration surface, expected for the app entrypoint but worth periodic review against Invariant #4 ordering |
-| `src/backend/database.py` | 66 | High fan-out — facade aggregating all `XOperations` mixins (Invariant #2); consider whether call sites can import the specific `db/` module instead |
-| `src/backend/services/agent_service/crud.py` | 38 | High fan-out — also a top-5 hotspot this run; coupling compounds the refactor case below |
+| `src/backend/main.py` | 143 | High fan-out — router registration surface, expected for the app entrypoint but worth periodic review against Invariant #4 ordering |
+| `src/backend/database.py` | 68 | High fan-out — facade aggregating all `XOperations` mixins (Invariant #2); consider whether call sites can import the specific `db/` module instead |
+| `src/backend/services/agent_service/crud.py` | 39 | High fan-out — also this run's #3 hotspot; coupling compounds the refactor case below |
 
 ### Stale Smell Inventory
 
-- **Total TODO/FIXME/HACK markers**: 6 (raw grep for the literal substring `XXX` returns
-  9 hits — excluded as false positives: `\uXXXX` inside a unicode-escape comment in
-  `services/skill_gate_service.py:72`, and two `mktemp "...XXXXXX"` placeholder patterns
-  in `services/skill_gate_service.py:1052` and `services/agent_service/read_only.py:70`,
-  the latter newly introduced since the last run by #3273 — none are actual markers)
-- Top smell-dense files: `services/monitoring_service.py` (2), `routers/ops.py` (2),
-  `db/migrations.py` (1), `routers/monitoring.py` (1) — identical marker set to the
-  prior run, no new debt added or removed
+- **Total TODO/FIXME/HACK markers**: 6 (a raw grep for the literal substring `XXX` returns
+  10 hits — excluded as false positives: `\uXXXX` inside a unicode-escape comment in
+  `services/skill_gate_service.py:72`, two `mktemp "...XXXXXX"` placeholder patterns
+  (`services/skill_gate_service.py:1261`, `services/agent_service/read_only.py:71`), and
+  the AAuth challenge-code example `code="XXXX-XXXX"` in `services/aauth/requirement.py:13`)
+- Top smell-dense files: `services/monitoring_service.py` (2 — stubbed alert fetches,
+  `:510` error-rate calc, `:813` recent-alerts), `routers/ops.py` (2 — alerts table not yet
+  implemented, `:373`/`:396`), `db/migrations.py` (1 — thread-cleanup job), `routers/monitoring.py`
+  (1 — stubbed recent-alerts). Unchanged from the prior run; all six markers point at the same
+  not-yet-built alerts/notifications surface across `monitoring.py`/`monitoring_service.py`/`ops.py`.
 
 ### Suggested Refactorings (Top 3 Hotspots)
 
-1. **`client_portal/service.py`** (6210 lines, churn 74, CC 236) — fourth consecutive
-   run at #1, and the gap keeps widening (+30% hotspot score this week alone, +80% over
-   the last two runs combined). It already has sibling `client_portal/router.py` and
-   `client_portal/db.py`, so the service layer itself has outgrown a single module.
-   Extract by portal capability (delegation, roster, feature-flag resolution) into a
-   `client_portal/service/` package following the router/service-package precedent in
-   Invariant #1 (`routers/settings/`, `services/git_service/`), keeping
-   `client_portal/service.py` as a re-export facade. Estimated reduction: 6210 → ~800
-   lines in the facade, remainder split across 4-5 focused modules.
+1. **`client_portal/service.py` (6309 lines, CC 247, churn 79)** — Extract per-capability
+   service modules (asks, delegation, billing-view, roster) the same way
+   `services/agent_service/` was split into `crud.py`/`lifecycle.py`/`deploy.py`. This is the
+   #1 hotspot for the sixth straight run with no sign of slowing growth; it supports
+   Invariant #1 (layer-outgrows-one-file → package, never a second module beside it).
+   Estimated reduction: 6309 lines → a ~500–800 line facade + 4–6 focused modules.
 
-2. **`services/operator_queue_service.py`** (2847 lines, churn 38, CC 281 — now the
-   single highest complexity score of any file in the tree, overtaking
-   `cleanup_service.py`) — new to the top 3 this run (was outside it entirely two runs
-   ago). The operator-queue surface (`ask_operator`/`respond_to_operator_queue` plumbing)
-   has been growing steadily; a size-driven split should separate request lifecycle
-   (create/expire/supersede) from response/notification fan-out, mirroring the
-   `services/schedules/` mixin-composition precedent (Invariant #2) rather than a package
-   split, since the domain is cohesive but the file has outgrown one module.
+2. **`services/task_execution_service.py` (3636 lines, CC 253, churn 46)** — This run's #2;
+   `execution.md`'s own invariant note (every terminal side effect gated on the status CAS)
+   is exactly the kind of cross-cutting concern that keeps complexity high across many
+   branches. Candidate split: separate the CAS-gated terminal-write paths from dispatch-admission
+   orchestration into a sibling module, following the `services/agent_client/` (`circuit`/`http_pool`/`client`)
+   precedent for Invariant #1. Estimated reduction: ~3600 lines → ~2 modules of ~1800 each.
 
-3. **`services/task_execution_service.py`** (3550 lines, churn 43, CC 239) — held the
-   #3 slot for a second consecutive run, growing further (7371 → 10277). `execution.md`
-   already names this file as the one where every terminal side effect must be gated on
-   winning the status CAS with the dispatch-activity close paired to the CAS winner
-   (#1804 class) — that coupling between correctness-critical control flow and ordinary
-   feature churn is exactly the kind of file where a size-driven split needs to preserve
-   invariant behavior, not just move lines. A complexity-reduction pass (extract the
-   CAS-win/dispatch-close pairing into a narrow helper used by every terminal writer)
-   would reduce both the line count and the chance of a fourth occurrence of the #1804
-   bug class, without touching unrelated code.
+3. **`services/agent_service/crud.py` (3872 lines, CC 221, churn 47)** — Already a package
+   member per Invariant #1, but at 3872 lines and 39 imports it is the largest single file in
+   that package. Candidate split: separate read-path (list/get) from write-path
+   (create/update/delete) handlers into `crud_read.py`/`crud_write.py` within the existing
+   `agent_service/` package, preserving the public re-export surface per Invariant #1(a).

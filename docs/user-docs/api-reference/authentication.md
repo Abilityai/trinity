@@ -28,6 +28,8 @@ curl -s -X POST http://localhost:8000/api/token \
    `POST /api/auth/email/verify` with `{"email": "user@example.com", "code": "123456"}`
 3. Returns a JWT token on success.
 
+Both steps take a JSON object. A body that is not valid JSON, or not an object, answers `422` with `Request body must be a JSON object`; a missing or malformed field answers `422` in FastAPI's validation shape. On `/verify` a malformed body also counts as a failed attempt for the per-address rate limit, so it is not a free probe. `POST /api/access/request` parses its body the same way.
+
 The verify step re-checks the email allow-list before redeeming a code. An address that is not allow-listed gets the same 401 as a wrong code, whatever channel minted the code.
 
 A sign-in email belongs to at most one account, compared case-insensitively. Every sign-in path finds the account by its email, so whoever holds an address holds that identity — which is why changing it needs proof (see [Changing your sign-in email](#changing-your-sign-in-email)).
@@ -158,7 +160,7 @@ Two more sets of routes are human-only for any owner, not only admins:
 
 - **A person only** — a browser session or the person's own `user` key. Agent-scoped keys (on their own agent or any other), the system key, and every other scope get a 403 with code `person_required`. This covers `PUT /api/agents/{name}/autonomy`, `capabilities`, `capacity` and `api-key-setting`, plus turning an agent's git pull sync on or off (`PUT /api/agents/{name}/git/pull-sync`). The refusal comes before the owner check, so it reveals nothing about whether the agent exists. An agent's own key can still create, enable and disable its schedules; autonomy decides whether they fire.
 - **A person, or an agent an admin granted the permission** — `PUT /api/agents/{name}/read-only`, `resources`, `timeout`, `public-channel-model` and `guardrails` accept an agent key only while that agent holds **Manage other agents**, only on an agent its owner owns, and never its own read-only mode or guardrails. Without the grant the agent gets a named 403 (`agent_management_not_permitted`). Other agent writes are fenced the same way: another agent's schedules, instruction files, creating and deleting agents, and skills. See [Agent Configuration → Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
-- **A signed-in session only** — no MCP key of any scope, your own included. This covers creating or listing MCP keys, changing your sign-in email (`POST /api/users/me/email/code` and `PUT /api/users/me/email`), setting or clearing your personal GitHub token (`PUT` / `DELETE /api/users/me/github-pat`), and your stored UI preferences (`/api/users/me/preferences`).
+- **A signed-in session only** — no MCP key of any scope, your own included. This covers creating or listing MCP keys, changing your sign-in email (`POST /api/users/me/email/code` and `PUT /api/users/me/email`), setting or clearing your personal GitHub token (`PUT` / `DELETE /api/users/me/github-pat`), your stored UI preferences (`/api/users/me/preferences`), and adding an email to the login whitelist (`POST /api/settings/email-whitelist`). The whitelist add needs an admin's session for every role it can select, `user` included, because the entry gives the person a signed-in session at that role; no MCP-key scope can add entries.
 
 If you hit a 403 on one of these from an automation, that is the gate working as intended — perform the action from the UI or with a user session.
 
@@ -171,7 +173,7 @@ An agent-scoped key carries its owner's role, but on the backend's own routes it
 - **Agents it spawned** with its current key. It can call and manage those.
 - **The owner's other agents, on the routes a granted permission covers** — for example another agent's schedule routes for an agent holding **Change other agents' schedules**. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 
-Any other agent is refused with the same answer as an agent the key may not access (usually `404`, as for one that does not exist), so the key learns nothing about it. This applies whether the agent calls through MCP tools or straight against the backend with its injected key. The operator queue an agent key reads is narrowed the same way, and an agent key never gets the admin view of every user's chat history or sessions. Fleet-wide list routes, such as the agent list, are not narrowed this way: they still answer an agent key with its owner's view. People, `user` keys and the system key are not affected.
+Any other agent is refused with the same answer as an agent the key may not access (usually `404`, as for one that does not exist), so the key learns nothing about it. This applies whether the agent calls through MCP tools or straight against the backend with its injected key. The operator queue an agent key reads is narrowed the same way, and an agent key never gets the admin view of every user's chat history or sessions. Fleet-wide routes with no agent in the path — the agent list, execution and sync-health summaries, tag counts, telemetry, subscriptions and the `/ws/events` stream among them — answer an agent key with the same reach, never its owner's whole fleet. Two fleet health sweeps keep the owner's view, and a few routes are for people only. The full list is in [Agent Permissions](../collaboration/agent-permissions.md). People, `user` keys and the system key are not affected.
 
 ### WebSocket Authentication
 
@@ -180,7 +182,7 @@ Two real-time endpoints, two credentials:
 | Endpoint | Credential | Who sees what |
 |----------|-----------|---------------|
 | `/ws?ticket=<ticket>` | A single-use, 30-second ticket from `POST /api/ws/ticket` (JWT in `Authorization`). The browser uses this; an MCP client never opens `/ws`. | Scoped to the agents the ticket's user can access: an event naming agents is delivered only when every agent it names is one you may access. Admins see everything. Both live delivery and the reconnect replay are filtered. An unknown or suspended account is closed with code 4001. |
-| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `connector` and `portal_delegate` keys are closed with code 4003. |
+| `/ws/events?token=trinity_mcp_…` | An MCP key in the query string (Trinity Connect and external listeners) | Events for the agents the key's owner can access; an `agent` key gets only its own reach (see [What an agent key reaches](#what-an-agent-key-reaches)), re-read when an agent is created, deleted, shared or renamed. Only `user`, `agent` (non-ephemeral agents only) and `system` keys may open it; `ops`, `connector` and `portal_delegate` keys are closed with code 4003. |
 
 ### API Endpoints
 
@@ -189,7 +191,7 @@ Two real-time endpoints, two credentials:
 | `/api/token` | POST | None | Admin login (form-encoded) |
 | `/api/auth/email/request` | POST | None | Request email verification code |
 | `/api/auth/email/verify` | POST | None | Verify email code, returns token |
-| `/api/auth/mode` | GET | None | Get auth mode configuration |
+| `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says the code is in the backend log), `setup_completed` |
 | `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
 | `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
 | `/api/users/me` | GET | JWT | Get current user info |

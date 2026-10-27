@@ -449,7 +449,7 @@ describe('ent#524 — one implementation, three consumers', () => {
 
 describe('ent#523 — the agent page was dismantled, not dropped', () => {
   it('the stats and the chart are in the always-visible band', () => {
-    expect(BAND).toContain('StackedBarChart')
+    expect(BAND).toContain('ActivityWave') // the chart, as a wave since trinity-enterprise#968
     expect(BAND).toMatch(/tasks · last/)
     expect(BAND).toMatch(/completed/)
     expect(BAND).toMatch(/first try/)

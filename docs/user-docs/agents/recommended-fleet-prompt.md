@@ -16,6 +16,8 @@ The Trinity prompt is one block of instance-wide instructions that an admin writ
 | Trinity prompt | Your admin | Every agent on this instance | Fleet rules: how agents on *this* instance should behave |
 | Agent `CLAUDE.md` (`AGENTS.md` on Codex) | The agent's author | One agent | That agent's role, skills and domain knowledge |
 
+The platform instructions also carry a **Your environment** block, so you never need to explain the container to your agents: it tells each one that it runs as `developer` in its own container, that `/home/developer` is a durable volume while `/tmp` is small RAM-backed scratch (use `$TMPDIR`), that the clock is UTC, what a reset to the template's main keeps and what a force-replace pull deletes, which folders the platform creates or reads in its home (`data/`, `public/`, `uploads/`, `shared-out/` and `shared-in/`, `content/`, `.trinity/`, `memory/`), that `template.yaml` is read at creation and only its metrics re-read later, and which protected paths it must not write to. That last sentence is honest per runtime: a Claude Code agent is told its Write and Edit tools refuse those paths but shell commands do not; a Codex or Gemini agent is told nothing in its runtime blocks them, so the rule is its own to keep.
+
 > **Note:** Deploying a [system manifest](../collaboration/system-manifest.md#things-the-preview-will-make-you-confirm) with a top-level `prompt:` key **replaces** the Trinity prompt for every agent on the instance. If you have adopted the prompt below, check a manifest's preview before you deploy it.
 
 ### What Belongs There and What Doesn't

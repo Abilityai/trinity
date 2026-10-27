@@ -175,10 +175,11 @@ async def place_voip_call(
     doesn't place two calls.
     """
     _require_enabled()
-    public_url = settings_service.get_setting("public_chat_url", "")
+    public_url = settings_service.get_public_chat_url_setting()
 
     # Idempotency gate (#525): a duplicate trigger must not double-dial.
-    scope = idempotency_service.make_agent_scope(agent_name)
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+    scope = idempotency_service.make_caller_scope(agent_name, current_user)
     idem = idempotency_service.begin(scope, idempotency_key)
     if idem.replay:
         if idem.in_flight:

@@ -6,6 +6,7 @@ import logging
 import errno
 import mimetypes
 import os
+import secrets
 import shutil
 import stat as stat_mod
 from datetime import datetime, timezone
@@ -27,6 +28,29 @@ router = APIRouter()
 # The agent's home: the only tree these routes serve. A module constant so the
 # handlers can be driven over a temporary home in tests.
 _HOME = Path("/home/developer")
+
+
+def _load_path_policy():
+    """The vendored path policy (trinity-enterprise#820), loaded ONCE from its
+    file beside the agent_server package. By file path, not a relative import:
+    this router must stay loadable with no package context (#1795)."""
+    import importlib.util
+    import sys
+    name = "trinity_file_path_policy"
+    if name not in sys.modules:
+        source = Path(__file__).resolve().parent.parent / "file_path_policy.py"
+        spec = importlib.util.spec_from_file_location(name, str(source))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        sys.modules[name] = module
+    return sys.modules[name]
+
+
+_policy = _load_path_policy()
+
+
+def _home_str() -> str:
+    return str(_HOME.resolve())
 
 # trinity-enterprise#819: download and preview never follow a link. The backend
 # maps this code to its own refusal and an audit row; keep the code in sync with
@@ -95,6 +119,94 @@ def _iso_z_from_mtime(mtime: float) -> str:
     return datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+# trinity-enterprise#820: the write verbs, and the list root, never act through
+# a link that changes what a path is. The backend decides the tier on the path
+# the caller NAMED; a link made by the agent (on request, in chat) could make
+# that name reach a different class — `workspace/x/CLAUDE.md` with
+# `x -> ../.claude`. The path is resolved once, refused unless the resolved
+# path has the same class set as the named one, and then acted on by walking
+# the resolved path one component at a time without following any link, so a
+# link that appears after the check is refused rather than followed.
+_MAX_LIST_NODES = 20_000
+
+
+def _named_path(path: str) -> str:
+    """The caller's path, normalised under the home, lexically."""
+    return _policy.normalize(path, _home_str())
+
+
+def _refuse_outside_home(target: Path) -> None:
+    if not target.is_relative_to(_HOME.resolve()):
+        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+
+
+def _refuse_class_change(named: str, target: Path, verb: Optional[str] = None) -> None:
+    """403 `resolved_path_mismatch` when a link changes the path's class, or
+    (with `verb`) any tier's verdict for that verb."""
+    if not _policy.same_class(named, str(target), _home_str(), verb=verb):
+        raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+
+
+def _mutation_target(path: str, verb: str) -> tuple[Path, str]:
+    """(target, named) for PUT, mkdir and DELETE: the parent resolved, the
+    final component NOT followed (a final link is acted on, or refused, as
+    itself). Contained in the home and class-checked."""
+    named = _named_path(path)
+    if not named:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    lexical = Path(named)
+    target = lexical.parent.resolve() / lexical.name
+    _refuse_outside_home(target)
+    _refuse_class_change(named, target, verb)
+    return target, named
+
+
+def _walk_dir_nofollow(rel_parts, *, create: bool = False, base: Optional[Path] = None) -> int:
+    """Open <base>/<rel_parts> (the home by default) as a directory, one
+    component at a time, never following a link; with `create`, make missing
+    components. Returns the fd (the caller closes it). A link → 403
+    `resolved_path_mismatch`; a file used as a directory → 400."""
+    fd = os.open((_HOME if base is None else base).resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in rel_parts:
+            if create:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                except OSError as e:
+                    raise HTTPException(status_code=500, detail=f"Failed to create folder: {part}: {e.strerror}") from e
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+            except OSError as e:
+                try:
+                    mode = os.lstat(part, dir_fd=fd).st_mode
+                except FileNotFoundError:
+                    raise HTTPException(status_code=404, detail=f"Path not found: {part}") from e
+                if stat_mod.S_ISLNK(mode):
+                    raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL)) from e
+                if e.errno == errno.ENOTDIR or not stat_mod.S_ISDIR(mode):
+                    raise HTTPException(status_code=400, detail=f"Not a directory: {part}") from e
+                raise HTTPException(status_code=500, detail=f"Failed to open {part}: {e.strerror}") from e
+            os.close(fd)
+            fd = nxt
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _parent_parts(target: Path) -> list:
+    return list(target.parent.relative_to(_HOME.resolve()).parts)
+
+
+def _lstat_at(dir_fd: int, name: str) -> Optional[os.stat_result]:
+    try:
+        return os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
 @router.get("/api/files")
 async def list_files(path: str = "/home/developer", show_hidden: bool = False):
     """
@@ -107,36 +219,58 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
 
     Returns a hierarchical tree structure with folders and files.
     """
-    # Security: Only allow workspace access
-    allowed_base = Path("/home/developer")
-    requested_path = Path(path).resolve()
-
-    # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+    # Security: Only allow workspace access. Resolved-path containment
+    # (#3032: a string prefix lets /home/developer2 through), and a link at the
+    # root may not change what is listed (ent#820).
+    allowed_base = _HOME.resolve()
+    named = _named_path(path) or str(allowed_base)
+    requested_path = Path(named).resolve()
+    _refuse_outside_home(requested_path)
+    _refuse_class_change(named, requested_path, _policy.LIST)
 
     if not requested_path.exists():
         raise HTTPException(status_code=404, detail=f"Path not found: {path}")
 
+    budget = {"left": _MAX_LIST_NODES, "truncated": False}
+
     def build_tree(directory: Path, base_path: Path, include_hidden: bool) -> dict:
-        """Build a hierarchical tree structure from a directory."""
+        """Build a hierarchical tree structure from a directory. A link is
+        listed as a link and never descended (ent#820); the walk stops after
+        _MAX_LIST_NODES nodes."""
         items = []
         total_files = 0
 
         try:
-            # Get all items in directory
-            dir_items = sorted(directory.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower()))
+            # Get all items in directory; a link to a directory sorts as a file
+            def _is_real_dir(item: Path) -> bool:
+                try:
+                    return stat_mod.S_ISDIR(item.lstat().st_mode)
+                except OSError:
+                    return False
+
+            dir_items = sorted(directory.iterdir(), key=lambda x: (not _is_real_dir(x), x.name.lower()))
 
             for item in dir_items:
                 # Skip hidden items unless show_hidden is True
                 if item.name.startswith('.') and not include_hidden:
                     continue
+                if budget["left"] <= 0:
+                    budget["truncated"] = True
+                    break
+                budget["left"] -= 1
 
                 try:
-                    stat = item.stat()
+                    stat = item.lstat()
                     relative_path = item.relative_to(base_path)
 
-                    if item.is_dir():
+                    if stat_mod.S_ISLNK(stat.st_mode):
+                        items.append({
+                            "name": item.name,
+                            "path": str(relative_path),
+                            "type": "link",
+                            "modified": _iso_z_from_mtime(stat.st_mtime)
+                        })
+                    elif stat_mod.S_ISDIR(stat.st_mode):
                         # Recursively build tree for subdirectory
                         subtree = build_tree(item, base_path, include_hidden)
                         items.append({
@@ -176,7 +310,8 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
             "requested_path": str(requested_path.relative_to(allowed_base)) if requested_path != allowed_base else ".",
             "tree": tree_data["children"],
             "total_files": tree_data["file_count"],
-            "show_hidden": show_hidden
+            "show_hidden": show_hidden,
+            "truncated": budget["truncated"],
         }
 
     except Exception as e:
@@ -206,21 +341,15 @@ async def download_file(path: str):
         except Exception as e:
             logger.error(f"File download error: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
-    return PlainTextResponse(content=content)
+    # ent#820: the backend refuses a file with more than one name below the
+    # owner tier (a hard link to a credential); it needs the count to do so.
+    return PlainTextResponse(content=content, headers={"X-File-Nlink": str(st.st_nlink)})
 
 
-# Protected paths that cannot be deleted
-PROTECTED_PATHS = [
-    "CLAUDE.md",
-    ".trinity",
-    ".git",
-    ".gitignore",
-    ".env",
-    ".mcp.json",
-    ".mcp.json.template",
-    ".claude.json",
-    ".credentials.json",
-]
+# Protected paths that cannot be deleted. By name on the path or any parent —
+# the agent server's platform floor, from the vendored policy
+# (trinity-enterprise#820; `.credentials.enc` joined it there).
+PROTECTED_PATHS = list(_policy.AGENT_SERVER_DELETE_PROTECTED_NAMES)
 
 # Paths that cannot be edited via the file-write endpoint.
 #
@@ -229,83 +358,41 @@ PROTECTED_PATHS = [
 # tool `command:` fields run as the agent process. See #590 (AISEC-C2).
 #
 # The sanctioned path (#2008 — this comment previously named
-# `/api/credentials/update`, which had no callers anywhere and was removed;
-# both blocks below were justified by a route that did not run):
+# `/api/credentials/update`, which had no callers anywhere and was removed):
 #   * `POST /api/agents/{name}/credentials/inject`, gated by
 #     `validate_mcp_config` — Layer 2 of the #590 closure (#598). Real today.
 #
 # PLANNED, not yet available: rendering `.mcp.json.template` into `.mcp.json`
-# at container startup (`${VAR}` substituted inside `env` only, each server
-# validated) — #2007 / PR #2013. Deleting `update_credentials` removed the only
-# code that ever rendered the template, `startup.sh` performs no substitution,
-# and `credential_paths.py` denies the template on the inject path — so until
-# #2013 lands, declaring a server in the template alone never reaches
-# `.mcp.json`. Written as planned rather than present so this comment does not
-# replace one forward reference with another.
+# at container startup — #2007 / PR #2013.
 #
-# CLAUDE.md is intentionally NOT here — owners do edit their agent's
-# instructions directly.
-EDIT_PROTECTED_PATHS = [
-    ".trinity",
-    ".git",
-    ".gitignore",
-    ".env",
-    ".mcp.json",
-    ".mcp.json.template",
-    ".credentials.enc",
-    ".claude.json",
-    ".credentials.json",
-]
-
+# CLAUDE.md is editable here: who may edit it is a TIER the backend decides
+# (owner tier through the Files tab, ent#820); this server cannot tell callers
+# apart. It is deletable by no one.
+EDIT_PROTECTED_PATHS = list(_policy.AGENT_SERVER_EDIT_PROTECTED_NAMES)
 # trinity-enterprise#823: runtime config these routes never write, matched on
-# the RESOLVED path (relative to `_HOME`), so a link elsewhere in the home that
-# points here is refused too. Some names are too generic for the by-name lists
-# above (settings.json, auth.json, config.toml). `.tmp/codex` is Codex's
-# CODEX_HOME (its login and MCP config), so everything under it is covered.
-# No platform writer of these goes through these routes.
-_RUNTIME_CONFIG_PATHS = (
-    ".claude.json",
-    ".claude/.credentials.json",
-    ".gemini/settings.json",
-    ".tmp/codex",
-)
+# the RESOLVED path (relative to `_HOME`).
+_RUNTIME_CONFIG_PATHS = _policy.AGENT_SERVER_RUNTIME_CONFIG_RELPATHS
 
 
 def _touches_runtime_config(resolved: Path, *, include_ancestors: bool) -> bool:
     """True when `resolved` is a runtime config path or lies under one; with
     `include_ancestors` (DELETE), also when it is a directory above one."""
     home = _HOME.resolve()
-    for rel in _RUNTIME_CONFIG_PATHS:
-        target = home / rel
-        if resolved == target or resolved.is_relative_to(target):
-            return True
-        if include_ancestors and target.is_relative_to(resolved):
-            return True
-    return False
+    if resolved.is_relative_to(home):
+        rel = resolved.relative_to(home).as_posix()
+        return _policy.agent_server_touches_runtime_config(
+            "" if rel == "." else rel, include_ancestors=include_ancestors)
+    return include_ancestors and home.is_relative_to(resolved)
 
 
 def _is_protected_path(path: Path) -> bool:
     """Check if path is a protected file/directory (for deletion)."""
-    for protected in PROTECTED_PATHS:
-        if path.name == protected:
-            return True
-        # Check parent directories too
-        for parent in path.parents:
-            if parent.name == protected:
-                return True
-    return False
+    return _policy.agent_server_delete_protected(path.as_posix())
 
 
 def _is_edit_protected_path(path: Path) -> bool:
     """Check if path is protected from editing."""
-    for protected in EDIT_PROTECTED_PATHS:
-        if path.name == protected:
-            return True
-        # Check parent directories too
-        for parent in path.parents:
-            if parent.name == protected:
-                return True
-    return False
+    return _policy.agent_server_edit_protected(path.as_posix())
 
 
 # ---------------------------------------------------------------------------
@@ -380,58 +467,57 @@ async def delete_file(path: str):
     Delete a file or directory from the workspace.
     Only allows access to /home/developer for security.
     Cannot delete protected paths (CLAUDE.md, .trinity, .git, etc.)
+
+    A link is deleted as itself, never its target; a link on the way there
+    that changes the path's class is refused (ent#820). The directory removal
+    is fd-based (`shutil.rmtree(dir_fd=...)`), so it does not follow a link
+    swapped in mid-walk.
     """
-    # Security: Only allow workspace access
-    allowed_base = _HOME
-
-    # Handle both absolute and relative paths
-    if path.startswith('/'):
-        requested_path = Path(path).resolve()
-    else:
-        requested_path = (allowed_base / path).resolve()
-
-    # Ensure requested path is within workspace
-    if not str(requested_path).startswith(str(allowed_base)):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+    target, _named = _mutation_target(path, _policy.DELETE)
 
     # Prevent deleting the base directory itself
-    if requested_path == allowed_base:
+    if target == _HOME.resolve():
         raise HTTPException(status_code=403, detail="Cannot delete home directory")
 
     # Check if it's a protected path, or a directory holding runtime config
-    if _is_protected_path(requested_path) or _touches_runtime_config(requested_path, include_ancestors=True):
+    if _is_protected_path(target) or _touches_runtime_config(target, include_ancestors=True):
         raise HTTPException(
             status_code=403,
-            detail=f"Cannot delete protected path: {requested_path.name}"
+            detail=f"Cannot delete protected path: {target.name}"
         )
 
-    if not requested_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-
+    parent_fd = _walk_dir_nofollow(_parent_parts(target))
     try:
-        file_type = "directory" if requested_path.is_dir() else "file"
-        file_count = 0
+        st = _lstat_at(parent_fd, target.name)
+        if st is None:
+            raise HTTPException(status_code=404, detail=f"File not found: {path}")
+        try:
+            if stat_mod.S_ISDIR(st.st_mode):
+                file_type = "directory"
+                file_count = sum(
+                    len(dirs) + len(files)
+                    for _root, dirs, files, _fd in os.fwalk(target.name, dir_fd=parent_fd)
+                )
+                shutil.rmtree(target.name, dir_fd=parent_fd)
+            else:
+                file_type = "link" if stat_mod.S_ISLNK(st.st_mode) else "file"
+                file_count = 1
+                os.unlink(target.name, dir_fd=parent_fd)
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"File delete error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+    finally:
+        os.close(parent_fd)
 
-        if requested_path.is_dir():
-            # Count files before deletion
-            for _ in requested_path.rglob("*"):
-                file_count += 1
-            shutil.rmtree(requested_path)
-        else:
-            file_count = 1
-            requested_path.unlink()
-
-        logger.info(f"Deleted {file_type}: {requested_path}")
-        return {
-            "success": True,
-            "deleted": path,
-            "type": file_type,
-            "file_count": file_count
-        }
-
-    except Exception as e:
-        logger.error(f"File delete error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+    logger.info(f"Deleted {file_type}: {target}")
+    return {
+        "success": True,
+        "deleted": path,
+        "type": file_type,
+        "file_count": file_count
+    }
 
 
 @router.get("/api/files/preview")
@@ -480,6 +566,7 @@ async def preview_file(path: str):
         headers={
             "Content-Disposition": f'inline; filename="{name}"',
             "Content-Length": str(st.st_size),
+            "X-File-Nlink": str(st.st_nlink),
         },
     )
 
@@ -490,6 +577,27 @@ def content_sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _read_text_at(dir_fd: int, name: str) -> Optional[str]:
+    """The file's text as the download endpoint serves it, opened without
+    following a link; None when it does not exist."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        return f.read().decode("utf-8", errors="replace")
+
+
+def _if_match_holds_at(dir_fd: int, name: str, if_match: Optional[str]) -> bool:
+    if if_match is None:
+        return True
+    try:
+        text = _read_text_at(dir_fd, name)
+    except OSError:
+        return False
+    return text is None or content_sha256(text) == if_match
+
+
 def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
     """True when the caller's `if_match` still describes the file on disk.
 
@@ -497,26 +605,78 @@ def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
     holds too (there is nothing to clobber). The bytes are decoded exactly as
     the download endpoint serves them (`errors="replace"`), so both sides hash
     the same text and a stray non-UTF-8 byte cannot wedge delivery behind an
-    endless 412 (#2989 review). An unreadable file never matches.
+    endless 412 (#2989 review). An unreadable file never matches; the file is
+    opened without following a link (ent#820).
     """
-    if if_match is None or not path.exists():
+    if if_match is None:
         return True
+    dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        return content_sha256(path.read_text(encoding="utf-8", errors="replace")) == if_match
-    except OSError:
-        return False
+        return _if_match_holds_at(dir_fd, path.name, if_match)
+    finally:
+        os.close(dir_fd)
+
+
+def _write_bytes_atomic_at(dir_fd: int, name: str, data: bytes, mode: Optional[int] = None) -> None:
+    """tmp + os.replace inside the opened directory. The tmp name is random and
+    created O_EXCL|O_NOFOLLOW, so neither a crash leftover nor a planted link
+    blocks or redirects the write. `mode` sets the file's permissions (created
+    with it, so the content is never briefly wider); None keeps an existing
+    file's mode (ent#820)."""
+    old = _lstat_at(dir_fd, name)
+    tmp_name = f".{name}.tmp-{secrets.token_hex(6)}"
+    fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                 0o644 if mode is None else mode, dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
+            elif old is not None and stat_mod.S_ISREG(old.st_mode):
+                os.fchmod(f.fileno(), stat_mod.S_IMODE(old.st_mode))
+        os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    finally:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+
+
+def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
+    _write_bytes_atomic_at(dir_fd, name, content.encode("utf-8"))
+
+
+def write_bytes_nofollow(rel: str, data: bytes, *, mode: Optional[int] = None,
+                         base: Optional[Path] = None) -> None:
+    """Write `data` to <base>/<rel> (the home by default) without following a
+    link anywhere on the way (ent#822): the parents are walked — and created —
+    one component at a time with O_NOFOLLOW, a final component that is a link
+    is refused rather than replaced, and the file goes in by tmp + os.replace.
+    A link at any level is a 403 `resolved_path_mismatch`, never a write that
+    lands somewhere else. For the agent server's own writers (credential
+    injection, snapshot restore); `rel` is a home-relative path they have
+    already validated."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    dir_fd = _walk_dir_nofollow(parts[:-1], create=True, base=base)
+    try:
+        st = _lstat_at(dir_fd, parts[-1])
+        if st is not None and stat_mod.S_ISLNK(st.st_mode):
+            raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+        _write_bytes_atomic_at(dir_fd, parts[-1], data, mode)
+    finally:
+        os.close(dir_fd)
 
 
 def write_text_atomic(path: Path, content: str) -> None:
     """tmp + os.replace in the same directory: a reader never sees a torn file,
     and a concurrent writer's own read is of a whole file (#2915)."""
-    tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
-        tmp_path.write_text(content, encoding="utf-8")
-        os.replace(tmp_path, path)
+        _write_text_atomic_at(dir_fd, path.name, content)
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        os.close(dir_fd)
 
 
 @router.put("/api/files")
@@ -548,21 +708,15 @@ async def update_file(
     Returns:
         Success status and file info
     """
-    # Security: Only allow workspace access. Resolved-path containment via
-    # is_relative_to() — the CWE-022 barrier create_folder already uses — rather
-    # than a string prefix, which a sibling name such as /home/developer2 would
-    # satisfy (#2915).
-    allowed_base = _HOME.resolve()
+    # Security: Only allow workspace access, by resolved-path containment
+    # (#2915), and never through a link that changes the path's class
+    # (ent#820). The final component is not followed: a link there is refused.
+    requested_path, _named = _mutation_target(path, _policy.WRITE)
 
-    # Handle both absolute and relative paths
-    if path.startswith('/'):
-        requested_path = Path(path).resolve()
-    else:
-        requested_path = (allowed_base / path).resolve()
-
-    # Ensure requested path is within workspace
-    if not requested_path.is_relative_to(allowed_base):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+    # The home itself is a directory, not a file to write: a named 400, as
+    # mkdir and DELETE answer, not the 500 its missing parent raised (ent#949).
+    if requested_path == _HOME.resolve():
+        raise HTTPException(status_code=400, detail="Not a file: /home/developer")
 
     # Check if it's a protected path (for editing)
     # Platform writes can bypass .trinity protection (but not .git, .env, etc.)
@@ -582,41 +736,43 @@ async def update_file(
             detail=f"Cannot edit protected path: {requested_path.name}"
         )
 
-    # If path exists and is a directory, reject
-    if requested_path.exists() and not requested_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-
-    # #2915: compare-and-swap. Hash the same bytes the download endpoint hands
-    # out (the UTF-8 text), so the platform's sha over `response.text` and this
-    # one agree; a file that cannot be read as UTF-8 never matches, which fails
-    # closed (412) rather than open.
-    if not if_match_holds(requested_path, if_match):
-        raise HTTPException(
-            status_code=412,
-            detail="if_match mismatch: the file changed since it was read",
-        )
-
+    # Create parent directories if they don't exist, never through a link.
+    parent_fd = _walk_dir_nofollow(_parent_parts(requested_path), create=True)
     try:
-        # Create parent directories if they don't exist
-        requested_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = _lstat_at(parent_fd, requested_path.name)
+        if existing is not None and stat_mod.S_ISLNK(existing.st_mode):
+            raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+        if existing is not None and not stat_mod.S_ISREG(existing.st_mode):
+            raise HTTPException(status_code=400, detail=f"Not a file: {path}")
 
-        # Write the new content ATOMICALLY: a reader (or a concurrent writer's
-        # own read) never sees a half-written file. Same directory so the
-        # rename cannot cross a filesystem boundary.
-        write_text_atomic(requested_path, request.content)
-        stat = requested_path.stat()
+        # #2915: compare-and-swap. Hash the same bytes the download endpoint
+        # hands out (the UTF-8 text), so the platform's sha over
+        # `response.text` and this one agree; a file that cannot be read never
+        # matches, which fails closed (412) rather than open.
+        if not _if_match_holds_at(parent_fd, requested_path.name, if_match):
+            raise HTTPException(
+                status_code=412,
+                detail="if_match mismatch: the file changed since it was read",
+            )
 
-        logger.info(f"Updated file: {requested_path}")
-        return {
-            "success": True,
-            "path": path,
-            "size": stat.st_size,
-            "modified": _iso_z_from_mtime(stat.st_mtime)
-        }
+        try:
+            # Write the new content ATOMICALLY: a reader (or a concurrent
+            # writer's own read) never sees a half-written file.
+            _write_text_atomic_at(parent_fd, requested_path.name, request.content)
+            stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except Exception as e:
+            logger.error(f"File update error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+    finally:
+        os.close(parent_fd)
 
-    except Exception as e:
-        logger.error(f"File update error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+    logger.info(f"Updated file: {requested_path}")
+    return {
+        "success": True,
+        "path": path,
+        "size": stat.st_size,
+        "modified": _iso_z_from_mtime(stat.st_mtime)
+    }
 
 
 @router.post("/api/files/mkdir")
@@ -634,23 +790,13 @@ async def create_folder(path: str):
     Returns:
         Success status and directory info
     """
-    # Security: Only allow workspace access. allowed_base is resolved so the
-    # containment check below compares resolved-path to resolved-path.
+    # Security: Only allow workspace access. Resolved-path containment via
+    # is_relative_to() rather than str.startswith(), which has a sibling-prefix
+    # bypass (e.g. "/home/developer-x".startswith("/home/developer") is True).
+    # This also acts as the CWE-022 path-traversal barrier. Never through a
+    # link that changes the path's class (ent#820). (CodeQL py/path-injection)
     allowed_base = _HOME.resolve()
-
-    if path.startswith('/'):
-        requested_path = Path(path).resolve()
-    else:
-        requested_path = (allowed_base / path).resolve()
-
-    # Ensure the resolved path is strictly within the workspace. Uses
-    # resolved-path containment via is_relative_to() rather than
-    # str.startswith(), which has a sibling-prefix bypass
-    # (e.g. "/home/developer-x".startswith("/home/developer") is True).
-    # This also acts as the CWE-022 path-traversal barrier — .resolve()
-    # collapses any "../" before the check. (CodeQL py/path-injection)
-    if not requested_path.is_relative_to(allowed_base):
-        raise HTTPException(status_code=403, detail="Access denied: only /home/developer accessible")
+    requested_path, _named = _mutation_target(path, _policy.WRITE)
 
     # Cannot create the home directory itself
     if requested_path == allowed_base:
@@ -667,25 +813,28 @@ async def create_folder(path: str):
             detail=f"Cannot create folder in protected path: {requested_path.name}"
         )
 
-    if requested_path.exists():
-        if requested_path.is_dir():
-            raise HTTPException(status_code=409, detail=f"Directory already exists: {path}")
-        raise HTTPException(status_code=409, detail=f"A file already exists at: {path}")
-
+    parent_fd = _walk_dir_nofollow(_parent_parts(requested_path), create=True)
     try:
-        requested_path.mkdir(parents=True, exist_ok=False)
-        stat = requested_path.stat()
+        existing = _lstat_at(parent_fd, requested_path.name)
+        if existing is not None:
+            if stat_mod.S_ISLNK(existing.st_mode):
+                raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+            if stat_mod.S_ISDIR(existing.st_mode):
+                raise HTTPException(status_code=409, detail=f"Directory already exists: {path}")
+            raise HTTPException(status_code=409, detail=f"A file already exists at: {path}")
+        try:
+            os.mkdir(requested_path.name, dir_fd=parent_fd)
+            stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
+        except Exception as e:
+            logger.error(f"Folder create error: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+    finally:
+        os.close(parent_fd)
 
-        logger.info(f"Created directory: {requested_path}")
-        return {
-            "success": True,
-            "path": path,
-            "type": "directory",
-            "modified": _iso_z_from_mtime(stat.st_mtime)
-        }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Folder create error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+    logger.info(f"Created directory: {requested_path}")
+    return {
+        "success": True,
+        "path": path,
+        "type": "directory",
+        "modified": _iso_z_from_mtime(stat.st_mtime)
+    }

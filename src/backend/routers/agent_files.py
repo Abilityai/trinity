@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal, require_admin, reject_non_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -545,11 +545,7 @@ async def get_agent_canon_roles(
     it is the same kind of fan-out against the same container. An agent key reads
     only its own canon. OSS-core (operator ruling 2026-10-06).
     """
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only read its own canon",
-        )
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own canon")
     objectives_read_budget.enforce(
         agent_name,
         detail="Canon read rate limit exceeded for this agent.",
@@ -589,11 +585,7 @@ async def get_agent_objectives(
     """
     # --- self-gate (after access, before any read: the `/metrics` spelling,
     # so the two reads agree on who "itself" is) ----------------------------
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only read its own objectives",
-        )
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own objectives")
 
     objectives_read_budget.enforce(
         agent_name,
@@ -753,22 +745,18 @@ def _metric_policy() -> dict:
     and `GET /api/settings/retention` cannot disagree about what is in force.
     """
     from services.settings_service import settings_service
+    from routers import metric_points as _metric_points
 
-    retention, retention_source = settings_service.resolve_ops_setting(
-        "metrics_retention_days")
-    cap, cap_source = settings_service.resolve_ops_setting(
-        "metrics_daily_point_cap")
+    _, retention_source = settings_service.resolve_ops_setting("metrics_retention_days")
+    _, cap_source = settings_service.resolve_ops_setting("metrics_daily_point_cap")
 
-    def _int(raw, fallback):
-        try:
-            return max(int(raw), 0)
-        except (TypeError, ValueError):
-            return fallback
-
+    # #3089: values come from the enforcing reader, so an unusable row reports
+    # what the record route applies: the default cap, never "unlimited", and a
+    # disabled window (0) for garbage, matching the sweep.
     return {
-        "retention_days": _int(retention, 365),
+        "retention_days": _metric_points._ops_int("metrics_retention_days", 0),
         "retention_days_source": retention_source,
-        "daily_point_cap": _int(cap, 100000),
+        "daily_point_cap": _metric_points._ops_int("metrics_daily_point_cap", 100000),
         "daily_point_cap_source": cap_source,
         "enforced": True,
         "enforced_by": "abilityai/trinity-enterprise#478",
@@ -927,12 +915,9 @@ async def share_agent_file(
     # An agent-scoped key may share only from its OWN volume. Checked first so
     # the refusal names the rule; the owner gate below (narrowed to the agent's
     # reach since ent#629) would refuse a sibling too, less specifically.
+    assert_own_agent(current_user, agent_name,
+                     detail="Agent-scoped MCP key cannot share files for a different agent.")
     actor_agent = getattr(current_user, "agent_name", None)
-    if actor_agent and actor_agent != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped MCP key cannot share files for a different agent.",
-        )
 
     # Owner gate (the agent's owner always passes)
     assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")

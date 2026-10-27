@@ -198,10 +198,12 @@ INTERNAL_FAILURE_DETAIL = (
 def _public_chat_url() -> str:
     """Local mirror of OSS ``settings_service.get_public_chat_url()`` — the
     fallback base when no explicit portal base URL is set."""
+    from services.settings_service import normalize_public_url  # #3881
+
     url = db.get_setting("public_chat_url", "")
     if url:
-        return url.rstrip("/")
-    return os.getenv("PUBLIC_CHAT_URL", "").rstrip("/")
+        return normalize_public_url(url)
+    return normalize_public_url(os.getenv("PUBLIC_CHAT_URL", ""))
 
 
 def get_portal_base_url() -> str:
@@ -291,13 +293,61 @@ def email_has_access(email: str | None) -> bool:
         return False
 
 
+# #3922 — what `portal_signin_verify` returns instead of a token for a platform
+# account: it signs in at `/login`, never as an outside client.
+PLATFORM_LOGIN_REQUIRED = object()
+
+
+def platform_login_admits(email: str | None) -> bool:
+    """#3922 — True when this address has a platform account that `/login`
+    can sign in: a `users` row exists for it, AND either
+
+    * it has a password (`POST /api/token` takes the email for an account with
+      a password hash — the admin, `authenticate_user`), or
+    * the platform email login (`POST /api/auth/email/verify`) would admit it:
+      email login on, the login policy allows codes (the pair
+      `GET /api/auth/mode` reports as `email_code_login_enabled`), and the
+      address is allow-listed (the #2381 re-check that route applies).
+
+    Such an address is a platform account, so the Workspace door sends it to
+    `/login` rather than minting a client session that resolves as
+    `is_platform=False`. The user row is required: an allow-list row is not
+    an account (sharing and access-request approval wrote allow-list rows for
+    outside clients before trinity-enterprise#837, and those remain), and
+    sending such a client to `/login` would create a user for them there.
+    Anything else, including a lookup error, keeps the client door: a `/login`
+    that cannot admit the person is a dead end."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from config import EMAIL_AUTH_ENABLED
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+        if not user:
+            return False
+        if user.get("password"):
+            return True
+        setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+        if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+            return False
+        return bool(core_db.is_email_whitelisted(addr))
+    except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
+        logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
+        return False
+
+
 def portal_signin_request(email: str | None) -> str | None:
     """Step 1: if the email has portal access, mint a 6-digit login code and
     return it (the caller dispatches the email). Returns None otherwise — the
     router ALWAYS returns the same generic body, so this never reveals whether
-    an email has access (#186 enumeration discipline)."""
+    an email has access (#186 enumeration discipline).
+
+    #3922: a platform account gets a code too, even with nothing shared to it,
+    so the verify step can send it on to `/login` instead of leaving it waiting
+    for a code that never comes."""
     email = (email or "").strip().lower()
-    if not email or not email_has_access(email):
+    if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -306,9 +356,13 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None) -> str | None:
+def portal_signin_verify(email: str | None, code: str | None):
     """Step 2: verify the code AND re-check access, then mint a portal session
-    token (a verified email, no platform account). Returns None on any failure."""
+    token (a verified email, no platform account). Returns None on any failure.
+
+    #3922: a platform account returns `PLATFORM_LOGIN_REQUIRED` and gets no
+    token. It is decided only after the code verifies, so only the owner of the
+    inbox learns that the address has an account."""
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -316,6 +370,8 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
+    if platform_login_admits(email):
+        return PLATFORM_LOGIN_REQUIRED
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token
@@ -2708,6 +2764,14 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
+    # The platform default is a Claude model id: a Codex or Gemini agent runs on
+    # its own model instead (`task_execution_service._default_model_for`).
+    try:
+        from services.docker_service import get_agent_runtime
+        if get_agent_runtime(agent_name) != "claude-code":
+            return None
+    except Exception as e:  # noqa: BLE001 — an unknown runtime keeps the default
+        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
     try:
         from services import settings_service
         return settings_service.get_platform_default_model() or None
@@ -2764,7 +2828,7 @@ def validate_requested_model(raw: str | None, *, is_platform: bool) -> str | Non
         # echoed. `PortalChatRequest.model` is deliberately unvalidated at the
         # payload layer (a length rule there would refuse before the 403 that
         # this principal has no control at all), and every sibling field on that
-        # model IS bounded — `message` is `max_length=8000`. Without this an
+        # model IS bounded — `message` is `max_length=100_000`. Without this an
         # authenticated caller can post a megabyte-long `model` and have it
         # echoed verbatim into the error body. Truncated rather than dropped:
         # naming what was refused is the whole point of the message.
@@ -3057,7 +3121,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
     history = []
     try:
         # #2694: a window of TYPED turns plus the calls among them — a 180-row
-        # call no longer fills the window on its own.
+        # call no longer fills the window on its own. trinity#3402: a turn the
+        # skill gate held or refused, and its notice, are not in it (the read's
+        # default) — the gate reads only what is typed this turn, so the agent
+        # must never be handed that request as conversation instead.
         history = db.get_portal_thread_window(
             agent_name, email, session_id, typed_limit=_HISTORY_CONTEXT_MESSAGES
         ).rows
@@ -3304,9 +3371,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
         # trinity-enterprise#751: the message names a gated skill — nothing ran,
         # an approval was raised. Waiting is not failing: the thread renders a
         # non-retryable error as a Failed turn, so the notice is the reply.
-        return _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
-                              execution_id, viewer_is_person=gate_is_person)
+        answer = _persist_reply(agent_name, email, session_id, e.message, None, voice_call_id,
+                                execution_id, viewer_is_person=gate_is_person)
+        # trinity#3402: neither the request nor its notice is ever replayed to
+        # the agent, whatever is decided — an approved run is its own execution.
+        _mark_gate_hold((user_row_id, answer.get("message_id")), e)
+        return answer
     except SkillGateError as e:
+        _mark_gate_hold((user_row_id,), e)   # trinity#3402: nor is a refused one
         raise ClientPortalError(e.status_code, str(e), category="gated", retryable=False)
     except ResumeLockBusy:
         # A concurrent turn holds this thread's lock. Same shape as the "agent
@@ -3550,6 +3622,31 @@ def _gate_requester(email: str, is_person: bool, credential: str | None = None):
                                         credential=credential)
 
 
+def _mark_gate_hold(message_ids, exc) -> None:
+    """trinity#3402: keep a turn the skill gate stopped — the client's message
+    and the notice answering it — out of every later prompt. Never changes the
+    answer: the approval is already raised, or the refusal already given. A
+    failure is an ERROR: until fixed, the row would be replayed."""
+    from services.skill_gate_errors import hold_marker
+
+    ids = [i for i in message_ids if i]
+    try:
+        db.mark_portal_messages_held(ids, hold_marker(exc))
+    except Exception:  # noqa: BLE001
+        logger.error("portal: could not mark the gated turn's messages %s", ids, exc_info=True)
+
+
+def _clear_gate_hold(row_id: str | None) -> None:
+    """trinity#3402: a retry reuses the refused turn's row — drop that verdict.
+    Best-effort: a stale mark only keeps a message that then ran out of history."""
+    if not row_id:
+        return
+    try:
+        db.mark_portal_messages_held([row_id], None)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: could not clear the gate mark of reused row %s: %s", row_id, e)
+
+
 def _voice_attribution(voice_call_id: str | None) -> dict:
     """ent#551: the `add_portal_message` kwargs that attribute a row to the
     voice call whose `run_task` produced it — and NOTHING for a typed turn, so
@@ -3640,13 +3737,18 @@ def _persist_user_turn(agent_name: str, email: str, session_id: str, content: st
     row is moved to the retrying turn, so its reply sits under it after a reload.
     """
     try:
-        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id)
+        # trinity#3402: with held rows — a refused turn is exactly what is retried.
+        recent = db.get_portal_messages(agent_name, email, limit=1, session_id=session_id,
+                                        include_held=True)
         # ent#534: a SPOKEN last line is not a failed typed turn — typing the
         # same words after saying them is a new message, not a retry.
         if (recent and recent[-1].get("role") == "user" and recent[-1].get("content") == content
                 and recent[-1].get("source") is None):
             logger.info("portal: skipping duplicate user row on retry for session %s", session_id)
             _stamp_user_turn(recent[-1].get("id"), execution_id)
+            # trinity#3402: the row stands for THIS turn now; an earlier turn's
+            # gate verdict no longer applies (this one gets its own).
+            _clear_gate_hold(recent[-1].get("id"))
             return recent[-1].get("id")
     except Exception as e:  # noqa: BLE001 — a read failure must not block the turn
         logger.warning("portal duplicate-check failed for %s: %s", session_id, e)
@@ -4796,11 +4898,14 @@ def get_history(agent_name: str, email: str, session_id: str | None = None,
         session_id = db.get_latest_portal_session_id(agent_name, email)
     messages: list = []
     truncated = False
+    # trinity#3402: the client's own thread shows a held turn and its notice —
+    # and the reply poll must find that notice as the turn's answer.
     if session_id and limit is not None:
-        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id)
+        messages = db.get_portal_messages(agent_name, email, limit=limit, session_id=session_id,
+                                          include_held=True)
     elif session_id:
         window = db.get_portal_thread_window(agent_name, email, session_id,
-                                             typed_limit=_HISTORY_TYPED_TURNS)
+                                             typed_limit=_HISTORY_TYPED_TURNS, include_held=True)
         messages, truncated = window.rows, window.truncated
     # ent#366: attach the caller's OWN rating to each message, so a reload shows
     # the thumb they already gave. One query for the thread rather than one per

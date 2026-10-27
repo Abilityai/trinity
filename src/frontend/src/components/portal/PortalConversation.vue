@@ -275,9 +275,6 @@
       <PortalSkeleton v-if="!historyLoaded" variant="thread" />
       <div v-else class="space-y-6">
 
-        <!-- Briefing (new-chat state) rendered by the parent via slot -->
-        <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
-
         <!-- ent#523: a SYSTEM line — the platform speaking about the thread,
              not the agent speaking in it. Today its only author is Reset,
              naming where the previous conversation went. Rendered centred and
@@ -486,6 +483,12 @@
         </div>
         </template>
 
+        <!-- Briefing (new-chat state) rendered by the parent via slot. #3795:
+             gated on "no turns yet", not "no rows" — Reset's system line sits
+             in an otherwise new Main and must not hide this. Placed after the
+             rows so that signpost reads above the briefing. -->
+        <slot v-if="!loadingHistory && isNewChatTranscript(messages) && !sending" name="empty" />
+
         <!-- ent#525: the live execution card under the message that started
              the job (ent#457's card, as ruled). Status, elapsed, the stream's
              last line as the current step (ent#286), the steps of a pipeline
@@ -631,17 +634,7 @@
             @remove="removeAttachment(f)"
           />
         </div>
-        <!-- #3460: the server bounds a message, so the composer says so FIRST —
-             a count for the last stretch, then a named refusal with Send held.
-             Before this the limit was first mentioned by a 422, after the words
-             had left the composer. One line, mutually exclusive ink arms. -->
-        <p
-          v-if="messageLimit.near"
-          class="mb-2 text-xs tabular-nums"
-          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
-          :role="messageLimit.over ? 'alert' : undefined"
-          data-testid="portal-message-limit"
-        >{{ messageLimit.message }}</p>
+        <PortalMessageLimit :limit="messageLimit" />
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -913,6 +906,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
+import PortalMessageLimit from './PortalMessageLimit.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'
@@ -921,7 +915,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -1487,7 +1481,7 @@ const {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
   // scrolling the agent's identity away. Sticking resumes with the first turn.
-  enabled: () => messages.value.length > 0 || sending.value,
+  enabled: () => !isNewChatTranscript(messages.value) || sending.value,
 })
 // trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
 // Inbox's "Open in chat" sets. Resolved after the history lands (messages) or

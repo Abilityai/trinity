@@ -1,11 +1,13 @@
 <template>
-  <div class="p-6">
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Reliability — dispatch circuit breaker</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      When this agent's task dispatch keeps failing with auth/billing errors, the
-      breaker trips and fast-fails new tasks (instead of burning retries) until it
-      recovers. Opt-in per agent (#526).
-    </p>
+  <div :class="embedded ? '' : 'p-6'">
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Reliability — dispatch circuit breaker</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        When this agent's task dispatch keeps failing with auth/billing errors, the
+        breaker trips and fast-fails new tasks (instead of burning retries) until it
+        recovers. Opt-in per agent (#526).
+      </p>
+    </template>
 
     <div v-if="statusLoading" class="text-sm text-gray-400">Loading…</div>
 
@@ -66,7 +68,7 @@
     <!-- ent#329 — respond → resume ------------------------------------------>
     <hr class="my-6 border-gray-200 dark:border-gray-700" />
 
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Wake this agent when its asks end</h3>
+    <h3 class="font-medium text-gray-900 dark:text-white mb-2" :class="embedded ? 'text-sm' : 'text-lg'">Wake this agent when its asks end</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
       How one of this agent's parked requests ended always reaches it — but by
       default it is only read on the agent's <em>next</em> turn. An agent with no
@@ -114,6 +116,9 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // Positional (message, type) — same contract as the other settings panels.
   notify: { type: Function, default: null },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 function notifyUser(message, type = 'success') {

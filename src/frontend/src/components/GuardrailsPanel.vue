@@ -1,11 +1,15 @@
 <template>
-  <div class="p-6">
-    <div class="mb-6">
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Guardrails</h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Per-agent execution caps. Leave a field blank to inherit the platform default.
-        Changes require an agent restart to take effect.
-      </p>
+  <!-- `embedded` (trinity-enterprise#890): inside Settings › Guardrails the
+       row supplies the title and the restart note goes to the page banner. -->
+  <div :class="embedded ? '' : 'p-6'">
+    <div :class="embedded ? '' : 'mb-6'">
+      <template v-if="!embedded">
+        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Guardrails</h3>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Per-agent execution caps. Leave a field blank to inherit the platform default.
+          Changes require an agent restart to take effect.
+        </p>
+      </template>
 
       <!-- Loading State -->
       <div v-if="loading" class="text-center py-4">
@@ -83,12 +87,20 @@ const props = defineProps({
   notify: {
     type: Function,
     default: null
+  },
+  embedded: {
+    type: Boolean,
+    default: false
   }
 })
 
+// trinity-enterprise#890: a save needs a restart to apply, so the pane hears
+// about it and reports it to the one restart banner.
+const emit = defineEmits(['saved'])
+
 const MIN_TURNS = 1
 const MAX_TURNS = 500
-const DEFAULT_TURNS = 50
+const DEFAULT_TURNS = 200
 
 const agentsStore = useAgentsStore()
 
@@ -157,6 +169,7 @@ async function save() {
     await agentsStore.setGuardrails(props.agentName, payload)
     showToast('Guardrails saved — restart agent to apply', 'success')
     await load()
+    emit('saved', payload)
   } catch (err) {
     const detail = err.response?.data?.detail || 'Failed to save guardrails'
     errorMessage.value = detail

@@ -66,21 +66,19 @@ Click any agent to open its detail page. Tabs appear based on what the agent has
 | **Schedules** | Cron jobs, trigger history, next run times |
 | **Loops** | Bounded sequential task runs |
 | **Skills** | The agent's own skills and those shared from the library, each with **Run**; owners and admins also set approval and assign skills |
-| **Credentials** | Per-agent credential setup and status |
 | **Payments** | Nevermined payment configuration |
-| **Access** / **Sharing** / **Permissions** | Who can reach the agent, and which agents it may call (owners and admins) |
+| **Sharing** / **Permissions** | External clients and channels, and which agents may call this one (owners and admins) |
 | **A2A** | Inbound A2A exposure (owner-only, entitled installations) |
-| **Git** | Repository binding, sync status, and history (only when the agent has a repository binding) |
-| **Files** / **Folders** | Browse the agent workspace, download files, shared folders (Folders: owners and admins) |
-| **Settings** | Guardrails, autonomy, resources, timeouts, runtime options (owners and admins) |
-| **Info** | Template metadata and "what you can ask" |
+| **Git** | Sync status, pending changes, commits, **Pull**, **Push** and **Refresh** (only when the agent has a repository binding) |
+| **Files** | Browse the agent workspace, download files |
+| **Settings** | The one configuration home, pinned last on the strip (owners and admins): a rail of panes — **General** (identity, model and funding, timeout, capacity, read-only, memory and CPU, template details, danger zone), **Guardrails**, **People** (who the agent is shared with), **Channels**, **Integrations** (MCP exposure and access key), **Storage** (repository, GitHub token, credentials, shared folders, file sharing) — with one bar listing every change that waits for a restart |
 
 Header actions:
 
 - **Start/Stop** — Toggle agent container state.
 - **Autonomy** — Enable/disable proactive (scheduled) operation. Turning it off holds schedules and reminders without erasing their individual on/off state, so turning it back on restores exactly what you had.
-- **Workspace** — Open this agent in the Workspace.
-- **Talk** — Start a voice call with the agent. The call opens in the Workspace and the conversation lives there, not in this page's chat.
+
+Below the name, the header also shows the bound GitHub repository (with its branch and how many changes wait to be pushed or pulled), the agent's tags (owners add and remove them with the pencil), and, for a running agent, a small ring showing how full its context window is. The Workspace and voice calls are reached from the navigation bar.
 
 There is no browser terminal on this page. Direct shell access is by SSH — see [Agent Terminal](../agents/agent-terminal.md).
 
@@ -88,23 +86,23 @@ There is no browser terminal on this page. Direct shell access is by SSH — see
 
 Click **Create Agent** in the Dashboard header, or **Use Template** on the Library page:
 
-1. **Choose a source**:
-   - **Blank Agent (Claude Code)** — A minimal agent with a default CLAUDE.md that you shape yourself.
+1. **Choose a source** from the list on the left of the dialog (**Search templates** narrows it). The selected source, the name and its options appear on the right; the dialog keeps one size whatever you pick:
+   - **Blank agent** — A minimal agent with a default CLAUDE.md that you shape yourself.
    - **Local Templates** — The templates bundled with your install (the scout / sage / scribe starters, and more).
    - **GitHub Templates** — Repositories your admin has registered under **Settings → Agents → GitHub Templates**.
-   - **GitHub Repository** — Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** or **A deployment of a codebase** — and Trinity sets up the git binding from the answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
+   - **Import a GitHub repository** — Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** or **A deployment of a codebase** — and Trinity sets up the git binding from the answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
    - Featured **fork-to-own** templates, when your install offers them, ask for a destination repo and a token so the agent gets a repository of its own.
-2. **Enter a name** — A **Slug / Identifier** (e.g., `my-research-agent`). The dialog previews the formatted identifier as you type — lowercased, with spaces and other unsupported characters turned into hyphens — so you see the exact name before you create. It becomes the agent's permanent name in URLs, containers and keys. You can also set a friendly display label.
-3. **Create Agent** — Trinity clones, builds, and starts the container. The form closes and the agent appears on the Dashboard (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
+2. **Enter a name** — One **Name** field (e.g., `My Research Agent`), shown in the UI. The dialog previews the permanent **ID** derived from it as you type — lowercased, with spaces and other unsupported characters turned into hyphens (`my-research-agent`). The ID is used in URLs, containers and keys; **Edit** sets a different one. The **Runtime** row shows the runtime the agent will use (Claude Code for a blank agent; a template may declare another).
+3. **Create agent** — Trinity clones, builds, and starts the container. The form closes and the agent appears on the Dashboard (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
 
 What happens after creation:
 
 - A Docker container is built from the `trinity-agent-base` image.
 - Template files are copied into the agent's workspace at `/home/developer/`.
-- Credentials the template declares show as missing on the **Credentials** tab until you add them.
+- Credentials the template declares show as missing under **Settings › Storage › Credentials** until you add them.
 - The agent starts automatically and appears on the Dashboard.
 
-Next, add credentials on the **Credentials** tab, send a task or chat, set up schedules (the **Schedules** tab's empty state has a **Create a schedule** button), and configure permissions if you are building a multi-agent system. Importing an existing GitHub repository runs a compatibility check inline. See [Creating Agents](../agents/creating-agents.md).
+Next, add credentials under **Settings › Storage › Credentials**, send a task or chat, set up schedules (the **Schedules** tab's empty state has a **Create a schedule** button), and configure permissions if you are building a multi-agent system. Importing an existing GitHub repository runs a compatibility check inline. See [Creating Agents](../agents/creating-agents.md).
 
 ## Operations
 

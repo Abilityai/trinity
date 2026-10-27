@@ -1073,21 +1073,29 @@ function backToEmail() { step.value = 'email'; code.value = ''; error.value = nu
 async function onVerify() {
   if (code.value.length < 6 || busy.value) return
   busy.value = true; error.value = null
+  // #2261 — read the resume target BEFORE the roster load, since the sign-in
+  // that consumed the expiry is what makes it spendable. `endSession` recorded
+  // where the client was when their session lapsed, and until now nothing ever
+  // read it back: the expired notice promises "pick up where you left off", so
+  // it has to actually land there rather than on the roster root.
+  // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+  const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
+  const address = email.value.trim().toLowerCase()
   try {
-    // #2261 — read the resume target BEFORE the roster load, since the sign-in
-    // that consumed the expiry is what makes it spendable. `endSession` recorded
-    // where the client was when their session lapsed, and until now nothing ever
-    // read it back: the expired notice promises "pick up where you left off", so
-    // it has to actually land there rather than on the roster root.
-    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
-    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
-    await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
+    await store.verifyCode(address, code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
       store.resumePath = null
       router.push(resumeTo)
     }
   } catch (err) {
+    // #3922: the code was right, but this address has a platform account. It
+    // signs in at `/login`, which gives it the team view, then comes back here.
+    if (err.response?.status === 409 && err.response?.data?.detail?.reason === 'platform_login_required') {
+      store.resumePath = null
+      router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
+      return
+    }
     error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
     code.value = ''
     await nextTick(); codeInput.value?.focusFirst()

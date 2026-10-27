@@ -1,9 +1,11 @@
 <template>
-  <div class="p-6 space-y-6">
+  <!-- `embedded` (trinity-enterprise#891): Settings › People, whose title is
+       the pane's own — the panel keeps everything else exactly as it was. -->
+  <div :class="embedded ? 'space-y-6' : 'p-6 space-y-6'">
     <!-- Header -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Access</h3>
-      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+      <h3 v-if="!embedded" class="text-lg font-medium text-gray-900 dark:text-white">Access</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400" :class="{ 'mt-1': !embedded }">
         <!-- trinity-enterprise#837: an admin who manages members changes the role
              right here, so the pointer to Settings is for everyone else. -->
         <template v-if="canManageMembers">
@@ -12,12 +14,16 @@
           works in the Workspace only, <span class="font-medium">operator</span> and above also get
           the operator UI. External clients who reach the agent through channels are managed on the
           <span class="font-medium">Sharing</span> tab.
+          A share lets them chat with the agent, see their own conversations, and browse and edit its
+          files, except credentials, runtime config and its instructions.
         </template>
         <template v-else>
           People this agent is shared with. They use it in the Workspace, signing in with an
           emailed code; whether someone also gets the operator UI is their platform role, which an
           admin sets in Settings → Access. External clients who reach the agent through channels are
           managed on the <span class="font-medium">Sharing</span> tab.
+          A share lets them chat with the agent, see their own conversations, and browse and edit its
+          files, except credentials, runtime config and its instructions.
         </template>
       </p>
     </div>
@@ -224,6 +230,7 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // The owner's username: the serves section never shares the agent with them.
   agentOwner: { type: String, default: null },
+  embedded: { type: Boolean, default: false },
 })
 
 const agentsStore = useAgentsStore()

@@ -360,7 +360,6 @@ screenshots:
     shows: Platform settings including agent defaults and feature toggles.
     sources:
       - src/frontend/src/views/Settings.vue
-      - src/frontend/src/components/settings/SettingsPanel.vue
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
 

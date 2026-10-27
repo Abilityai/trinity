@@ -27,11 +27,13 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
 3. **Chat / Task.** `POST /api/chat` → `runtime.execute()`; `POST /api/task` →
    `runtime.execute_headless()`. Both build `codex exec --json --skip-git-repo-check
    -C /home/developer --sandbox <mode> -o <CODEX_HOME>/<exec_id>-last.txt
-   [-m model] [resume <thread_id>] -- <prompt>` and stream the JSONL.
+   [-m model] [resume <thread_id>] -- -`, write the prompt to stdin, close
+   it, and stream the JSONL.
    `<mode>` = `danger-full-access` normally (no inner bwrap sandbox — see Safety
    parity), `read-only` when the agent is read-only. Exec-level flags **precede**
    `resume` (the `resume` sub-subcommand rejects them — the turn-2+ continuity
-   fix); `--` ends options so a `-`-leading prompt can't be reparsed as a flag.
+   fix). The prompt is never an argument: Linux refuses one argv element over
+   131,072 bytes (`MAX_ARG_STRLEN`), which a room transcript passes (#3838).
 4. **Parse.** `thread.started`→session id; `turn.completed.usage`→tokens (cost
    estimated; `reasoning_output_tokens` ⊂ `output_tokens`, never double-counted);
    `item.completed`→agent message / tool activity; `turn.failed`/`error`→error.
@@ -226,11 +228,14 @@ a post-creation runtime-switch endpoint.
 
 Headless task images are passed to native `codex exec --image` options. Resumed
 turns put these options after `resume`, so images attach to the current turn.
+The prompt still travels on stdin (`-- -`), preserving support for long messages.
 The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
 5 MiB each and 10 MiB combined; violations of these MIME, base64 and size checks return HTTP 400 before spawn.
 Raster decoding is performed by the Codex CLI, not by this validation helper.
 A private, unique mode-0700 temporary directory holds mode-0600 copies. Before
-subprocess handoff, failures remove partial files immediately. After handoff, the
+subprocess handoff, failures remove partial files immediately. If writing or
+closing stdin fails after spawn but before reader handoff, the image execution
+stops its child before removing its inputs. After handoff, the
 reader owns cleanup until subprocess reading and bounded cleanup finish. Canceling the
 HTTP waiter leaves those inputs and the process registry entry available until
 that worker completes; cleanup does not need another executor slot. Native
@@ -241,5 +246,5 @@ This change adds no persistent upload originals or tool permissions. Existing
 upload authorization, preprocessing, and channel behavior remain in place.
 
 Unit coverage: `test_codex_runtime.py` exercises initial/resumed argv, bounded
-validation, private permissions, spawn failure, concurrent isolation, and
+validation, private permissions, spawn/stdio failure, long prompts, concurrent isolation, and
 cancellation with a saturated reader executor.

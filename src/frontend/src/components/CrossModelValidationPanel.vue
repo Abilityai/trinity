@@ -2,7 +2,9 @@
   <!-- ent#277. Gated on the entitlement: in an OSS-only build (or an unentitled
        enterprise build) `enterprise_features` omits the id and this renders
        nothing at all — no dead toggle promising a feature the backend 404s. -->
-  <div v-if="entitled" class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-5">
+  <!-- `embedded` (trinity-enterprise#890): a row of Settings › Guardrails ›
+       Checks, inside that section's card — so no card of its own. -->
+  <div v-if="entitled" :class="embedded ? 'px-4 py-3' : 'bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-5'">
     <div class="flex items-start justify-between gap-4">
       <div>
         <h3 class="text-sm font-semibold text-gray-900 dark:text-gray-100">Cross-model validation</h3>
@@ -74,7 +76,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import api from '../api'
 import { useEnterpriseStore } from '../stores/enterprise'
 
-const props = defineProps({ agentName: { type: String, required: true } })
+const props = defineProps({
+  agentName: { type: String, required: true },
+  embedded: { type: Boolean, default: false },
+})
 
 const enterprise = useEnterpriseStore()
 const entitled = computed(() => enterprise.isEntitled('cross_model_validation'))
