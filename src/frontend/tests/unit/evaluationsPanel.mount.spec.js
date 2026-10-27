@@ -106,11 +106,20 @@ const FAILED_PAGE_1 = {
   ],
 }
 const FAILED_PAGE_2 = { ...FAILED_PAGE_1, items: [run('e3', 'alpha', { failed_checks: [{ id: 'no_error', reason: null }] })] }
+// A pair group carries the callee runs' Tier-0 counters AND the edge's own
+// `pair` block (ent#940); the table shows the latter.
+const pairBlock = (graded, passed, perCheck = {}, extra = {}) => ({
+  pair_graded: graded, pair_passed: passed,
+  pair_checks_passed_rate: graded ? passed / graded : null,
+  pair_per_check_fail: perCheck, latency_p50_ms: {}, round_trips_mean: null,
+  cost_per_verified_outcome: null, ...extra,
+})
 const PAIRS = {
   by: 'pair', since: SINCE, until: UNTIL, truncated: false, total: summary(3, 3, 3, 2),
   groups: [
-    { key: { caller: 'alpha', callee: 'beta' }, ...summary(2, 2, 2, 1) },
-    { key: { caller: 'gamma', callee: 'alpha' }, ...summary(1, 1, 1, 1) },
+    { key: { caller: 'alpha', callee: 'beta' }, ...summary(2, 2, 2, 2),
+      pair: pairBlock(2, 1, { relay_unverified: 1 }, { round_trips_mean: 1.5, cost_per_verified_outcome: 0.42 }) },
+    { key: { caller: 'gamma', callee: 'alpha' }, ...summary(1, 1, 1, 0), pair: pairBlock(1, 1) },
   ],
 }
 
@@ -126,8 +135,8 @@ const TREND_BETA = [
   { ts: '2026-10-12T00:00:00Z', value: 0.5 },
   { ts: '2026-10-14T00:00:00Z', value: 0.75 },
 ]
-const byWindow = ({ prevFails = false, pairs = PAIRS, trend = null, fleet = [] } = {}) => async (url, { params }) => {
-  if (url === FAILED) return { data: params.offset ? FAILED_PAGE_2 : FAILED_PAGE_1 }
+const byWindow = ({ prevFails = false, pairs = PAIRS, trend = null, fleet = [], failed = null } = {}) => async (url, { params }) => {
+  if (url === FAILED) return { data: failed || (params.offset ? FAILED_PAGE_2 : FAILED_PAGE_1) }
   if (url === TREND) {
     if (trend instanceof Error) throw trend
     return { data: trendOf(params.agent, params.agent ? (trend ?? TREND_BETA) : fleet) }
@@ -305,6 +314,30 @@ describe('EvaluationsPanel — pairs stub (C3)', () => {
     expect(w.findAll('[data-testid="eval-pair-row"]').map((r) => r.find('button').text()))
       .toEqual(['alpha → beta', 'gamma → alpha'])
     expect(w.find('[data-testid="eval-pairs-total"]').text()).toBe('2 pairs')
+  })
+
+  it('a row shows the EDGE\'s numbers from the pair block, not the callee runs\' Tier-0 rate', async () => {
+    const w = await panel(byWindow())
+    const [ab, ga] = w.findAll('[data-testid="eval-pair-row"]')
+    // alpha → beta: callee runs pass 2/2 at Tier-0, but the hand-off itself passed 1 of 2.
+    expect(ab.find('[data-testid="eval-pair-graded"]').text()).toBe('2')
+    expect(ab.find('[data-testid="eval-pair-passed"]').text()).toBe('50.0%')
+    expect(ab.find('[data-testid="eval-pair-top-check"]').text()).toContain('relay_unverified')
+    // gamma → alpha: callee runs pass 0/1 at Tier-0, but the hand-off passed.
+    expect(ga.find('[data-testid="eval-pair-passed"]').text()).toBe('100.0%')
+    expect(ga.find('[data-testid="eval-pair-top-check"]').text()).toBe('—')
+  })
+
+  it('a failed run lists the pair\'s own failed checks, marked as the pair\'s', async () => {
+    const page = { ...FAILED_PAGE_1, items: [run('e9', 'beta', {
+      caller_agent: 'alpha', failed_checks: [],
+      pair_failed_checks: [{ id: 'relay_unverified', reason: 'no_readback' }],
+    })] }
+    const w = await panel(byWindow({ failed: page }))
+    const chips = w.findAll('[data-testid="eval-failed-pair-check"]')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].text()).toContain('pair ·')
+    expect(chips[0].text()).toContain('relay_unverified · no_readback')
   })
 
   it('a pair row narrows the failed list to that caller → callee edge; clearing restores it', async () => {

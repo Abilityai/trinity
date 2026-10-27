@@ -47,6 +47,16 @@
             <span v-for="c in run.failed_checks" :key="c.id" class="font-mono text-xs text-gray-700 dark:text-gray-300">
               {{ c.id }}<span v-if="c.reason" class="text-gray-500 dark:text-gray-400"> · {{ c.reason }}</span>
             </span>
+            <!-- ent#940: the edge's own failed checks, marked as the pair's so a
+                 reader can tell "the run failed" from "the hand-off failed". -->
+            <span
+              v-for="c in run.pair_failed_checks || []"
+              :key="`pair:${c.id}`"
+              class="font-mono text-xs text-gray-700 dark:text-gray-300"
+              data-testid="eval-failed-pair-check"
+            >
+              <span class="text-gray-500 dark:text-gray-400">pair ·</span> {{ c.id }}<span v-if="c.reason" class="text-gray-500 dark:text-gray-400"> · {{ c.reason }}</span>
+            </span>
           </span>
           <span class="ml-auto text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ formatLocalDateTime(run.completed_at) }}</span>
         </li>

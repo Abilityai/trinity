@@ -151,15 +151,22 @@ the platform's own records — zero LLM calls, OSS core, always on. Contract:
    target_kind='execution', target_id=<execution_id>  → one row per run
    (ent#366 partial unique index), completion = status=='success', quality NULL
         ▼
- GET /api/agents/{name}/executions/{execution_id}/evaluation
+ GET /api/agents/{name}/executions/{execution_id}/evaluations
    get_authorized_agent_by_name · 404 `not_evaluated`
+   → {tier0, judge | null, pair | null}, each through the one projection
         ▼
  ExecutionDetail.vue → ExecutionChecks.vue  "Checks" card
 ```
 
+(The singular `…/evaluation` route — the Tier-0 row alone — stays for machine
+readers; the page reads the plural route, which adds the judge's row (ent#936)
+and the pair row (ent#940) in the same read, under the same gate. ent#938.)
+
 **What the page shows.** One headline from the gate checks: *Checks passed*
 (no gate failed), *Checks failed* (any gate failed — listed by id, reason and
-evidence), *No gate check applied* (every gate skipped). Signals sit under
+evidence), *No gate check applied* (every gate skipped). Every gate is then
+listed with its outcome (✓ passed / ✕ failed / – skipped, with the skip
+reason), so a pass is as visible as a failure. Signals sit under
 "recorded, not counted" and are never worded or coloured as pass/fail — a
 baseline drift is an observation, not a verdict. A run with no row reads
 *Not evaluated* (manual and chat runs are not graded), never an error. The
@@ -296,7 +303,7 @@ EvalFailed, EvalPairs, EvalTrend}.vue` + `format.js`, over one domain store,
 | Read | Request |
 |------|---------|
 | KPIs + per-agent table | `GET /api/evaluations/aggregate?by=agent` (+ `agent=` when one is picked), and the previous window of the same length for the deltas (a failed previous read drops the deltas to "—", never the numbers) |
-| Delegated pairs | `GET /api/evaluations/aggregate?by=pair` (narrowed client-side to the picked agent) |
+| Delegated pairs | `GET /api/evaluations/aggregate?by=pair` (narrowed client-side to the picked agent). The row shows the EDGE's `pair` block — graded, pair-check pass rate, top failed pair check, mean round trips, cost per verified outcome — never the group's top-level `checks_passed_rate`, which is the callee runs' Tier-0 rate (the agent table's number). A failed run's `pair_failed_checks` are listed beside its Tier-0 ones, marked `pair ·` |
 | Failed runs | `GET /api/evaluations/failed`, `limit=50`, offset paging ("Load more" hidden at `total`); `by=pair&caller&callee` when a pair is picked |
 | Trend | `GET /api/evaluations/trend?metric=eval.checks_passed_rate&days=N` — no `agent=` reads the fleet series. `N` runs back from now to the window's first day (≤ 92), so a custom window that ended in the past plots its own days; a window opening before the 92-day reach says so |
 

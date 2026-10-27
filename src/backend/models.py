@@ -2166,6 +2166,16 @@ class EvaluationResponse(BaseModel):
     judge_findings: Optional[List[Dict[str, Optional[str]]]] = None
 
 
+class EvaluationRunRows(BaseModel):
+    """How one run graded under every grader (trinity-enterprise#938, the
+    execution page): the Tier-0 row, the judge's row if the run was sampled,
+    the pair row if another agent delegated it. Each is the same projection
+    the singular read applies — `None` where no such row exists."""
+    tier0: EvaluationResponse
+    judge: Optional[EvaluationResponse] = None
+    pair: Optional[EvaluationResponse] = None
+
+
 class EvaluationSummary(BaseModel):
     """One fold of Tier-0-graded runs (ent#937). A machine principal's copy
     has no `quality_mean` / `judge_human_agreement` / `agreement_n` — absent

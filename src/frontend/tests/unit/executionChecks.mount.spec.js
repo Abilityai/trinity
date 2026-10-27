@@ -1,12 +1,16 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#935 — the Tier-0 result on the execution page, MOUNTED.
+ * trinity-enterprise#935/#936/#938/#940 — the run's grades on the execution
+ * page, MOUNTED.
  *
- * The panel reads `GET /api/agents/{name}/executions/{id}/evaluation` (the
- * B.2 route) and shows ONE headline, derived from the GATE checks only (TD-7):
- * a failed gate fails the run, skips never count against it, and signals are
- * listed as recorded observations — never worded or coloured as pass/fail.
- * A 404 `not_evaluated` is a state of the run, not an error of the page.
+ * The panel reads `GET /api/agents/{name}/executions/{id}/evaluations` (the
+ * run's Tier-0, judge and pair rows in one read) and shows ONE headline,
+ * derived from the Tier-0 GATE checks only (TD-7): a failed gate fails the
+ * run, skips never count against it, and signals are listed as recorded
+ * observations — never worded or coloured as pass/fail. Every gate is listed
+ * with its outcome. The judge's verdict and the hand-off's checks follow as
+ * their own blocks when those rows exist. A 404 `not_evaluated` is a state of
+ * the run, not an error of the page.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -32,19 +36,33 @@ vi.mock('vue-router', () => ({
 import ExecutionChecks from '../../src/components/ExecutionChecks.vue'
 import ExecutionDetail from '../../src/views/ExecutionDetail.vue'
 
-const EVAL_URL = '/api/agents/fin/executions/exec-1/evaluation'
+const EVAL_URL = '/api/agents/fin/executions/exec-1/evaluations'
 
 const check = (id, tier, status, over = {}) => ({
   id, tier, source: 'platform', status, evidence: {}, ...over,
 })
 
-function evaluation(checks, headline) {
+// The route's answer: the Tier-0 row plus, when they exist, the judge's row
+// and the pair row.
+function evaluation(checks, headline, { judge = null, pair = null } = {}) {
   return {
-    id: 'ev-1', agent_name: 'fin', execution_id: 'exec-1', evaluator: 'platform:tier0',
-    completion: true, created_at: '2026-10-18T04:00:00Z',
-    checks: { schema: 1, evaluated_at: '2026-10-18T04:00:00Z', headline, checks },
+    tier0: {
+      id: 'ev-1', agent_name: 'fin', execution_id: 'exec-1', evaluator: 'platform:tier0',
+      completion: true, created_at: '2026-10-18T04:00:00Z',
+      checks: { schema: 1, evaluated_at: '2026-10-18T04:00:00Z', headline, checks },
+    },
+    judge, pair,
   }
 }
+const judgeRow = (judge, quality = judge.quality ?? null) => ({
+  id: 'ev-j', agent_name: 'fin', execution_id: 'exec-1', evaluator: 'platform:tier1:claude-sonnet-5',
+  quality, judge, created_at: '2026-10-18T04:02:00Z',
+})
+const pairRow = (checks, headline, caller = 'ops') => ({
+  id: 'ev-p', agent_name: 'fin', execution_id: 'exec-1', evaluator: 'platform:tier0:pair',
+  caller_agent: caller, created_at: '2026-10-18T04:00:06Z',
+  checks: { schema: 1, headline, checks },
+})
 
 const notFound = () => {
   const e = new Error('Request failed with status code 404')
@@ -68,7 +86,7 @@ const headlineOf = (w) => w.find('[data-testid="execution-checks-headline"]')
 describe('ExecutionChecks — the gate-derived headline', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
-  it('reads the B.2 route for this agent and execution', async () => {
+  it('reads the run-rows route for this agent and execution', async () => {
     await panel(async () => ({ data: evaluation([], { passed: true, gate_pass: 0, gate_fail: 0, gate_skip: 0 }) }))
     expect(routes.get.mock.calls.map(([u]) => u)).toEqual([EVAL_URL])
   })
@@ -133,6 +151,78 @@ describe('ExecutionChecks — the gate-derived headline', () => {
     expect(signals.text()).toContain('outside baseline')
     expect(signals.text()).not.toMatch(/\b(pass|passed|fail|failed)\b/i)
     expect(signals.find('[data-verdict]').exists()).toBe(false)
+  })
+
+  it('every gate is listed with its outcome, a pass as visibly as a failure', async () => {
+    const w = await panel(async () => ({ data: evaluation([
+      check('execution_exists', 'gate', 'pass'),
+      check('deliverable_landed', 'gate', 'fail', { reason: 'claimed_without_receipt' }),
+      check('validate_001', 'gate', 'skip', { reason: 'not_run_yet' }),
+      check('budget_vs_baseline', 'signal', 'pass'),
+    ], { passed: false, gate_pass: 1, gate_fail: 1, gate_skip: 1 }) }))
+    const items = w.findAll('[data-testid="execution-checks-gates"] li')
+    expect(items.map((li) => [li.find('.font-mono').text(), li.attributes('data-status')]))
+      .toEqual([['execution_exists', 'pass'], ['deliverable_landed', 'fail'], ['validate_001', 'skip']])
+    expect(items[2].text()).toContain('skipped (not run yet)')
+  })
+
+  it('a judged run shows the quality out of 5, the model and each dimension with its reason', async () => {
+    const w = await panel(async () => ({ data: evaluation([check('execution_exists', 'gate', 'pass')],
+      { passed: true, gate_pass: 1, gate_fail: 0, gate_skip: 0 }, { judge: judgeRow({
+        schema: 1, state: 'judged', model: 'claude-sonnet-5', verdict: 'graded', quality: 0.76,
+        dimensions: {
+          helpfulness: { verdict: 'pass' },
+          scope_fidelity: { verdict: 'fail', reason: 'edited a file outside the brief' },
+          intent_alignment: { verdict: 'n/a' },
+        },
+      }) }) }))
+    const judge = w.find('[data-testid="execution-checks-judge"]')
+    expect(judge.attributes('data-judge-state')).toBe('judged')
+    expect(w.find('[data-testid="execution-checks-judge-quality"]').text()).toBe('3.8 / 5')
+    expect(judge.text()).toContain('claude-sonnet-5')
+    const dims = w.findAll('[data-testid="execution-checks-judge-dims"] li')
+    // Rubric order, not document order.
+    expect(dims.map((d) => d.attributes('data-verdict'))).toEqual(['fail', 'n/a', 'pass'])
+    expect(dims[0].text()).toContain('Scope fidelity')
+    expect(dims[0].text()).toContain('edited a file outside the brief')
+    expect(dims[1].text()).toContain('not applicable')
+  })
+
+  it('a run the judge skipped says so, and why', async () => {
+    const w = await panel(async () => ({ data: evaluation([check('execution_exists', 'gate', 'pass')],
+      { passed: true, gate_pass: 1, gate_fail: 0, gate_skip: 0 },
+      { judge: judgeRow({ schema: 1, state: 'skipped', skip: 'judge_budget' }) }) }))
+    expect(w.find('[data-testid="execution-checks-judge"]').attributes('data-judge-state')).toBe('skipped')
+    expect(w.find('[data-testid="execution-checks-judge-skip"]').text()).toBe('not judged (judge budget)')
+    expect(w.find('[data-testid="execution-checks-judge-quality"]').exists()).toBe(false)
+  })
+
+  it('no judge row, no judge block', async () => {
+    const w = await panel(async () => ({ data: evaluation([check('execution_exists', 'gate', 'pass')],
+      { passed: true, gate_pass: 1, gate_fail: 0, gate_skip: 0 }) }))
+    expect(w.find('[data-testid="execution-checks-judge"]').exists()).toBe(false)
+    expect(w.find('[data-testid="execution-checks-pair"]').exists()).toBe(false)
+  })
+
+  it('a delegated run shows the hand-off\'s own checks, with the caller and the failed one\'s reason', async () => {
+    const w = await panel(async () => ({ data: evaluation([check('execution_exists', 'gate', 'pass')],
+      { passed: true, gate_pass: 1, gate_fail: 0, gate_skip: 0 }, { pair: pairRow([
+        check('dispatch_exists', 'gate', 'pass'),
+        check('relay_unverified', 'gate', 'fail', { reason: 'no_readback', evidence: { readbacks: 0 } }),
+        check('rework_bounds', 'signal', 'pass', { evidence: { round_trips: 2 } }),
+      ], { passed: false, gate_pass: 1, gate_fail: 1, gate_skip: 0 }) }) }))
+    const pair = w.find('[data-testid="execution-checks-pair"]')
+    expect(pair.text()).toContain('from ops')
+    expect(w.find('[data-testid="execution-checks-pair-headline"]').attributes('data-verdict')).toBe('fail')
+    const failed = w.findAll('[data-testid="execution-checks-pair-failed"] li')
+    expect(failed).toHaveLength(1)
+    expect(failed[0].text()).toContain('relay_unverified')
+    expect(failed[0].text()).toContain('no readback')
+    expect(failed[0].text()).toContain('readbacks: 0')
+    expect(w.findAll('[data-testid="execution-checks-pair-gates"] li').map((li) => li.attributes('data-status')))
+      .toEqual(['pass', 'fail'])
+    // The Tier-0 headline is untouched by the hand-off's failure.
+    expect(headlineOf(w).attributes('data-verdict')).toBe('pass')
   })
 
   it('404 not_evaluated renders "Not evaluated", not an error', async () => {
