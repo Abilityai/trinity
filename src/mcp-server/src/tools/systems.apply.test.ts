@@ -300,6 +300,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         assert.equal(out.detail, detail);
         assert.match(out.error, /not available/);
         assert.match(out.error, /do NOT fall back to deploy_system/, "the actionable warning: create would suffix existing members");
+        assert.match(out.error, /Upgrade the instance/, "and what to do instead");
         assert.deepEqual(
           requests.map((r) => r.path),
           ["/api/systems/apply"],
@@ -309,6 +310,18 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         await s.client.close();
       });
     }
+
+    it("a proxy's non-JSON 404 is still not_available, with the raw text as detail", async () => {
+      const html = "<html><body>404 Not Found</body></html>";
+      reset({ status: 404, body: html, contentType: "text/html" });
+      const s = await session("absent-html");
+      const { text } = await s.call("apply_system", { manifest: MANIFEST });
+      const out = parsed(text);
+      assert.equal(out.not_available, true);
+      assert.equal(out.http_status, 404);
+      assert.equal(out.detail, html);
+      await s.client.close();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -350,6 +363,14 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.equal(isError, false);
       assert.deepEqual(parsed(text), { success: false, http_status: 502, detail: html });
       assert.equal(row.details.denied, undefined);
+      await s.client.close();
+    });
+
+    it("a JSON body that is not an object (a bare string) becomes {success: false, http_status, detail}", async () => {
+      reset(jsonReply(502, "upstream unavailable"));
+      const s = await session("json-scalar");
+      const { text } = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
+      assert.deepEqual(parsed(text), { success: false, http_status: 502, detail: "upstream unavailable" });
       await s.client.close();
     });
   });

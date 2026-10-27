@@ -132,7 +132,8 @@ function applyFailure(error: unknown, context: DenyCallContext | undefined): str
           `System apply is not available on this Trinity build: POST /api/systems/apply answered ${status}, `
           + "so the backend predates apply mode. Nothing was planned or written, and do NOT fall back to "
           + "deploy_system: it is create-only and would create suffixed copies (`<name>_2`) of members "
-          + "that already exist.",
+          + "that already exist. Upgrade the instance to a build with apply mode, or change existing "
+          + "members one at a time with the per-agent tools.",
         detail,
       },
       null,
