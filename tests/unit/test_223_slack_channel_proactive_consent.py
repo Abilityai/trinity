@@ -157,28 +157,95 @@ class TestMigrationBackfill:
 
 
 class TestConsentToggleIsHumanOnly:
-    def test_toggle_endpoint_rejects_an_agent_principal(self):
+    def test_toggle_route_carries_the_person_gate(self):
         """An agent-scoped key resolves to the OWNER on REST (dependencies.py:423),
         so can_user_share_agent alone would let an agent flip its OWN consent on —
-        self-granting the control ent#223 exists to enforce."""
-        import inspect
+        self-granting the control ent#223 exists to enforce. The route's gate is
+        `Depends(require_person)` in its decorator (trinity-enterprise#719): an
+        allowlist that admits only a person, whatever key a machine holds."""
         from routers import slack as slack_router
 
-        src = inspect.getsource(slack_router.set_slack_channel_proactive)
-        assert "reject_agent_principal" in src, (
-            "the consent toggle lost its human-only guard — an agent could grant "
-            "itself proactive-messaging consent"
+        # The objects the router really holds (a sibling file may re-import
+        # `dependencies`, so the module's own names are the ones to compare).
+        require_person = slack_router.require_person
+        route = next(
+            r for r in slack_router.auth_router.routes
+            if getattr(r, "endpoint", None) is slack_router.set_slack_channel_proactive
+        )
+        assert require_person in [d.call for d in route.dependant.dependencies], (
+            "the consent toggle lost its person gate — a machine key could grant "
+            "proactive-messaging consent"
         )
 
+    @pytest.mark.parametrize(
+        "principal",
+        [
+            pytest.param({"mcp_scope": "agent", "agent_name": "analytics"}, id="agent-own-key"),
+            pytest.param({"mcp_scope": "system"}, id="system-key"),
+        ],
+    )
+    def test_toggle_refuses_a_machine_key_through_the_router(self, monkeypatch, principal):
+        """Through the real router: a machine key gets the person refusal before
+        the owner check or any channel lookup (every post-gate db call is loud)."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from routers import slack as slack_router
+        from models import User
+
+        # Override the leaf the router really authenticates through, and read
+        # the detail from the same `dependencies` namespace (test_ent717 shape).
+        get_current_user = slack_router.get_current_user
+        human_only_detail = slack_router.require_person.__globals__["HUMAN_ONLY_DETAIL"]
+
+        def _boom(*a, **k):
+            raise AssertionError("reached a db call past the person gate")
+
+        monkeypatch.setattr(slack_router.db, "can_user_share_agent", _boom, raising=False)
+        monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent", _boom, raising=False)
+        monkeypatch.setattr(slack_router.db, "set_slack_channel_allow_proactive", _boom, raising=False)
+
+        app = FastAPI()
+        app.include_router(slack_router.auth_router)
+        app.dependency_overrides[get_current_user] = lambda: User(
+            id=1, username="owner", email="owner@example.com", role="admin", **principal)
+        res = TestClient(app).put(
+            "/api/agents/analytics/slack/channels/C1/proactive", json={"allow_proactive": True})
+        assert res.status_code == 403, res.text
+        assert res.json()["detail"] == human_only_detail
+
+    def test_toggle_admits_a_person_through_the_router(self, monkeypatch):
+        """Control: a signed-in owner passes the gate and reaches the handler,
+        which answers for an unbound channel."""
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from routers import slack as slack_router
+        from models import User
+
+        # Override the leaf the router really authenticates through (test_ent717 shape).
+        get_current_user = slack_router.get_current_user
+
+        monkeypatch.setattr(slack_router.db, "can_user_share_agent", lambda *a, **k: True, raising=False)
+        monkeypatch.setattr(slack_router.db, "get_slack_channels_for_agent", lambda *a, **k: [], raising=False)
+
+        app = FastAPI()
+        app.include_router(slack_router.auth_router)
+        app.dependency_overrides[get_current_user] = lambda: User(
+            id=1, username="owner", email="owner@example.com", role="admin")
+        res = TestClient(app).put(
+            "/api/agents/analytics/slack/channels/C1/proactive", json={"allow_proactive": True})
+        assert res.status_code == 404, res.text
+        assert res.json()["detail"] == "Channel not found or not bound to this agent"
+
     def test_toggle_rejects_agent_principal_at_runtime(self, monkeypatch):
-        """Runtime proof, not just source-grep (#1710): an agent-scoped principal
-        calling the toggle gets 403 + the human-only detail BEFORE the owner check
-        or any channel mutation. ``reject_agent_principal`` is the first statement,
-        so making every post-gate db call loud proves the ordering — and this is
-        what the AST wiring guard (a plain helper call) cannot see. The migration
-        onto ``assert_agent_owner`` must NOT drop this line: that helper is
-        agent-permissive, so without the standalone reject an agent could
-        self-grant proactive consent."""
+        """Direct call (#1710): an agent-scoped principal calling the handler gets
+        403 + the human-only detail BEFORE the owner check or any channel
+        mutation. ``reject_agent_principal`` is the first statement, so making
+        every post-gate db call loud proves the ordering. Over HTTP the route's
+        ``require_person`` gate answers first (the two tests above); this pins the
+        inline line the handler keeps for direct callers. ``assert_agent_owner``
+        is agent-permissive, so it must not be the only check."""
         import asyncio
         from fastapi import HTTPException
         from routers import slack as slack_router

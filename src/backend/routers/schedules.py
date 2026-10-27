@@ -29,6 +29,7 @@ from models import (
 from dependencies import (
     agent_may_reach,
     capability_fence,
+    require_person_or_capability,
     get_current_user,
     get_authorized_agent,
     AuthorizedAgent,
@@ -670,6 +671,13 @@ async def trigger_schedule(
 
 
 # Webhook Management Endpoints (WEBHOOK-001, #291)
+#
+# Every webhook route, the read included, takes a person or an agent holding
+# `schedules.manage` (trinity-enterprise#719). The schedule writes above keep
+# the own-agent exemption, whose reason is that autonomy bounds the agent's own
+# schedules; a webhook run is not gated by autonomy, so the exemption stops at
+# the schedule. The read returns the URL with its token, so it takes the same
+# gate as the writes.
 
 
 def _build_webhook_url(request: Request, token: str) -> Optional[str]:
@@ -683,7 +691,7 @@ def _build_webhook_url(request: Request, token: str) -> Optional[str]:
     return f"{base}/api/webhooks/{token}" if base else None
 
 
-@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def generate_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -735,7 +743,7 @@ async def generate_webhook(
     )
 
 
-@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
+@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def get_webhook_status(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -771,7 +779,7 @@ async def get_webhook_status(
 @router.post(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def generate_webhook_secret(
     name: AuthorizedAgent,
@@ -826,7 +834,7 @@ async def generate_webhook_secret(
 @router.delete(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def disable_webhook_secret(
     name: AuthorizedAgent,
@@ -856,7 +864,7 @@ async def disable_webhook_secret(
     )
 
 
-@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def revoke_webhook(
     name: AuthorizedAgent,
     schedule_id: str,

@@ -11,9 +11,9 @@ As a developer, I want to trigger a Trinity agent schedule from a CI pipeline, G
 ## Entry Points
 
 - **API (public)**: `POST /api/webhooks/{webhook_token}` — no authentication required
-- **Management API**: `POST /api/agents/{name}/schedules/{id}/webhook` — generate token (JWT required)
-- **Management API**: `GET /api/agents/{name}/schedules/{id}/webhook` — get status (JWT required)
-- **Management API**: `DELETE /api/agents/{name}/schedules/{id}/webhook` — revoke token (JWT required)
+- **Management API**: `POST /api/agents/{name}/schedules/{id}/webhook` — generate token (a person, or an agent key holding `schedules.manage`)
+- **Management API**: `GET /api/agents/{name}/schedules/{id}/webhook` — get status (a person, or an agent key holding `schedules.manage`)
+- **Management API**: `DELETE /api/agents/{name}/schedules/{id}/webhook` — revoke token (a person, or an agent key holding `schedules.manage`)
 
 ---
 
@@ -109,13 +109,16 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{20,60}$")
 
 ### Webhook Management Endpoints
 
-**File**: `src/backend/routers/schedules.py:458-553`
+**File**: `src/backend/routers/schedules.py:673-885`
 
 | Method | Path | Auth | Handler |
 |--------|------|------|---------|
-| POST | `/{name}/schedules/{id}/webhook` | `get_current_user` + `can_user_access_agent` + `is_agent_live` | `generate_webhook` |
-| GET | `/{name}/schedules/{id}/webhook` | `AuthorizedAgent` | `get_webhook_status` |
-| DELETE | `/{name}/schedules/{id}/webhook` | `get_current_user` + `can_user_access_agent` | `revoke_webhook` |
+| POST | `/{name}/schedules/{id}/webhook` | `require_person_or_capability("schedules.manage")`, then `AuthorizedAgent` + `is_agent_live` | `generate_webhook` |
+| GET | `/{name}/schedules/{id}/webhook` | `require_person_or_capability("schedules.manage")`, then `AuthorizedAgent` | `get_webhook_status` |
+| DELETE | `/{name}/schedules/{id}/webhook` | `require_person_or_capability("schedules.manage")`, then `AuthorizedAgent` | `revoke_webhook` |
+| POST / DELETE | `/{name}/schedules/{id}/webhook/secret` | `require_person_or_capability("schedules.manage")`, then `AuthorizedAgent` | `generate_webhook_secret` / `disable_webhook_secret` |
+
+**Who may manage a webhook (trinity-enterprise#719):** a person (a signed-in session or the person's own `user`-scoped key), or an agent key holding `schedules.manage` on an agent its owner owns (another user's agent answers 404, like a missing one). The gate sits in the decorator, so it is decided before the agent or schedule is looked up. An agent key without the grant gets 403 `schedule_management_not_permitted`, audited as `capability_refused`, on its own schedules too: the own-agent exemption on `schedules.manage` covers the schedule, not its webhook, because a webhook run is not gated by autonomy. The system key gets 403 `person_required`. Connector, ops, portal-delegate and ephemeral agent keys are refused earlier by their own entry fences in `get_current_user`, and the route gate refuses any other non-person with `person_required`. The read takes the same gate because it returns the URL with its token.
 
 **Creation gate (#1445):** both `create_schedule` (`POST /{name}/schedules`) and `generate_webhook` reject an agent with no live `agent_ownership` row. The order is access-check → **404** on `not db.is_agent_live(name)` (never before the access check, so a low-priv caller can't distinguish "agent missing" from "access denied" — uniform 403). The db layer re-enforces it at the `db/schedules.py:create_schedule` chokepoint (`is_agent_live` → `None` → router 403), so every caller (router, MCP, system-manifest deploy) holds the no-orphan invariant. `is_agent_live` checks `agent_ownership.deleted_at IS NULL` **without joining `users`**, matching the token-lookup predicate exactly (`get_agent_owner` joins `users`, so it would false-negative a live agent whose owner-user row is missing — FKs are off platform-wide).
 

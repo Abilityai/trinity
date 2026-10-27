@@ -58,7 +58,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 - `GET /api/agents/{name}/slack/channel` → `{bound, channel_name, channel_id, workspace_name, is_dm_default, workspace_agent_count}`
 - `POST /api/agents/{name}/slack/channel` → `{status, channel_name, channel_id, workspace_name}`
 - `DELETE /api/agents/{name}/slack/channel` → `{unbound, workspace_name}` — **409** if the agent is the workspace's DM default and other agents are still bound (#584)
-- `PUT /api/agents/{name}/slack/channel/dm-default` → `{status, team_id, workspace_name, previous, new_default}` — owner-only; single-tx clear-then-set on `is_dm_default`; audit-logged via `AGENT_LIFECYCLE/slack_dm_default_changed` (#584)
+- `PUT /api/agents/{name}/slack/channel/dm-default` → `{status, team_id, workspace_name, previous, new_default}` — owner-only and a person only (`Depends(require_person)`, trinity-enterprise#719); single-tx clear-then-set on `is_dm_default`; audit-logged via `AGENT_LIFECYCLE/slack_dm_default_changed` (#584)
 - `POST /api/agents/{name}/slack/channels/{channel_id}/messages` → proactive channel send (#350); owner-gated, rate limited. **Persists to session history (#1649)** — see below
 
 ### Proactive channel sends → session history (#1649)

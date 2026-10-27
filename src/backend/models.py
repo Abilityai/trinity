@@ -4535,7 +4535,7 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
-    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    # ent#265: human-only arm — the router calls assert_person when set.
     allow_proactive: Optional[bool] = None
     # ent#600: human-only arm too — recording a group's conversation is a
     # privacy decision the owner makes, not one an agent grants itself.

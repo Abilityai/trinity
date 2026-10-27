@@ -30,8 +30,11 @@ from services.telegram_group_context import flag_from_bot_info, group_context_st
 from dependencies import (
     AuthorizedAgentByName,
     OwnedAgentByName,
+    assert_person,
     get_current_user,
     reject_agent_principal,
+    require_interactive,
+    require_person,
 )
 from models import (
     TelegramBindingResponse,
@@ -98,7 +101,11 @@ def _progress_indicator_enabled(binding: dict) -> bool:
     return v is None or v != 0
 
 
-@auth_router.get("/{agent_name}/telegram", response_model=TelegramBindingResponse)
+@auth_router.get(
+    "/{agent_name}/telegram",
+    response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_person)],
+)
 async def get_telegram_binding(
     agent_name: AuthorizedAgentByName,
 ):
@@ -106,7 +113,9 @@ async def get_telegram_binding(
 
     Access hardened in ent#264 (previously any authenticated user): the
     response includes ``webhook_url``, which embeds the webhook secret —
-    owner/shared/admin only, uniform-404 accessor (Invariant #8).
+    owner/shared/admin only, uniform-404 accessor (Invariant #8). A person
+    only (trinity-enterprise#719): the response carries the webhook secret,
+    so the read is ruled on sensitivity. A person it is shared with keeps it.
     """
     binding = db.get_telegram_binding(agent_name)
     if not binding:
@@ -129,6 +138,7 @@ async def get_telegram_binding(
 @auth_router.put(
     "/{agent_name}/telegram/progress-indicator",
     response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_person)],
 )
 async def set_telegram_progress_indicator(
     agent_name: OwnedAgentByName,
@@ -140,7 +150,9 @@ async def set_telegram_progress_indicator(
     Dedicated route (mirrors ``PUT /voip/enabled``) so toggling never requires
     re-entering the bot token. Human-only: an agent-scoped key resolves to the
     OWNER on REST, so ownership checks alone would let an agent flip its own
-    user-facing behavior toggle (ent#223 lesson).
+    user-facing behavior toggle (ent#223 lesson). The route gate is
+    ``require_person`` (trinity-enterprise#719): only a person passes. The
+    inline ``reject_agent_principal`` stays for direct callers of the handler.
     """
     reject_agent_principal(current_user)
 
@@ -166,7 +178,11 @@ async def set_telegram_progress_indicator(
     )
 
 
-@auth_router.put("/{agent_name}/telegram", response_model=TelegramBindingResponse)
+@auth_router.put(
+    "/{agent_name}/telegram",
+    response_model=TelegramBindingResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def configure_telegram_bot(
     agent_name: OwnedAgentByName,
     config: TelegramConfigureRequest,
@@ -175,7 +191,9 @@ async def configure_telegram_bot(
     Configure a Telegram bot for an agent.
 
     Validates the bot token via getMe API, stores encrypted,
-    and registers the webhook if a public URL is available.
+    and registers the webhook if a public URL is available. Binding a bot
+    token binds a credential, so it takes a signed-in session
+    (``require_interactive``, trinity-enterprise#719).
     """
     bot_token = config.bot_token.strip()
 
@@ -258,7 +276,7 @@ async def configure_telegram_bot(
     )
 
 
-@auth_router.delete("/{agent_name}/telegram")
+@auth_router.delete("/{agent_name}/telegram", dependencies=[Depends(require_person)])
 async def delete_telegram_binding(
     agent_name: OwnedAgentByName,
 ):
@@ -278,7 +296,7 @@ async def delete_telegram_binding(
     return {"ok": True, "message": f"Telegram bot removed from {agent_name}"}
 
 
-@auth_router.post("/{agent_name}/telegram/test")
+@auth_router.post("/{agent_name}/telegram/test", dependencies=[Depends(require_person)])
 async def test_telegram_bot(
     agent_name: OwnedAgentByName,
     test: TelegramTestRequest,
@@ -385,7 +403,9 @@ async def update_telegram_group(
     if config.allow_proactive is not None or config.context_enabled is not None:
         # ent#600: recording a group's conversation is the owner's privacy
         # decision — same grant-vs-use line as the consent arm above.
-        reject_agent_principal(current_user)
+        # trinity-enterprise#719: the PERSON allowlist — only a session or the
+        # person's own user key passes.
+        assert_person(current_user)
 
     # Validate trigger_mode if provided
     # Issue #349: Added 'observe' mode - agent sees all messages but can return [NO_REPLY]
@@ -431,7 +451,10 @@ async def update_telegram_group(
     return _group_config_response(binding, updated).model_dump()
 
 
-@auth_router.delete("/{agent_name}/telegram/groups/{group_config_id}")
+@auth_router.delete(
+    "/{agent_name}/telegram/groups/{group_config_id}",
+    dependencies=[Depends(require_person)],
+)
 async def delete_telegram_group(
     agent_name: OwnedAgentByName,
     group_config_id: int,

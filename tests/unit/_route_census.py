@@ -835,8 +835,9 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/agent_files.py::share_agent_file": (
         "POST /api/agents/{agent_name}/shared-files",
         "MCP share_file: a download link for a file in the agent's OWN publish dir (FILES-001); the owner gate "
-        "follows. Listed as today's behaviour, not a ruling: whether minting a public link is a grant (person-only, "
-        "like the canvas share, trinity-enterprise#554) is open in trinity-enterprise#719's sharing cluster"),
+        "follows. A USE of the file-sharing grant a person turns on (PUT .../file-sharing is PERSON, "
+        "trinity-enterprise#719): create_share refuses while it is off. The canvas share differs: it has no prior "
+        "person grant, so minting one is person-only (trinity-enterprise#554)"),
     "routers/reports.py::create_report": (
         "POST /api/agents/{name}/reports", "MCP report: structured output an agent publishes about itself (#918)"),
     "routers/metric_points.py::record_metric_points": (
@@ -1040,6 +1041,16 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/git.py::get_pull_sync_config": (
         "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle",
         _SIB_READ + " — one boolean"),
+    # trinity-enterprise#265 / #600: the agent keeps setting its own group's trigger mode and
+    # welcome; the completion-report consent and group-context fields are a person's decision,
+    # refused to every machine principal by assert_person inside the handler (trinity-enterprise#719).
+    "routers/telegram.py::update_telegram_group": (
+        "PUT /api/agents/{agent_name}/telegram/groups/{group_config_id}",
+        "ent#265: trigger mode and welcome are the agent's own channel settings, a USE; the consent "
+        "(allow_proactive) and context (context_enabled) fields take assert_person, so no key grants "
+        "itself either",
+        "owner tier (OwnedAgentByName): a sibling reaches it only for an agent it spawned (the ent#629 "
+        "manage reach), never through an edge, and only for trigger mode and welcome"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)
@@ -1134,7 +1145,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 330
+FROZEN_BASELINE_COUNT = 281
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

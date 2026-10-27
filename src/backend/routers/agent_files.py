@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -295,7 +295,7 @@ async def get_agent_reach(
     return agent_reach_logic(agent_name, target, current_user)
 
 
-@router.put("/{agent_name}/permissions")
+@router.put("/{agent_name}/permissions", dependencies=[Depends(require_person)])
 async def set_agent_permissions(
     agent_name: str,
     request: Request,
@@ -322,7 +322,7 @@ async def set_agent_permissions(
     return result
 
 
-@router.post("/{agent_name}/permissions/{target_agent}")
+@router.post("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def add_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -348,7 +348,7 @@ async def add_agent_permission(
     return result
 
 
-@router.delete("/{agent_name}/permissions/{target_agent}")
+@router.delete("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def remove_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -818,7 +818,7 @@ async def get_agent_folders(
     return await get_agent_folders_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/folders")
+@router.put("/{agent_name}/folders", dependencies=[Depends(require_person)])
 async def update_agent_folders(
     agent_name: str,
     request: Request,
@@ -873,7 +873,7 @@ async def get_agent_file_sharing(
     return await get_file_sharing_status_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/file-sharing")
+@router.put("/{agent_name}/file-sharing", dependencies=[Depends(require_person)])
 async def set_agent_file_sharing(
     agent_name: str,
     body: dict,

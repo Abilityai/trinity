@@ -2323,8 +2323,9 @@ _CAPABILITY_REFUSALS = {
         "schedule_management_not_permitted",
         "This agent does not hold the schedule-management permission, which "
         "creating, changing, enabling, disabling or deleting ANOTHER agent's "
-        "schedules (and their webhooks) requires. An agent's own schedules need "
-        "no grant." + _ask_for_it("schedules.manage"),
+        "schedules requires, as does creating, reading, signing or revoking "
+        "any schedule's webhook \u2014 its own included. An agent's own schedules "
+        "otherwise need no grant." + _ask_for_it("schedules.manage"),
     ),
     "instructions.manage": (
         "instruction_management_not_permitted",

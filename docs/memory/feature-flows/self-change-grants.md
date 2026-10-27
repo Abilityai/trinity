@@ -18,14 +18,18 @@ admin grants it from a signed-in session — in the agent's Settings →
 **Permissions to change itself** (ent#756), or with
 `PUT /api/agents/{agent}/capability-grants/{capability}`.
 
-People (JWT, their own `user` key) and the system agent are never fenced.
+People (JWT, their own `user` key) and the system agent are never fenced by a
+capability. A route that takes `require_person_or_capability` (the reconfigure
+writes, the skill-gate writes of trinity-enterprise#753, and every
+schedule-webhook route, trinity-enterprise#719) still refuses the system
+agent's key, as `require_person` does.
 
 ## Capabilities
 
 | Capability | Covers | Exempt |
 |---|---|---|
 | `skills.manage` | ent#596, unchanged | — |
-| `schedules.manage` | create / update / delete / enable / disable a schedule; its webhook and webhook secret | the agent's **own** schedules (#2996); `trigger` |
+| `schedules.manage` | create / update / delete / enable / disable a schedule; its webhook and webhook secret (mint, read, sign, unsign, revoke) | the agent's **own** schedules (#2996), but not their webhooks (trinity-enterprise#719: a webhook run is not gated by autonomy); `trigger` |
 | `instructions.manage` | `CLAUDE.md`, `AGENTS.md`, `.claude/**` except `.claude/skills/**` through the file routes; `git/reset-to-main-preserve-state` | — |
 | `agents.manage` | create a durable agent, delete, `deploy-local`, `systems/deploy`, `PUT /model`, and `read-only` / `resources` / `timeout` / `public-channel-model` / `guardrails` | spawning or discarding an **ephemeral** agent (ent#69) |
 | `projects.manage` (ent#588) | start a Workspace project for its owner (owner = creator and first member, agent = steward, members-only) and import one of its own folder projects — MCP `create_project` / `import_project`, checked by the projects module before any read | working on a project it is already active on; adding people or changing visibility is never granted |
@@ -84,6 +88,9 @@ reconfigure   Depends(require_person_or_capability("agents.manage"[, self_person
               agent scope → the capability, then target owned by its owner
               (else 404); read-only / guardrails on itself → assert_person;
               anything else → assert_person
+webhooks      Depends(require_person_or_capability("schedules.manage")) on all five
+              schedule-webhook routes, the read included — no own-agent exemption;
+              as reconfigure, with no self_person_only branch
 create        _require_create_capability (routers/agents.py), before the
               idempotency claim; ghosts (config.ephemeral) skip it
 file routes   services/agent_service/files._require_skill_capability
@@ -114,10 +121,9 @@ The fence covers the platform routes listed above, and nothing else:
   Only `git/reset-to-main-preserve-state` takes `instructions.manage`.
 - **Instruction writes outside the path list**: `CLAUDE.local.md`, the
   home-level `.claude.json`, a symlink inside the target workspace, and the
-  DB-stored prompts (`PUT /{agent}/public-prompt`, `PUT /{name}/voice/prompt`).
+  DB-stored voice prompt (`PUT /{name}/voice/prompt`).
 - **Other owner-tier writes** stay agent-reachable without a grant:
-  `circuit-breaker`, `mcp-exposed`, `folders`, `file-sharing`,
-  `git/auto-sync`, `github-pat`, `access-policy`, and
+  `circuit-breaker`, `mcp-exposed`, `git/auto-sync`, `github-pat`, and
   `git/freeze-schedules-if-failing`.
 - **Calibration** is checked at grant time, for the holder only: a ready
   holder can still rewrite a calibrating sibling's `CLAUDE.md`, and a grant

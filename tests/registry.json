@@ -1,6 +1,59 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_channel_bindings_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Channel bindings and their exposure are human-only, through the real Telegram, WhatsApp, VoIP and Slack routers: the three credential binds take a signed-in session (the owner's user key refused too), the other 18 routes a person. The agent's own key, a sibling inside its manage reach, the system key, ops, portal_delegate, connector, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope are refused with the gate's detail; a real unvouched loopback JWT is refused by the entry fence; a nonexistent agent gets the same 403; a schema-invalid body or query is refused before validation (and is a 422 for a person); a signed-in owner, an admin and (on person routes) the owner's user key get each handler's own fresh-install answer. Other shape: VoIP with the feature flag off."
+    },
+    {
+      "file": "unit/test_ent719_channel_uses_kept.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "The channel uses an agent keeps: PUT telegram/groups/{id} still sets trigger mode and welcome on the agent's own key (and a spawned sibling's) and on the system key (the route is listed ANY), while the completion-report consent and group-context fields are refused to every machine principal with the stored value unchanged and pass for a person; a sibling outside its reach gets the uniform 404. The Telegram, Slack and VoIP sends and lists still admit the agent's own key and reach their handlers."
+    },
+    {
+      "file": "unit/test_ent719_schedule_webhook_person_or_grant.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "scheduling",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The five schedule-webhook routes (mint, read, sign, unsign, revoke) take require_person_or_capability('schedules.manage') in the decorator, through the real schedules router and the real get_current_user with key rows in the real schema: an ungranted agent key is refused on its own agent with schedule_management_not_permitted and exactly one capability_refused audit row, before any agent or schedule lookup; an in-reach sibling without the grant is refused (the read included); a granted own key and a granted owner-owned sibling pass, another user's agent answers 404 (a call edge to it included); the owner's session and user key pass; the system key gets person_required; real connector, ops, portal_delegate and ephemeral agent keys are refused by their own entry fences first, each asserted by that fence's exact detail with no capability_refused row (a ghost on its own schedule too), and the route gate refuses stated connector, ops and portal_delegate principals, an unknown scope, a user scope carrying an agent, a vouched loopback (person_required) and a principal with no mcp_scope (403); a real unvouched loopback JWT is refused by the entry fence. Every refusal leaves the stored webhook state unmoved. The schedule itself keeps its own-agent exemption (create/update/enable/disable/delete without a grant). Other shape: a schedule with no webhook reads has_token false. The census classifies all five person_or_grant. Mutation: restoring capability_fence(own_agent_exempt=True) turns the refusal, system-key and census tests red."
+    },
+    {
+      "file": "unit/test_ent719_reach_and_exposure_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "sharing",
+        "auth",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Who may reach an agent and who outside the platform sees it is a person's decision, through each route's real router over a real schema: sharing and access-request approval take a signed-in session (require_interactive); revoking a share, access policy, public prompt, permission edges, folders and file sharing, and logging out, blocking and unblocking a Workspace client take a person (require_person; block and unblock keep assert_admin), as do the five public-link routes (the agent's own key creating a link: 403, no row written) and the canvas share create/list/revoke and pin routes. Every machine principal (own key, an agent in reach, system, connector, ops, portal_delegate, unknown scope, no mcp_scope, vouched loopback) gets the rule's 403 before any db call, for a missing agent and a schema-invalid body too; a real unvouched loopback JWT is refused at the entry fence; a person (and the user key on PERSON routes) still succeeds; share_file still mints once a person turns file sharing on, and the own key still writes and clears its own canvas; fresh install refuses the same way and lists []."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",

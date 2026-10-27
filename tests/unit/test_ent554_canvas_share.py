@@ -428,6 +428,46 @@ def test_the_share_gate_refuses_an_agent_even_for_its_own_agent():
         assert excinfo.value.status_code == 403
 
 
+def _machine_principals():
+    """Every machine principal other than the agent key above."""
+    admin = {"id": 1, "username": "alice", "role": "admin"}
+    return {
+        "system": User(**admin, mcp_scope="system"),
+        "ops": User(**admin, mcp_scope="ops"),
+        "connector": User(**admin, mcp_scope="connector", connector_agent="agent-a"),
+        "portal_delegate": User(**admin, mcp_scope="portal_delegate", portal_delegate=True),
+        "unknown": User(**admin, mcp_scope="a-scope-no-one-has-shipped"),
+        "vouched_loopback": User(**admin, is_event_loopback=True, vouched_source_agent="agent-a"),
+    }
+
+
+def test_the_share_gate_admits_only_a_person(monkeypatch):
+    """trinity-enterprise#719: the share and pin gates admit only a person (a
+    signed-in session or the person's own `user` key). The routes also carry
+    `Depends(require_person)`; this pins the helper on its own.
+
+    The owner check behind the rule is stood in for, so a 403 here can only be
+    the rule's, and it must never be reached for a machine principal."""
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    owner_checks = []
+    monkeypatch.setattr(canvas_router, "assert_agent_owner",
+                        lambda user, name, **kw: owner_checks.append(name))
+
+    for who, principal in _machine_principals().items():
+        for gate in (canvas_router._gate_share, canvas_router._gate_pin):
+            with pytest.raises(HTTPException) as excinfo:
+                gate(principal, "agent-a")
+            assert excinfo.value.status_code == 403, (who, gate.__name__)
+    assert owner_checks == []
+
+    # A person passes the rule and meets the owner check.
+    canvas_router._gate_share(User(id=1, username="alice", role="admin"), "agent-a")
+    canvas_router._gate_pin(User(id=1, username="alice", role="admin", mcp_scope="user"), "agent-a")
+    assert owner_checks == ["agent-a", "agent-a"]
+
+
 def test_all_three_share_routes_use_the_human_only_gate():
     """Source-level, because the bug was a call site rather than a predicate.
 

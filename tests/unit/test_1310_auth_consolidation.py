@@ -845,8 +845,11 @@ def test_slack_proactive_toggle_rejects_agent_principal(seeded):
     """Site #10 keeps its ent#223 human-only guard through the migration: an
     agent-scoped principal (resolving to the owner, carrying the owner role) is
     refused with the reject_agent_principal detail — self-granting proactive
-    consent is a human decision. assert_agent_owner alone is agent-permissive,
-    so the standalone reject_agent_principal line is what enforces this."""
+    consent is a human decision. assert_agent_owner alone is agent-permissive.
+    Over HTTP the route's own gate is now `Depends(require_person)` in its
+    decorator (trinity-enterprise#719), which runs first and admits only a person
+    (test_223_slack_channel_proactive_consent.py); this direct call pins
+    the inline reject_agent_principal the handler keeps for direct callers."""
     from models import SlackChannelProactiveRequest  # noqa: PLC0415
 
     agent_key = _user(_OWNER, uid=_OWNER_ID, agent_name=_AGENT)  # the agent's own key

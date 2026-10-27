@@ -20,7 +20,13 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from fastapi.responses import RedirectResponse
 
 from database import db
-from dependencies import get_current_user, reject_agent_principal, assert_agent_access, assert_agent_owner
+from dependencies import (
+    assert_agent_access,
+    assert_agent_owner,
+    get_current_user,
+    reject_agent_principal,
+    require_person,
+)
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
 from services import channel_history, idempotency_service, rate_limiter
 from services.slack_service import slack_service
@@ -205,13 +211,21 @@ async def slack_oauth_callback(code: str = None, state: str = None, error: str =
 auth_router = APIRouter(tags=["slack"])
 
 
-@auth_router.get("/api/agents/{name}/public-links/{link_id}/slack", response_model=SlackConnectionStatus)
+@auth_router.get(
+    "/api/agents/{name}/public-links/{link_id}/slack",
+    response_model=SlackConnectionStatus,
+    dependencies=[Depends(require_person)],
+)
 async def get_slack_connection_status(
     name: str,
     link_id: str,
     current_user: User = Depends(get_current_user)
 ):
-    """Get Slack connection status for a public link."""
+    """Get Slack connection status for a public link.
+
+    A person only (trinity-enterprise#719): ``connected_by`` names the person
+    who connected the workspace.
+    """
     assert_agent_access(current_user, name, detail="Access denied")
 
     link = db.get_public_link(link_id)
@@ -235,7 +249,10 @@ async def get_slack_connection_status(
     )
 
 
-@auth_router.post("/api/agents/{name}/public-links/{link_id}/slack/connect")
+@auth_router.post(
+    "/api/agents/{name}/public-links/{link_id}/slack/connect",
+    dependencies=[Depends(require_person)],
+)
 async def connect_slack(
     name: str,
     link_id: str,
@@ -329,7 +346,10 @@ async def connect_slack(
             raise HTTPException(status_code=400, detail=str(e))
 
 
-@auth_router.delete("/api/agents/{name}/public-links/{link_id}/slack")
+@auth_router.delete(
+    "/api/agents/{name}/public-links/{link_id}/slack",
+    dependencies=[Depends(require_person)],
+)
 async def disconnect_slack(
     name: str,
     link_id: str,
@@ -350,7 +370,10 @@ async def disconnect_slack(
     return {"disconnected": True}
 
 
-@auth_router.put("/api/agents/{name}/public-links/{link_id}/slack")
+@auth_router.put(
+    "/api/agents/{name}/public-links/{link_id}/slack",
+    dependencies=[Depends(require_person)],
+)
 async def update_slack_connection(
     name: str,
     link_id: str,
@@ -415,7 +438,10 @@ async def get_agent_slack_channel(
     return {"bound": False}
 
 
-@auth_router.post("/api/agents/{name}/slack/channel")
+@auth_router.post(
+    "/api/agents/{name}/slack/channel",
+    dependencies=[Depends(require_person)],
+)
 async def create_agent_slack_channel(
     name: str,
     current_user: User = Depends(get_current_user)
@@ -481,7 +507,10 @@ async def create_agent_slack_channel(
     }
 
 
-@auth_router.delete("/api/agents/{name}/slack/channel")
+@auth_router.delete(
+    "/api/agents/{name}/slack/channel",
+    dependencies=[Depends(require_person)],
+)
 async def delete_agent_slack_channel(
     name: str,
     current_user: User = Depends(get_current_user)
@@ -523,7 +552,10 @@ async def delete_agent_slack_channel(
     raise HTTPException(status_code=404, detail="Agent is not bound to any Slack channel")
 
 
-@auth_router.put("/api/agents/{name}/slack/channel/dm-default")
+@auth_router.put(
+    "/api/agents/{name}/slack/channel/dm-default",
+    dependencies=[Depends(require_person)],
+)
 async def set_agent_as_slack_dm_default(
     name: str,
     current_user: User = Depends(get_current_user)
@@ -643,7 +675,10 @@ async def list_agent_slack_channels(
     return {"channels": channels, "count": len(channels)}
 
 
-@auth_router.put("/api/agents/{name}/slack/channels/{channel_id}/proactive")
+@auth_router.put(
+    "/api/agents/{name}/slack/channels/{channel_id}/proactive",
+    dependencies=[Depends(require_person)],
+)
 async def set_slack_channel_proactive(
     name: str,
     channel_id: str,
@@ -658,7 +693,9 @@ async def set_slack_channel_proactive(
     # Human-only: an agent-scoped key resolves to the OWNER on REST
     # (dependencies.py:423), so can_user_share_agent alone would let an agent flip
     # its own consent on — self-granting the very control ent#223 adds. Granting
-    # consent is a human decision; SENDING under it stays agent-callable.
+    # consent is a human decision; SENDING under it stays agent-callable. The
+    # route gate is require_person (trinity-enterprise#719): only a person
+    # passes. This inline check stays for direct callers.
     reject_agent_principal(current_user)
     assert_agent_owner(current_user, name, detail="Only owners can change channel settings")
 

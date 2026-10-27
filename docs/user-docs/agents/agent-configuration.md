@@ -31,14 +31,14 @@ The sections below say which pane holds each setting. Everything is also availab
 
 ### Permissions to Change Itself
 
-An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People and the system agent never need them.
+An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People never need them, and neither does the system agent, except that its key is refused wherever a change takes a person or an agent holding the permission. A schedule's webhook is one such change; so are an agent's read-only mode, resources, timeout, public-channel model and guardrails, and a skill's approval gate.
 
 The **Permissions to change itself** card under **Settings › Guardrails › Bounds** shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
 
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
 | **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
-| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules and their webhooks | It still manages its own schedules, never another agent's |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage any schedule's webhook, its own included | It still manages its own schedules but not their webhooks, and never another agent's |
 | **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
 | **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
 | **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |

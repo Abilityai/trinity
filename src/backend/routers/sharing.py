@@ -1,4 +1,4 @@
-# mcp: none — share / unshare is a grant surface, human-only (reject_agent_principal, ent#69 Part 2)
+# mcp: none — share / unshare is a grant surface, human-only (require_interactive / require_person, ent#69 Part 2, trinity-enterprise#719)
 """
 Agent sharing routes for the Trinity backend.
 """
@@ -14,7 +14,10 @@ from models import (
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
-from dependencies import get_current_user, OwnedAgentByName, CurrentUser, reject_agent_principal
+from dependencies import (
+    get_current_user, OwnedAgentByName, CurrentUser, reject_agent_principal,
+    require_interactive, require_person,
+)
 from services.docker_service import get_agent_container
 from services.client_roster_service import get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -78,14 +81,19 @@ def set_websocket_manager(ws_manager):
     manager = ws_manager
 
 
-@router.post("/{agent_name}/share", response_model=AgentShare)
+@router.post("/{agent_name}/share", response_model=AgentShare,
+             dependencies=[Depends(require_interactive)])
 async def share_agent_endpoint(
     agent_name: OwnedAgentByName,
     share_request: AgentShareRequest,
     request: Request,
     current_user: CurrentUser
 ):
-    """Share an agent with another user by email."""
+    """Share an agent with another user by email.
+
+    INTERACTIVE (trinity-enterprise#719): the share row is a Workspace sign-in
+    by emailed code, so writing one takes a signed-in session, never a key.
+    """
     # trinity-enterprise#69 Part 2: sharing is a human-only decision.
     reject_agent_principal(current_user)
     container = get_agent_container(agent_name)
@@ -130,7 +138,7 @@ async def share_agent_endpoint(
     return share
 
 
-@router.delete("/{agent_name}/share/{email}")
+@router.delete("/{agent_name}/share/{email}", dependencies=[Depends(require_person)])
 async def unshare_agent_endpoint(
     agent_name: OwnedAgentByName,
     email: str,
@@ -216,7 +224,8 @@ async def get_public_channel_prompt_endpoint(
     )
 
 
-@router.put("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
+@router.put("/{agent_name}/public-prompt", response_model=PublicChannelPrompt,
+            dependencies=[Depends(require_person)])
 async def set_public_channel_prompt_endpoint(
     agent_name: OwnedAgentByName,
     body: PublicChannelPromptUpdate,
@@ -262,7 +271,8 @@ async def get_access_policy_endpoint(
     return AccessPolicy(**db.get_access_policy(agent_name))
 
 
-@router.put("/{agent_name}/access-policy", response_model=AccessPolicy)
+@router.put("/{agent_name}/access-policy", response_model=AccessPolicy,
+            dependencies=[Depends(require_person)])
 async def update_access_policy_endpoint(
     agent_name: OwnedAgentByName,
     update: AccessPolicyUpdate,
@@ -289,7 +299,8 @@ async def list_access_requests_endpoint(
     return [AccessRequest(**r) for r in rows]
 
 
-@router.post("/{agent_name}/access-requests/{request_id}/decide", response_model=AccessRequest)
+@router.post("/{agent_name}/access-requests/{request_id}/decide", response_model=AccessRequest,
+             dependencies=[Depends(require_interactive)])
 async def decide_access_request_endpoint(
     agent_name: OwnedAgentByName,
     request_id: str,
@@ -300,7 +311,10 @@ async def decide_access_request_endpoint(
     """Approve or deny a pending access request (owner-only).
 
     Approval inserts the email into agent_sharing so future messages from
-    that user across any channel are admitted automatically.
+    that user across any channel are admitted automatically. That is the same
+    share row `/share` writes, so this takes the same signed-in session
+    (`require_interactive`, trinity-enterprise#719). A denial writes no share
+    row, but the route has one rule, so a denial takes a session too.
     """
     existing = db.get_access_request(request_id)
     if not existing or existing["agent_name"] != agent_name:

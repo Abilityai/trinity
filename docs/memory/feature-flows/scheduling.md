@@ -463,9 +463,9 @@ executions?limit=100              AuthorizedAgent dependency         SELECT (spe
 | GET | `/api/agents/{name}/executions/{id}` | Get specific execution (full) | schedules.py:462 | AuthorizedAgent |
 | GET | `/api/agents/{name}/executions/{id}/log` | Get execution log | schedules.py:309 | AuthorizedAgent |
 | GET | `/api/agents/scheduler/status` | Scheduler status (admin) | schedules.py:354 | Admin only |
-| POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token | schedules.py:474 | CurrentUser |
-| GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL | schedules.py:511 | AuthorizedAgent |
-| DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token | schedules.py:537 | CurrentUser |
+| POST | `/api/agents/{name}/schedules/{id}/webhook` | Generate/rotate webhook token | schedules.py:694 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
+| GET | `/api/agents/{name}/schedules/{id}/webhook` | Get webhook status and URL | schedules.py:746 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
+| DELETE | `/api/agents/{name}/schedules/{id}/webhook` | Revoke webhook token | schedules.py:867 | Person or `schedules.manage` holder, then AuthorizedAgent (trinity-enterprise#719) |
 
 ### Access Control Pattern
 

@@ -19,7 +19,6 @@ Modules: src/backend/routers/voice.py, src/backend/routers/voip.py
 
 import os
 import sys
-import types
 from pathlib import Path
 
 os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
@@ -37,6 +36,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import routers.voice as voice_mod  # noqa: E402
 import routers.voip as voip_mod  # noqa: E402
+from models import User  # noqa: E402
 from dependencies import (  # noqa: E402
     get_current_user,
     get_authorized_agent,
@@ -45,9 +45,10 @@ from dependencies import (  # noqa: E402
 )
 
 _AGENT = "myagent"
-_USER = types.SimpleNamespace(
-    username="owner", email="owner@example.com", role="user", id=1
-)
+# A signed-in owner, as the real principal model (mcp_scope None, no agent
+# identity): the voip binding writes are person-only (trinity-enterprise#719), and
+# that gate fails closed on a stand-in that does not declare mcp_scope.
+_USER = User(username="owner", email="owner@example.com", role="user", id=1)
 
 
 # ---------------------------------------------------------------------------
