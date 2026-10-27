@@ -245,11 +245,13 @@ def fill(template):
             .replace("{key_id}", "@KEY@"))
 
 
-def run_families(token, tag):
+def run_families(token, tag, only=None):
     sacrifice = {"revoke": mint("user", f"sweep sacrificial revoke {tag}"),
                  "delete": mint("user", f"sweep sacrificial delete {tag}")}
     res = {"_sacrifice_active": {}}
     for fam in FAMILIES:
+        if only is not None and not only(fam):
+            continue
         rows = by_key.get(fam["key"])
         if not rows:
             res[fam["key"]] = {"missing": True}
@@ -274,7 +276,10 @@ real_fence = D._enforce_ops_write_key_fence
 D._enforce_ops_write_key_fence = lambda request, owner: None
 out["families_no_fence"] = run_families(OW.api_key, "no-fence")
 D._enforce_ops_write_key_fence = real_fence
-out["families_user_key"] = run_families(USER.api_key, "user-key")
+# The unbounded key `ops_write` replaces, over the fence-only families ONLY: it
+# passes the admin gates, so letting it run a gated family first (registering a
+# subscription, say) would change what a later family finds.
+out["families_user_key"] = run_families(USER.api_key, "user-key", only=lambda fam: fam.get("own_gate") is None)
 
 # Doors that validate a Trinity key themselves and never run the resolver.
 eid = "sweep3180-exec"
@@ -308,8 +313,11 @@ sys.stdout.write("\n__OPS_WRITE_SWEEP__" + json.dumps(out))
 
 
 def run(families, python: str = sys.executable, timeout: int = 600) -> dict:
-    """Run the sweep; raise (never skip) on a failed import or an empty result."""
-    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    """Run the sweep; raise (never skip) on a failed import or an empty result.
+
+    Hermetic environment: a sibling test that sets a variable in `os.environ`
+    (a credential key, a feature flag) must not change what the app does here."""
+    env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR", "LANG") if k in os.environ}
     proc = subprocess.run(
         [python, "-c", SCRIPT, str(BACKEND), json.dumps(families)],
         capture_output=True, text=True, timeout=timeout, cwd=str(REPO), env=env,
