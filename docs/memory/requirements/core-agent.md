@@ -2659,19 +2659,19 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target per UTC day, by construction.** The id is
-  derived from the evaluator, the target and the day, so a re-rate hits
-  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **One item per person per target per UTC day, by construction.** The subject's
+  key is a digest of the evaluator, the target and the day, so a re-rate updates
+  that day's pending item in place through `platform_alerts.observe` (#3254).
 - **A comment sent after the rating reaches the item** (trinity#3521). The
   Workspace records the thumbs-down on the click and sends the comment as a
   second request, so the click has usually raised the item already. A request
   that carries words rewrites the item's `question` and `context.has_comment`
-  through `db.update_pending_problem_report` — pending items of this type only,
+  through `platform_alerts.observe` (`keep_text=False`; a bare click passes `keep_text=True`) — pending items only,
   so an item a person already ended is never rewritten or reopened. Only words
   ever write text: a bare re-rate cannot erase a comment. The update adds no row,
-  so it spends no budget. Both requests run in the background, so the service
-  attaches once more after its own create (the click's create can land in
-  between). **Stated residual**: a comment sent after the operator ended that
+  so it spends no budget. Both requests run in the background, and which one
+  writes is decided inside the per-agent create lock, so either order keeps the
+  words. **Stated residual**: a comment sent after the operator ended that
   day's item does not reach it; the next day's item carries the next report.
 - **Emitted off the response path.** `raise_problem_report` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
