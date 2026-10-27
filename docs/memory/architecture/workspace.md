@@ -105,6 +105,25 @@ signing in in another tab cannot strand an operator's Workspace tab on an expire
 Full model and the verdict table:
 [workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
 
+**The open thread catches up on the 20 s tick; the sidebar is not the only reader of
+the list (#3439).** `PortalConversation.loadThread` runs on mount and on a thread switch,
+and the Workspace has no history poll — so a row the agent wrote after the person's turn
+ended (a completion report, an approval outcome #3709, a recovered lost turn #2319, a
+background task's reply) used to badge the open chat on the shell's 20 s tick while the
+transcript stayed stale until a reload. The conversation now watches its OWN row in the
+`threads` prop the shell already hands it, compared as the string
+`` `${message_count}|${last_message_at}` `` (`portalThreadTail.tailSignature`) — never the
+object, which `decorate()` re-creates every tick, and never `unread`, which counts assistant
+rows only and is reset by the turn-end mark-read. When it moves and no turn or call is in
+flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopts the server
+id onto its own id-less local question (or that question renders twice), appends the unseen
+ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
+event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
+answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
+`visibilitychange` → visible. See
+[workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).
+
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
 whether a container exists. A live ownership row with no container is a routine state
