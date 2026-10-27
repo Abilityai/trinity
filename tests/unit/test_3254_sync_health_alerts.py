@@ -135,6 +135,11 @@ def service(db, pa, monkeypatch):
     monkeypatch.setattr(shs, "get_breaker_redis", lambda: None)
     # The poller writes through the SAME db object the test reads.
     monkeypatch.setattr(shs, "db", db)
+    # So do the answer and ending sinks: a sibling suite that swapped
+    # `database` while `ask_service` was first imported leaves it holding an
+    # orphaned db whose queue module no clock below reaches (R6).
+    from services import ask_service
+    monkeypatch.setitem(ask_service.answer.__globals__, "db", db)
     return shs.SyncHealthService(poll_interval=0)
 
 
