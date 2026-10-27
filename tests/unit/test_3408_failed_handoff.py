@@ -175,8 +175,8 @@ def _prepare(site, monkeypatch, tmp_path):
 
 def _is_the_handoff_failure(error):
     """Codex lets the write's error escape; the others wrap it in a 500. Either
-    way it is the encode failure, not an error raised by the teardown itself
-    (an UnboundLocalError from naming the not-yet-assigned `loop`, say)."""
+    way it is the encode failure, never an error from the teardown itself:
+    every teardown step logs its own failure instead of raising it."""
     if isinstance(error, UnicodeEncodeError):
         return True
     return isinstance(error, HTTPException) and "surrogates not allowed" in str(error.detail)
@@ -253,9 +253,11 @@ async def test_the_teardown_runs_off_the_event_loop(
     """The kill waits up to ~2 s for the child. At an async site it must not
     hold the event loop that /health shares (#523), so it runs in the default
     pool and the release waits for it. Slow the real kill and keep measuring
-    the loop meanwhile. Reaching the handoff failure at all also proves the
-    handler acquires the running loop itself: the function's own `loop` is
-    assigned only after the write, so naming it would raise UnboundLocalError."""
+    the loop meanwhile. The "teardown never ran" and "child is dead"
+    assertions also prove the handler acquires the running loop itself: the
+    function's own `loop` is assigned only after the write, so a handler that
+    named it could not submit the teardown (that error is logged, not raised)
+    and would leave the child alive."""
     spawned, _ = children
     loop_thread = threading.get_ident()
     kill_threads = []
@@ -306,24 +308,46 @@ async def test_the_teardown_runs_off_the_event_loop(
     assert signals["refused"] == []
 
 
-@pytest.mark.asyncio
-async def test_a_cancel_during_the_teardown_still_releases_once_the_child_is_dead(
-    registry, signals, pools, children, monkeypatch, tmp_path,
-):
-    """The waiter can be cancelled while the kill is still in flight. The
-    teardown is shielded, so it finishes; the release then follows it, never
-    precedes it."""
-    spawned, _ = children
-    kill_started, let_kill_finish = threading.Event(), threading.Event()
-    real_terminate = chat._terminate_process_group
-
-    def gated_terminate(process, *args, **kwargs):
+def _hold_the_kill(site, script, monkeypatch, kill_started, let_kill_finish):
+    """Hold the site's kill, inside the teardown thread, until the test lets it
+    go: the group helper for Claude chat and Codex, the child's own pid kill
+    for Gemini."""
+    def hold():
         kill_started.set()
         assert let_kill_finish.wait(timeout=5), "the test never released the kill"
+
+    if site in GEMINI_SITES:
+        def on_spawn(process):
+            def held_kill():
+                hold()
+                type(process).kill(process)  # the real pid-only kill
+
+            process.kill = held_kill
+
+        script["on_spawn"] = on_spawn
+        return
+    module = {"claude_chat": chat, "codex": codex_runtime}[site]
+    real_terminate = module._terminate_process_group
+
+    def held_terminate(process, *args, **kwargs):
+        hold()
         return real_terminate(process, *args, **kwargs)
 
-    monkeypatch.setattr(chat, "_terminate_process_group", gated_terminate)
-    call = _prepare("claude_chat", monkeypatch, tmp_path)
+    monkeypatch.setattr(module, "_terminate_process_group", held_terminate)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["claude_chat", "codex", "gemini_chat", "gemini_headless"])
+async def test_a_cancel_during_the_teardown_still_releases_once_the_child_is_dead(
+    site, registry, signals, pools, children, monkeypatch, tmp_path,
+):
+    """The waiter can be cancelled while the kill is still in flight, at any
+    of the four async sites. The teardown is shielded, so it finishes; the
+    release then follows it, never precedes it."""
+    spawned, script = children
+    kill_started, let_kill_finish = threading.Event(), threading.Event()
+    _hold_the_kill(site, script, monkeypatch, kill_started, let_kill_finish)
+    call = _prepare(site, monkeypatch, tmp_path)
     task = asyncio.create_task(call(UNENCODABLE_PROMPT))
     try:
         assert await asyncio.to_thread(kill_started.wait, 5), "the teardown never started"
