@@ -233,3 +233,171 @@ class TestReconcileRefusal:
         [row] = _pending(db, self.SUBJECT)
         assert legacy == pa.LegacyMatch("skills_reconcile_refused", row["subject"])
         assert legacy.subject == pa.subject_for("skills_reconcile_refused", self.AGENT)
+
+
+# ---------------------------------------------------------------------------
+# The fleet sweep — `skills_fleet_reinject:fleet`, 14-day default lifetime
+# ---------------------------------------------------------------------------
+
+class TestFleetReinject:
+    SUBJECT = "skills_fleet_reinject:fleet"
+
+    @pytest.fixture
+    def sweep(self, monkeypatch):
+        from services.skills_sync_service import SkillsLibrarySyncService as S
+        monkeypatch.setattr(S, "_audit_fleet", staticmethod(AsyncMock()))
+
+        def _run(outcomes, *, agents=None, commit="abc123"):
+            names = list(outcomes) if agents is None else agents
+            monkeypatch.setattr(S, "_eligible_agents", staticmethod(lambda: names))
+            monkeypatch.setattr(S, "_reinject_agent", staticmethod(
+                AsyncMock(side_effect=lambda n, sets_lib=None: outcomes[n])))
+            return asyncio.run(S().run_fleet_reinject(commit_sha=commit))
+        return _run
+
+    OK = {"status": "injected", "injected": 1, "unchanged": 0}
+    BAD = {"status": "failed", "error": "1 skill(s) failed"}
+    BUSY = {"status": "skipped", "reason": "busy"}
+    NO_SKILLS = {"status": "skipped", "reason": "no_skills"}
+
+    def test_two_failed_sweeps_are_one_row_carrying_the_seam_properties(
+            self, db, sweep, clock):
+        """The old id (`skills-fleet-reinject-{finished_at}`) filed every bad
+        run as its own row; now the latest run updates the one condition."""
+        from services import platform_alerts as pa
+        sweep({"a1": self.BAD, "a2": self.OK}, commit="c1")
+        clock.advance(hours=6)
+        sweep({"a1": self.OK, "a2": self.BAD, "a3": self.BAD}, commit="c2")
+
+        [row] = _pending(db, self.SUBJECT)
+        assert len(db.list_operator_queue_items(agent_name=HOST, status="pending")) == 1
+        assert row["request_id"].startswith("skills-fleet-reinject-fleet-")
+        assert row["priority"] == "medium"
+        assert row["context"]["seen_count"] == 2
+        assert row["context"]["agents"] == ["a2", "a3"]    # the latest reading
+        assert row["context"]["commit_sha"] == "c2"
+        assert "a2, a3" in row["question"]
+        assert _parse(row["last_seen_at"]) == T0 + timedelta(hours=6)
+        lifetime = pa.lifetime_for("skills_fleet_reinject")
+        assert _parse(row["expires_at"]) == T0 + timedelta(hours=6) + lifetime
+
+    @pytest.mark.parametrize("outcomes", [
+        {"a1": OK, "a2": OK},
+        {"a1": OK, "a2": NO_SKILLS},
+    ], ids=["all-injected", "injected-and-no-skills"])
+    def test_a_sweep_that_reached_every_agent_ends_the_row_as_the_platform(
+            self, db, sweep, outcomes):
+        sweep({"a1": self.BAD, "a2": self.OK})
+        [row] = _pending(db, self.SUBJECT)
+        report = sweep(outcomes)
+        assert report["agents_total"] == 2 and report["agents_failed"] == 0
+        assert _pending(db, self.SUBJECT) == []
+        _assert_ended_by_platform(db, row)
+
+    def test_a_docker_error_enumerates_nothing_and_ends_nothing(
+            self, db, sweep, monkeypatch):
+        """R10 (the #2196 class): `_eligible_agents` returns [] when Docker is
+        unreadable — an empty sweep is not a recovered fleet."""
+        import services.docker_service as docker_service
+        from services.skills_sync_service import SkillsLibrarySyncService as S
+        real_enumeration = S.__dict__["_eligible_agents"]
+        sweep({"a1": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+
+        def _unreadable():
+            raise RuntimeError("docker daemon unreachable")
+
+        monkeypatch.setattr(S, "_eligible_agents", real_enumeration)
+        monkeypatch.setattr(docker_service, "list_all_agents_fast", _unreadable)
+        assert S._eligible_agents() == []
+        report = asyncio.run(S().run_fleet_reinject(commit_sha="abc123"))
+        assert report["agents_total"] == 0 and report["agents_failed"] == 0
+        [still] = _pending(db, self.SUBJECT)
+        assert still["id"] == row["id"]
+
+    def test_a_busy_agent_leaves_the_row_alone(self, db, sweep):
+        """A busy agent was never re-injected: its earlier failure is unknown."""
+        sweep({"a1": self.BAD, "a2": self.OK})
+        [row] = _pending(db, self.SUBJECT)
+        report = sweep({"a1": self.BUSY, "a2": self.OK})
+        assert report["agents_failed"] == 0
+        [still] = _pending(db, self.SUBJECT)
+        assert still["id"] == row["id"]
+
+    def test_an_agent_with_no_result_leaves_the_row_alone(self, db, sweep):
+        """Every enumerated agent must have reported; a missing result (the
+        gather swallowed an exception) is not evidence."""
+        sweep({"a1": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+
+        class _Partial(dict):
+            def __getitem__(self, name):
+                if name == "a2":
+                    raise RuntimeError("lost")
+                return super().__getitem__(name)
+
+        sweep(_Partial({"a1": self.OK}), agents=["a1", "a2"])
+        [still] = _pending(db, self.SUBJECT)
+        assert still["id"] == row["id"]
+
+    def test_a_persons_ending_stands_and_snoozes_the_next_failure(self, db, sweep, clock):
+        sweep({"a1": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+        out = _answer(db, row)
+        assert out["status"] == "acknowledged" and out["disposed_by"] == "person"
+
+        clock.advance(hours=1)
+        sweep({"a1": self.OK})
+        after = db.get_operator_queue_item(row["id"])
+        assert after["status"] == "acknowledged" and after["disposed_by"] == "person"
+
+        clock.advance(days=1)
+        sweep({"a1": self.BAD})
+        assert _pending(db, self.SUBJECT) == []
+
+    def test_r1_the_legacy_row_derives_the_subject_the_seam_files(self, db, sweep):
+        from services import platform_alerts as pa
+        legacy = pa.derive_legacy_subject("skills-fleet-reinject-2026-09-20T00:00:00.000000Z",
+                                          {"alert_type": "skills_fleet_reinject_failed"})
+        sweep({"a1": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+        assert legacy == pa.LegacyMatch("skills_fleet_reinject", row["subject"])
+
+
+# ---------------------------------------------------------------------------
+# Other shape — a fresh install that never raised either alarm
+# ---------------------------------------------------------------------------
+
+class TestFreshInstall:
+    def test_a_clear_on_a_fresh_install_ends_nothing_and_writes_nothing(
+            self, db, triggers, monkeypatch):
+        """The clear sites run on every agent start and every clean sweep, so
+        on an install that never raised the alarm they must be pure reads: no
+        row, no platform ending, no audit or broadcast scheduled. The first
+        refusal after that files exactly one row."""
+        from services import ask_service
+        from services.skill_service import SkillService
+        from services.skills_sync_service import SkillsLibrarySyncService as S
+
+        endings = []
+        real_clear_platform = ask_service.clear_platform
+        monkeypatch.setattr(ask_service, "clear_platform",
+                            lambda *a, **kw: endings.append(a) or real_clear_platform(*a, **kw))
+        monkeypatch.setattr(S, "_audit_fleet", staticmethod(AsyncMock()))
+        monkeypatch.setattr(S, "_eligible_agents", staticmethod(lambda: ["a1"]))
+        monkeypatch.setattr(S, "_reinject_agent", staticmethod(
+            AsyncMock(return_value={"status": "injected", "injected": 0, "unchanged": 2})))
+        svc = SkillService.__new__(SkillService)
+        svc._list_managed_skills = AsyncMock(return_value=[])
+
+        assert _queue_row_count() == 0
+        assert asyncio.run(svc.reconcile_agent_skills("fresh-agent", []))["status"] == "clean"
+        assert asyncio.run(S().run_fleet_reinject(commit_sha="abc"))["agents_failed"] == 0
+        assert _queue_row_count() == 0
+        assert endings == [] and triggers == []
+
+        svc._list_managed_skills = AsyncMock(return_value=[f"o{i:02d}" for i in range(11)])
+        assert asyncio.run(svc.reconcile_agent_skills("fresh-agent", []))["status"] == "refused"
+        assert _queue_row_count() == 1
+        [row] = _pending(db, "skills_reconcile_refused:fresh-agent")
+        assert row["context"]["seen_count"] == 1

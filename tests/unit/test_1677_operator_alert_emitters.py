@@ -103,9 +103,6 @@ _ALLOWED_CALLERS = {
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
     ("services/retention_guard.py", "announce_refusal"):
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
-    ("services/skills_sync_service.py",
-     "SkillsLibrarySyncService._announce_fleet_failures"):
-        "platform-only: leader-locked, one per sync run (ent#236)",
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
         "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):

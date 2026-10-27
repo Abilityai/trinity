@@ -2289,6 +2289,18 @@
       "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse — alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting — REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
     },
     {
+      "file": "unit/test_3254_skills_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "skills",
+        "unit"
+      ],
+      "description": "#3254 S1: the two `_skills-sync` host alarms report through the #3246 platform alert seam, on a fresh full schema per test (db_harness; PostgreSQL when TEST_POSTGRES_URL is set) with the clock pinned. Reconcile refusal (skills_reconcile_refused:<agent>): two refusals with different orphan counts are one pending row (subject, seen_count 2, moved last_seen_at and 30-day net deadline, counts never skill names); a clean or reconciled pass ends it as the platform; an inventory-unavailable, busy or erroring pass leaves it (R10). Fleet sweep (skills_fleet_reinject:fleet): two bad sweeps are one row; a sweep that reached every agent (injected, or no skills) ends it; a Docker-error empty enumeration, a busy agent or a missing result leaves it (R10). A person's ending through ask_service.answer lands acknowledged, is never re-ended, and snoozes the next reading. R1 legacy-id parity for both kinds. Other shape: on a fresh install the clear sites end nothing, write nothing and schedule nothing, and the first refusal files one row."
+    },
+    {
       "file": "unit/test_ent123_tokenless_clone.py",
       "feature": "trinity-enterprise#123",
       "added": "2026-07-23",

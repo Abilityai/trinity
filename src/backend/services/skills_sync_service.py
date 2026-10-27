@@ -51,6 +51,12 @@ _LEADER_KEY = "skills:sync:leader"
 # Persisted aggregate of the last fleet sweep, rendered in Settings.
 FLEET_LAST_RUN_KEY = "skills_fleet_reinject_last_run"
 
+# The fleet sweep's alarm is ONE condition for the whole fleet (#3254): the
+# subject `skills_fleet_reinject:fleet`. The key equals the legacy parser's
+# constant (`platform_alerts._LEGACY_PARSERS`), so the upgrade sweep stamps a
+# pre-move row with the subject this module now files (R1).
+FLEET_ALERT_KEY = "fleet"
+
 # Idle poll while auto-sync is disabled. Short enough that flipping the toggle
 # takes effect promptly, long enough to cost nothing.
 _DISABLED_POLL_SECONDS = 60
@@ -270,6 +276,8 @@ class SkillsLibrarySyncService:
         await self._audit_fleet(report)
         if failures:
             self._announce_fleet_failures(report)
+        elif self._sweep_reached_every_agent(agents, results):
+            self._clear_fleet_failures()
         logger.info(
             "Skills fleet re-inject: %s agents, %s injected, %s skipped, %s failed",
             report["agents_total"], report["agents_injected"],
@@ -387,37 +395,78 @@ class SkillsLibrarySyncService:
         """Operator alarm for a partially-failed sweep. Never raises.
 
         Carries counts and agent NAMES only — never per-skill errors, which can
-        embed library paths and agent output. The id includes the run's finish
-        timestamp so consecutive bad runs are distinct rows rather than one
-        `create_item` conflict silently swallowing every run after the first.
+        embed library paths and agent output.
+
+        #3254: one platform condition for the fleet,
+        `skills_fleet_reinject:fleet` on the `_skills-sync` host. Each bad run
+        updates the one pending row in place (the latest counts, agents and
+        commit; seen count, last-seen time), where the old id carried the run's
+        finish timestamp and filed every bad run as its own row that nothing
+        ever ended. The kind's lifetime runs from the latest bad run; a sweep
+        that reached every agent ends the row (`_clear_fleet_failures`).
         """
         try:
+            from services import platform_alerts
+
             message = (
                 f"[Skills] Fleet re-inject completed with {report['agents_failed']} "
                 f"failed agent(s) of {report['agents_total']} at commit "
                 f"{report.get('commit_sha') or 'unknown'}. Affected: "
                 f"{', '.join(sorted(report['failures'])) or 'unknown'}."
             )
-            db.create_operator_queue_item(
-                RECONCILE_ALARM_AGENT_NAME,
-                {
-                    "id": f"skills-fleet-reinject-{report['finished_at']}",
-                    "type": "alert",
-                    "priority": "medium",
-                    "title": "Skills fleet re-inject partially failed",
-                    "question": message,
-                    "context": {
-                        "alert_type": "skills_fleet_reinject_failed",
-                        "agents_total": report["agents_total"],
-                        "agents_failed": report["agents_failed"],
-                        "commit_sha": report.get("commit_sha"),
-                        "agents": sorted(report["failures"]),
-                    },
-                    "expires_at": None,
+            platform_alerts.observe(
+                RECONCILE_ALARM_AGENT_NAME, "skills_fleet_reinject", FLEET_ALERT_KEY,
+                priority="medium",
+                title="Skills fleet re-inject partially failed",
+                question=message,
+                context={
+                    "alert_type": "skills_fleet_reinject_failed",
+                    "agents_total": report["agents_total"],
+                    "agents_failed": report["agents_failed"],
+                    "commit_sha": report.get("commit_sha"),
+                    "agents": sorted(report["failures"]),
                 },
             )
         except Exception as e:  # noqa: BLE001 — the alarm is decorative
             logger.warning(f"could not raise fleet re-inject alarm: {e}")
+
+    @staticmethod
+    def _sweep_reached_every_agent(
+        agents: List[str], results: Dict[str, Dict[str, Any]]
+    ) -> bool:
+        """Positive evidence that the fleet condition cleared (#3254, R10).
+
+        The absence of a failure is not a recovery. Three sweeps report zero
+        failures without having seen the fleet current, and none of them may
+        end the alarm:
+
+        * an EMPTY enumeration — `_eligible_agents` returns ``[]`` on a Docker
+          error exactly as on an idle fleet (the #2196 class);
+        * an agent skipped as ``busy`` — it was never re-injected, so whether
+          its earlier failure is fixed is unknown;
+        * an agent with no result at all (``gather`` swallowed an exception).
+
+        So: at least one agent, and every enumerated agent reported injected,
+        or skipped because it holds no skills. An outcome this list does not
+        name never counts as evidence.
+        """
+        def _current(outcome: Any) -> bool:
+            if not isinstance(outcome, dict):
+                return False
+            if outcome.get("status") == "injected":
+                return True
+            return outcome.get("status") == "skipped" and outcome.get("reason") == "no_skills"
+
+        return bool(agents) and all(_current(results.get(name)) for name in agents)
+
+    @staticmethod
+    def _clear_fleet_failures() -> None:
+        """A sweep reached every running agent and saw each one current: the
+        platform ends the fleet alarm's row (#3254). On an install that never
+        raised it this is one indexed read and no write. Never raises."""
+        from services import platform_alerts
+        platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_fleet_reinject",
+                              FLEET_ALERT_KEY)
 
     @staticmethod
     async def _audit_sync(result: Dict[str, Any]) -> None:
