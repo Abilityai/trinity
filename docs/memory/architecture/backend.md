@@ -179,7 +179,8 @@
 
 *Real-time delivery:*
 - `event_bus.py` - Redis Streams transport for WebSocket delivery — see [Real-time Delivery](integrations.md#real-time-delivery-reliability-003-306)
-- `ws_ticket_service.py` - Single-use WebSocket auth tickets (C-002, #550) — see [Real-time Delivery](integrations.md#real-time-delivery-reliability-003-306)
+- `ws_ticket_service.py` - Single-use WebSocket auth tickets (C-002, #550); every consumer passes its exact scope (trinity-enterprise#595) — see [Real-time Delivery](integrations.md#real-time-delivery-reliability-003-306)
+- `voice_auth_service.py` - The voice socket's credential (trinity-enterprise#595): `issue_voice_ticket` (both voice starts), `authenticate_voice_socket` (first-frame admission) and `_resolve_voice_ticket_user` (the attach-time account re-read) — see [Real-time Delivery](integrations.md#real-time-delivery-reliability-003-306)
 - `event_dispatch_service.py` - EVT-001 subscription dispatch primitives (`trigger_subscription`, extracted from the router) + the shared system-emit helper `emit_task_terminal_event`/`spawn_task_terminal_event` — see [Task Completion Events](execution.md#task-completion-events-1578) (#1578)
 
 *Monitoring & Activities:*

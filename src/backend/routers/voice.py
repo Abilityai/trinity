@@ -6,6 +6,10 @@ Endpoints:
   POST /api/agents/{name}/voice/start - Initialize voice session
   POST /api/agents/{name}/voice/stop  - End voice session and save transcript
   WS   /ws/voice/{voice_session_id}   - Audio streaming bridge (audio + tool_call + tool_result)
+
+The socket authenticates with the single-use ticket the start response carries,
+sent as its first frame (trinity-enterprise#595, `services/voice_auth_service.py`);
+no session token appears in any URL.
 """
 
 import asyncio
@@ -14,7 +18,7 @@ import json
 import logging
 import types
 
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, Depends, HTTPException, Response, WebSocket, WebSocketDisconnect
 
 from models import (
     DEFAULT_CANVAS_ID,
@@ -24,7 +28,10 @@ from models import (
     VoiceStopRequest,
     VoiceStopResponse,
 )
-from dependencies import get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin, workspace_route
+from dependencies import (
+    get_current_user, get_authorized_agent, get_owned_agent, assert_owns_or_admin,
+    require_interactive, workspace_route,
+)
 from database import db
 from config import VOICE_ENABLED, DEFAULT_VOICE_NAME, GEMINI_VOICE_NAMES
 from services import canvas_service
@@ -34,6 +41,19 @@ from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.voice_auth_service import (
+    CLOSE_FORBIDDEN,
+    CLOSE_NOT_FOUND,
+    MSG_NOT_OWNER,
+    MSG_SESSION_GONE,
+    ORIGIN_OPERATOR,
+    START_UNAVAILABLE_DETAIL,
+    VoiceAuthRefused,
+    VoiceTicketIssueError,
+    authenticate_voice_socket,
+    issue_voice_ticket,
+    refuse_voice_socket,
+)
 from db.write_params import ChatMessageFields
 
 logger = logging.getLogger(__name__)
@@ -46,14 +66,18 @@ router = APIRouter(tags=["voice"])
 @router.post("/api/agents/{name}/voice/start", response_model=VoiceStartResponse)
 async def voice_start(
     request: VoiceStartRequest,
+    response: Response,
+    current_user: User = Depends(require_interactive),
     name: str = Depends(get_authorized_agent),
-    current_user: User = Depends(get_current_user),
 ):
     """Initialize a voice session with an agent.
 
     1. Loads the agent's voice system prompt
     2. Summarizes prior chat history for context
     3. Creates a voice session ready for WebSocket connection
+    4. Issues the socket's single-use ticket for that session and this caller
+       (trinity-enterprise#595) — which is why only an interactive session may
+       start: a credential minter is stricter than what it mints (§2.8).
     """
     if not VOICE_ENABLED:
         raise HTTPException(status_code=503, detail="Voice chat is disabled")
@@ -86,20 +110,36 @@ async def voice_start(
 
     voice_name = request.voice_name or _get_voice_name(name)
 
-    session = await voice_service.create_session(
-        agent_name=name,
-        chat_session_id=chat_session_id,
-        user_id=current_user.id,
-        user_email=current_user.email or current_user.username,
-        system_prompt=combined_prompt,
-        voice_name=voice_name,
-        workspace_mode=request.workspace_mode,
-    )
+    try:
+        session = await voice_service.create_session(
+            agent_name=name,
+            chat_session_id=chat_session_id,
+            user_id=current_user.id,
+            user_email=current_user.email or current_user.username,
+            system_prompt=combined_prompt,
+            voice_name=voice_name,
+            workspace_mode=request.workspace_mode,
+        )
+    except RuntimeError:
+        # The session could not be persisted (Redis down): words, not the
+        # exception text, and no id the socket would refuse.
+        logger.error("voice start: the session could not be stored for %s", name)
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
 
+    try:
+        credential = await issue_voice_ticket(
+            current_user, session.session_id,
+            origin=ORIGIN_OPERATOR, remove_session=voice_service.remove_session,
+        )
+    except VoiceTicketIssueError:
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+
+    response.headers["Cache-Control"] = "no-store"
     return VoiceStartResponse(
         voice_session_id=session.session_id,
         websocket_url=f"/ws/voice/{session.session_id}",
         chat_session_id=chat_session_id,
+        **credential,
     )
 
 
@@ -264,68 +304,54 @@ async def set_voice_name(
 async def voice_websocket(
     websocket: WebSocket,
     voice_session_id: str,
-    token: str = Query(default=None),
 ):
     """
     WebSocket audio bridge: Browser ↔ Backend ↔ Gemini Live API.
 
-    Client sends: {"type": "audio", "data": "<base64 PCM 16kHz mono>"}
-    Server sends: {"type": "audio", "data": "<base64 PCM 24kHz mono>"}
+    Client sends: {"type": "auth", "ticket": "<websocket_ticket>"}   (first frame only)
+                  {"type": "audio", "data": "<base64 PCM 16kHz mono>"}
+    Server sends: {"type": "auth_ok"}                                (before any media)
+                  {"type": "audio", "data": "<base64 PCM 24kHz mono>"}
                   {"type": "transcript", "role": "user|assistant", "text": "..."}
                   {"type": "status", "state": "connecting|listening|speaking|ended"}
                   {"type": "task", "state": "started|finished|failed", "task_id": "t1", "label": "...", "running": 1}
+
+    Admission (trinity-enterprise#595): the transport is accepted first, because
+    the credential arrives in the first frame, never in the URL. Then
+    authentication (4001), then the session lookup (4004), then the owner gate
+    (4003), then `auth_ok`, then the provider. Every refusal sends a `status`
+    frame with words before it closes.
     """
-    # Authenticate via query param token (WebSocket can't use Authorization header)
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
-        return
+    await websocket.accept()
 
-    # ent#534 review: the token is verified BEFORE the session is looked up, so
-    # an unauthenticated caller cannot use 4004-vs-4001 to learn whether a
-    # session id exists.
-    from jose import jwt, JWTError
-    from config import SECRET_KEY, ALGORITHM
+    # ent#534 review: the caller is authenticated BEFORE the session is looked
+    # up, so an unauthenticated caller cannot use 4004-vs-4001 to learn whether
+    # a session id exists. A ticket minted for another session is refused here.
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError:
-        await websocket.close(code=4001, reason="Invalid token")
-        return
-
-    username = payload.get("sub")
-    if not username:
-        await websocket.close(code=4001, reason="Invalid token claims")
-        return
-
-    # #3825: a token signed out by logout (#187) or by a password change is
-    # refused here as on every other platform door.
-    from dependencies import is_token_revoked, session_predates_user_revoke
-    if is_token_revoked(payload.get("jti")) or session_predates_user_revoke(payload):
-        await websocket.close(code=4001, reason="Session signed out")
-        return
-
-    user = db.get_user_by_username(username)
-    if not user:
-        await websocket.close(code=4001, reason="Unknown user")
+        user = await authenticate_voice_socket(websocket, voice_session_id)
+    except VoiceAuthRefused as refused:
+        await refuse_voice_socket(websocket, refused)
         return
 
     session = await voice_service.get_session(voice_session_id)
     if not session:
-        await websocket.close(code=4004, reason="Voice session not found")
+        await refuse_voice_socket(websocket, VoiceAuthRefused(
+            CLOSE_NOT_FOUND, MSG_SESSION_GONE, "Voice session not found"))
         return
 
-    # Ownership gate (#600): JWT user must own the voice session, or be admin.
-    # Without this check, anyone holding a valid JWT who learns the 128-bit
-    # session id (logs, browser inspection, XSS) can hijack the audio stream
-    # and write tool calls under the victim's identity.
-    if user["id"] != session.user_id and user.get("role") != "admin":
+    # Ownership gate (#600): the authenticated user must own the voice session,
+    # or be admin. The start routes only ever issue a ticket for the caller's
+    # own new session; this stays as defence in depth.
+    try:
+        assert_owns_or_admin(user, session.user_id, detail="Not authorized for this voice session")
+    except HTTPException:
         logger.warning(
             "voice_ws ownership rejected: user_id=%s tried to attach to session owned by user_id=%s",
-            user["id"], session.user_id,
+            user.id, session.user_id,
         )
-        await websocket.close(code=4003, reason="Not authorized for this voice session")
+        await refuse_voice_socket(websocket, VoiceAuthRefused(
+            CLOSE_FORBIDDEN, MSG_NOT_OWNER, "Not authorized for this voice session"))
         return
-
-    await websocket.accept()
 
     # Callbacks that forward Gemini output to the browser WebSocket
     async def on_audio_out(audio_bytes: bytes):
@@ -396,7 +422,7 @@ async def voice_websocket(
             event_type=AuditEventType.EXECUTION,
             event_action="voice_tool_call",
             source="api",
-            actor_user=types.SimpleNamespace(id=user["id"], email=user.get("email")),
+            actor_user=types.SimpleNamespace(id=user.id, email=user.email),
             target_type="agent",
             target_id=session.agent_name,
             details={"tool": tool_name, "prompt_preview": str(args.get("prompt", ""))[:100]},
@@ -421,19 +447,10 @@ async def voice_websocket(
         except Exception:
             pass
 
-    # Start the Gemini connection in a background task
-    gemini_task = asyncio.create_task(
-        voice_service.connect_and_stream(
-            voice_session_id,
-            on_audio_out=on_audio_out,
-            on_transcript=on_transcript,
-            on_status=on_status,
-            on_tool_call=on_tool_call,
-            on_tool_result=on_tool_result,
-            on_turn=on_turn,
-            on_task_event=on_task_event,
-        )
-    )
+    # The provider connection starts only after `auth_ok` (trinity-enterprise#595),
+    # inside the `try` below, so a client that leaves before the acknowledgement
+    # still reaches the close-out and the lease release.
+    gemini_task = None
 
     try:
         # #2700: the party that opens the effect closes it. The lease is armed
@@ -449,6 +466,27 @@ async def voice_websocket(
                 max_seconds=int(getattr(session, "max_duration", 0) or 0) + VOICE_MARKER_SLACK_SECONDS,
             ))
 
+        # trinity-enterprise#595: the client starts its microphone only on this.
+        try:
+            await websocket.send_json({"type": "auth_ok"})
+        except Exception:  # noqa: BLE001 — the client left; the `finally` closes out
+            logger.info("Voice WebSocket closed before authentication was acknowledged: %s", voice_session_id)
+            return
+
+        # Start the Gemini connection in a background task
+        gemini_task = asyncio.create_task(
+            voice_service.connect_and_stream(
+                voice_session_id,
+                on_audio_out=on_audio_out,
+                on_transcript=on_transcript,
+                on_status=on_status,
+                on_tool_call=on_tool_call,
+                on_tool_result=on_tool_result,
+                on_turn=on_turn,
+                on_task_event=on_task_event,
+            )
+        )
+
         # Forward audio from browser to Gemini
         while True:
             data = await websocket.receive_text()
@@ -458,6 +496,11 @@ async def voice_websocket(
                     audio_bytes = base64.b64decode(msg["data"])
                     await voice_service.send_audio(voice_session_id, audio_bytes)
                 elif msg.get("type") == "end":
+                    break
+                elif msg.get("type") == "auth":
+                    # Identity is fixed at admission; a second credential ends
+                    # the call rather than re-authenticating it. Not logged.
+                    logger.warning("voice_ws: a repeated auth frame ended %s", voice_session_id)
                     break
             except (json.JSONDecodeError, Exception) as e:
                 logger.warning(f"Invalid voice WS message: {e}")
@@ -503,7 +546,7 @@ async def voice_websocket(
                 logger.exception("voice bridge: close-out failed for %s", voice_session_id)
 
             # Cancel Gemini task
-            if not gemini_task.done():
+            if gemini_task is not None and not gemini_task.done():
                 gemini_task.cancel()
                 try:
                     await gemini_task

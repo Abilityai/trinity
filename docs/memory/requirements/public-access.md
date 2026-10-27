@@ -1052,6 +1052,18 @@ spoken replies (#2157) stay as composer affordances.
   brand-new chat gets its thread created and adopted BEFORE the call starts.
   Context = the thread's recent rows (system rows skipped, earlier spoken rows
   labelled). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
+- **FR-2b — The socket credential (trinity-enterprise#595)**: the voice socket
+  authenticates with a single-use, short-lived credential; no session token
+  appears in any URL. The start response carries `websocket_ticket` (≤ 30 s,
+  one use, bound to the new call and its caller) and is `Cache-Control:
+  no-store`; the client sends it as the socket's first frame and starts the
+  mic only after the server's `auth_ok` (runtimes.md VOICE-002). The
+  credential comes from the same Workspace-authorized start request, so a
+  Workspace-only account still gets a call; the resolved platform user must be
+  an interactive session (MCP keys are refused), and a portal-token client is
+  still the uniform 404. Every failure — an expired or reused credential, a
+  stale tab, the ticket store being unavailable — reaches the person as words
+  ("Start a new call", "Reload this page"), never a silent orb.
 - **FR-3 — Transcript, written as it goes**: each completed turn is inserted by
   the worker holding the live socket as an `enterprise_portal_messages` row
   with `source='voice'` and `voice_call_id`; the call closes with one `system`

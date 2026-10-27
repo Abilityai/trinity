@@ -115,7 +115,8 @@
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools. Resolves voice as request override → persisted `voice_name` → `Kore` (#28). Caller-less since #2559 |
+| POST | `/api/agents/{name}/voice/start` | Start Gemini Live voice session; `workspace_mode` enables panel tools. Resolves voice as request override → persisted `voice_name` → `Kore` (#28). `Depends(require_interactive)` before `get_authorized_agent`; returns `websocket_ticket` + `websocket_ticket_expires_in` (30) beside the credential-free `websocket_url`, `Cache-Control: no-store`; 503 with words when the session or ticket cannot be stored (trinity-enterprise#595). Caller-less since #2559 |
+| WS | `/ws/voice/{voice_session_id}` | The audio bridge. No query credential: first frame `{"type":"auth","ticket"}` (5 s, 1 KiB) → `auth_ok` → media; refusals send a `status{ended}` frame with words, then close 4001 (credential, before any session lookup) / 4004 (session gone) / 4003 (not the owner) — see [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306) |
 | POST | `/api/agents/{name}/voice/stop` | Stop active voice session. Caller-less since #2559 (the Workspace passes `restStop: false` — its bridge closes the call on the socket) |
 | GET/PUT | `/api/agents/{name}/voice/prompt` | Get/set per-agent voice system prompt |
 | GET/PUT | `/api/agents/{name}/voice/name` | Get (any accessor; returns `available_voices`/`default_voice`) / set (owner-only; 400 on a voice outside `GEMINI_VOICE_NAMES`) the persisted per-agent Gemini voice. Applies to both the Workspace voice call and outbound VoIP calls (#28) |

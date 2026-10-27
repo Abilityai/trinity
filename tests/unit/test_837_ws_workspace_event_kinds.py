@@ -361,3 +361,25 @@ def test_connect_hands_the_allowlist_to_the_dispatcher_and_defaults_closed():
     # nothing usable — noticed at once — rather than everything, silently.
     assert defaults.get("allowed_types") == "frozenset()"
     assert defaults.get("allowed_fields") == "frozenset()"
+
+
+def _plain_calls_to(fn, name):
+    return [
+        n for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == name
+    ]
+
+
+def test_the_ws_endpoint_consumes_only_a_user_scoped_ticket_before_it_resolves_anyone():
+    """trinity-enterprise#595: `/ws` names the one scope it accepts, so a voice
+    or VoIP ticket is refused by its scope — not by the accident of its
+    subject failing to resolve — and the check runs before identity
+    resolution and `connect`."""
+    fn = _function(_main_tree(), "websocket_endpoint")
+    (consume,) = _plain_calls_to(fn, "consume_ticket")
+    scope = _keyword(consume, "scope")
+    assert scope is not None, "/ws consumes a ticket without naming the scope it accepts"
+    assert isinstance(scope, ast.Constant) and scope.value == "user"
+    (resolve,) = _plain_calls_to(fn, "resolve_ws_identity")
+    (connect,) = _calls_to(fn, "connect")
+    assert consume.lineno < resolve.lineno < connect.lineno

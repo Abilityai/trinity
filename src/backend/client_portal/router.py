@@ -34,6 +34,7 @@ from dependencies import (
     oauth2_scheme,
     reject_agent_principal,
     require_admin,
+    require_interactive,
     resolve_platform_user_unfloored,
 )
 from models import (
@@ -1467,14 +1468,18 @@ async def portal_voice_start(
     agent_name: str,
     body: PortalVoiceStartRequest,
     request: Request,
+    response: Response,
     principal: PortalPrincipal = Depends(get_portal_principal),
     token: str = Depends(oauth2_scheme),
 ):
     """Start a real-time voice call bound to a Workspace thread (ent#534).
 
-    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS)
-    authenticates with the platform JWT, which a portal-token client does not
-    hold, so for them this is a uniform 404 like any agent off their roster.
+    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS) is
+    bound to a platform user id, which a portal-token client does not have, so
+    for them this is a uniform 404 like any agent off their roster. The
+    response carries the socket's single-use ticket (trinity-enterprise#595),
+    minted only for an interactive session: a Workspace-only account gets a
+    call, an MCP key does not.
     Under the portal principal rather than the OSS `voice/start` deliberately:
     every Workspace gate (agent-key rejection, the blocked-client check, the
     roster union for owners) is inherited here instead of re-spelled.
@@ -1494,6 +1499,12 @@ async def portal_voice_start(
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
     user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
+    # trinity-enterprise#595: the response mints a credential, so the resolved
+    # user must be an interactive session (§2.8) — every MCP key scope is refused.
+    require_interactive(user)
+    from services.voice_auth_service import (
+        ORIGIN_WORKSPACE, START_UNAVAILABLE_DETAIL, VoiceTicketIssueError, issue_voice_ticket,
+    )
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(
@@ -1507,12 +1518,22 @@ async def portal_voice_start(
         )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except RuntimeError as e:
+    except RuntimeError:
         # The voice service could not persist the session (Redis down) — say
-        # so rather than hand out an id the WebSocket will refuse.
-        logger.error("workspace voice start failed for %s: %s", agent_name, e)
-        raise HTTPException(status_code=503, detail="Voice is unavailable right now. Try again shortly.")
-    return PortalVoiceStartResponse(**result)
+        # so rather than hand out an id the WebSocket will refuse. Fixed words:
+        # the exception text can name the store.
+        logger.error("workspace voice start: the session could not be stored for %s", agent_name)
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    from services.gemini_voice import voice_service
+    try:
+        credential = await issue_voice_ticket(
+            user, result["voice_session_id"],
+            origin=ORIGIN_WORKSPACE, remove_session=voice_service.remove_session,
+        )
+    except VoiceTicketIssueError:
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    response.headers["Cache-Control"] = "no-store"
+    return PortalVoiceStartResponse(**result, **credential)
 
 
 @router.post("/agents/{agent_name}/stt")

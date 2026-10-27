@@ -247,6 +247,9 @@ _catchup(client_id, slot, last_event_id, catchup_max)
   `POST /api/ws/ticket` (C-002 / #550 — see `architecture.md` "WebSocket
   Security"). The 32-byte ticket has a 30s TTL and is consumed atomically
   via Redis `GETDEL`; JWT-in-URL was removed to close pentest finding 3.2.1.
+  `/ws` consumes with `scope="user"` (trinity-enterprise#595): every ticket
+  consumer names the one scope it accepts, so a voice or VoIP ticket is refused
+  here by its scope after being spent, not by the shape of its subject.
   `/ws/events` still accepts a `trinity_mcp_*` API key via `?token=` (kept
   for the documented `wscat`/`websocat` surface). Consumer tasks inherit
   connection-level auth.

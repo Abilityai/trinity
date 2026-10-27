@@ -683,22 +683,62 @@ class TestFingerprintIsReserved:
 # =============================================================================
 
 class TestVoiceSocket:
-    def test_a_signed_out_session_cannot_open_the_voice_socket(self, monkeypatch):
+    """trinity-enterprise#595 took the session token out of the voice URL: the
+    socket authenticates with a single-use ticket from its first frame, and
+    only an authenticated start route mints one. So the #3825 cutoff stops a
+    signed-out session at the mint door, the same reader as every other
+    platform door, and a token in the socket URL is refused without being
+    decoded at all."""
+
+    @pytest.fixture
+    def signed_out(self, monkeypatch):
         import dependencies
-        from routers import voice
         redis = fakeredis.FakeRedis()
         monkeypatch.setitem(dependencies.revoke_user_sessions.__globals__, "get_breaker_redis", lambda: redis)
         token = dependencies.create_access_token(data={"sub": "voice-user"}, mode="admin")
         assert dependencies.revoke_user_sessions("voice-user")
+        return dependencies, token
 
-        closed = []
+    def test_a_signed_out_session_cannot_mint_a_voice_ticket(self, signed_out, monkeypatch):
+        """`voice_start` resolves its caller through `require_interactive` ->
+        `get_current_user`; the cutoff fires before the user lookup."""
+        from fastapi import HTTPException
+
+        dependencies, token = signed_out
+        # Stop at the first step after the gate: reaching the lookup would show
+        # the gate missed.
+        monkeypatch.setattr(dependencies.db, "get_user_by_username",
+                            lambda u: pytest.fail("the signed-out session reached the user lookup"))
+        request = SimpleNamespace(method="POST", scope={"path": "/api/agents/a/voice/start"})
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(dependencies.get_current_user(request, token))
+        assert e.value.status_code == 401
+
+    def test_a_signed_out_token_in_the_socket_url_is_refused_unread(self, signed_out, monkeypatch):
+        """A tab from before the protocol: the handler neither decodes the
+        token nor reads a frame; it says to reload and closes 4001."""
+        from routers import voice
+
+        dependencies, token = signed_out
+        monkeypatch.setattr(voice.db, "get_user_by_username",
+                            lambda u: pytest.fail("the URL token reached the user lookup"))
+        closed, sent = [], []
 
         class _Socket:
+            query_params = {"token": token}
+
+            async def accept(self):
+                pass
+
+            async def receive(self):
+                pytest.fail("the handler read a frame from a tab that carried a URL token")
+
+            async def send_json(self, payload):
+                sent.append(payload)
+
             async def close(self, code=None, reason=None):
                 closed.append((code, reason))
 
-        # Stop at the first step after the gate: an unknown user closes 4001
-        # with a different reason, so reaching it would show the gate missed.
-        monkeypatch.setattr(voice.db, "get_user_by_username", lambda u: None)
-        asyncio.run(voice.voice_websocket(_Socket(), "vs-1", token=token))
-        assert closed == [(4001, "Session signed out")]
+        asyncio.run(voice.voice_websocket(_Socket(), "vs-1"))
+        assert closed == [(4001, "Reload required")]
+        assert [f["type"] for f in sent] == ["status"]

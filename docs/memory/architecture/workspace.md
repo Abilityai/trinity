@@ -354,6 +354,13 @@ chat. It is bound to the **Workspace thread**: `POST
 `client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
 recent rows and creates the session with `portal_session_id` + `client_email`,
 `canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The start response also carries the audio socket's single-use ticket (trinity-enterprise#595),
+minted in the router for the platform user it resolved — which must be an interactive
+session, so a Workspace-only account gets a call and an MCP key does not — and the client
+sends it as the socket's first frame. The ticket comes from the same `portalHttp` request the
+store's credential decision authorized; the composable never reads a session token for the
+socket, and `startWith` resolves (the orb shows *listening*) only after the server's
+`auth_ok` and a live mic. Protocol: [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306).
 The transcript is **written turn by turn on the worker holding the live socket**
 (`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
 rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label

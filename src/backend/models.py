@@ -4645,6 +4645,10 @@ class VoiceStartResponse(BaseModel):
     voice_session_id: str
     websocket_url: str
     chat_session_id: str
+    # trinity-enterprise#595: the voice socket's single-use credential, sent as
+    # its first frame; `websocket_url` never carries one.
+    websocket_ticket: str
+    websocket_ticket_expires_in: int
 
 
 class VoiceStopRequest(BaseModel):

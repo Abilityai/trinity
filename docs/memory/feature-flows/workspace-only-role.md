@@ -184,7 +184,7 @@ set is pinned by `test_837_workspace_only_floor.py::test_the_unfloored_resolver_
 | `/ws/events` | `main.py::websocket_events_endpoint` refuses a Workspace-only owner at the handshake, before `accept()` (the client sees HTTP 403) |
 | `/api/agents/{agent_name}/terminal` | `services/agent_service/terminal.py` closes 4003 for a Workspace-only role, after the JWT decode and before any agent lookup |
 | system-agent terminal | admin only |
-| `/ws/voice/{id}` | bound to the voice session's owner (#600) |
+| `/ws/voice/{id}` | first-frame single-use ticket from either voice start — the Workspace one admits a Workspace-only account, the operator one requires operator-or-above, re-checked at attach; then bound to the session's owner (#600, trinity-enterprise#595) |
 | VoIP media stream | provider-authenticated |
 
 ### Sharing
