@@ -987,8 +987,8 @@ async def bind_agent_to_own_repo(
         fork_pat_required, saved_token_message, saved_token_not_for_others,
     )
 
-    # #3164: no form token → the CALLER's own saved personal token (Settings →
-    # GitHub token), read by user id. Never the agent's per-agent token (that
+    # #3164: no form token → the CALLER's own saved personal token (Settings → MCP Keys
+    # → Personal GitHub Token), read by user id. Never the agent's per-agent token (that
     # is the agent's current identity, not the binding person's) and never the
     # platform token, which must not become a user-owned repo's identity.
     if body.github_pat is not None:
@@ -1005,7 +1005,8 @@ async def bind_agent_to_own_repo(
             raise fork_pat_required()
 
     destination = body.destination_repo
-    scope = idempotency_service.make_agent_scope(agent_name)
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+    scope = idempotency_service.make_caller_scope(agent_name, current_user)
     # Verb-folded key: a client reusing ONE Idempotency-Key across different
     # actions on the same agent must not replay the wrong snapshot
     # (learnings 2026-07-01). No key is derived when the caller omits the

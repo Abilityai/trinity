@@ -136,7 +136,9 @@ async def get_all_settings(
     try:
         settings = db.get_all_settings()
 
-        return settings
+        # #3825: the admin env fingerprint is boot's own record, not a setting.
+        from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+        return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY]
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
 
@@ -156,7 +158,9 @@ async def get_setting(
     assert_admin(current_user)
 
     try:
-        setting = db.get_setting(key)
+        # #3825: reads as absent — the row holds a crackable hash of ADMIN_PASSWORD.
+        from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+        setting = None if key == ADMIN_ENV_FINGERPRINT_KEY else db.get_setting(key)
 
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
@@ -202,6 +206,17 @@ async def update_setting(
                 f"once at first boot from the {INSTALL_SOURCE_ENV_VAR} "
                 "environment variable."
             ),
+        )
+
+    # #3825: boot's record of the ADMIN_PASSWORD value it last applied. Writing
+    # it would let a key-only caller decide whether the next restart re-applies
+    # `.env` over a password the admin changed in the app.
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+
+    if key == ADMIN_ENV_FINGERPRINT_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
         )
 
     # #506: the fleet ceiling must go through the dedicated range-validated
@@ -526,9 +541,9 @@ async def update_setting(
     # `http://` stays legal — the managed fleet advertises exactly that behind a
     # tunnel — and clearing the setting stays legal.
     if key == "public_chat_url":
-        from services.settings_service import classify_advertised_url
+        from services.settings_service import classify_advertised_url, normalize_public_url
 
-        body.value = (body.value or "").strip().rstrip("/")
+        body.value = normalize_public_url(body.value)
         if body.value and classify_advertised_url(body.value) == "unconfigured":
             raise HTTPException(
                 status_code=422,
@@ -642,6 +657,16 @@ async def delete_setting(
                 f"{INSTALL_SOURCE_SETTING_KEY} records how this instance was "
                 "installed and cannot be cleared through the API."
             ),
+        )
+
+    # #3825: deleting it makes the next restart re-apply `.env` over a password
+    # the admin changed in the app — the revert the fingerprint exists to stop.
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
+
+    if key == ADMIN_ENV_FINGERPRINT_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is recorded by the platform at boot and cannot be cleared through the API.",
         )
 
     # ent#623: deleting the AAuth signing key re-keys this instance on next

@@ -421,12 +421,22 @@ class SettingsService:
         """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
         return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
+    def get_public_chat_url_setting(self) -> str:
+        """The stored `public_chat_url` row only (no env fallback), normalised
+        (#3881). For the webhook registrars that have always read the row
+        directly; they must not register a dotted host either."""
+        return normalize_public_url(self.get_setting('public_chat_url', '') or '')
+
     def get_public_chat_url(self) -> str:
-        """Get Public Chat URL from settings, fallback to env var."""
+        """Get Public Chat URL from settings, fallback to env var.
+
+        Normalised on read too (#3881), so a row stored before the save path
+        stripped a trailing host dot, or a dotted env value, never reaches a
+        webhook or a link."""
         url = self.get_setting('public_chat_url')
         if url:
-            return url.rstrip('/')
-        return os.getenv('PUBLIC_CHAT_URL', '').rstrip('/')
+            return normalize_public_url(url)
+        return normalize_public_url(os.getenv('PUBLIC_CHAT_URL', ''))
 
     def get_slack_transport_mode(self) -> str:
         """Get Slack transport mode: 'socket' (default) or 'webhook'."""
@@ -1117,6 +1127,30 @@ def clear_secret_setting(key: str) -> bool:
 def has_secret_setting(key: str) -> bool:
     """Whether a credential-bearing setting is configured in the DB."""
     return settings_service.has_secret_setting(key)
+
+
+def normalize_public_url(url: str) -> str:
+    """Trim whitespace and a trailing `/`, and drop a trailing dot from the host
+    (#3881). `host.example.com.` is the same name, but its TLS certificate is
+    for `host.example.com`, so Telegram (and any strict client) refuses it."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    url = (url or "").strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # A malformed authority (`https://[::1`). Hand the input through: on the
+        # save path this runs before `classify_advertised_url`, which answers
+        # 422 for it, so raising here would turn that refusal into a 500.
+        return url
+    if not (parts.hostname or "").endswith("."):
+        return url
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    host, colon, port = hostport.rpartition(":")
+    if not (colon and port.isdigit()):
+        host, colon, port = hostport, "", ""
+    netloc = f"{userinfo}{at}{host.rstrip('.')}{colon}{port}"
+    return urlunsplit(parts._replace(netloc=netloc)).rstrip("/")
 
 
 def classify_advertised_url(url: str) -> str:

@@ -98,7 +98,7 @@ Both surfaces write the same per-agent assignment, so there is one skill model w
 
 #### From the agent's Skills tab
 
-Library skills assigned to the agent are the cards under **Shared skills**, each with its version short-SHA, description, and the outcome of its last delivery. The owner or an admin manages them from the section's header. **Assign skills** opens the library picker: everything available, with its declared dependencies. Tick or untick skills and click **Save assignments**. The save delivers straight away, and the note under the button says what happened:
+Library skills assigned to the agent are the cards under **Shared skills**, each with its version short-SHA, description, and the outcome of its last delivery. The owner or an admin manages them from the section's header. **Assign skills** opens the library picker: everything available, with its declared dependencies. Tick or untick skills and click **Save assignments**. **Select all** and **Deselect all**, above the list, tick or untick every listed skill in one click. Nothing is saved until you click **Save assignments**, and **Reset** puts the ticks back. Select all leaves deprecated skills as they are, so tick one by hand to assign it. Neither button changes a skill that a set assigns, or an assignment whose skill is no longer in the library: remove that one from its card. A save that would remove a skill that needs approval asks first, because its approval requirement goes with it. The save delivers straight away, and the note under the button says what happened:
 
 | Note | Meaning |
 |------|---------|

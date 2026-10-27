@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
+from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -105,6 +105,7 @@ from routers.telegram import public_router as telegram_public_router, auth_route
 from routers.whatsapp import public_router as whatsapp_public_router, auth_router as whatsapp_auth_router
 from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
+from routers.nevermined_delegation import router as nevermined_delegation_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
 from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
@@ -938,7 +939,7 @@ async def _start_telegram_transport(app: FastAPI) -> None:
 
         # Reconcile webhooks for all existing bindings on startup
         from services.settings_service import settings_service
-        public_url = settings_service.get_setting("public_chat_url", "")
+        public_url = settings_service.get_public_chat_url_setting()
         if public_url:
             bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
@@ -989,7 +990,7 @@ async def _start_whatsapp_transport(app: FastAPI) -> None:
 
         # Backfill webhook_url for existing bindings so UI displays the current URL
         from services.settings_service import settings_service as _settings_svc
-        public_url = _settings_svc.get_setting("public_chat_url", "")
+        public_url = _settings_svc.get_public_chat_url_setting()
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
             bindings = _db.get_all_whatsapp_bindings()
@@ -1413,6 +1414,7 @@ app.include_router(whatsapp_public_router)  # WhatsApp via Twilio Public (WHATSA
 app.include_router(whatsapp_auth_router)  # WhatsApp via Twilio Auth (WHATSAPP-001)
 app.include_router(paid_router)  # Nevermined Paid Chat (NVM-001)
 app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
+app.include_router(nevermined_delegation_router)  # Nevermined card delegation (ent#966)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
@@ -1681,6 +1683,12 @@ async def websocket_events_endpoint(
     user_email = key_info.get("user_email")
     # Determine if admin by checking user role
     user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
+    # #995 — a suspended owner's key is refused here as on every other door
+    # (`get_current_user`, `/ws`). Same close as an inactive key: the holder
+    # learns nothing more than "this key does not work".
+    if owner_is_suspended(user_data):
+        await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
+        return
     # ent#837 — the event stream is an operator surface, and this handler never
     # runs `get_current_user`, so the operator floor is applied here: a key whose
     # owner is Workspace-only (including one minted before the upgrade) does not
@@ -1941,6 +1949,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
+    from utils.admin_identity import is_usable_password_hash
     user_data = db.get_user_by_username(current_user.username)
     if user_data:
         return {
@@ -1948,9 +1957,12 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "picture": user_data.get("picture"),
-            "role": user_data["role"]
+            "role": user_data["role"],
+            # #3825: whether this account can change a password in Settings —
+            # a boolean only, never the hash. Email-only accounts have none.
+            "has_password": is_usable_password_hash(user_data.get("password")),
         }
-    return {"username": current_user.username, "role": current_user.role}
+    return {"username": current_user.username, "role": current_user.role, "has_password": False}
 
 
 if __name__ == "__main__":

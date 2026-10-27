@@ -33,7 +33,7 @@ def test_registration_records_transport_atomically_and_never_upgrades_existing(d
         from db.engine import get_engine
         from sqlalchemy.exc import DBAPIError
         spec = importlib.util.spec_from_file_location('migration_3722', Path(__file__).parents[2] /
-            'src/backend/migrations/versions/0101_agent_config_storage_format.py')
+            'src/backend/migrations/versions/0104_agent_config_storage_format.py')
         revision = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(revision)
         # Simulate an existing legacy database, then run the actual revision.
@@ -103,5 +103,26 @@ def test_admin_email_and_config_histories_converge_without_rewriting_parents():
         '0099_agent_config_storage_format', '0099_agent_peer_skill_grants',
     }
     assert set(convergence.down_revision) == {config_merge.revision, admin.revision}
+    assert len(scripts.get_heads()) == 1
+    assert convergence.revision in {r.revision for r in scripts.walk_revisions()}
+
+
+def test_current_upstream_and_published_config_histories_converge():
+    """Upstream may advance without changing any already-published parent."""
+    from pathlib import Path
+    from alembic.script import ScriptDirectory
+
+    scripts = ScriptDirectory(str(Path(__file__).parents[2] / 'src/backend/migrations'))
+    expected_parents = {
+        '0101_held_gate_turns': '0100_admin_email_not_username',
+        '0102_nevermined_delegations': '0101_held_gate_turns',
+        '0103_a2a_caller_identity': '0102_nevermined_delegations',
+    }
+    for revision, parent in expected_parents.items():
+        assert scripts.get_revision(revision).down_revision == parent
+    convergence = scripts.get_revision('0107_merge_config_a2a_identity')
+    assert set(convergence.down_revision) == {
+        '0103_merge_config_admin_email', '0103_a2a_caller_identity',
+    }
     assert len(scripts.get_heads()) == 1
     assert convergence.revision in {r.revision for r in scripts.walk_revisions()}

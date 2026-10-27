@@ -57,11 +57,18 @@ export function useGitSync(agentRef, agentsStore, showNotification) {
   const loadGitStatus = async () => {
     if (!agentRef.value || agentRef.value.status !== 'running' || !hasGitSync.value) return
     gitLoading.value = true
+    // trinity-enterprise#950: the header shows this on every tab, and the page
+    // clears it on agent switch and on stop. An answer for a different agent,
+    // or one that lands after the agent stopped, is no longer this page's
+    // status — writing it would show A's repo under B's name.
+    const name = agentRef.value.name
+    const stillCurrent = () => agentRef.value?.name === name && agentRef.value?.status === 'running'
     try {
-      gitStatus.value = await agentsStore.getGitStatus(agentRef.value.name)
+      const status = await agentsStore.getGitStatus(name)
+      if (stillCurrent()) gitStatus.value = status
     } catch (err) {
       console.debug('Failed to load git status:', err)
-      gitStatus.value = null
+      if (stillCurrent()) gitStatus.value = null
     } finally {
       gitLoading.value = false
     }

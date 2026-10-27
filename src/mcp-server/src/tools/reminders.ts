@@ -79,8 +79,8 @@ export function createReminderTools(
           .string()
           .optional()
           .describe(
-            "Target agent (must be yourself). Required for user-scoped keys; " +
-              "agent-scoped keys default to the bound agent."
+            "For a user-scoped key only. An agent-scoped key always sets its own reminders; " +
+              "naming another is refused."
           ),
         message: z
           .string()
@@ -186,7 +186,7 @@ export function createReminderTools(
         agent_name: z
           .string()
           .optional()
-          .describe("Target agent. Agent-scoped keys default to the bound agent."),
+          .describe("For a user-scoped key only. An agent-scoped key always lists its own reminders; naming another is refused."),
         status: z
           .string()
           .optional()
@@ -225,7 +225,7 @@ export function createReminderTools(
         agent_name: z
           .string()
           .optional()
-          .describe("Target agent. Agent-scoped keys default to the bound agent."),
+          .describe("For a user-scoped key only. An agent-scoped key always cancels its own reminders; naming another is refused."),
         reminder_id: z
           .string()
           .min(1)

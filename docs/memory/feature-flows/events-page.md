@@ -3,6 +3,8 @@
 > **CONSOLIDATED (2026-03-08; route updated 2026-06-09 #1109)**: The standalone Events page (`/events`) has been consolidated into the **Notifications** tab of the **Operations** view (formerly Operating Room). The `/events` route now redirects to `/operations?tab=notifications` (was `/operating-room?tab=notifications` before the #1109 rename). The UI content was extracted into `src/frontend/src/components/operator/NotificationsPanel.vue`. See [operating-room.md](operating-room.md) for current documentation.
 >
 > `src/frontend/src/views/Events.vue` has been **deleted**. The notifications store (`notifications.js`) and all backend APIs remain unchanged.
+>
+> **#3451 (2026-10-23)**: in the Notifications tab the list scrolls inside its own region and never grows the page, and the bulk actions ("N selected", Acknowledge / Dismiss Selected, Cancel) sit in the list card's header row instead of a bar above the list. The line ranges below describe the deleted view.
 
 ## Overview
 
@@ -297,6 +299,7 @@ case 'agent_notification':
 2. Click "Acknowledge Selected" or "Dismiss Selected"
 
 **Expected**:
+- The list header reads "N selected" and holds the bulk buttons; the rows do not move (#3451)
 - All selected notifications updated
 - Selection cleared after action
 

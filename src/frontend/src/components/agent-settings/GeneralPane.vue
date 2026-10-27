@@ -2,12 +2,15 @@
   <!--
     Settings › General — "What this agent is" (trinity-enterprise#887).
 
-    Every control here moved from somewhere else and exists nowhere else now:
-    the label and id edits and the avatar from the header, tags / read-only /
-    funding / memory-and-CPU from the header rows, parallel capacity from the
-    old Settings cards, the description and template details from the Info
-    tab. The execution timeout (ent#353) is new — its endpoints existed, its
-    control never shipped.
+    Every control here moved from somewhere else: the label and id edits and
+    the avatar from the header, tags / read-only / funding / memory-and-CPU
+    from the header rows, parallel capacity from the old Settings cards, the
+    description and template details from the Info tab. The execution timeout
+    (ent#353) is new — its endpoints existed, its control never shipped. Two
+    of these have a quick path back on the header since trinity-enterprise#955
+    (the display-label pencil and the avatar hover overlay; tags had one since
+    ent#950) — they emit the SAME events as the rows here, so AgentDetail keeps
+    one handler per verb. The id rename exists only here.
 
     Each row that reads a value owns its three states: a skeleton while there
     is no value yet, the value, or an honest "couldn't load" — never a default

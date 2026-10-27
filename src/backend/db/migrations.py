@@ -5309,6 +5309,106 @@ def _migrate_admin_email_not_username(cursor, conn):
     conn.commit()
 
 
+def _migrate_held_gate_turns(cursor, conn):
+    """trinity#3402 — a turn the skill gate stopped is never replayed to the agent.
+
+    * ``gate_hold`` on ``public_chat_messages`` and ``enterprise_portal_messages``:
+      NULL for an ordinary row; otherwise the request id, ``refused:<code>`` or
+      ``named``, and every prompt read leaves the row out.
+    * ``room_gate_holds``: the room messages one agent's gate stopped, per agent.
+    * One backfill: a Workspace turn held before the column existed (since #3166
+      its rows carry the turn's id) is marked from the gate record that names
+      that turn as its origin — an exact match, never a guess from the text.
+      Public-link and channel rows held before the fix carry no turn id and stay
+      unmarked (a stated limit).
+
+    Additive. Idempotent: the backfill touches unmarked rows only.
+    Mirrored by Alembic 0101_held_gate_turns.
+    """
+    for table in ("public_chat_messages", "enterprise_portal_messages"):
+        _safe_add_column(cursor, table, "gate_hold",
+                         f"ALTER TABLE {table} ADD COLUMN gate_hold TEXT")
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
+        )
+        """
+    )
+    cursor.execute(HELD_PORTAL_ROWS_BACKFILL)
+    conn.commit()
+
+
+# trinity#3402: shared by both tracks (`0101_held_gate_turns` imports it), so the
+# SQLite and PostgreSQL backfills cannot drift apart.
+HELD_PORTAL_ROWS_BACKFILL = (
+    "UPDATE enterprise_portal_messages "
+    "SET gate_hold = (SELECT MIN(g.request_id) FROM skill_gate_requests g "
+    "                 WHERE g.origin_execution_id = enterprise_portal_messages.execution_id) "
+    "WHERE gate_hold IS NULL AND execution_id IN ("
+    "    SELECT origin_execution_id FROM skill_gate_requests "
+    "    WHERE origin_execution_id IS NOT NULL)"
+)
+
+
+def _migrate_nevermined_delegations(cursor, conn):
+    """trinity-enterprise#966 — a person funds an agent with a card mandate
+    held by Nevermined.
+
+    * ``nevermined_organization`` — the instance's one Nevermined organization
+      (singleton row ``id = 'default'``): org id, environment, and the widget
+      secret + agent API key in one AES-256-GCM envelope (Invariant #12).
+    * ``agent_delegations`` — the delegation id a person bound to an agent. One
+      active row per agent, enforced by a partial unique index; a deleted
+      agent's row is kept (``agent_deleted_at``) as a financial record.
+
+    Additive. Idempotent. Mirrored by Alembic 0102_nevermined_delegations,
+    which executes the same statements (``NEVERMINED_DELEGATIONS_DDL``).
+    """
+    for statement in NEVERMINED_DELEGATIONS_DDL:
+        cursor.execute(statement)
+    conn.commit()
+
+
+# trinity-enterprise#966: shared by both tracks (`0102_nevermined_delegations`
+# imports it), so the SQLite and PostgreSQL tables cannot drift apart.
+NEVERMINED_DELEGATIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS nevermined_organization ("
+    " id TEXT PRIMARY KEY,"
+    " org_id TEXT NOT NULL,"
+    " environment TEXT NOT NULL,"
+    " encrypted_credentials TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " updated_at TEXT NOT NULL,"
+    " updated_by TEXT)",
+    "CREATE TABLE IF NOT EXISTS agent_delegations ("
+    " id TEXT PRIMARY KEY,"
+    " agent_name TEXT NOT NULL,"
+    " delegation_id TEXT NOT NULL,"
+    " payment_method_id TEXT,"
+    " provider TEXT,"
+    " environment TEXT NOT NULL,"
+    " api_key_injected INTEGER NOT NULL DEFAULT 0,"
+    " created_by TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " revoked_at TEXT,"
+    " revoked_by TEXT,"
+    " agent_deleted_at TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent"
+    " ON agent_delegations(agent_name, created_at DESC)",
+    # One active binding per agent at the DB, not only in service code. A
+    # deleted agent's kept row is not active: it must never block a later
+    # agent of the same name.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active"
+    " ON agent_delegations(agent_name)"
+    " WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
+)
+
 def _migrate_agent_peer_skill_grants(cursor, conn):
     """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
     what an admin assigned needs a grant.
@@ -5603,6 +5703,17 @@ def _migrate_agent_skill_gates(cursor, conn):
     conn.commit()
 
 
+def _migrate_a2a_caller_identity(cursor, conn):
+    """abilityai/trinity-enterprise#862 — store the AAuth peer identity that
+    triggered an inbound A2A execution so it is visible on the execution row.
+    Additive: NULL for all existing rows. Mirrored by Alembic 0103_a2a_caller_identity."""
+    _safe_add_column(
+        cursor, "schedule_executions", "a2a_caller_identity",
+        "ALTER TABLE schedule_executions ADD COLUMN a2a_caller_identity TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5774,4 +5885,7 @@ MIGRATIONS = [
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("agent_config_storage_format", _migrate_agent_config_storage_format),
+    ("held_gate_turns", _migrate_held_gate_turns),
+    ("nevermined_delegations", _migrate_nevermined_delegations),
+    ("a2a_caller_identity", _migrate_a2a_caller_identity),
 ]

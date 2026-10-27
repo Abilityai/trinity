@@ -17,6 +17,7 @@ import axios from 'axios'
 import { parseUTC } from '@/utils/timestamps'
 import { BUCKET_COLORS } from '@/utils/executionBuckets'
 import { formatSyncSummary, syncChip, syncPillClass, syncTextClass } from '@/utils/syncSummary'
+import { pendingCountOf, readPendingQueue } from '@/utils/operatorQueueRead'
 import { useAuthStore } from '../stores/auth'
 import { useExecutionsStore } from '../stores/executions'
 import { useAgentsStore } from '../stores/agents'
@@ -211,7 +212,9 @@ async function loadSidecars() {
   const results = await Promise.allSettled([
     get('/api/executions/stats', { agent: name }),
     get(`/api/agents/${name}/notifications/count`),
-    get(`/api/operator-queue/agents/${name}`, { status: 'pending', limit: 100 }),
+    // #3302: the agent's pending count is the list route's `total` — the old
+    // per-agent read answered `count`, the length of a 100-row page.
+    get('/api/operator-queue', { agent_name: name, status: 'pending', limit: 1 }),
     get(`/api/agents/${name}/git/sync-state`),
     get(`/api/monitoring/agents/${name}`),
     get(`/api/monitoring/agents/${name}/history`, { check_type: 'network', hours: 168, limit: 1000 }),
@@ -236,7 +239,13 @@ async function loadSidecars() {
   if (agentInfo.status === 'fulfilled') info.value = agentInfo.value
   if (stats.status === 'fulfilled') live.value = stats.value.data
   if (notif.status === 'fulfilled') notifCount.value = notif.value.data?.pending_count || 0
-  if (opq.status === 'fulfilled') opQueuePending.value = opq.value.data?.count || 0
+  // An unverified total (null) means the route withheld a row that was not
+  // this viewer's to see: with no more rows the page's own rows are the count,
+  // with more they are a floor until the agent's pending asks are read once
+  // below. Never the number on screen — the panel is reused across agents.
+  const opqBody = opq.status === 'fulfilled' ? opq.value.data : null
+  const opqCounted = pendingCountOf(opqBody)
+  if (opq.status === 'fulfilled') opQueuePending.value = opqCounted ?? (Number(opqBody?.count) || 0)
   if (sync.status === 'fulfilled') syncState.value = sync.value.data || null
   if (hDetail.status === 'fulfilled') health.value = hDetail.value.data
   if (hHist.status === 'fulfilled') healthTrend.value = bucketHealth(hHist.value.data?.checks || [])
@@ -246,6 +255,16 @@ async function loadSidecars() {
     skillsCount.value = Array.isArray(d) ? d.length : (d?.skills?.length ?? null)
   }
   if (recents.status === 'fulfilled') recent.value = recents.value.data || []
+
+  // Last, so every write above stays in step with the reads that fed it.
+  if (opq.status === 'fulfilled' && opqCounted == null && opqBody?.has_more) {
+    try {
+      const read = await readPendingQueue((params) => get('/api/operator-queue', params), { params: { agent_name: name } })
+      if (agentName.value === name) opQueuePending.value = read.total ?? read.items.length
+    } catch {
+      // the fallback failed: the line stays as a failed read leaves it
+    }
+  }
 }
 
 // Bucket network health checks into per-UTC-day uptime% + avg latency.
@@ -330,9 +349,12 @@ onMounted(() => {
 
     <!-- 3. Trend charts -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
-      <div class="flex items-center justify-between px-5 pt-4">
+      <!-- #2197 class: title + live counts + window toggle are ~360px of
+           rigid min-content, so this row widened the page at 375px (found by
+           e2e/agent-header.spec.js, ent#950). It wraps instead. -->
+      <div class="flex flex-wrap items-center justify-between gap-x-2 gap-y-2 px-5 pt-4">
         <h3 class="text-sm font-semibold text-gray-900 dark:text-white uppercase tracking-wider">Activity trends</h3>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <span v-if="live" class="text-xs text-gray-500 dark:text-gray-400">
             <span class="font-mono text-action-primary-600 dark:text-action-primary-400">{{ live.running_count }}</span> running ·
             <span class="font-mono text-status-warning-700 dark:text-status-warning-400">{{ live.queued_count }}</span> queued

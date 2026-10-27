@@ -72,7 +72,7 @@ graph TB
 ```mermaid
 graph TB
     subgraph "Base Image: trinity-agent-base"
-        RT[Multi-Runtime<br/>Python 3.11 | Node 20 | Go 1.21]
+        RT[Multi-Runtime<br/>Python 3.11 | Node 24 | Go 1.21]
         CC[Claude Code CLI<br/>or Gemini CLI]
         AS[Agent Server<br/>FastAPI :8000]
     end

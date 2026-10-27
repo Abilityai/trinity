@@ -17,7 +17,7 @@ Workspace lives at `/workspace` and ships in **every** build. The older `/portal
 - **Suggestions** — A short list headed **Suggested for you**, computed for you and the agent in front of you: what is waiting on you, and what you could do next. Platform users only.
 - **Seat** — You and one agent together. The agent's memory of you, and the decisions you and it record, belong to the seat. The [role card](#the-role-card) also uses *seat* for a business role a person or agent holds (*Head of Sales*); that seat decides which objectives the agent owns.
 
-> **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer, or from **Talk** on the agent's Agent Detail page — see [Voice Chat](../advanced/voice-chat.md).
+> **The Workspace is also where voice lives.** A voice call runs inside a Workspace chat, with the agent's canvas beside the orb. Start one from the call button in the composer — see [Voice Chat](../advanced/voice-chat.md).
 
 ## How It Works
 
@@ -109,7 +109,7 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
 
-A message can be up to 8,000 characters. Within the last 500 the composer shows a count (*7,650 of 8,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
+A message can be up to 100,000 characters, in a chat or a room. Within the last 500 the composer shows a count (*99,650 of 100,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
 
@@ -301,7 +301,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
 | `/agents/{name}/sessions/{id}/archive` | PUT / DELETE | Close (archive) a chat / reopen it. Nothing is deleted |
 | `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome. No message carries its cost |
-| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 8,000 characters |
+| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 100,000 characters |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
 | `/agents/{name}/executions/{id}/terminate` | POST | Stop one of your own turns |
