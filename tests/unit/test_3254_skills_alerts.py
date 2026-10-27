@@ -195,6 +195,7 @@ class TestReconcileRefusal:
         """R10: a pass that could not look is not evidence of recovery."""
         from services.skill_service import SkillInjectionBusy
         self._reconcile(svc, 25)
+        [first] = _pending(db, self.SUBJECT)
         if case == "inventory_unavailable":
             svc._list_managed_skills = AsyncMock(return_value=None)
             result = asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))
@@ -204,8 +205,8 @@ class TestReconcileRefusal:
         else:
             result = self._reconcile(svc, error=RuntimeError("boom"))
         assert result["status"] == "skipped"
-        [row] = _pending(db, self.SUBJECT)
-        assert row["context"]["seen_count"] == 1
+        assert [(r["id"], r["context"]["seen_count"]) for r in _pending(db, self.SUBJECT)] == [
+            (first["id"], 1)]                                 # untouched, not ended
 
     def test_a_persons_ending_stands_and_snoozes_the_next_refusal(self, db, svc, clock):
         """AC 7 (#2372) on this kind: the answer lands `acknowledged` as the
@@ -316,8 +317,7 @@ class TestFleetReinject:
         assert S._eligible_agents() == []
         report = asyncio.run(S().run_fleet_reinject(commit_sha="abc123"))
         assert report["agents_total"] == 0 and report["agents_failed"] == 0
-        [still] = _pending(db, self.SUBJECT)
-        assert still["id"] == row["id"]
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]   # not ended
 
     def test_a_busy_agent_leaves_the_row_alone(self, db, sweep):
         """A busy agent was never re-injected: its earlier failure is unknown."""
@@ -325,8 +325,7 @@ class TestFleetReinject:
         [row] = _pending(db, self.SUBJECT)
         report = sweep({"a1": self.BUSY, "a2": self.OK})
         assert report["agents_failed"] == 0
-        [still] = _pending(db, self.SUBJECT)
-        assert still["id"] == row["id"]
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]   # not ended
 
     def test_an_agent_with_no_result_leaves_the_row_alone(self, db, sweep):
         """Every enumerated agent must have reported; a missing result (the
@@ -340,9 +339,9 @@ class TestFleetReinject:
                     raise RuntimeError("lost")
                 return super().__getitem__(name)
 
-        sweep(_Partial({"a1": self.OK}), agents=["a1", "a2"])
-        [still] = _pending(db, self.SUBJECT)
-        assert still["id"] == row["id"]
+        report = sweep(_Partial({"a1": self.OK}), agents=["a1", "a2"])
+        assert report["agents_failed"] == 0
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]   # not ended
 
     def test_a_persons_ending_stands_and_snoozes_the_next_failure(self, db, sweep, clock):
         sweep({"a1": self.BAD})
