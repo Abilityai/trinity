@@ -47,11 +47,13 @@ for the deliberately inverted coercion) + the fixed
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import os
 import secrets
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -161,6 +163,46 @@ STATUS_KEYS = (
 
 class BackupRunError(RuntimeError):
     """A backup attempt failed in a way the run loop reports as `failed`."""
+
+
+@contextmanager
+def _outcome_lock():
+    """Serialise one worker's status write and the alarm it implies (#3254).
+
+    Two uvicorn workers run the nightly job when the Redis lease fails open,
+    and each records its own outcome. The failure alarm is decided from the
+    prior status and then filed or ended, so an outcome the sibling records in
+    between leaves the alarm out of step with the status that stands: a
+    durable ``failed`` with its alarm ended (the next failure then raises no
+    edge), or an alarm beside an ``ok``. The shape of
+    ``db/migration_lock.migration_lock``: an OS ``flock`` on a sidecar of the
+    database file, which both workers share through the ``/data`` bind mount
+    and which the kernel releases if its holder dies.
+
+    Fails open: if the lock file cannot be opened or locked, the outcome is
+    recorded and alarmed unserialised, as before, with a WARNING. A lost alarm
+    is the worse failure.
+    """
+    fd = None
+    try:
+        try:
+            fd = os.open(f"{db_connection.DB_PATH}.db-backup-alarm.lock",
+                         os.O_RDWR | os.O_CREAT, 0o600)
+            # Held only for a few settings writes and one alarm call.
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            logger.warning("[DBBackup] outcome lock unavailable (%s); "
+                           "recording the outcome without it", exc)
+            if fd is not None:
+                os.close(fd)
+                fd = None
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def effective_backup_retention_days() -> int:
@@ -352,21 +394,17 @@ class DBBackupService:
         conditions as the platform (#3254). A person's ending is never
         overwritten: ``clear`` is a compare-and-set on a pending row.
 
-        Two workers run this job when the Redis lease fails open, and each
-        records its own outcome. The status is read back as the write's last
-        step, and the failure alarm follows the status that stands: an ``ok``
-        that another worker's failure has since replaced ends nothing, and a
-        failure that another worker's ``ok`` has since replaced files nothing.
-        So a durable ``failed`` always has its alarm, which the next run's edge
-        check relies on. The residual is a sibling's write landing between
-        that read-back and the alarm call, a few statements apart.
+        The status write and the alarm it implies run as one section under
+        ``_outcome_lock``, so the other worker's outcome lands wholly before or
+        wholly after it, and a durable ``failed`` always has its alarm, which
+        the next run's edge check relies on.
         """
         from database import db
         from utils.helpers import utc_now_iso
 
         now = utc_now_iso()
 
-        def _write() -> Tuple[Optional[str], Optional[str]]:
+        def _write() -> Optional[str]:
             prior = db.get_setting_value("db_backup_last_status", None)
             db.set_setting("db_backup_last_status", status)
             db.set_setting("db_backup_last_error", (error or "")[:_STDERR_CAP])
@@ -383,23 +421,31 @@ class DBBackupService:
                     db.set_setting("db_backup_last_size_bytes", str(size_bytes))
                 if duration_ms is not None:
                     db.set_setting("db_backup_last_duration_ms", str(duration_ms))
-            return prior, db.get_setting_value("db_backup_last_status", None)
+            return prior
 
-        try:
-            prior, standing = await asyncio.to_thread(_write)
-        except Exception:
-            logger.exception("[DBBackup] could not persist status")
-            return
+        def _record() -> None:
+            with _outcome_lock():
+                try:
+                    prior = _write()
+                except Exception:
+                    logger.exception("[DBBackup] could not persist status")
+                    return
+                self._alarm_for_outcome(status, prior, trigger=trigger, error=error)
 
+        await asyncio.to_thread(_record)
+
+    def _alarm_for_outcome(
+        self, status: str, prior: str | None, *, trigger: str, error: str,
+    ) -> None:
+        """The alarm transition one recorded outcome implies. Called with the
+        outcome lock held, right after the status write it acts on."""
         from services import platform_alerts
 
         backup_dir = self.backup_dir()  # both alarms' key
         if status == "ok":
-            if standing == "ok":
-                platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
-            # This success is fresh whatever a sibling recorded since.
+            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
             platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
-        elif status in _FAILURE_STATUSES and prior in (None, "ok") and standing in _FAILURE_STATUSES:
+        elif status in _FAILURE_STATUSES and prior in (None, "ok"):
             title = (
                 "Database backup skipped: not enough disk space"
                 if status == "skipped_no_space"
@@ -438,8 +484,9 @@ class DBBackupService:
         is the first attempt, and a young one is not evidence that a backup
         works, so it ends nothing."""
         from database import db
-        from services import platform_alerts
         from utils.helpers import utc_now_iso
+
+        from services import platform_alerts
 
         def _read() -> Dict[str, Optional[str]]:
             return {

@@ -21,6 +21,9 @@ Pinned here, for `db_backup_failure`, `db_backup_stale` and
   row, and the seam's own row reads back as the same kind (the two backup
   kinds share the `db-backup-` prefix and are told apart by
   `context.alert_type`).
+* Two workers (the Redis lease failed open): the sibling's outcome landing
+  inside this worker's alarm call waits for it, so the failure alarm always
+  matches the status that stands.
 * The other shape, the clock 30 days ahead: a persisting staleness, re-alarmed
   weekly by the real `_staleness_check`, keeps exactly one pending row through
   day 30; the one-off failure reading has expired; a person's ending of the
@@ -36,8 +39,11 @@ patching each running function's own globals. No literal is compared to the
 real clock.
 """
 import asyncio
+import fcntl
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -308,34 +314,97 @@ class TestBackupFailure:
 
 class TestTwoWorkers:
     """With Redis down the lease fails open and both uvicorn workers run the
-    nightly job. Each records its own outcome; the alarms must follow the
-    status that stands once both have written, never the one each wrote."""
+    nightly job. Each records its own outcome and then acts on the alarm. The
+    sibling's whole outcome is landed at the worst point: inside this worker's
+    alarm call, after its status write. The failure alarm must still match the
+    status that stands once both have finished."""
 
-    @staticmethod
-    def _sibling(status, **kw):
+    @pytest.fixture
+    def sibling(self, backup, monkeypatch):
         import services.db_backup_service as svc_mod
-        sibling = svc_mod.DBBackupService()
-        return lambda: asyncio.run(sibling._record_outcome(status, trigger="scheduled", **kw))
 
-    def test_a_failure_recorded_after_this_workers_success_keeps_its_alarm(self, db, backup):
+        state = SimpleNamespace(threads=[], waiting=threading.Event())
+        lock = getattr(svc_mod, "_outcome_lock", None)
+        if lock is not None:
+            real_flock = fcntl.flock
+
+            def flock(fd, op):
+                if op == fcntl.LOCK_EX:
+                    state.waiting.set()
+                return real_flock(fd, op)
+
+            monkeypatch.setitem(lock.__wrapped__.__globals__, "fcntl", SimpleNamespace(
+                flock=flock, LOCK_EX=fcntl.LOCK_EX, LOCK_UN=fcntl.LOCK_UN))
+
+        def land(status, **kw):
+            """Start the sibling's outcome in its own thread; return once it
+            has finished or is waiting on the outcome lock."""
+            sib = svc_mod.DBBackupService()
+            done = threading.Event()
+
+            def run():
+                try:
+                    asyncio.run(sib._record_outcome(status, trigger="scheduled", **kw))
+                finally:
+                    done.set()
+
+            state.waiting.clear()
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            state.threads.append(t)
+            deadline = time.monotonic() + 30
+            while not (state.waiting.is_set() or done.is_set()):
+                assert time.monotonic() < deadline, "the sibling neither finished nor waited"
+                time.sleep(0.005)
+
+        def at_seam_call(fn_name, kind, status, **kw):
+            real, fired = getattr(pa, fn_name), []
+
+            def wrapper(agent_name, k, *a, **kwa):
+                if k == kind and not fired:
+                    fired.append(True)
+                    land(status, **kw)
+                return real(agent_name, k, *a, **kwa)
+
+            monkeypatch.setattr(pa, fn_name, wrapper)
+
+        state.at_seam_call = at_seam_call
+        state.join = lambda: [t.join(30) for t in state.threads]
+        return state
+
+    def test_a_failure_recorded_during_this_workers_clear_keeps_its_alarm(self, db, backup, sibling):
         backup.settings["db_backup_last_status"] = "ok"
-        # The sibling's failure lands after this worker wrote `ok` and before
-        # it reached its clear: the sibling saw `ok` as the prior status, so it
-        # raised the edge alarm.
-        backup.hooks["db_backup_last_success_at"] = self._sibling("failed", error="ENOSPC on its tmp")
+        sibling.at_seam_call("clear", "db_backup_failure", "failed", error="ENOSPC on its tmp")
         _ok(backup)
+        sibling.join()
         assert backup.settings["db_backup_last_status"] == "failed"
         assert len(_pending(db, backup.host, "db_backup_failure")) == 1
 
-    def test_a_success_recorded_after_this_workers_failure_files_no_alarm(self, db, backup):
+    def test_a_success_recorded_during_this_workers_failure_alarm_ends_it(self, db, backup, sibling):
         backup.settings["db_backup_last_status"] = "ok"
-        # The sibling's success lands after this worker wrote `failed` and
-        # before it filed the edge alarm.
-        backup.hooks["db_backup_last_trigger"] = self._sibling(
-            "ok", path=os.path.join(backup.dir, "trinity-backup-x.db"), size_bytes=1, duration_ms=1)
+        sibling.at_seam_call("observe", "db_backup_failure", "ok",
+                             path=os.path.join(backup.dir, "trinity-backup-x.db"),
+                             size_bytes=1, duration_ms=1)
         _record(backup, "failed", error="ENOSPC on its tmp")
+        sibling.join()
         assert backup.settings["db_backup_last_status"] == "ok"
         assert _pending(db, backup.host) == []
+        (row,) = _all_rows(db, backup.host)
+        assert (row["status"], row["disposed_by"]) == ("cancelled", "platform")
+
+    def test_an_unavailable_lock_fails_open(self, db, backup, monkeypatch):
+        """A lock file that cannot be opened (a root-owned data dir) must not
+        cost the alarm: the outcome is recorded and alarmed unserialised."""
+        import services.db_backup_service as svc_mod
+
+        g = svc_mod._outcome_lock.__wrapped__.__globals__
+        monkeypatch.setitem(g, "os", SimpleNamespace(
+            open=lambda *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied")),
+            close=os.close, O_RDWR=os.O_RDWR, O_CREAT=os.O_CREAT))
+        backup.settings["db_backup_last_status"] = "ok"
+        _record(backup, "failed", error="boom")
+        assert backup.settings["db_backup_last_status"] == "failed"
+        assert len(_pending(db, backup.host, "db_backup_failure")) == 1
 
 
 # ---------------------------------------------------------------------------
