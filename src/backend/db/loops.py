@@ -537,8 +537,8 @@ class LoopOperations:
              return ``"armed"``.
 
         ``due_for`` is the service's due-time policy. It runs inside this
-        transaction while the row is held, so it must be pure (no I/O, no
-        await); if it raises, the transaction rolls back. Every outcome other
+        transaction while the row is held, so it must not touch the database
+        or await; if it raises, the transaction rolls back. Every outcome other
         than ``"open_run"`` carries None as its second element.
         """
         with get_engine().connect() as conn, conn.begin() as tx:

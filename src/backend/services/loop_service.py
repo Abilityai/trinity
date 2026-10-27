@@ -197,7 +197,8 @@ def _rearm_due_at(loop: dict, runs: list, now: datetime) -> datetime:
     representable the result lies in `[now, now + grace]` and no input raises;
     at an unrepresentable instant it returns `now`.
 
-    Pure (no I/O): `rearm_lost_dispatch` calls it while holding the loop row.
+    No database access and no await (it may log a WARNING):
+    `rearm_lost_dispatch` calls it while holding the loop row.
     """
     grace = timedelta(seconds=LOOP_REARM_GRACE_SECONDS)
     try:
