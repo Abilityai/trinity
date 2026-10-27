@@ -567,7 +567,8 @@ SyncHealthService._poll_loop (SYNC_HEALTH_POLL_INTERVAL_SECONDS, default 60 s)
     │     │     double leader; the episode ending (diverged_since cleared)
     │     │     → platform_alerts.clear; counts + recommendation only
     │     ├── #1595 git_bloat alerts (same edge-trigger pattern; two kinds,
-    │     │   row type 'git_bloat' on both, cleared on the falling edge):
+    │     │   row type 'git_bloat' on both; size cleared when .git falls back
+    │     │   under the bound, maintenance only on the agent's own 'repacked …'):
     │     │     ├── git_dir_bytes crossed GIT_DIR_ALERT_BYTES (10 GiB) → git_bloat_size
     │     │     └── maintenance_failures crossed 3 → git_bloat_maintenance
     │     └── #2742 WARNING on a newly observed lock_recovery / index_lock_stuck
@@ -660,10 +661,11 @@ push. `computed_at` (ISO-Z, stamped inside the computation) makes that legible.
 Serving late followers a fresh run was explicitly rejected — it reintroduces the
 overlapping `git fetch` this change exists to remove.
 
-Emission is **edge-triggered** — a new entry appears only on the
-transition from `N-1 < 3` to `N >= 3` (or below-ceiling → above-ceiling
-for `git_bloat`). A fresh failure series after a `success` reset produces
-a distinct entry (the ID embeds the emission timestamp).
+Emission is **edge-triggered** — a row is filed on the transition from
+`N-1 < 3` to `N >= 3` (or below-ceiling → above-ceiling for `git_bloat`),
+then re-read every 6 h while the condition holds, which moves its
+deadline (#3254). Recovery ends the row as the platform, so a fresh
+failure series after a `success` reset files a new row.
 
 ### 3. Dual ahead/behind (P6 fix)
 

@@ -53,14 +53,16 @@ Besides agent-authored items, the platform files its own alerts into this tab:
 
 #### Platform alerts are conditions, not messages
 
-Some platform alerts describe a *condition* — a subscription near its weekly limit, a refused skills-library address, the system agent's stale base image, a long-open circuit breaker. For these, Trinity keeps **at most one pending card per subject**:
+Platform alerts describe a *condition* — for example a subscription near its weekly limit, a failing git sync, a stale database backup, a refused retention prune, the system agent's stale base image, a long-open circuit breaker. For each, Trinity keeps **at most one pending card per subject**:
 
 - A repeat reading updates the existing card in place rather than filing a new one. A card seen more than once shows **seen N times · last seen 5m ago**. A worse reading (higher priority, or a subscription moving from warning to critical) escalates the same card.
 - When the condition clears, the platform ends the card itself. It moves to Resolved reading **Ended by the platform — the condition cleared**.
 - If nothing clears it, the card expires 14 days after its **last** reading (`OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS`) and reads **Expired — nobody acted on it**. Some edge-triggered alerts use a fixed 30-day lifetime instead.
 - After a person ends one (Got it, cancel, or Clear All), the same reading files nothing for 7 days (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`), unless it gets worse.
 
-The upgrade that introduced this collapses an existing backlog: for each subject it keeps the newest pending card and ends the older duplicates as superseded. Other platform alerts still file one card per event and keep their own rules (described above and in the linked pages).
+Four alerts need a person and never expire: a poisoned execution, a collided Workspace inbox, a gitignore change notice and a Workspace problem report. The platform never ends them; only a person does. A person's ending of an inbox collision is final: only a new claimant (or a higher priority) brings it back.
+
+The upgrades that introduced this collapse an existing backlog: for each subject they keep the newest pending card and end the older duplicates as superseded.
 
 #### Flood guard
 
