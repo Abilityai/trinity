@@ -366,7 +366,9 @@ def test_the_renderer_runs_after_credentials_are_available():
     Rendering before it would resolve placeholders against a file that is not
     there yet."""
     startup = (_ROOT / "docker" / "base-image" / "startup.sh").read_text()
-    assert startup.index("/generated-creds/.env") < startup.index("agent_server.mcp_template"), (
+    # Check the actual seed command, which uses the selected legacy or
+    # persistent-volume directory, rather than a literal legacy-only pathname.
+    assert startup.index('cp -n "${GENERATED_CREDS_DIR}"/.env') < startup.index("python3 -m agent_server.mcp_template"), (
         "the renderer runs before .env is copied in — placeholders would be "
         "unresolvable"
     )

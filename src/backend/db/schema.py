@@ -115,6 +115,7 @@ TABLES = {
             spawned_by_agent TEXT,
             spawned_by_key_id TEXT,
             volume_base_name TEXT,
+            config_storage_format TEXT,
             display_label TEXT,
             FOREIGN KEY (owner_id) REFERENCES users(id),
             FOREIGN KEY (subscription_id) REFERENCES subscription_credentials(id)
