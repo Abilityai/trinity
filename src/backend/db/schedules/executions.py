@@ -105,6 +105,9 @@ class ScheduleExecutionsMixin:
             open_canvas_id=row["open_canvas_id"] if "open_canvas_id" in row_keys else None,
             # Inter-agent chain depth (#2806); NULL = root.
             chain_depth=row["chain_depth"] if "chain_depth" in row_keys else None,
+            # Verified AAuth peer of an inbound A2A call (ent#862); NULL otherwise.
+            a2a_caller_identity=row["a2a_caller_identity"]
+                if "a2a_caller_identity" in row_keys else None,
         )
 
     # =========================================================================

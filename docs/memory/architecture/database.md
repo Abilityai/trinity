@@ -885,7 +885,7 @@ CREATE INDEX idx_canary_violations_snapshot
 **idempotency_keys** (RELIABILITY-006 — see [Idempotency](execution.md#idempotency-reliability-006-525) and Invariant #18):
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" (platform-derived keys) | "agent:{name}:caller:{principal}" (client header keys, ent#830) | "webhook:{token}"
     idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
     execution_id TEXT,               -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,            -- 'in_flight' | 'completed'

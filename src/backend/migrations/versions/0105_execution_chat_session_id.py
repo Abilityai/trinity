@@ -6,14 +6,14 @@ into the chat thread as well as the execution row. Nullable, no backfill.
 
 Mirrors the SQLite ``execution_chat_session_id`` migration.
 
-Revision ID: 0103_execution_chat_session_id
-Revises: 0102_nevermined_delegations
+Revision ID: 0105_execution_chat_session_id
+Revises: 0103_a2a_caller_identity
 """
 from alembic import op
 
 
-revision = "0103_execution_chat_session_id"
-down_revision = "0102_nevermined_delegations"
+revision = "0105_execution_chat_session_id"
+down_revision = "0103_a2a_caller_identity"
 branch_labels = None
 depends_on = None
 
