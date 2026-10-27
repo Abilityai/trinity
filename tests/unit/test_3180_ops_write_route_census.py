@@ -619,15 +619,44 @@ class TestNeverGrantableFamilies:
         assert no_fence["_sacrifice_active"] == {"revoke": False, "delete": False}
 
     def test_doors_that_validate_a_key_themselves(self, live):
-        doors = live["doors"]
-        assert doors["heartbeat"]["status"] == 403
-        assert doors["result_callback"]["status"] == 403
-        assert doors["pull_next_task"]["status"] == 403
-        assert doors["pull_task_result"]["status"] == 403
+        """Each door is driven with the `ops_write` key AND with the agent's own
+        key (the pull seams with the agent made a pilot, else they refuse before
+        reading any key). The agent's key getting past the key check is what
+        makes the `ops_write` 403 the key check's answer, not a gate in front."""
+        ow, agent = live["doors"]["ops_write"], live["doors"]["agent_key"]
+        own_key = {
+            "heartbeat": "Heartbeat requires the agent's own MCP key",
+            "result_callback": "Result callback requires the agent's own MCP key",
+            "pull_next_task": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
+            "pull_task_result": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
+        }
+        for door, detail in own_key.items():
+            assert ow[door]["status"] == 403 and ow[door]["detail"] == detail, (door, ow[door])
+        assert agent["heartbeat"]["status"] == 200, agent["heartbeat"]
+        assert agent["pull_next_task"]["status"] == 200, agent["pull_next_task"]
+        # Past the key check, refused only because the execution does not exist.
+        for door in ("result_callback", "pull_task_result"):
+            assert agent[door]["status"] == 404 and agent[door]["detail"] == "Execution not found", (door, agent[door])
         # The one exception, stated: introspection answers "valid" and grants nothing.
         import json as _json
-        body = _json.loads(doors["mcp_validate"]["body"])
-        assert doors["mcp_validate"]["status"] == 200 and body["valid"] is True and body["scope"] == "ops_write"
+        validate = live["doors"]["mcp_validate"]
+        body = _json.loads(validate["body"])
+        assert validate["status"] == 200 and body["valid"] is True and body["scope"] == "ops_write"
+
+    def test_the_optional_auth_door_treats_the_key_as_anonymous_on_a_live_share(self, live):
+        """A live `authorized` canvas share: a viewer who can reach the agent gets
+        the canvas, anyone else is asked to sign in. The `ops_write` key, whose
+        owner CAN reach the agent, must get exactly the anonymous answer — and
+        does only because of the fence: with the fence call removed it gets the
+        canvas."""
+        canvas = live["canvas"]
+        assert canvas["owner_user_key"]["status"] == 200 and canvas["owner_user_key"]["share_status"] == "ok"
+        assert canvas["owner_session"]["status"] == 200 and canvas["owner_session"]["share_status"] == "ok"
+        anon = canvas["anonymous"]
+        assert anon["status"] == 401 and anon["share_status"] == "sign_in_required", anon
+        for who in ("ops_write", "bogus_key"):
+            assert (canvas[who]["status"], canvas[who]["body"]) == (anon["status"], anon["body"]), (who, canvas[who])
+        assert live["canvas_no_fence"]["status"] == 200, live["canvas_no_fence"]
 
     def test_neither_event_socket_opens(self, live):
         assert live["ws_events"] == {"closed": 4003}, live["ws_events"]
