@@ -1276,9 +1276,9 @@ class TestReconcileDuringLiveAdvance:
         assert parked and snap["v"][0]["next_run_at"] is None
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap["v"]):
-            assert _run(ls.LoopService().reconcile_after_restart()) == 0
-        assert seen == [(lid, "parked")]
-        assert _loop(db, lid)["next_run_at"] == parked
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert _loop(db, lid)["next_run_at"] == parked, "the 1-hour pause was overwritten"
+        assert (moved, seen) == (0, [(lid, "parked")])
 
     def test_t7r_a_rearm_before_the_pause_does_not_bypass_it(self, env, monkeypatch):
         """B re-arms and sweeps while A sits between run 1's progress write and
@@ -1319,9 +1319,8 @@ class TestReconcileDuringLiveAdvance:
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap["v"]):
             moved = _run(ls.LoopService().reconcile_after_restart())
-        assert moved == 0
-        assert seen == [(lid, "open_run")]
-        assert _loop(db, lid)["next_run_at"] is None
+        assert _loop(db, lid)["next_run_at"] is None, "a park was armed with run 2 in flight"
+        assert (moved, seen) == (0, [(lid, "open_run")])
         assert _sweep_at(ls, monkeypatch, _grace_end(db, lid) + timedelta(seconds=1)) == 0
         assert _nums(db, lid) == [1, 2]
         assert len(ts.calls) == 2
@@ -1495,8 +1494,9 @@ class TestDeadAdvanceStillRecovers:
         assert snap[0]["runs_completed"] == 0  # B's read predates A's claim
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap):
-            assert _run(ls.LoopService().reconcile_after_restart()) == 1
-        assert seen == [(lid, "armed")]
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert seen == [(lid, "armed")], "a real loss was not re-armed"
+        assert moved == 1
         assert _loop(db, lid)["next_run_at"] is not None
         assert _sweep_at(ls, monkeypatch, _grace_end(db, lid)) == 1
         assert _nums(db, lid)[:2] == [1, 2]
@@ -1508,8 +1508,9 @@ class TestDeadAdvanceStillRecovers:
         db.mark_loop_running(loop["id"])  # ... and worker A dies here
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap):
-            assert _run(ls.LoopService().reconcile_after_restart()) == 1
-        assert seen == [(loop["id"], "armed")]
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert seen == [(loop["id"], "armed")], "a real loss was not re-armed"
+        assert moved == 1
         assert _loop(db, loop["id"])["next_run_at"] == _iso(_grace_end(db, loop["id"]))
 
     def test_t21_overtaken_four_times_before_b_decides_then_death(self, env):
@@ -1552,8 +1553,9 @@ class TestDeadAdvanceStillRecovers:
         db.hooks["rearm_lost_dispatch"] = _a_runs_one_iteration
         seen = _record_rearms(db)
         with caplog.at_level(logging.WARNING), _SnapshotReadAs(db, snap):
-            assert _run(ls.LoopService().reconcile_after_restart()) == 1
-        assert seen == [(lid, "armed")]
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert seen == [(lid, "armed")], "a real loss was not re-armed"
+        assert moved == 1
         assert not any("not re-armed" in r.getMessage() for r in caplog.records)
         assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
 
@@ -1591,11 +1593,11 @@ class TestDeadAdvanceStillRecovers:
         db.set_loop(lid, runs_completed=1)  # rewound under a closed run 2
         seen = _record_rearms(db)
         with caplog.at_level(logging.WARNING):
-            assert _run(ls.LoopService().reconcile_after_restart()) == 0
-        assert seen == [(lid, "stuck")]
+            moved = _run(ls.LoopService().reconcile_after_restart())
+        assert _loop(db, lid)["next_run_at"] is None, "re-armed over run number 2, which exists"
+        assert (moved, seen) == (0, [(lid, "stuck")])
         warned = [r for r in caplog.records if "not re-armed" in r.getMessage()]
         assert len(warned) == 1 and lid in warned[0].getMessage()
-        assert _loop(db, lid)["next_run_at"] is None
 
 
 class TestRearmOutcomes:
