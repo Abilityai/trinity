@@ -382,6 +382,10 @@ class SyncHealthService:
         # between. The seam's subject, not this memo, keeps it one row across
         # restarts and workers; a restart only re-reads once.
         self._alert_read_at: Dict[Tuple[str, str], Tuple[Optional[str], float]] = {}
+        # #3254: the divergence episode whose seam row this process has looked
+        # up after an empty memo (a restart, a leadership hand-off), so the
+        # lookup runs once per episode rather than on every poll.
+        self._divergence_looked_up: Dict[str, str] = {}
 
     @property
     def poll_interval(self) -> int:
@@ -649,11 +653,11 @@ class SyncHealthService:
         # its own row, so a precedence never RAISES a divergence alert.
         verdict = sync_view(updated, config)
         episode = updated.get("diverged_since")
-        reported = self._alert_read_at.get(("sync_diverged", agent_name), (None,))[0]
         if verdict["freeze_cause"] == "divergence":
             if self._reading_due("sync_diverged", agent_name, episode=episode):
                 self._observe_sync_diverged(agent_name, updated, verdict)
-        elif (verdict["freeze_cause"] == "sync_failing" and episode and reported == episode
+        elif (verdict["freeze_cause"] == "sync_failing" and episode
+                and self._divergence_reported(agent_name, episode)
                 and self._reading_due("sync_diverged", agent_name, episode=episode)):
             underneath = sync_view({**updated, "consecutive_failures": 0}, config)
             if underneath["freeze_cause"] == "divergence":
@@ -661,6 +665,7 @@ class SyncHealthService:
         if (prior or {}).get("diverged_since") and not episode:
             platform_alerts.clear(agent_name, "sync_diverged", agent_name)
             self._forget_reading("sync_diverged", agent_name)
+            self._divergence_looked_up.pop(agent_name, None)
 
         # #2742: a self-healed wedge, announced once. No operator-queue item
         # and no DB column — the boot reap already fixed it, so this is a log
@@ -761,11 +766,42 @@ class SyncHealthService:
     def _note_reading(self, kind: str, agent_name: str, outcome: str,
                       episode: Optional[str] = None) -> None:
         """Remember a reading the seam took. `observe` never raises, so a failed
-        write is only its outcome: it is retried on the next poll, not in 6 h."""
-        if outcome == platform_alerts.OBSERVED_FAILED:
-            self._alert_read_at.pop((kind, agent_name), None)
+        write is only its outcome: it is retried on the next poll, not in 6 h.
+        A failed re-read of an episode that already landed keeps the episode
+        (it is still reported) and is due at once."""
+        key = (kind, agent_name)
+        if outcome != platform_alerts.OBSERVED_FAILED:
+            self._alert_read_at[key] = (episode, time.monotonic())
+        elif self._alert_read_at.get(key, (object(),))[0] == episode:
+            self._alert_read_at[key] = (episode, float("-inf"))
         else:
-            self._alert_read_at[(kind, agent_name)] = (episode, time.monotonic())
+            self._alert_read_at.pop(key, None)
+
+    def _divergence_reported(self, agent_name: str, episode: str) -> bool:
+        """Was this divergence episode reported (#3254 R9 under a precedence)?
+
+        This process's memo answers it. After a restart or a leadership hand-off
+        the memo is empty, so the seam's pending row is looked up once per
+        episode: a row of this episode means it was reported, and it is re-read
+        at once (a restart re-reads once). No row means it never was, and a
+        precedence never raises one.
+        """
+        last = self._alert_read_at.get(("sync_diverged", agent_name))
+        if last is not None and last[0] == episode:
+            return True
+        if self._divergence_looked_up.get(agent_name) == episode:
+            return False
+        try:
+            row = db.find_pending_operator_queue_by_subject(
+                agent_name, platform_alerts.subject_for("sync_diverged", agent_name))
+        except Exception:
+            logger.warning("could not look up %s's divergence alert", agent_name, exc_info=True)
+            return False  # looked up again on the next poll
+        self._divergence_looked_up[agent_name] = episode
+        if row and (row.get("context") or {}).get("diverged_since") == episode:
+            self._alert_read_at[("sync_diverged", agent_name)] = (episode, float("-inf"))
+            return True
+        return False
 
     def _forget_reading(self, kind: str, agent_name: str) -> None:
         self._alert_read_at.pop((kind, agent_name), None)

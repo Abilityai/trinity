@@ -605,6 +605,88 @@ async def test_a_sync_failing_precedence_never_raises_a_divergence_alert(
     assert len(_pending(db, "sync-failing-")) == 1
     assert _rows(db, "sync-diverged-") == []
 
+    restarted = type(service)(poll_interval=0)  # a restart does not raise one either
+    for _ in range(2):
+        await _poll(restarted, failing)
+        clock.advance(hours=7)
+    assert _rows(db, "sync-diverged-") == []
+
+
+async def _report_then_precede(service, clock):
+    """A divergence reported while it is the cause, then sync failing on top."""
+    await _poll(service, _AHEAD)
+    clock.advance(hours=25)
+    await _poll(service, _AHEAD)
+    failing = _payload(status="failed", error="boom", ahead=7)
+    for _ in range(3):
+        clock.advance(**_MIN)
+        await _poll(service, failing)
+    return failing
+
+
+@pytest.mark.asyncio
+async def test_a_failed_re_read_under_a_precedence_is_retried_on_the_next_poll(
+        service, seed_agent, db, clock, monkeypatch):
+    seed_agent()
+    failing = await _report_then_precede(service, clock)
+    (row,) = _rows(db, "sync-diverged-")
+
+    real_create = db.create_platform_operator_queue_item
+    fail = {"on": True}
+
+    def create(*args, **kwargs):
+        if fail["on"]:
+            raise RuntimeError("the database went away mid-write")
+        return real_create(*args, **kwargs)
+
+    monkeypatch.setattr(db, "create_platform_operator_queue_item", create)
+    clock.advance(hours=7)
+    await _poll(service, failing)  # the re-read is due and its write fails
+    fail["on"] = False
+    assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == 1
+    clock.advance(**_MIN)
+    await _poll(service, failing)  # retried on the next poll, not in 6 h or never
+    assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_restarted_poller_re_reads_a_divergence_under_a_precedence(
+        service, seed_agent, db, clock, monkeypatch):
+    """A restart or a leadership hand-off empties the memo; the divergence row
+    that exists is still re-read under the precedence (a restart re-reads once),
+    for 31 days, and the seam's row is looked up once, not on every poll."""
+    seed_agent()
+    failing = await _report_then_precede(service, clock)
+    (row,) = _rows(db, "sync-diverged-")
+
+    real_lookup = db.find_pending_operator_queue_by_subject
+    lookups = []
+
+    def lookup(agent_name, subject):
+        lookups.append(subject)
+        return real_lookup(agent_name, subject)
+
+    monkeypatch.setattr(db, "find_pending_operator_queue_by_subject", lookup)
+    restarted = type(service)(poll_interval=0)
+    clock.advance(**_MIN)
+    await _poll(restarted, failing)  # re-read at once
+    assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == 2
+    before = len(lookups)
+    for _ in range(10):  # inside the 6 hours: no lookup, no write
+        clock.advance(minutes=30)
+        await _poll(restarted, failing)
+    assert len(lookups) == before
+
+    expired = []
+    for _ in range(0, 31 * 24 + 1, 2):
+        clock.advance(hours=2)
+        await _poll(restarted, failing)
+        expired += [r for r in db.mark_operator_queue_expired() if r["agent_name"] == "alpha"]
+    assert expired == []
+    again = db.get_operator_queue_item(row["id"])
+    assert again["status"] == "pending"
+    assert _ts(again["expires_at"]) > clock.now + timedelta(days=29)
+
 
 # --------------------------------------------------------------------------
 # R10: the absence of a failure is not a recovery
