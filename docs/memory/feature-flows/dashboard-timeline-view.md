@@ -118,7 +118,7 @@ The Dashboard offers two views for monitoring the agent fleet:
 | ID Type | Format | Source | Purpose |
 |---------|--------|--------|---------|
 | Queue Execution ID | UUID v4 | Redis queue | Internal queue management, 10-min TTL |
-| Database Execution ID | `token_urlsafe(16)` | `schedule_executions.id` | API access, UI navigation, permanent |
+| Database Execution ID | `token_urlsafe(16)`; UUID v4 for `/chat` rows | `schedule_executions.id` | API access, UI navigation, permanent |
 
 **Timeline uses Database Execution ID** for navigation:
 - Activities have `related_execution_id` field linking to `schedule_executions.id`

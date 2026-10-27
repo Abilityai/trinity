@@ -10,7 +10,7 @@ Targets, each driven through its own layer with the #751 harness (real per-test
 database, real ask sink; the gate map, capacity and the dispatch bodies stubbed):
   * ``/task``  → ``chat_execution_service.dispatch_parallel_task``
   * ``/chat``  → ``admit_chat_request`` + ``prepare_chat_execution`` (the record
-    moved out of admission: the agent receives the ROW's id, not the slot's)
+    lives with the row the agent receives, which carries the admission id, #3989)
   * the backstop inside ``execute_task`` (the Workspace's ``gate_requester``)
   * ``db/skill_gate_requests.record_self_approved_run`` (the record itself)
   * ``channel_completion_report._is_approved_gate_run`` (must not read a
@@ -129,9 +129,10 @@ def test_chat_admission_carries_the_decision_and_records_nothing_itself(world):
     assert db.get_gate_request_by_dispatched_execution(admission.execution_id) is None
 
 
-def test_a_self_approved_chat_is_cleared_on_the_row_not_the_slot(world, quiet_activities):
+def test_a_self_approved_chat_is_cleared_on_the_row(world, quiet_activities):
     admission, ctx = _chat_turn(_human(world))
-    assert ctx.task_execution_id and ctx.task_execution_id != admission.execution_id
+    # #3989: the row takes the admission (slot) id, so the two are one id.
+    assert ctx.task_execution_id and ctx.task_execution_id == admission.execution_id
     record = _clearance(ctx.task_execution_id)
     assert (record["state"], record["agent_name"], record["skills"]) == (
         "self_approved", FIN, ["pay-invoice"])

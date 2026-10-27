@@ -130,6 +130,43 @@ def test_a_backstop_producer_passes_its_replay_through_execute_task(world):
     assert (request.message, request.system_prompt) == ("weekly report", "First run /pay-invoice 3 EUR.")
 
 
+def test_an_approved_task_runs_with_the_callers_max_turns(world):
+    """trinity#2328: the per-task turn cap is frozen with the request, so the
+    approved run is the task that was asked for, not one on the agent default."""
+    with pytest.raises(_GATE.SkillApprovalRequired) as info:
+        W.task(W.agent_key(world), message="/pay-invoice 100 EUR", max_turns=7)
+    _approve_run(info.value.request_id, "exec-turns-1")
+    assert world.spawned[0]["request"].max_turns == 7
+
+
+def test_a_queued_approved_task_keeps_the_callers_max_turns(world, monkeypatch):
+    """The busy-executor branch: the approved run is queued, and the request the
+    backlog will drain carries the cap."""
+    import services.capacity_manager as _CM
+    calls = []
+
+    async def _acquire(**kw):
+        calls.append(kw)
+        return SimpleNamespace(state="queued", queue_position=1)
+
+    monkeypatch.setattr(_CM, "get_capacity_manager", lambda: SimpleNamespace(acquire=_acquire))
+    with pytest.raises(_GATE.SkillApprovalRequired) as info:
+        W.task(W.agent_key(world), message="/pay-invoice 100 EUR", max_turns=7)
+    _approve_run(info.value.request_id, "exec-turns-2")
+    assert world.spawned == []
+    assert calls[0]["overflow_payload"].request.max_turns == 7
+
+
+def test_a_backstop_producer_freezes_max_turns(world):
+    """A producer that meets the gate at the `execute_task` backstop."""
+    row = db.create_task_execution(agent_name=W.FIN, message="/pay-invoice 3 EUR", triggered_by="fan_out")
+    with pytest.raises(_GATE.SkillApprovalRequired) as info:
+        W.execute(message="/pay-invoice 3 EUR", triggered_by="fan_out", execution_id=row.id,
+                  max_turns=7)
+    _approve_run(info.value.request_id, "exec-turns-3")
+    assert world.spawned[0]["request"].max_turns == 7
+
+
 def test_frozen_replay_sanitises_each_part_and_omits_a_missing_system_prompt():
     out = _GATE.frozen_replay("call it with Bearer " + "x" * 24, None)   # a sanitiser pattern
     assert set(out) == {_GATE.REPLAY_MESSAGE}
