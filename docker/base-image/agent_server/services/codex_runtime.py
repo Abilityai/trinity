@@ -1281,7 +1281,34 @@ class CodexRuntime(AgentRuntime):
             process.stdin.write(composed_prompt)
             process.stdin.close()
         except BaseException:
-            registry.unregister(execution_id)
+            # #3408: since #3307 `unregister()` keeps a live child, so a write
+            # that fails while the child lives must end it first (no reader
+            # yet, stdin still open). Off the event loop: the kill waits up to
+            # ~2s, and `loop` is assigned only below.
+            def _abort_handoff() -> None:
+                _terminate_process_group(
+                    process, graceful_timeout=0, pgid=process_pgid,
+                    execution_tag=execution_id,
+                )
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    try:
+                        pipe.close()
+                    except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                        logger.debug(
+                            "[Codex] pipe close after failed handoff of %s raised",
+                            execution_id, exc_info=True,
+                        )
+
+            teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            try:
+                await asyncio.shield(teardown)
+            finally:
+                # Release only once the child is dead: now, or, if this await
+                # was cancelled mid-teardown, when the teardown ends.
+                if teardown.done():
+                    registry.unregister(execution_id)
+                else:
+                    teardown.add_done_callback(lambda _: registry.unregister(execution_id))
             raise
 
         import threading
