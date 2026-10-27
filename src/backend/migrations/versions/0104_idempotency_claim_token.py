@@ -7,14 +7,14 @@ reclaimer's row. Nullable, no backfill.
 
 Mirrors the SQLite ``idempotency_claim_token`` migration.
 
-Revision ID: 0103_idempotency_claim_token
-Revises: 0102_nevermined_delegations
+Revision ID: 0104_idempotency_claim_token
+Revises: 0103_a2a_caller_identity
 """
 from alembic import op
 
 
-revision = "0103_idempotency_claim_token"
-down_revision = "0102_nevermined_delegations"
+revision = "0104_idempotency_claim_token"
+down_revision = "0103_a2a_caller_identity"
 branch_labels = None
 depends_on = None
 

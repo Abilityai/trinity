@@ -355,8 +355,9 @@ async def admit_chat_request(
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
     # requests before consuming a capacity slot. The header is optional — when
     # absent, dedup is off and the request proceeds normally (back-compat).
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
     idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)
     if idem.replay:
@@ -638,6 +639,7 @@ def begin_task_idempotency(
     *,
     name: str,
     idempotency_key: Optional[str],
+    current_user,
 ):
     """Open the ``/task`` idempotency claim (#525).
 
@@ -647,8 +649,9 @@ def begin_task_idempotency(
     the caller's job (it must run under the request's audit context), done via
     ``audit_idempotent_replay`` below.
     """
+    # trinity-enterprise#830: a client-chosen key is scoped to its caller.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
     idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)
     if idem.replay:

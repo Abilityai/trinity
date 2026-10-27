@@ -23,7 +23,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from database import db
-from dependencies import AuthorizedAgent, assert_agent_owner, get_current_user
+from dependencies import AuthorizedAgent, agent_principal_name, assert_agent_owner, assert_own_agent, get_current_user
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     DEFAULT_CANVAS_ID,
@@ -64,13 +64,12 @@ def _map(exc: CanvasError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
-def _require_self(current_user: User, name: str) -> None:
-    """An agent-scoped key may only write its OWN canvas (the #918 rule)."""
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only write its own canvas",
-        )
+# An agent-scoped key may only write its OWN canvas (the #918 rule). Every
+# write and delete handler calls `assert_own_agent` with this as its FIRST
+# statement — the spelling the route census recognises (trinity-enterprise#840).
+# `_gate_write` and `_gate_human_removal` repeat it, so neither helper is ever
+# weaker than its name when a route reaches it alone (the ent#554 lesson below).
+_OWN_CANVAS = "Agent-scoped key may only write its own canvas"
 
 
 def _gate_human_removal(current_user: User, name: str) -> None:
@@ -94,8 +93,10 @@ def _gate_human_removal(current_user: User, name: str) -> None:
     that warning is about deleting an AGENT (where the `is_system` guard
     matters), not about a row belonging to one.
     """
-    if current_user.agent_name:
-        _require_self(current_user, name)
+    # The same "is this an agent key" predicate `assert_own_agent` uses, so a
+    # principal that is not one always meets the owner gate below.
+    if agent_principal_name(current_user) is not None:
+        assert_own_agent(current_user, name, detail=_OWN_CANVAS)
         return
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
@@ -185,7 +186,7 @@ def _gate_share(current_user: User, name: str) -> None:
 
 def _gate_write(current_user: User, name: str, request: Request) -> None:
     """The three checks every canvas write shares: self-gate, rate, size hint."""
-    _require_self(current_user, name)
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     rate_limiter.enforce(
         f"agent_canvas:{name}",
         CANVAS_RATE_LIMIT,
@@ -241,6 +242,7 @@ async def bulk_delete_canvases(
     "3 of 5 removed" rather than implying success for ids that were already
     gone.
     """
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     _gate_human_removal(current_user, name)
     for canvas_id in body.canvas_ids:
         try:
@@ -432,6 +434,7 @@ async def write_canvas(
     ``(agent, canvas_id)`` — writing the same blocks twice leaves one canvas in
     one state, which is the whole point of the surface.
     """
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     _gate_write(current_user, name, request)
     try:
         canvas = canvas_service.write_canvas(
@@ -469,6 +472,7 @@ async def patch_canvas(
     Title and audience are untouched — this is a content edit, not a
     republish.
     """
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     _gate_write(current_user, name, request)
     try:
         canvas = canvas_service.patch_canvas(
@@ -556,6 +560,7 @@ async def clear_canvas(
     "the owner may delete any of this agent's", and narrowed for everyone else
     — see `_gate_human_removal`.
     """
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     _gate_human_removal(current_user, name)
     try:
         canvas_service.validate_canvas_id(canvas_id)

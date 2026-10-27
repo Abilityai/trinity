@@ -20,6 +20,7 @@ import sys
 import uuid
 from datetime import timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -156,7 +157,7 @@ def _held_claim(db, agent, *, execution_status=None):
     """A claim some (now dead) request took, optionally with its run attached."""
     from services import idempotency_service as svc
     key = _key()
-    scope = svc.make_agent_scope(agent)
+    scope = _scope(agent)
     first = svc.begin(scope, key)
     assert first.enabled and not first.replay
     if execution_status is not None:
@@ -169,9 +170,19 @@ def _held_claim(db, agent, *, execution_status=None):
     return key, first
 
 
+# /task scopes a header key to its caller (trinity-enterprise#830); one person
+# makes the first request and every retry.
+_CALLER = SimpleNamespace(id=7, agent_name=None, mcp_scope=None, mcp_key_id=None)
+
+
+def _scope(agent):
+    from services import idempotency_service as svc
+    return svc.make_caller_scope(agent, _CALLER)
+
+
 def _retry(agent, key):
     from services import dispatch_admission_service as das
-    return das.begin_task_idempotency(name=agent, idempotency_key=key)
+    return das.begin_task_idempotency(name=agent, idempotency_key=key, current_user=_CALLER)
 
 
 class TestStaleClaimReclaim:
@@ -237,7 +248,7 @@ class TestStaleClaimReclaim:
         from services import idempotency_service as svc
         agent = _agent()
         key = f"sched:{uuid.uuid4().hex}"
-        svc.begin(svc.make_agent_scope(agent), key)
+        svc.begin(_scope(agent), key)
         with _stale():
             idem, replay = _retry(agent, key)
         assert replay is not None and replay.in_flight
@@ -247,7 +258,7 @@ class TestStaleClaimReclaim:
         from services import dispatch_admission_service as das
         agent = _agent()
         key, _ = _held_claim(real_db, agent)
-        seen = svc.begin(svc.make_agent_scope(agent), key)  # both retries read the stale claim
+        seen = svc.begin(_scope(agent), key)  # both retries read the stale claim
         with _stale(lease=_UNNAMED_LEASE):
             a = das._reclaim_stale_claim(seen, name=agent)
             b = das._reclaim_stale_claim(seen, name=agent)
@@ -261,7 +272,7 @@ class TestStaleClaimReclaim:
             fresh, _ = _retry(agent, key)
         svc.complete(original, "exec-late", {"late": True})   # the original finally returns
         svc.fail(original)
-        row = _row(real_db, svc.make_agent_scope(agent), key)
+        row = _row(real_db, _scope(agent), key)
         assert row["status"] == "in_flight" and row["claim_token"] == fresh.claim_token
         svc.complete(fresh, "exec-fresh", {"fresh": True})
-        assert _row(real_db, svc.make_agent_scope(agent), key)["execution_id"] == "exec-fresh"
+        assert _row(real_db, _scope(agent), key)["execution_id"] == "exec-fresh"

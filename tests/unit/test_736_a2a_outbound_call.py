@@ -656,6 +656,22 @@ def test_both_routes_404_when_the_kill_switch_is_off(client, monkeypatch):
     ).status_code == 404
 
 
+def test_with_the_switch_off_a_malformed_body_is_the_same_404(client, monkeypatch):
+    """trinity-enterprise#840: the switch is a DEPENDENCY, solved before the body
+    is validated, so a disabled route answers a body that fails schema
+    validation with the same 404 as a good one — not a 422 that says the route
+    exists (the aauth `require_live` shape). The service's own switch check
+    cannot do this: it runs after validation. With the switch on, the same body
+    is an ordinary 422. (JSON that does not parse is a 422 either way: FastAPI
+    decodes the body before it solves dependencies.)"""
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: False)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 404
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 404
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: True)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 422
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 422
+
+
 def _settings_singleton():
     """The exact object `is_outbound_enabled` consults, resolved the exact way
     the resolver resolves it — an attribute read off the LIVE

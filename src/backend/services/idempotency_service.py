@@ -100,26 +100,69 @@ class EffectUnguardedError(Exception):
 # ---------------------------------------------------------------------------
 
 def make_agent_scope(agent_name: str) -> str:
-    """Scope execution-creating boundaries per agent (cross-tenant isolation)."""
+    """Scope execution-creating boundaries per agent (cross-tenant isolation).
+
+    For keys the PLATFORM derives (operator resume, x402 payment, effect keys,
+    a reminder's input key). A key the CLIENT chose goes under
+    ``make_caller_scope`` instead (trinity-enterprise#830), which also keeps a
+    header key from ever reaching this namespace."""
     return f"agent:{agent_name}"
+
+
+def caller_principal(user) -> str:
+    """Who claimed a client-supplied idempotency key (trinity-enterprise#830).
+
+    An agent key is its agent (``agent:{name}``): the owner's id would collapse
+    two agents of one owner into one namespace (the #2323 a2a note). A person —
+    a browser session or their user-scoped MCP key — is ``user:{id}``, one
+    principal across both, so a client that retries through either still
+    dedupes. Any other machine credential (system, connector, …) is its own
+    key, ``key:{id}``. Never a caller-typed value: every field here comes from
+    the authenticated principal."""
+    agent_name = getattr(user, "agent_name", None)
+    if agent_name:
+        return f"agent:{agent_name}"
+    mcp_scope = getattr(user, "mcp_scope", None)
+    if mcp_scope in (None, "user"):
+        return f"user:{user.id}"
+    key_id = getattr(user, "mcp_key_id", None)
+    return f"key:{key_id}" if key_id else f"{mcp_scope}:{user.id}"
+
+
+def make_caller_scope(agent_name: str, user) -> str:
+    """Scope a CLIENT-supplied ``Idempotency-Key`` per (agent, caller)
+    (trinity-enterprise#830).
+
+    A client-chosen key identifies a request only together with the client that
+    chose it, so the scope carries the authenticated caller: two principals
+    that pick the same key on one agent are two requests, each deduplicated
+    against its own earlier ones. ``agent:{name}`` alone did not carry the
+    caller, though authentication had already identified it. Every boundary
+    that claims a header key uses this; platform-derived keys keep
+    ``make_agent_scope``, which a header key can no longer reach. (MCP already
+    folds the caller into the key it derives; this makes the scope right for
+    every client, not only that one.)"""
+    return f"{make_agent_scope(agent_name)}:caller:{caller_principal(user)}"
 
 
 def make_inline_auth_scope(agent_name: str, email: str) -> str:
     """Scope an MCP inline-auth (#848) chat per (agent, verified email).
 
-    NOT ``make_agent_scope``. Every other ``make_agent_scope`` caller reaches
-    the boundary through an already-authenticated per-user dependency, so the
-    caller's identity is implicit and agent scope is sufficient. Inline auth is
-    the exception: the identity arrives in the request BODY, and the key is
-    caller-supplied — so an agent-only scope makes the (scope, key) tuple
+    NOT ``make_agent_scope``, and not ``make_caller_scope`` either: the
+    authenticated principal here is the inline-auth gateway, while the person
+    is only known from the request BODY. (trinity-enterprise#830 found the
+    premise once stated here — that an authenticated boundary's identity is
+    implicit in agent scope — false: authentication identifies the caller, but
+    nothing put it into ``(scope, key)``.) The key is caller-supplied, so an
+    agent-only scope makes the (scope, key) tuple
     identical for two different verified users of the same shared agent. The
     second caller then replays the first caller's stored response snapshot and
     execution_id: a cross-user disclosure, reachable by collision as well as by
     malice (MCP clients derive deterministic keys from call args, so two users
     asking the same agent the same question collide by design).
 
-    Folding the verified email in makes the tuple per-identity, which is what
-    every other boundary gets for free from its auth dependency. Compare
+    Folding the verified email in makes the tuple per-identity, which header-key
+    boundaries now get from ``make_caller_scope``. Compare
     ``derive_payment_key`` (#1018), which solves the same problem for x402 by
     binding the payer's signature into the key.
     """

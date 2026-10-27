@@ -276,6 +276,49 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     return _build_claim_response(row, cap=cap)
 
 
+async def open_claim_activity(execution_id: str) -> Optional[str]:
+    """#3932: open the claimed turn's CHAT_START activity. Push opens it at
+    dispatch (``execute_task`` step 3); a pull row is queued before that step,
+    so the claim is its dispatch. Every pull terminal writer (result sink,
+    lease reaper, terminate) already closes it via ``close_execution_activity``.
+
+    A first delivery reuses a bar already open for the execution (pulled
+    ``/chat`` opens one before queueing). A re-delivery always opens its own:
+    the reaper closes the dead attempt's bar by id, possibly after this claim,
+    so reusing it would leave the live attempt with none. Best-effort: never
+    blocks the claim.
+    """
+    try:
+        row = db.get_execution(execution_id)
+        if row is None:
+            return None
+        if not row.redelivery_count and db.get_open_activity_id_for_execution(execution_id):
+            return None
+        try:
+            meta = json.loads(row.backlog_metadata) if row.backlog_metadata else {}
+        except (TypeError, ValueError):
+            meta = {}
+        from services.task_execution_service import start_dispatch_activity
+
+        return await start_dispatch_activity(
+            agent_name=row.agent_name,
+            message=row.message,
+            execution_id=execution_id,
+            triggered_by=row.triggered_by,
+            source_agent_name=row.source_agent_name,
+            source_user_id=row.source_user_id,
+            parent_activity_id=meta.get("collaboration_activity_id"),
+            extra_activity_details={
+                "pull_claimed": True,
+                "redelivery_count": row.redelivery_count or 0,
+            },
+        )
+    except Exception as e:  # noqa: BLE001 — a claim must never fail on the timeline
+        logger.warning("[#3932] could not open the claim activity for %s: %s",
+                       execution_id, type(e).__name__)
+        return None
+
+
 def _record_starting_assignment(row: Dict[str, Any]) -> None:
     """Point the claimed row's SUB-004 attribution at the assignment the turn
     starts on (#3487 review). The row was stamped at ENQUEUE, which can be long

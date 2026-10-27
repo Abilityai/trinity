@@ -1,5 +1,7 @@
 <template>
-  <div>
+  <div class="grow basis-0 flex flex-col">
+    <!-- #3451: a link in Operations' flex chain — the list card below takes the
+         height the filters and stats leave, and its rows scroll in a region. -->
     <!-- Filters -->
     <div class="bg-white dark:bg-gray-800 rounded-lg shadow p-4 mb-6">
       <div class="flex flex-wrap gap-4 items-end">
@@ -113,45 +115,49 @@
       </div>
     </div>
 
-    <!-- Bulk Actions -->
-    <div v-if="notificationsStore.selectedIds.length > 0" class="bg-blue-50 dark:bg-blue-900/30 rounded-lg shadow p-4 mb-4 flex items-center justify-between">
-      <span class="text-sm text-blue-700 dark:text-blue-300">
-        {{ notificationsStore.selectedIds.length }} selected
-      </span>
-      <div class="flex gap-2">
-        <button
-          @click="bulkAcknowledge"
-          class="px-3 py-1.5 text-xs font-medium text-white bg-status-success-600 hover:bg-status-success-700 rounded-lg"
-        >
-          Acknowledge Selected
-        </button>
-        <button
-          @click="bulkDismiss"
-          class="px-3 py-1.5 text-xs font-medium text-white bg-gray-600 hover:bg-gray-700 rounded-lg"
-        >
-          Dismiss Selected
-        </button>
-        <button
-          @click="notificationsStore.clearSelection"
-          class="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-
     <!-- Notifications List -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow">
-      <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-        <h2 class="text-lg font-medium text-gray-900 dark:text-white">Notifications</h2>
-        <div v-if="displayedNotifications.length > 0" class="flex items-center gap-2">
-          <input
-            type="checkbox"
-            :checked="allSelected"
-            @change="toggleSelectAll"
-            class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
-          />
-          <label class="text-xs text-gray-500 dark:text-gray-400">Select all</label>
+    <div class="bg-white dark:bg-gray-800 rounded-lg shadow grow basis-0 flex flex-col">
+      <!-- #3451: the bulk actions live in this header row. As a bar of their
+           own above the list, the first checkbox ticked pushed every row down
+           under the pointer (design-system p30). From `sm` up the row keeps its
+           height (measured); narrower, the buttons wrap to a second line. -->
+      <div
+        class="px-6 py-4 border-b border-gray-200 dark:border-gray-700 flex flex-wrap items-center justify-between gap-x-3 gap-y-2"
+        data-testid="notifications-list-header"
+      >
+        <h2 class="text-lg font-medium text-gray-900 dark:text-white">
+          {{ notificationsStore.selectedIds.length > 0 ? `${notificationsStore.selectedIds.length} selected` : 'Notifications' }}
+        </h2>
+        <div class="flex items-center gap-2">
+          <template v-if="notificationsStore.selectedIds.length > 0">
+            <button
+              @click="bulkAcknowledge"
+              class="px-3 py-1.5 text-xs font-medium text-white bg-status-success-600 hover:bg-status-success-700 rounded-lg"
+            >
+              Acknowledge Selected
+            </button>
+            <button
+              @click="bulkDismiss"
+              class="px-3 py-1.5 text-xs font-medium text-white bg-gray-600 hover:bg-gray-700 rounded-lg"
+            >
+              Dismiss Selected
+            </button>
+            <button
+              @click="notificationsStore.clearSelection"
+              class="px-3 py-1.5 text-xs font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200"
+            >
+              Cancel
+            </button>
+          </template>
+          <div v-if="displayedNotifications.length > 0" class="flex items-center gap-2">
+            <input
+              type="checkbox"
+              :checked="allSelected"
+              @change="toggleSelectAll"
+              class="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+            />
+            <label class="text-xs text-gray-500 dark:text-gray-400">Select all</label>
+          </div>
         </div>
       </div>
 
@@ -181,166 +187,172 @@
         />
       </div>
 
-      <!-- Loading state (#1926) — the body used to render blank during the
-           first fetch: neither list, nor empty state, nor spinner. -->
-      <div v-if="firstLoad" class="px-6 py-12 text-center" aria-busy="true">
-        <svg class="w-8 h-8 mx-auto mb-4 animate-spin text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24">
-          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-          <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-        </svg>
-        <p class="text-sm text-gray-500 dark:text-gray-400">Loading notifications…</p>
-      </div>
+      <!-- #3451: the rows, their states and Load more scroll here; the header
+           row and the banners above stay put. -->
+      <BoundedRegion ref="listRegion" label="Notifications" data-testid="ops-list-region" class="rounded-b-lg">
+        <!-- Loading state (#1926) — the body used to render blank during the
+             first fetch: neither list, nor empty state, nor spinner. -->
+        <div v-if="firstLoad" class="px-6 py-12 text-center" aria-busy="true">
+          <svg class="w-8 h-8 mx-auto mb-4 animate-spin text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <p class="text-sm text-gray-500 dark:text-gray-400">Loading notifications…</p>
+        </div>
 
-      <!-- Failed state (#1926) — previously there was none at all. -->
-      <LoadFailed
-        v-else-if="loadFailed"
-        title="Couldn't load notifications"
-        message="We can't show what your agents have sent. Check your connection and try again."
-        :detail="notificationsStore.error"
-        :retrying="loading"
-        @retry="fetchNotifications"
-      />
+        <!-- Failed state (#1926) — previously there was none at all. -->
+        <LoadFailed
+          v-else-if="loadFailed"
+          title="Couldn't load notifications"
+          message="We can't show what your agents have sent. Check your connection and try again."
+          :detail="notificationsStore.error"
+          :retrying="loading"
+          @retry="fetchNotifications"
+        />
 
-      <div v-else class="divide-y divide-gray-200 dark:divide-gray-700">
-        <div
-          v-for="notification in displayedNotifications"
-          :key="notification.id"
-          class="px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
-          :class="{
-            'bg-status-danger-50 dark:bg-status-danger-900/10': notification.status === 'pending' && notification.priority === 'urgent',
-            'bg-status-urgent-50 dark:bg-status-urgent-900/10': notification.status === 'pending' && notification.priority === 'high',
-            'opacity-60': notification.status === 'dismissed'
-          }"
-        >
-          <div class="flex items-start gap-3">
-            <!-- Checkbox -->
-            <input
-              type="checkbox"
-              :checked="notificationsStore.selectedIds.includes(notification.id)"
-              @change="notificationsStore.toggleSelected(notification.id)"
-              class="mt-1 w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
-            />
+        <div v-else class="divide-y divide-gray-200 dark:divide-gray-700">
+          <div
+            v-for="notification in displayedNotifications"
+            :key="notification.id"
+            data-testid="notification-row"
+            class="px-6 py-4 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+            :class="{
+              'bg-status-danger-50 dark:bg-status-danger-900/10': notification.status === 'pending' && notification.priority === 'urgent',
+              'bg-status-urgent-50 dark:bg-status-urgent-900/10': notification.status === 'pending' && notification.priority === 'high',
+              'opacity-60': notification.status === 'dismissed'
+            }"
+          >
+            <div class="flex items-start gap-3">
+              <!-- Checkbox -->
+              <input
+                type="checkbox"
+                :checked="notificationsStore.selectedIds.includes(notification.id)"
+                @change="notificationsStore.toggleSelected(notification.id)"
+                class="mt-1 w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600"
+              />
 
-            <!-- Priority/Type Icon -->
-            <div
-              class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
-              :class="getPriorityIconBg(notification.priority)"
-            >
-              <component :is="getTypeIcon(notification.notification_type)" class="w-5 h-5" :class="getPriorityIconColor(notification.priority)" />
-            </div>
-
-            <!-- Content -->
-            <div class="flex-1 min-w-0">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="px-2 py-0.5 text-xs font-medium rounded" :class="getPriorityBadge(notification.priority)">
-                  {{ notification.priority.toUpperCase() }}
-                </span>
-                <router-link
-                  :to="`/agents/${notification.agent_name}`"
-                  :title="agentNameTooltip(agentsStore.agentRefForSlug(notification.agent_name))"
-                  class="font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
-                >
-                  {{ notification.agent_name }}
-                </router-link>
-                <span class="text-xs text-gray-500 dark:text-gray-400">
-                  {{ formatRelativeTime(notification.created_at) }}
-                </span>
+              <!-- Priority/Type Icon -->
+              <div
+                class="flex-shrink-0 w-8 h-8 rounded-full flex items-center justify-center"
+                :class="getPriorityIconBg(notification.priority)"
+              >
+                <component :is="getTypeIcon(notification.notification_type)" class="w-5 h-5" :class="getPriorityIconColor(notification.priority)" />
               </div>
 
-              <h3 class="font-medium text-gray-900 dark:text-white mt-1">{{ notification.title }}</h3>
+              <!-- Content -->
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="px-2 py-0.5 text-xs font-medium rounded" :class="getPriorityBadge(notification.priority)">
+                    {{ notification.priority.toUpperCase() }}
+                  </span>
+                  <router-link
+                    :to="`/agents/${notification.agent_name}`"
+                    :title="agentNameTooltip(agentsStore.agentRefForSlug(notification.agent_name))"
+                    class="font-medium text-blue-600 dark:text-blue-400 hover:underline truncate"
+                  >
+                    {{ notification.agent_name }}
+                  </router-link>
+                  <span class="text-xs text-gray-500 dark:text-gray-400">
+                    {{ formatRelativeTime(notification.created_at) }}
+                  </span>
+                </div>
 
-              <p v-if="notification.message" class="text-sm text-gray-600 dark:text-gray-400 mt-1">
-                {{ truncateMessage(notification) }}
+                <h3 class="font-medium text-gray-900 dark:text-white mt-1">{{ notification.title }}</h3>
+
+                <p v-if="notification.message" class="text-sm text-gray-600 dark:text-gray-400 mt-1">
+                  {{ truncateMessage(notification) }}
+                  <button
+                    v-if="notification.message.length > 150"
+                    @click="toggleExpanded(notification.id)"
+                    class="text-blue-600 dark:text-blue-400 hover:underline text-xs ml-1"
+                  >
+                    {{ expandedIds.includes(notification.id) ? 'Show less' : 'Show more' }}
+                  </button>
+                </p>
+
+                <div class="flex items-center gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
+                  <span v-if="notification.category" class="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">
+                    {{ notification.category }}
+                  </span>
+                  <span class="px-2 py-0.5 rounded" :class="getTypeBadge(notification.notification_type)">
+                    {{ notification.notification_type }}
+                  </span>
+                  <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-status-success-700 dark:text-status-success-400">
+                    <CheckIcon class="w-3 h-3" />
+                    Acknowledged
+                  </span>
+                  <span v-if="notification.status === 'dismissed'" class="text-gray-400 dark:text-gray-400">
+                    Dismissed
+                  </span>
+                </div>
+
+                <!-- Metadata (expandable) -->
+                <div v-if="notification.metadata && expandedIds.includes(notification.id)" class="mt-3 p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs font-mono overflow-x-auto">
+                  <pre>{{ JSON.stringify(notification.metadata, null, 2) }}</pre>
+                </div>
+              </div>
+
+              <!-- Actions -->
+              <div class="flex items-center gap-2 flex-shrink-0">
+                <span
+                  class="px-2 py-1 text-xs font-medium rounded capitalize"
+                  :class="getStatusBadge(notification.status)"
+                >
+                  {{ notification.status }}
+                </span>
+
                 <button
-                  v-if="notification.message.length > 150"
-                  @click="toggleExpanded(notification.id)"
-                  class="text-blue-600 dark:text-blue-400 hover:underline text-xs ml-1"
+                  v-if="notification.status === 'pending'"
+                  @click="acknowledge(notification.id)"
+                  class="px-3 py-1.5 text-xs font-medium text-status-success-700 dark:text-status-success-300 bg-status-success-100 dark:bg-status-success-900/30 border border-status-success-300 dark:border-status-success-700 rounded hover:bg-status-success-200 dark:hover:bg-status-success-900/50"
+                  title="Acknowledge"
                 >
-                  {{ expandedIds.includes(notification.id) ? 'Show less' : 'Show more' }}
+                  <CheckIcon class="w-4 h-4" />
                 </button>
-              </p>
 
-              <div class="flex items-center gap-4 mt-2 text-xs text-gray-500 dark:text-gray-400">
-                <span v-if="notification.category" class="px-2 py-0.5 bg-gray-100 dark:bg-gray-700 rounded">
-                  {{ notification.category }}
-                </span>
-                <span class="px-2 py-0.5 rounded" :class="getTypeBadge(notification.notification_type)">
-                  {{ notification.notification_type }}
-                </span>
-                <span v-if="notification.status === 'acknowledged'" class="flex items-center gap-1 text-status-success-700 dark:text-status-success-400">
-                  <CheckIcon class="w-3 h-3" />
-                  Acknowledged
-                </span>
-                <span v-if="notification.status === 'dismissed'" class="text-gray-400 dark:text-gray-400">
-                  Dismissed
-                </span>
-              </div>
-
-              <!-- Metadata (expandable) -->
-              <div v-if="notification.metadata && expandedIds.includes(notification.id)" class="mt-3 p-2 bg-gray-50 dark:bg-gray-700 rounded text-xs font-mono overflow-x-auto">
-                <pre>{{ JSON.stringify(notification.metadata, null, 2) }}</pre>
+                <button
+                  v-if="notification.status !== 'dismissed'"
+                  @click="dismiss(notification.id)"
+                  class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600"
+                  title="Dismiss"
+                >
+                  <XMarkIcon class="w-4 h-4" />
+                </button>
               </div>
             </div>
+          </div>
 
-            <!-- Actions -->
-            <div class="flex items-center gap-2 flex-shrink-0">
-              <span
-                class="px-2 py-1 text-xs font-medium rounded capitalize"
-                :class="getStatusBadge(notification.status)"
-              >
-                {{ notification.status }}
-              </span>
-
-              <button
-                v-if="notification.status === 'pending'"
-                @click="acknowledge(notification.id)"
-                class="px-3 py-1.5 text-xs font-medium text-status-success-700 dark:text-status-success-300 bg-status-success-100 dark:bg-status-success-900/30 border border-status-success-300 dark:border-status-success-700 rounded hover:bg-status-success-200 dark:hover:bg-status-success-900/50"
-                title="Acknowledge"
-              >
-                <CheckIcon class="w-4 h-4" />
-              </button>
-
-              <button
-                v-if="notification.status !== 'dismissed'"
-                @click="dismiss(notification.id)"
-                class="px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600"
-                title="Dismiss"
-              >
-                <XMarkIcon class="w-4 h-4" />
-              </button>
-            </div>
+          <!-- Empty State — only once a fetch has SUCCEEDED and returned zero -->
+          <div v-if="displayedNotifications.length === 0" class="px-6 py-12 text-center">
+            <InboxIcon class="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-500" />
+            <p class="text-lg font-medium text-gray-900 dark:text-white">
+              {{ hasActiveFilters ? 'No matching events' : 'No events yet' }}
+            </p>
+            <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              {{ hasActiveFilters ? 'Try adjusting your filters' : 'Notifications from your agents will appear here when they send them.' }}
+            </p>
+            <button
+              v-if="hasActiveFilters"
+              @click="clearFilters"
+              class="mt-4 px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+            >
+              Clear all filters
+            </button>
           </div>
         </div>
 
-        <!-- Empty State — only once a fetch has SUCCEEDED and returned zero -->
-        <div v-if="displayedNotifications.length === 0" class="px-6 py-12 text-center">
-          <InboxIcon class="w-12 h-12 mx-auto mb-4 text-gray-300 dark:text-gray-500" />
-          <p class="text-lg font-medium text-gray-900 dark:text-white">
-            {{ hasActiveFilters ? 'No matching events' : 'No events yet' }}
-          </p>
-          <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">
-            {{ hasActiveFilters ? 'Try adjusting your filters' : 'Notifications from your agents will appear here when they send them.' }}
-          </p>
+        <!-- Load More -->
+        <div v-if="notificationsStore.hasMore && displayedNotifications.length > 0" class="px-6 py-4 border-t border-gray-200 dark:border-gray-700">
           <button
-            v-if="hasActiveFilters"
-            @click="clearFilters"
-            class="mt-4 px-4 py-2 text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline"
+            data-testid="notifications-load-more"
+            @click="loadMore"
+            :disabled="loading"
+            class="w-full py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg"
           >
-            Clear all filters
+            {{ loading ? 'Loading...' : 'Load more' }}
           </button>
         </div>
-      </div>
-
-      <!-- Load More -->
-      <div v-if="notificationsStore.hasMore && displayedNotifications.length > 0" class="px-6 py-4 border-t border-gray-200 dark:border-gray-700">
-        <button
-          @click="loadMore"
-          :disabled="loading"
-          class="w-full py-2 text-sm font-medium text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg"
-        >
-          {{ loading ? 'Loading...' : 'Load more' }}
-        </button>
-      </div>
+      </BoundedRegion>
     </div>
   </div>
 </template>
@@ -352,6 +364,7 @@ import { useAgentsStore } from '../../stores/agents'
 import { agentNameTooltip, agentOptionLabel } from '../../utils/agentName'
 import LoadFailed from '../LoadFailed.vue'
 import InlineError from '../InlineError.vue'
+import BoundedRegion from '../BoundedRegion.vue'
 import { apiErrorMessage } from '../../utils/apiError'
 import {
   XMarkIcon,
@@ -380,6 +393,9 @@ const agentFilter = ref('')
 const typeFilter = ref('')
 const showDismissed = ref(false)
 const expandedIds = ref([])
+// #3451: the filters stay in view beside a list scrolled deep, so a new query
+// returns the list to its first row (a refresh of the same query does not).
+const listRegion = ref(null)
 
 // Computed
 const hasActiveFilters = computed(() => {
@@ -473,6 +489,7 @@ async function fetchNotifications() {
 }
 
 function applyFilters() {
+  listRegion.value?.scrollToTop()
   notificationsStore.setFilters({
     status: statusFilter.value,
     priority: priorityFilter.value,
@@ -483,6 +500,7 @@ function applyFilters() {
 }
 
 function clearFilters() {
+  listRegion.value?.scrollToTop()
   statusFilter.value = 'pending'
   priorityFilter.value = ''
   agentFilter.value = ''

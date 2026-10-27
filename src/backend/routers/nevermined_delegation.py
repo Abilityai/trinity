@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
 from dependencies import (
-    agent_principal_name,
+    assert_own_agent,
     get_authorized_agent_by_name,
     get_current_user,
     get_owned_agent_by_name,
@@ -158,9 +158,11 @@ async def get_agent_delegation(
     """What this agent can spend through its Nevermined card mandate — live
     from Nevermined, never cached, never computed here. An agent key reads its
     own budget only; any other agent is the same 404 as a missing one."""
-    principal_agent = agent_principal_name(current_user)
-    if principal_agent is not None and principal_agent != agent_name:
-        raise HTTPException(status_code=404, detail="Agent not found")
+    # The census-recognised self-gate (trinity-enterprise#840). `refusal=` builds
+    # the access dependency's own uniform 404, so a sibling inside the caller's
+    # reach is answered exactly like a missing agent.
+    assert_own_agent(current_user, agent_name,
+                     refusal=lambda: HTTPException(status_code=404, detail="Agent not found"))
     enforce_rate_limit(
         f"nvm-read:{current_user.username}:{agent_name}", 30, 60,
         detail="Too many Nevermined spending reads for this agent.",
