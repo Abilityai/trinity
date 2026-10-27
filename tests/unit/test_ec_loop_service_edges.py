@@ -1459,26 +1459,28 @@ class TestLiveWorkerKeepsItsDecision:
 
     def test_t13_rtail_a_park_forced_due_inside_the_window_still_dispatches_once(self, env, monkeypatch):
         """The stated residual (R-tail): when the park is due inside A's window
-        (A's tail outlasting the grace), B's sweep can overtake A's stop gate.
-        What must still hold is that run 2 exists exactly once."""
+        (A's tail outlasting the grace), B's sweep dispatches run 2 before A
+        reaches its own dispatch. A then claims run 2 as well and must lose:
+        run 2 exists exactly once and its turn is spawned once."""
         ls, db, ts = env
         worker_b = ls.LoopService()
-        fired = {"v": False}
+        b: dict = {}
 
         async def _broadcast(event):
-            if event.get("type") == "loop_run_completed" and not fired["v"]:
-                fired["v"] = True
-                await worker_b.reconcile_after_restart()
+            if event.get("type") == "loop_run_completed" and "swept" not in b:
+                b["moved"] = await worker_b.reconcile_after_restart()
                 lid_ = event["loop_id"]
                 with monkeypatch.context() as m:
                     when = _grace_end(db, lid_) + timedelta(seconds=1)
                     m.setattr(ls, "utc_now_iso", lambda: _iso(when))
-                    await worker_b.dispatch_due_loops()
+                    b["swept"] = await worker_b.dispatch_due_loops()
 
         monkeypatch.setattr(ls, "_broadcast", _broadcast)
-        ts.script = [{"response": "r1 DONE"}, "queued", "queued"]
-        lid = _start(ls, max_runs=3, stop_signal="DONE")
-        assert _nums(db, lid).count(2) == 1, _nums(db, lid)
+        ts.script = [{"response": "r1"}, "queued", "queued"]
+        lid = _start(ls, max_runs=3)
+        assert (b["moved"], b["swept"]) == (1, 1), b
+        assert _nums(db, lid) == [1, 2], _nums(db, lid)
+        assert len(ts.calls) == 2
 
 
 class TestDeadAdvanceStillRecovers:
