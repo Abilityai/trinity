@@ -233,6 +233,42 @@ def test_every_execute_task_keyword_has_a_fate_in_the_frozen_dispatch():
     }
 
 
+def _keyword_names(call):
+    return {k.arg for k in call.keywords if k.arg}
+
+
+def test_every_frozen_field_is_replayed_and_captured_by_the_backstop():
+    """trinity#2328: FREEZE is a promise in two places — the backstop records the
+    field (`fields=dict(...)` in `execute_task`) and the approved run reads it
+    back (`frozen.get("<key>")` in `_dispatch_approved`). A key classified FREEZE
+    that either side ignores is a false label: the approved run silently loses
+    it. `triggered_by` travels as its own argument on both sides."""
+    from services.skill_gate_service import DISPATCH_FIELDS, FREEZE
+
+    frozen = {k for k, fate in DISPATCH_FIELDS.items() if fate == FREEZE} - {"triggered_by"}
+
+    def _fn(rel, name):
+        tree = ast.parse((_BACKEND / rel).read_text())
+        return next(n for n in ast.walk(tree)
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name)
+
+    replayed = {
+        n.args[0].value for n in ast.walk(_fn("services/skill_gate_service.py", "_dispatch_approved"))
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == "get"
+        and isinstance(n.func.value, ast.Name) and n.func.value.id == "frozen"
+        and n.args and isinstance(n.args[0], ast.Constant)
+    }
+    backstops = [n for n in ast.walk(_fn("services/task_execution_service.py", "execute_task"))
+                 if isinstance(n, ast.Call) and _call_name(n) == "_skill_gate_backstop"]
+    assert len(backstops) == 1, "the backstop call moved — the guard went blind"
+    fields = next(k.value for k in backstops[0].keywords if k.arg == "fields")
+    captured = _keyword_names(fields)
+    print("frozen:", sorted(frozen), "replayed:", sorted(replayed), "captured:", sorted(captured))
+    assert frozen, "no FREEZE field discovered — the guard went blind"
+    assert not frozen - replayed, f"FREEZE fields `_dispatch_approved` never replays: {sorted(frozen - replayed)}"
+    assert not frozen - captured, f"FREEZE fields the backstop never records: {sorted(frozen - captured)}"
+
+
 def test_frozen_dispatch_refuses_an_unclassified_keyword():
     from services.skill_gate_service import frozen_dispatch
     with pytest.raises(ValueError):
