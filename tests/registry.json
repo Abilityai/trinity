@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3180_operational_write_audit.py",
+      "feature": "abilityai/trinity#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "Circuit-breaker reset (CONFIGURATION circuit_breaker_reset) and execution terminate (EXECUTION execution_terminate) each write one audit_log row on success, through the real resolver and the real routes: a session and a user-scoped key carry the right actor and key id; terminate covers queued cancel, parked cancel and container-proxy terminate; refused and failed calls, and an already_finished terminate, write none; with DISPATCH_BREAKER_ENABLED off and the per-agent breaker disabled the reset still writes its row."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
