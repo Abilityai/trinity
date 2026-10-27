@@ -341,15 +341,20 @@ def _fleet_snapshot() -> dict:
         }
 
 
-def _generated_ids(snapshot: dict) -> dict:
-    """{actual generated id: stable placeholder}, named by the row's natural key."""
+def _generated_ids(*snapshots: dict) -> dict:
+    """{actual generated id: stable placeholder}, named by the row's natural key.
+
+    Takes every snapshot a case compares, so a row that only the BEFORE side
+    holds (a removal) is reported with a placeholder too, never a raw id.
+    """
     ids = {}
-    for row in snapshot["system_views"]:
-        ids[row["id"]] = f"<generated system_views.id: {row['name']}>"
-    for row in snapshot["agent_schedules"]:
-        ids[row["id"]] = (
-            f"<generated agent_schedules.id: {row['agent_name']}/{row['name']}>"
-        )
+    for snapshot in snapshots:
+        for row in snapshot["system_views"]:
+            ids[row["id"]] = f"<generated system_views.id: {row['name']}>"
+        for row in snapshot["agent_schedules"]:
+            ids[row["id"]] = (
+                f"<generated agent_schedules.id: {row['agent_name']}/{row['name']}>"
+            )
     return ids
 
 
@@ -481,7 +486,7 @@ def _deploy_case(
     before = _fleet_snapshot()
     resp = _client(principal).post("/api/systems/deploy", json=body)
     after = _fleet_snapshot()
-    ids = _generated_ids(after)
+    ids = _generated_ids(before, after)
     raw = resp.content.decode("utf-8")
     for actual, placeholder in ids.items():
         raw = raw.replace(actual, placeholder)
@@ -781,7 +786,7 @@ def test_first_run_seed_on_fresh_install(install):
     sha = hashlib.sha256(
         BUNDLED_MANIFEST.read_text(encoding="utf-8").encode("utf-8")
     ).hexdigest()
-    ids = _generated_ids(after)
+    ids = _generated_ids(before, after)
     _check(
         "first_run_seed_fresh_install",
         {
@@ -803,9 +808,10 @@ def test_first_run_seed_on_fresh_install(install):
 # --- the fixture itself ---------------------------------------------------------
 
 
-def test_fleet_diff_counts_duplicate_rows():
+def test_fleet_diff_counts_duplicate_rows_and_masks_removed_ids():
     """Two same-named schedules on one agent share a placeholder id, so their
-    canonical rows are equal; the diff must still report two rows, not one."""
+    canonical rows are equal; the diff must still report two rows, not one. A
+    row only the before side holds is reported removed, under its placeholder."""
     row = {
         "id": "s1",
         "agent_name": "a",
@@ -832,6 +838,11 @@ def test_fleet_diff_counts_duplicate_rows():
     assert _fleet_writes(one, two, _generated_ids(two))["agent_schedules"]["added"] == [
         {**row, "id": "<generated agent_schedules.id: a/nightly>"}
     ]
+    removed = _fleet_writes(two, one, _generated_ids(two, one))["agent_schedules"]
+    assert removed == {
+        "added": [],
+        "removed": [{**row, "id": "<generated agent_schedules.id: a/nightly>"}],
+    }
 
 
 def test_golden_holds_exactly_the_exercised_cases():
