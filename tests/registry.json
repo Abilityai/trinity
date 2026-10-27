@@ -6701,6 +6701,20 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_sqlite_upgrade_parity_guard.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "ci",
+        "guard"
+      ],
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor."
     }
   ]
 }
