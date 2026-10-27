@@ -109,15 +109,27 @@ class _Harness:
         self.emit, self.write_result, self.lock_home = emit, write_result, lock_home
         self.pool_kind, self.queued = pool_kind, queued
         self.registered = asyncio.Event()
+        self.reader_started = asyncio.Event()
         self.children = []
-        self.reader_futures = []
+        self.submissions = []
         self.unblock_pool = threading.Event()
-        self.pool = ThreadPoolExecutor(max_workers=1 if queued else 2)
+        # Production's chat pool has one worker. A running task reader shares
+        # the default pool with the outer timeout's cleanup, so it gets two.
+        self.pool = ThreadPoolExecutor(max_workers=2 if pool_kind == "task" and not queued else 1)
         real_submit = self.pool.submit
 
-        def submit(*args, **kwargs):
-            future = real_submit(*args, **kwargs)
-            self.reader_futures.append(future)
+        def submit(fn, *args, **kwargs):
+            is_reader = not self.submissions
+
+            def run(*a, **kw):
+                if is_reader:
+                    # In the worker: the pool has started the reader job, so
+                    # its future is RUNNING and can no longer be cancelled.
+                    self.loop.call_soon_threadsafe(self.reader_started.set)
+                return fn(*a, **kw)
+
+            future = real_submit(run, *args, **kwargs)
+            self.submissions.append((fn, future))
             return future
 
         if queued:
@@ -163,6 +175,21 @@ class _Harness:
     def child(self):
         return self.children[0]
 
+    @property
+    def reader_future(self):
+        # The reader is the first job on the reader pool; on the task pool the
+        # outer timeout's cleanup jobs follow it there.
+        fn, future = self.submissions[0]
+        assert fn.__name__ in ("read_owned_subprocess_output", "read_subprocess_output"), fn
+        return future
+
+    async def wait_until_abandonable(self):
+        """The prompt is delivered and, unless the pool is saturated, the
+        reader has really started (a free worker alone does not prove it)."""
+        await _real_wait_for(self.registered.wait(), timeout=5)
+        if not self.queued:
+            await _real_wait_for(self.reader_started.wait(), timeout=5)
+
     def start(self):
         rt = CodexRuntime()
         return asyncio.create_task(rt._execute_codex(
@@ -201,13 +228,14 @@ class _Harness:
 _real_wait_for = asyncio.wait_for
 
 
-def _hold_outer_timeout_until_prompt(monkeypatch, registered):
-    """Expire only `_execute_codex`'s outer wait, and only after the prompt
-    is delivered, so the child is demonstrably alive when the waiter gives up."""
+def _hold_outer_timeout_until_abandonable(monkeypatch, harness):
+    """Expire only `_execute_codex`'s outer wait, and only once the prompt is
+    delivered and the reader is running (or queued), so the child is
+    demonstrably alive when the waiter gives up."""
 
     async def short_outer_timeout(awaitable, timeout):
         if timeout == OUTER_TIMEOUT:
-            await _real_wait_for(registered.wait(), timeout=5)
+            await harness.wait_until_abandonable()
             timeout = 0.01
         return await _real_wait_for(awaitable, timeout=timeout)
 
@@ -218,7 +246,7 @@ def _hold_outer_timeout_until_prompt(monkeypatch, registered):
 
 
 async def _abandon(harness, task, waiter_end):
-    await _real_wait_for(harness.registered.wait(), timeout=5)
+    await harness.wait_until_abandonable()
     assert harness.child.poll() is None
     assert harness.registry.is_execution_running(EXECUTION_ID)
     if waiter_end == "cancel":
@@ -238,9 +266,13 @@ def _assert_retained(harness):
     assert EXECUTION_ID not in registry.list_recently_completed_ids()
     # #3408 AC 3: an abandoned live child stays off the orphan sweep.
     assert harness.child.pid in registry.active_execution_pids()
+    if harness.queued:
+        assert not harness.reader_started.is_set(), "control: the reader was still queued"
+    else:
+        assert harness.reader_future.running(), "control: the reader was running"
 
 
-def _assert_released(harness, entries):
+async def _assert_released(harness, entries):
     registry = harness.registry
     assert entries[-1] == {"type": "stream_end"}
     assert harness.child.poll() == 0, "control: the child ended its turn normally"
@@ -248,8 +280,9 @@ def _assert_released(harness, entries):
     assert registry.get_buffered_logs(EXECUTION_ID) is None
     assert EXECUTION_ID in registry.list_recently_completed_ids()
     assert sorted(p.name for p in harness.codex_home.glob("*-last.txt")) == []
-    reader = harness.reader_futures[-1]
-    assert reader.done() and reader.exception() is None, "the owning reader returned cleanly"
+    # `stream_end` can arrive before the executor marks the reader done.
+    _, return_code = await _real_wait_for(asyncio.wrap_future(harness.reader_future), timeout=5)
+    assert return_code == 0, "the owning reader returned cleanly, having seen the exit"
 
 
 # chat reads on Codex's 1-worker `_executor`; task (`concurrent_reader=True`)
@@ -281,7 +314,7 @@ async def test_abandoned_codex_waiter_releases_after_child_exits(
     harness = _Harness(monkeypatch, tmp_path, pool_kind=pool_kind, queued=queued)
     harness.registry = registry
     if waiter_end == "timeout":
-        _hold_outer_timeout_until_prompt(monkeypatch, harness.registered)
+        _hold_outer_timeout_until_abandonable(monkeypatch, harness)
     task = None
     try:
         task = harness.start()
@@ -294,7 +327,7 @@ async def test_abandoned_codex_waiter_releases_after_child_exits(
         entries = await harness.stream_until_end(subscriber)
         assert harness.marker.exists(), "control: the child wrote its -o file at turn end"
         assert {"type": "thread.started", "thread_id": "t-3408"} in entries
-        _assert_released(harness, entries)
+        await _assert_released(harness, entries)
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -323,7 +356,7 @@ async def test_abandoned_child_with_no_output_and_no_result_file_is_still_releas
         entries = await harness.stream_until_end(subscriber)
         assert not harness.marker.exists(), "control: no -o file was ever written"
         assert entries == [{"type": "stream_end"}]
-        _assert_released(harness, entries)
+        await _assert_released(harness, entries)
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -356,8 +389,8 @@ async def test_result_file_that_cannot_be_removed_does_not_block_the_release(
         assert entries[-1] == {"type": "stream_end"}
         assert not registry.is_execution_running(EXECUTION_ID)
         assert registry.get_buffered_logs(EXECUTION_ID) is None
-        reader = harness.reader_futures[-1]
-        assert reader.done() and reader.exception() is None
+        _, return_code = await _real_wait_for(asyncio.wrap_future(harness.reader_future), timeout=5)
+        assert return_code == 0
     finally:
         if task is not None and not task.done():
             task.cancel()
@@ -387,7 +420,7 @@ async def test_worker_finishing_before_the_cancel_lands_is_released_by_the_waite
         cancel_delivered.set()
         # Hold the loop until the worker has fully returned, so the waiter
         # cannot set the abandoned flag before the worker checks it.
-        worker_finished_first.append(harness.reader_futures[-1].exception(timeout=5) is None)
+        worker_finished_first.append(harness.reader_future.exception(timeout=5) is None)
 
     def drain_then_race(*args, **kwargs):
         outcome = real_drain(*args, **kwargs)
@@ -409,7 +442,7 @@ async def test_worker_finishing_before_the_cancel_lands_is_released_by_the_waite
         assert worker_finished_first == [True], "control: the worker returned before the waiter's cleanup ran"
         entries = await harness.stream_until_end(subscriber)
         assert harness.marker.exists(), "control: the child wrote its -o file at turn end"
-        _assert_released(harness, entries)
+        await _assert_released(harness, entries)
     finally:
         if task_holder and not task_holder[0].done():
             task_holder[0].cancel()
