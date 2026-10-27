@@ -471,8 +471,9 @@ class TestRefusalAlarm:
         guard_db.raise_on_create = True
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
 
-    def test_alarm_id_is_the_natural_key_and_expiry_is_null(self, guard_db):
-        """C9 + C10. The natural key and the deadline, compared against LITERAL
+    def test_the_subject_is_the_natural_key_and_expiry_is_the_lifetime(self, guard_db):
+        """C9 + C10 (#3254 renamed this test from `test_alarm_id_is_the_natural_key_
+        and_expiry_is_null`). The natural key and the deadline, compared against LITERAL
         formats, never against the code's own helpers (a tautology the mutation
         gate caught: mutating the `"retention-guard-"` prefix left an
         `item["id"] == _alarm_id(...)` assertion green).

@@ -24,9 +24,11 @@ WHY RETRYING IS SAFE (the issue asked us to confirm this before changing it)
   `retention_ack_` prefix, written only by an admin-and-human-only endpoint. A
   retry can therefore neither re-authorize a prune nor wedge one. Pinned by
   `test_the_alarm_is_not_load_bearing_for_authorization`.
-* "Delivered" means "the call did not raise", never "a row was inserted":
-  `create_item` returns the id of the row that EXISTS, so on conflict it returns
-  the pre-existing uuid. Pinned by `test_delivery_is_did_not_raise_not_rows_inserted`.
+* "Delivered" never meant "a row was inserted". At #1834 it was "the call did
+  not raise" (`create_item` returned the id of the row that EXISTS); since #3254
+  it is a delivered outcome of `platform_alerts.observe` (created / updated /
+  snoozed), and a sibling worker's existing row is an `updated`. Pinned by
+  `test_delivery_is_a_delivered_outcome_not_rows_inserted`.
 
 WHY THERE IS NO GIVE-UP (divergence from the #1897 precedent)
 -------------------------------------------------------------
@@ -349,9 +351,12 @@ class TestFailedAlarmIsRetried:
         `logger.warning(..., e)` looks safe because `%s` formatting is deferred —
         but only in production, where `handleError` prints a traceback to stderr
         and carries on. pytest's `LogCaptureHandler` RE-RAISES it, which is how
-        this test found the second site after the first was fixed. Both now go
-        through `_describe_exception`. A function whose stated contract and actual
-        behaviour disagree is #1833 itself, so it is not repeated here.
+        this test found the second site after the first was fixed. Both went
+        through `_describe_exception` until #3254, which moved the write onto the
+        seam: `observe` now catches the exception and returns `failed`, and the
+        guard stores and logs that outcome, never the exception. A function whose
+        stated contract and actual behaviour disagree is #1833 itself, so it is
+        not repeated here.
         """
         class Hostile(RuntimeError):
             def __str__(self):
@@ -481,13 +486,15 @@ class TestTheAlarmAuthorizesNothing:
         v2 = _RG.evaluate(_KEY, 90, lambda limit: 10**6)
         assert v2.allowed is False, "a delivered alarm grants nothing"
 
-    def test_delivery_is_did_not_raise_not_rows_inserted(self, guard_db):
+    def test_delivery_is_a_delivered_outcome_not_rows_inserted(self, guard_db):
         """T-B7 — the property that stops a two-worker deployment retrying forever.
 
-        `create_item` is ON CONFLICT DO NOTHING and returns the id of the row that
-        EXISTS. If "delivered" meant "a row was inserted", the second worker —
-        whose write is always a conflict no-op — would re-attempt on every cycle,
-        for the life of the refusal, in every process but the first.
+        The second worker's reading finds the first worker's pending row and
+        updates it (`updated`). If "delivered" meant "a row was inserted"
+        (`created`), that worker would re-attempt on every cycle, for the life of
+        the refusal, in every process but the first. (#3254 renamed this test
+        from `..._did_not_raise_...`: under the seam a failure does not raise
+        either, it returns `failed`.)
         """
         # #3254 re-pin (write-observation point + id shape): "the row that
         # EXISTS" is now the subject's pending row, here a sibling worker's
