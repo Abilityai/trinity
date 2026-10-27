@@ -934,18 +934,6 @@
       "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
     },
     {
-      "file": "unit/test_3950_fleet_health_current.py",
-      "feature": "#3950",
-      "added": "2026-10-26",
-      "categories": [
-        "backend",
-        "unit",
-        "monitoring",
-        "api"
-      ],
-      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
-    },
-    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -1475,8 +1463,8 @@
       "description": "Tests for SSRF prevention in skills library URL: github.com hostname enforcement, internal IP rejection, scheme validation, bypass attempts (28 tests)"
     },
     {
-      "file": "unit/test_181_ip_rate_limit_spoofing.py",
-      "feature": "Issue #181, trinity-enterprise#873",
+      "file": "test_ip_rate_limit_fix.py",
+      "feature": "Issue #181",
       "added": "2026-03-27",
       "categories": [
         "backend",
@@ -1484,7 +1472,7 @@
         "rate-limiting",
         "unit"
       ],
-      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+      "description": "Tests for X-Forwarded-For rate limit bypass fix: trusted-proxy validation, spoofed header rejection, per-token secondary rate limit, pentest 3.2.4 PoC scenario"
     },
     {
       "file": "test_subscription_usage.py",
@@ -1694,18 +1682,6 @@
         "tools"
       ],
       "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
-    },
-    {
-      "file": "unit/test_ent471_turn_default_parity.py",
-      "feature": "trinity-enterprise#471",
-      "added": "2026-10-26",
-      "categories": [
-        "unit",
-        "guardrails",
-        "agent-server",
-        "frontend"
-      ],
-      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -1971,19 +1947,6 @@
         "reliability"
       ],
       "description": "Migration runner atomicity + cross-process lock (#1160). _atomic_rebuild rename-swap inside an explicit transaction closes the DROP-rebuild data-loss window (crash mid-rebuild rolls back with no data loss; verified for agent_sharing + agent_skills incl. lowercase/NULL-email behavior preservation and index recreation); replay-after-partial-apply completes cleanly; a failed migration is named on its traceback via add_note (original exception type preserved). Cross-process flock (db/migration_lock.py) serialises concurrent boots — multiprocessing tests prove mutual exclusion and a safe concurrent rebuild."
-    },
-    {
-      "file": "unit/test_migrations.py",
-      "feature": "#3395",
-      "added": "2026-10-26",
-      "categories": [
-        "backend",
-        "unit",
-        "database",
-        "migrations",
-        "guard"
-      ],
-      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
     },
     {
       "file": "unit/test_compatibility_checks.py",
@@ -3990,19 +3953,6 @@
         "fan-out"
       ],
       "description": "A fan-out batch is joined from the DB instead of gathered in a coroutine (#2524 - #1081 Phase 4's async fan-out join + sync edge adapter). The sync aggregate is rebuilt from the batch's schedule_executions rows (fan_out_id + the caller's fan_out_task_id) rather than from execute_task return values, which a pull dispatch never fills. Pinned: the join wakes the caller only when no row is open, is idempotent under re-delivery, costs one PK read and no batch COUNT on non-fan-out terminals, and is reached from spawn_task_terminal_event with a guard independent of #2523's loop advance. A row is created at SLOT GRANT, never up front (#2524 review): a pre-created RUNNING row waiting behind the semaphore is bulk-FAILed by the #106 no-session sweep, and a QUEUED one is claimable by the backlog drain / pull workers while the service also dispatches it. The row carries the SUB-004 subscription snapshot. A QUEUED return leaves the batch open, and a sync call waits on the rows and answers with the worker's result. max_concurrency still paces push. execute_task's error_code reaches the aggregate (no column holds it). A deadline reports the undispatched tail as running, not failed, and never cancels the dispatch. The default wait budget covers ceil(N / min(max_concurrency, max_parallel_tasks)) waves. A raised dispatch is closed by a proper terminal writer (activity close + terminal event on a won CAS, nothing on a lost one). Also covers task_execution_service.dispatch_and_await_terminal, the sync edge adapter that unstranded a2a and operator_response: a push dispatch is returned untouched, a QUEUED one waits and rebuilds from the row, a timed-out wait returns FAILED/TIMEOUT without raising, and a vanished row falls back to the dispatch result."
-    },
-    {
-      "file": "unit/test_schema_parity.py",
-      "feature": "#713, #3395",
-      "added": "2026-10-26",
-      "categories": [
-        "backend",
-        "database",
-        "migrations",
-        "unit",
-        "guard"
-      ],
-      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
     },
     {
       "file": "unit/test_2524_fanout_real_schema.py",
@@ -6352,17 +6302,6 @@
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     },
     {
-      "file": "unit/test_3825_password_change.py",
-      "feature": "#3825",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "auth",
-        "unit"
-      ],
-      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
-    },
-    {
       "file": "unit/test_3751_a2a_bearer_task_scope.py",
       "feature": "#3751",
       "added": "2026-10-20",
@@ -6464,18 +6403,6 @@
         "reliability"
       ],
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
-    },
-    {
-      "file": "unit/test_ent830_idempotency_caller_scope.py",
-      "feature": "trinity-enterprise#830",
-      "added": "2026-10-23",
-      "categories": [
-        "backend",
-        "security",
-        "idempotency",
-        "unit"
-      ],
-      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
     },
     {
       "file": "unit/test_3651_recovery_companion_close.py",
@@ -6633,6 +6560,105 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_sqlite_upgrade_parity_guard.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "ci",
+        "guard"
+      ],
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor."
+    },
+    {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
+      "file": "unit/test_181_ip_rate_limit_spoofing.py",
+      "feature": "Issue #181, trinity-enterprise#873",
+      "added": "2026-03-27",
+      "categories": [
+        "backend",
+        "security",
+        "rate-limiting",
+        "unit"
+      ],
+      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+    },
+    {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
+    },
+    {
+      "file": "unit/test_migrations.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "guard"
+      ],
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
+    },
+    {
+      "file": "unit/test_schema_parity.py",
+      "feature": "#713, #3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "unit",
+        "guard"
+      ],
+      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
+      "file": "unit/test_3825_password_change.py",
+      "feature": "#3825",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
+    },
+    {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
     },
     {
       "file": "../src/frontend/tests/unit/portalThreadTail.spec.js",
