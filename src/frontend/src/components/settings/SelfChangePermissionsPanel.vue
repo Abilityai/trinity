@@ -57,8 +57,11 @@
         None granted. Without them the agent is refused, by name, when it tries any of the changes below.
       </p>
 
+      <!-- Below `sm` a row stacks: toggle and label, then the status on its own
+           line, then the description, all from one left edge. Side by side at
+           390px the status column left the label a few words wide (#3542). -->
       <div v-for="cap in rows" :key="cap.id" :data-testid="`self-change-${cap.id}`">
-        <div class="flex items-start justify-between gap-3">
+        <div class="flex flex-col items-start gap-1 sm:flex-row sm:justify-between sm:gap-3">
           <BaseToggle
             :model-value="cap.granted"
             :disabled="!canEdit || !!store.busy[cap.id]"
@@ -67,17 +70,19 @@
             @update:model-value="(v) => store.setGranted(agentName, cap.id, v)"
           />
           <span
-            class="text-right text-xs text-gray-500 dark:text-gray-400 tabular-nums"
+            class="text-xs text-gray-500 dark:text-gray-400 tabular-nums sm:text-right"
             :title="cap.granted ? absolute(cap.granted_at) : ''"
             :data-testid="`self-change-granted-${cap.id}`"
           >
+            <!-- An email is one unbreakable word, so only the granter may break
+                 anywhere; "Off" and the time still wrap at spaces only. -->
             <template v-if="cap.granted">
-              Granted by {{ cap.granted_by || 'an admin' }} · {{ relative(cap.granted_at) }}
+              Granted by <span class="[overflow-wrap:anywhere]">{{ cap.granted_by || 'an admin' }}</span> · {{ relative(cap.granted_at) }}
             </template>
             <template v-else>Off</template>
           </span>
         </div>
-        <p class="mt-1 pl-[46px] text-xs text-gray-500 dark:text-gray-400">
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 sm:pl-[46px]">
           {{ cap.can }} {{ cap.without }}
         </p>
         <InlineError
