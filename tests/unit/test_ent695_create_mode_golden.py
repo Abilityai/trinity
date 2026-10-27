@@ -98,6 +98,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -369,21 +370,26 @@ def _canonical_row(table: str, row: dict, ids: dict, replacements: dict) -> dict
 def _fleet_writes(
     before: dict, after: dict, ids: dict, replacements: dict | None = None
 ) -> dict:
-    """Rows the request added and rows it removed, per table, canonicalized."""
+    """Rows the request added and rows it removed, per table, canonicalized.
+
+    A multiset difference, not a set one: two rows that canonicalize alike (two
+    same-named schedules on one agent share a placeholder id) must count twice,
+    or a writer that duplicated a row would read as unchanged.
+    """
     replacements = replacements or {}
 
     def canon(snapshot, table):
-        return {
+        return Counter(
             json.dumps(_canonical_row(table, row, ids, replacements), sort_keys=True)
             for row in snapshot[table]
-        }
+        )
 
     writes = {}
     for table in _FLEET_TABLES:
         b, a = canon(before, table), canon(after, table)
         writes[table] = {
-            "added": [json.loads(r) for r in sorted(a - b)],
-            "removed": [json.loads(r) for r in sorted(b - a)],
+            "added": [json.loads(r) for r in sorted((a - b).elements())],
+            "removed": [json.loads(r) for r in sorted((b - a).elements())],
         }
     return writes
 
@@ -795,6 +801,37 @@ def test_first_run_seed_on_fresh_install(install):
 
 
 # --- the fixture itself ---------------------------------------------------------
+
+
+def test_fleet_diff_counts_duplicate_rows():
+    """Two same-named schedules on one agent share a placeholder id, so their
+    canonical rows are equal; the diff must still report two rows, not one."""
+    row = {
+        "id": "s1",
+        "agent_name": "a",
+        "name": "nightly",
+        "cron_expression": "0 2 * * *",
+        "message": "m",
+        "enabled": 1,
+        "timezone": "UTC",
+        "description": None,
+        "owner_id": 1,
+        "deleted_at": None,
+    }
+    empty = {table: [] for table in _FLEET_TABLES}
+    one = {**empty, "agent_schedules": [row]}
+    two = {**empty, "agent_schedules": [row, {**row, "id": "s2"}]}
+
+    def added(after):
+        return _fleet_writes(empty, after, _generated_ids(after))["agent_schedules"][
+            "added"
+        ]
+
+    assert len(added(one)) == 1
+    assert len(added(two)) == 2
+    assert _fleet_writes(one, two, _generated_ids(two))["agent_schedules"]["added"] == [
+        {**row, "id": "<generated agent_schedules.id: a/nightly>"}
+    ]
 
 
 def test_golden_holds_exactly_the_exercised_cases():
