@@ -57,6 +57,11 @@ FLEET_LAST_RUN_KEY = "skills_fleet_reinject_last_run"
 # constant (`platform_alerts._LEGACY_PARSERS`), so the upgrade sweep stamps a
 # pre-move row with the subject this module now files (R1).
 FLEET_ALERT_KEY = "fleet"
+# The alarm's context names every failed agent (the clear's evidence, #3254
+# R10), apart from the report's 25-name display list; capped well inside the
+# operator queue's 64 KiB context belt. A longer list is stored capped, and its
+# row is then left to its lifetime (the clear cannot see every failed agent).
+FLEET_ALERT_MAX_AGENTS = 500
 
 # Idle poll while auto-sync is disabled. Short enough that flipping the toggle
 # takes effect promptly, long enough to cost nothing.
@@ -276,7 +281,7 @@ class SkillsLibrarySyncService:
         self._persist_report(report)
         await self._audit_fleet(report)
         if failures:
-            self._announce_fleet_failures(report)
+            self._announce_fleet_failures(report, sorted(failures))
         elif self._sweep_reached_every_agent(agents, results):
             self._clear_fleet_failures(started_at, set(agents))
         logger.info(
@@ -392,7 +397,8 @@ class SkillsLibrarySyncService:
             logger.warning(f"could not persist fleet re-inject report: {e}")
 
     @staticmethod
-    def _announce_fleet_failures(report: Dict[str, Any]) -> None:
+    def _announce_fleet_failures(report: Dict[str, Any],
+                                 failed_agents: Optional[List[str]] = None) -> None:
         """Operator alarm for a partially-failed sweep. Never raises.
 
         Carries counts and agent NAMES only — never per-skill errors, which can
@@ -429,7 +435,10 @@ class SkillsLibrarySyncService:
                     "agents_total": report["agents_total"],
                     "agents_failed": report["agents_failed"],
                     "commit_sha": report.get("commit_sha"),
-                    "agents": sorted(report["failures"]),
+                    # every failed agent (capped), not the report's 25: the
+                    # clear must see each one current again (R10)
+                    "agents": (sorted(failed_agents) if failed_agents is not None
+                               else sorted(report["failures"]))[:FLEET_ALERT_MAX_AGENTS],
                 },
             )
         except Exception as e:  # noqa: BLE001 — the alarm is decorative

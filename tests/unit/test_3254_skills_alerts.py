@@ -480,14 +480,30 @@ class TestFleetReinject:
         _assert_ended_by_platform(db, row)
 
     def test_a_failed_agent_past_the_reports_25_names_is_still_required(self, db, sweep):
-        """The report (and so the row) names at most 25 failed agents. With 26
-        failures the list cannot show that the 26th recovered, so a sweep that
-        no longer enumerates it ends nothing (the row is left to its lifetime)."""
+        """The report shows at most 25 failed agents; the row names all 26. A
+        sweep that no longer enumerates the 26th ends nothing; a sweep that
+        reaches all 26 and sees them current ends it."""
         bad = {f"a{i:02d}": self.BAD for i in range(26)}
-        sweep(bad)
+        report = sweep(bad)
+        assert len(report["failures"]) == 25                   # the bounded display report
         [row] = _pending(db, self.SUBJECT)
-        assert row["context"]["agents_failed"] == 26 and len(row["context"]["agents"]) == 25
+        assert row["context"]["agents_failed"] == 26
+        assert row["context"]["agents"] == sorted(bad)          # every failed agent
         sweep({f"a{i:02d}": self.OK for i in range(25)})       # a25 stopped meanwhile
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
+        sweep({f"a{i:02d}": self.OK for i in range(26)})       # a25 is back and current
+        assert _pending(db, self.SUBJECT) == []
+        _assert_ended_by_platform(db, row)
+
+    def test_a_list_past_the_cap_leaves_the_row_to_its_lifetime(self, db, sweep, monkeypatch):
+        """Past FLEET_ALERT_MAX_AGENTS the row's list is capped, so no sweep can
+        show every failed agent current: the row is left to its lifetime."""
+        from services import skills_sync_service as sync
+        monkeypatch.setattr(sync, "FLEET_ALERT_MAX_AGENTS", 3)
+        sweep({f"a{i}": self.BAD for i in range(4)})
+        [row] = _pending(db, self.SUBJECT)
+        assert row["context"]["agents_failed"] == 4 and len(row["context"]["agents"]) == 3
+        sweep({f"a{i}": self.OK for i in range(4)})
         assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]
 
     @pytest.mark.parametrize("agents", [
