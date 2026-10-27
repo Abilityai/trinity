@@ -1,11 +1,12 @@
 """
 FastAPI dependencies for the Trinity backend.
 """
+import json
 import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Annotated
+from typing import Any, Callable, Optional, Annotated
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 # threat (UnderDefense 3.3.4) is Low/CVSS 2.0 and backend restarts already
 # rotate SECRET_KEY (invalidating every token).
 _JWT_REVOKED_PREFIX = "jwt:revoked:"
+
+# Per-user platform-session cutoff (#3825): "sign this account out everywhere
+# else", written when its password is changed. Same shape as the portal cutoff
+# below (a per-`jti` blacklist cannot name every token a user holds): one key per
+# username holding `{"at": <epoch>, "at_ms": <epoch ms>, "keep": <jti>}`; a
+# session token issued at or before the cutoff is refused, except the one `keep`
+# names — the fresh token the change handed back to the person who made it.
+# Tokens are dated to the millisecond (`iat_ms`) so a sign-in later in the same
+# second as the change is not refused; a token dated only by `iat` is refused for
+# the whole cutoff second. Event-loopback tokens are not sessions and are exempt.
+# Reads fail open like the `jti` check; the TTL outlives the longest token.
+_USER_SESSIONS_REVOKED_PREFIX = "trinity:user_sessions_revoked:"
 
 # Bulk portal-session revocation (trinity-enterprise#281): "log this client out
 # everywhere, now". A per-`jti` blacklist cannot express it — `jti` is random per
@@ -164,6 +177,83 @@ def is_token_revoked(jti: Optional[str]) -> bool:
         return False
 
 
+def _epoch_ms() -> int:
+    """Wall-clock epoch milliseconds — the one clock that dates platform tokens
+    and the #3825 cutoff, so the two can be compared below one second."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
+    """Refuse every platform session token `username` was issued up to now,
+    except `keep_jti` (#3825). True when the cutoff was durably written, so the
+    caller can report honestly on a Redis outage."""
+    if not username:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] user session revoke skipped — Redis unavailable")
+        return False
+    from config import ACCESS_TOKEN_EXPIRE_MINUTES
+
+    now_ms = _epoch_ms()
+    try:
+        r.setex(
+            f"{_USER_SESSIONS_REVOKED_PREFIX}{username}",
+            ACCESS_TOKEN_EXPIRE_MINUTES * 60 + 60,  # + slack for clock skew
+            json.dumps({"at": now_ms // 1000, "at_ms": now_ms, "keep": keep_jti}),
+        )
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_user_sessions failed: {exc}")
+        return False
+
+
+def session_predates_user_revoke(payload: dict) -> bool:
+    """True when this platform token was issued before its user's #3825 cutoff.
+
+    A token with no `iat` (minted before #3825) cannot be shown to post-date the
+    cutoff, so it is refused — but only for a user who HAS a cutoff, i.e. who
+    changed their password, which is the kill switch it is meant to be.
+
+    Dating: a token with `iat_ms` is refused when issued at or before the
+    cutoff's millisecond, so a sign-in later in the same second survives while a
+    token minted earlier in that second does not. A token with only `iat`
+    (whole seconds — e.g. a caller-supplied `iat`) cannot be placed inside the
+    cutoff second, so that whole second is refused: rounding toward revoking.
+
+    An event-loopback token (EVT-001) is not a session: the backend mints one per
+    dispatch with `sub` = the provisioned admin, no `iat` and a 5-minute life,
+    fenced to one route. Without the exemption an admin password change would
+    refuse every event dispatch for the cutoff's whole TTL."""
+    if payload.get("scope") == EVENT_LOOPBACK_SCOPE:
+        return False
+    username = payload.get("sub")
+    r = get_breaker_redis() if username else None
+    if r is None:
+        return False
+    try:
+        raw = r.get(f"{_USER_SESSIONS_REVOKED_PREFIX}{username}")
+        if raw is None:
+            return False
+        cutoff = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+        at = int(cutoff["at"])
+        at_ms = int(cutoff.get("at_ms", at * 1000 + 999))
+        keep = cutoff.get("keep")
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] session_predates_user_revoke failed (fail-open): {exc}")
+        return False
+    if keep and payload.get("jti") == keep:
+        return False
+    iat_ms = payload.get("iat_ms")
+    iat = payload.get("iat")
+    try:
+        if iat_ms is not None:
+            return int(iat_ms) <= at_ms
+        return iat is None or int(iat) <= at_ms // 1000
+    except (TypeError, ValueError):
+        return True
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # ent#554 — the same scheme with `auto_error=False`, so a route can accept an
@@ -233,6 +323,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
         "mode": mode,  # Track auth mode to prevent dev/prod token mixing
         "jti": secrets.token_urlsafe(16),  # #187: per-token id for revocation
     })
+    # #3825: dates the token for the per-user session cutoff. A caller that
+    # supplies its own `iat` (the portal session, ent#375) keeps it.
+    # `iat_ms` dates it below the second, so a sign-in in the same second as a
+    # password change is not caught by that change's cutoff. Only when we set
+    # `iat` ourselves: a caller-supplied `iat` keeps second precision.
+    if "iat" not in to_encode:
+        now_ms = _epoch_ms()
+        to_encode["iat"] = now_ms // 1000
+        to_encode["iat_ms"] = now_ms
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -645,6 +744,9 @@ def decode_token(token: str) -> Optional[dict]:
         # #187 — a token revoked via logout is no longer valid (also for WS).
         if is_token_revoked(payload.get("jti")):
             return None
+        # #3825 — nor one issued before the user changed their password.
+        if session_predates_user_revoke(payload):
+            return None
 
         # Get full user record from database
         user = db.get_user_by_username(username)
@@ -735,6 +837,9 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
 
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
+            raise credentials_exception
+        # #3825 — reject a session issued before the user changed their password.
+        if session_predates_user_revoke(payload):
             raise credentials_exception
 
         user = db.get_user_by_username(username)
@@ -1533,12 +1638,20 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
 # target (`_admit_capability_reach`), and only that request's reach checks see
 # it. Holding `schedules.manage` therefore reaches a sibling's schedule routes
 # and nothing else; the gate never has to know which capability a route checked.
+def agent_principal_name(current_user) -> Optional[str]:
+    """The agent an agent-scoped principal acts as, else None.
+
+    `isinstance`, not truthiness: a bare MagicMock principal (older suites)
+    carries a truthy mock attribute and is not an agent. The one predicate the
+    per-agent gate and the fleet narrowing share (trinity-enterprise#872)."""
+    agent = getattr(current_user, "agent_name", None)
+    return agent if isinstance(agent, str) and agent else None
+
+
 def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) -> bool:
     """False only when an agent-scoped principal is outside its reach."""
-    agent = getattr(current_user, "agent_name", None)
-    # `isinstance`, not truthiness: a bare MagicMock principal (older suites)
-    # carries a truthy mock attribute and is not an agent.
-    if not isinstance(agent, str) or not agent:
+    agent = agent_principal_name(current_user)
+    if agent is None:
         return True
     if target_agent == agent:
         return True
@@ -1581,6 +1694,76 @@ def _has_edge(agent_name: str, target_agent: str) -> bool:
         logger.warning("[ent#629] edge lookup %s -> %s failed; treating as no edge",
                        agent_name, target_agent)
         return False
+
+
+# ----------------------------------------------------------------------------
+# Fleet reach (trinity-enterprise#872)
+# ----------------------------------------------------------------------------
+# The set form of `agent_may_reach`'s USE tier, for routes that take no single
+# agent in the path (lists, counts, timelines, the event stream). Every roster
+# accessor intersects with it, so an agent key's fleet view is its reach and
+# never its owner's. Per-request capability reach is deliberately NOT included:
+# it is earned per route, and a fleet list is no such route.
+
+def agent_reach_names(agent_name: str, owner_names: Optional[set] = None) -> set:
+    """{self} ∪ its `agent_permissions` edges ∪ the agents it spawned with the
+    key it holds now. `owner_names` is the owner's accessible set, or None for
+    an admin owner (every agent). Pure DB; every read fails closed, keeping self."""
+    try:
+        edges = set(db.get_permitted_agents(agent_name) or [])
+    except Exception:
+        logger.warning("[ent#872] edge list for %s failed; treating as no edges", agent_name)
+        edges = set()
+    try:  # one query, same key-id rule as `_spawned_by_caller`
+        key = db.get_agent_mcp_api_key(agent_name)
+        spawned = set(db.list_agents_spawned_by_key(agent_name, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#872] spawned list for %s failed; treating as none", agent_name)
+        spawned = set()
+    reach = edges | spawned
+    if owner_names is not None:
+        reach &= set(owner_names)
+    return reach | {agent_name}
+
+
+def owner_agent_names(role: Optional[str], email: Optional[str]) -> Optional[set]:
+    """The owner bound for `agent_reach_names`: None for an admin owner, else the
+    agents the owner may access. No email or a failed read is the empty set."""
+    if role == "admin":
+        return None
+    if not email:
+        return set()
+    try:
+        return set(db.get_accessible_agent_names(email, is_admin=False) or [])
+    except Exception:
+        logger.warning("[ent#872] owner roster read failed; bounding reach to self")
+        return set()
+
+
+def principal_reach(current_user) -> Optional[set]:
+    """An agent principal's fleet reach, or None for every other principal.
+
+    Memoized on the principal (one object per request, like `_capability_reach`),
+    so a route that consults it through several accessors reads the DB once."""
+    agent = agent_principal_name(current_user)
+    if agent is None:
+        return None
+    cached = getattr(current_user, "_fleet_reach", None)
+    if isinstance(cached, set):
+        return set(cached)
+    reach = agent_reach_names(agent, owner_agent_names(
+        getattr(current_user, "role", None), getattr(current_user, "email", None)))
+    try:
+        current_user._fleet_reach = set(reach)
+    except Exception:  # a stand-in principal without the private slot
+        pass
+    return reach
+
+
+def is_fleet_admin(current_user) -> bool:
+    """An admin that sees every agent: the admin role on anything but an agent
+    key, which carries its owner's role (trinity-enterprise#872)."""
+    return getattr(current_user, "role", None) == "admin" and agent_principal_name(current_user) is None
 
 
 def _reject_connector_principal(current_user: User) -> None:
@@ -1774,6 +1957,14 @@ def owner_is_workspace_only(owner_row: Optional[dict]) -> bool:
     the way `get_current_user` refuses a key with no owner.
     """
     return is_workspace_only_role((owner_row or {}).get("role"))
+
+
+def owner_is_suspended(owner_row: Optional[dict]) -> bool:
+    """A door that resolves a key's owner ROW itself (`/ws/events`) applies the
+    #995 deactivation check `get_current_user` and `/ws` apply: a suspended
+    owner's still-active key is refused. An unresolvable owner is refused by
+    `owner_is_workspace_only`, so None reads as "not suspended" here."""
+    return bool((owner_row or {}).get("suspended_at"))
 
 
 def require_role(min_role: str):
@@ -1976,8 +2167,9 @@ def get_self_agent(current_user: User = Depends(get_current_user)) -> str:
     agent-scoped key is its own agent, the system key is `trinity-system`.
     Nothing in the request can name another one — and nothing has to, which
     matters because a renamed agent's container keeps its old `AGENT_NAME`
-    while its key follows the rename. Every other principal gets
-    `get_self_acting_agent`'s uniform 403, then the access check its 404.
+    until its next recreate (#3813), while its key follows the rename. Every
+    other principal gets `get_self_acting_agent`'s uniform 403, then the access
+    check its 404.
     """
     return get_self_acting_agent(acting_agent_name(current_user) or "", current_user)
 
@@ -2528,6 +2720,48 @@ def assert_agent_access(current_user: User, agent_name: str, *, detail: str = "A
     if not (db.can_user_access_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+OWN_AGENT_DETAIL = "Agent-scoped key may only act as its own agent"
+
+
+def assert_own_agent(
+    current_user: User,
+    agent_name: str,
+    *,
+    detail: Any = OWN_AGENT_DETAIL,
+    refusal: Optional[Callable[[], HTTPException]] = None,
+) -> None:
+    """The agent-key self-gate (trinity-enterprise#840) — 403 when an
+    agent-scoped key names an agent other than its own.
+
+    An agent key resolves to its owner carrying the owner's role, so
+    ``AuthorizedAgent`` / ``assert_agent_access`` answer "may this key reach that
+    agent" (since ent#629: itself, its permission-edge targets, the agents it
+    spawned), never "is it acting on its own agent". A route an agent key may
+    call that reads or changes one agent's state calls this as its FIRST
+    statement, after the docstring, on its ``get_current_user`` principal and
+    the path agent. That shape is what the route census
+    (``tests/unit/_route_census.py``) recognises for ``AGENT_CALLABLE_SELF``, and
+    it runs before any lookup, so the refusal says nothing about the target
+    (#186).
+
+    A no-op for every principal that is not an agent key — a person, a
+    ``user`` / ``system`` / connector key, the event loopback — exactly like the
+    hand copies it replaced: whether those may reach another agent is the
+    access check's question, not this one's. The predicate is
+    ``agent_principal_name``, the one ``agent_may_reach`` uses.
+
+    ``detail`` is the route's own message. ``refusal`` builds the exception
+    instead, for a router whose access dependency answers a uniform 404 and
+    whose self refusal must stay byte-identical to it.
+    """
+    caller = agent_principal_name(current_user)
+    if caller is None or caller == agent_name:
+        return
+    if refusal is not None:
+        raise refusal()
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "Not authorized") -> None:

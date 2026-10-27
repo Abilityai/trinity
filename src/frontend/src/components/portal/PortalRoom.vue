@@ -252,22 +252,17 @@
              (#2794) — the 1:1's shape, which this composer is otherwise a copy
              of (#2662). -->
         <div v-if="attachments.length && !isClosed" class="mb-2 flex flex-wrap gap-1.5">
-          <span
+          <PortalAttachmentChip
             v-for="(f, i) in attachments"
             :key="i"
-            class="inline-flex items-center gap-1 text-xs rounded-full pl-2.5 pr-1.5 py-1"
-            :class="f.error
-              ? 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300'
-              : 'bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300'"
-            :title="f.error || `${f.name} → ${recipientLabel}`"
-            data-testid="portal-room-attachment-chip"
+            :entry="f"
+            :locked="sending"
+            :title="`${f.name} → ${recipientLabel}`"
+            testid="portal-room-attachment-chip"
+            @remove="removeAttachment(f)"
           >
-            <svg class="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" /></svg>
-            <span class="max-w-[10rem] truncate">{{ f.name }}</span>
-            <svg v-if="attachmentState(f) === 'uploading'" class="w-3 h-3 animate-spin text-gray-400" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-            <span v-else-if="attachmentState(f) === 'failed'" class="max-w-[16rem] truncate opacity-90">· {{ f.error }}</span>
-            <span v-else class="opacity-70">· to {{ recipientLabel }}</span>
-          </span>
+            <template #sent><span class="opacity-70">· to {{ recipientLabel }}</span></template>
+          </PortalAttachmentChip>
         </div>
         <!-- #2794: `v-if="!isClosed"`, NOT a `v-else`.
              The composer shipped as `<form v-else>` chained to the "this
@@ -330,8 +325,8 @@
                 <button
                   type="submit"
                   class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-                  :disabled="!input.trim() || sending"
-                  title="Send"
+                  :disabled="!input.trim() || sending || messageLimit.over"
+                  :title="messageLimit.over ? messageLimit.message : 'Send'"
                 >
                   <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                 </button>
@@ -339,6 +334,7 @@
             </div>
           </div>
         </form>
+        <PortalMessageLimit :limit="messageLimit" />
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
         <!-- #2794: what came with the message that created this room. The room
              is otherwise silent about attachments, so without this the person
@@ -405,13 +401,16 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalMessageLimit from './PortalMessageLimit.vue'
+import { ROOM_MESSAGE_MAX_CHARS, messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalTagMarks from './PortalTagMarks.vue'
 import { usePeoplePicker } from '@/composables/usePeoplePicker'
 import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from './portalMentions'
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
-import { usePortalFileDrop, attachmentState } from '@/composables/usePortalFileDrop'
+import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
+import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import { useComposerDraft } from '@/composables/useComposerDraft'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
@@ -470,6 +469,8 @@ const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
+// #3706: the server's limit, stated before sending (the 1:1's #3460 rule).
+const messageLimit = computed(() => messageLimitState(input.value.trim(), ROOM_MESSAGE_MAX_CHARS))
 // trinity-enterprise#657: the room's unsent text outlives this instance. The
 // room is keyed on its id (the shell remounts per room), so the key never
 // changes in-instance; `send()` giving the text back on failure makes it a
@@ -536,14 +537,35 @@ const {
   entries: attachments,
   batchNotice,
   clear: clearAttachments,
+  remove: removeAttachment,
   handlers: dropHandlers,
 } = usePortalFileDrop(
+  // #3738: returns where each copy landed and under what stored name, so a
+  // removed chip can be deleted from every participant's inbox. A participant
+  // refusing after others took the file attaches the same receipt to the error.
   async (file) => {
     const names = agentParticipants.value
     if (!names.length) throw new Error('This room has no agents to send to.')
-    for (const name of names) await store.uploadDocument(name, file)
+    const stored = []
+    try {
+      for (const name of names) await store.uploadDocument(name, file).then((res) => stored.push({ agent: name, filename: res?.filename || file.name }))
+    } catch (err) {
+      if (stored.length && err && typeof err === 'object') err.receipt = { stored }
+      throw err
+    }
+    return { filename: stored[0]?.filename, stored }
   },
-  { disabled: () => isClosed.value },
+  {
+    disabled: () => isClosed.value,
+    // Every copy is attempted; the first refusal is rethrown so it is logged.
+    discard: async (e) => {
+      const results = await Promise.allSettled(
+        (e.receipt?.stored || []).map((s) => store.discardComposerUpload(s.agent, s.filename, e.file)),
+      )
+      const refused = results.find((r) => r.status === 'rejected')
+      if (refused) throw refused.reason
+    },
+  },
 )
 
 // Server-reported, so it survives a reload. The local `sending` flag still
@@ -913,6 +935,8 @@ async function load({ full = false } = {}) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  // Enter reaches `send()` without the button, so the limit is checked here too.
+  if (messageLimit.value.over) return
   sending.value = true
   sendError.value = null
   input.value = ''
@@ -940,8 +964,8 @@ async function send() {
     await load()
   } catch (err) {
     const detail = err?.response?.data?.detail
-    sendError.value = detail?.message || (typeof detail === 'string' ? detail : null)
-      || 'That message was not delivered.'
+    sendError.value = messageRefusalReason(err) || detail?.message
+      || (typeof detail === 'string' ? detail : null) || 'That message was not delivered.'
     input.value = text        // give it back rather than losing what they typed
     resetTypeahead()
   } finally {

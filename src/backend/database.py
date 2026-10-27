@@ -137,6 +137,7 @@ from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
 from db.role_readiness import RoleReadinessOperations
 from db.capability_grants import CapabilityGrantOperations
+from db.peer_skill_grants import PeerSkillGrantOperations
 from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
 from db.skill_sources import SkillSourcesOperations
@@ -150,6 +151,7 @@ from db.dashboard_history import DashboardHistoryOperations
 from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
+from db.nevermined_delegation import NeverminedDelegationOperations
 from db.operator_queue import OperatorQueueOperations
 from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
@@ -864,15 +866,31 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
+# #3825: printed when boot leaves the admin password alone because it was
+# changed in the app after this ADMIN_PASSWORD value was applied. Literal text
+# plus the username only: nothing derived from either password reaches a log.
+_ADMIN_ENV_SKIPPED_NOTE = (
+    "ADMIN_PASSWORD not re-applied to admin user '%s': the password was changed "
+    "in the app after this value was applied. To reset it from .env, set a "
+    "different value and restart."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
     Reuses the dialect-agnostic ``UserOperations`` (already on SQLAlchemy Core)
-    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB;
-    updates the password when the env password no longer verifies.
+    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB, and
+    re-applies the env password only when it differs from the one last applied
+    (#3825, ``utils.admin_identity.env_apply_decision``).
     """
+    from db.settings import SettingsOperations
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision, fingerprint_value,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
     if not admin_password:
         print(_NO_ADMIN_AT_BOOT_NOTE)
         return
@@ -881,32 +899,52 @@ def _ensure_admin_user_engine():
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     user_ops = UserOperations()
-    existing = user_ops.get_user_by_username(admin_username)
+    settings_ops = SettingsOperations()
+    existing = user_ops.get_user_by_username(name)
     if existing is None:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Created admin user '{admin_username}' with hashed password")
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+        print(f"Created admin user '{name}' with hashed password")
         return
 
-    existing_hash = existing.get("password")
-    needs_update = False
-    if existing_hash and not existing_hash.startswith("$2"):
-        needs_update = existing_hash == admin_password  # plaintext → bcrypt
-    elif existing_hash:
-        try:
-            needs_update = not pwd_context.verify(admin_password, existing_hash)
-        except Exception:
-            needs_update = True
-    else:
-        needs_update = True
-    if needs_update:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Updated admin user '{admin_username}' password")
+    action, record = env_apply_decision(
+        admin_password, existing.get("password"),
+        settings_ops.get_setting_value(ADMIN_ENV_FINGERPRINT_KEY), name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        print(f"Updated admin user '{name}' password")
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+
+
+def _record_admin_env_fingerprint(cursor, conn, name, hashed):
+    """SQLite half of the #3825 fingerprint write (see `env_apply_decision`)."""
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value
+
+    cursor.execute(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, hashed), utc_now_iso()),
+    )
+    conn.commit()
 
 
 def _ensure_admin_user(cursor, conn):
-    """Ensure the admin user exists with properly hashed password."""
+    """Ensure the admin user exists with properly hashed password.
+
+    Re-applies `ADMIN_PASSWORD` only when it differs from the value last applied
+    (#3825), so a password changed in the app survives a restart."""
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
 
     # Warn operators if ADMIN_PASSWORD doesn't meet complexity requirements
     if admin_password:
@@ -921,7 +959,7 @@ def _ensure_admin_user(cursor, conn):
         except ImportError:
             pass  # password_validation module not available during early init
 
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (name,))
     existing = cursor.fetchone()
 
     if existing is None:
@@ -939,39 +977,37 @@ def _ensure_admin_user(cursor, conn):
         cursor.execute("""
             INSERT INTO users (username, password_hash, role, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (admin_username, hashed, "admin", now, now))
+        """, (name, hashed, "admin", now, now))
         conn.commit()
-        print(f"Created admin user '{admin_username}' with hashed password")
-    else:
-        # Check if existing password needs update (migration or change)
-        existing_hash = existing[1]
-        should_update = False
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
+        print(f"Created admin user '{name}' with hashed password")
+        return
 
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not admin_password:
+        return
 
-        if existing_hash and not existing_hash.startswith("$2"):
-            # Password is likely plaintext (bcrypt hashes start with $2)
-            if admin_password and existing_hash == admin_password:
-                should_update = True
-                print(f"Migrating admin user '{admin_username}' password from plaintext to bcrypt")
-        elif admin_password:
-            # Check if environment password matches DB hash
-            try:
-                if not pwd_context.verify(admin_password, existing_hash):
-                    should_update = True
-                    print(f"Environment password changed - updating admin user '{admin_username}'")
-            except Exception as e:
-                print(f"Error verifying password hash: {e}")
-                should_update = True
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-        if should_update and admin_password:
-            hashed = pwd_context.hash(admin_password)
-            cursor.execute("""
-                UPDATE users SET password_hash = ?, updated_at = ?
-                WHERE username = ?
-            """, (hashed, utc_now_iso(), admin_username))
-            conn.commit()
+    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_ENV_FINGERPRINT_KEY,))
+    row = cursor.fetchone()
+    action, record = env_apply_decision(
+        admin_password, existing[1], row[0] if row else None, name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        if existing[1] and not existing[1].startswith("$2"):
+            print(f"Migrating admin user '{name}' password from plaintext to bcrypt")
+        else:
+            print(f"Environment password changed - updating admin user '{name}'")
+        cursor.execute("""
+            UPDATE users SET password_hash = ?, updated_at = ?
+            WHERE username = ?
+        """, (pwd_context.hash(admin_password), utc_now_iso(), name))
+        conn.commit()
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
 
 
 class DatabaseManager:
@@ -1020,6 +1056,7 @@ class DatabaseManager:
         self._skill_sets_ops = SkillSetsOperations()
         self._role_readiness_ops = RoleReadinessOperations()
         self._capability_grant_ops = CapabilityGrantOperations()
+        self._peer_skill_grant_ops = PeerSkillGrantOperations()  # ent#662
         self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
         self._skill_sources_ops = SkillSourcesOperations()
@@ -1033,6 +1070,7 @@ class DatabaseManager:
         self._slack_ops = SlackOperations()
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
+        self._nevermined_delegation_ops = NeverminedDelegationOperations()  # ent#966
         self._operator_queue_ops = OperatorQueueOperations()
         self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
@@ -1590,6 +1628,16 @@ class DatabaseManager:
 
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
+
+    # SUB-003 walk on a pulled turn (#3487)
+    def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
+        return self._schedule_ops.rotate_claim_token(execution_id, old_token, new_token)
+
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        return self._schedule_ops.holds_claim_token(execution_id, claim_token)
+
+    def set_backlog_metadata_for_token(self, execution_id: str, claim_token: str, backlog_metadata: str) -> bool:
+        return self._schedule_ops.set_backlog_metadata_for_token(execution_id, claim_token, backlog_metadata)
 
     # Lease reaper (#1081 Phase 3 — #429 / #1402)
     def find_expired_leases(self, now_iso: str = None, limit: int = 500):
@@ -2717,8 +2765,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)
@@ -2858,6 +2907,25 @@ class DatabaseManager:
         # #2914: the inject path's per-row verdict (`conflict` / cleared).
         return self._skills_ops.set_skill_delivery_status(agent_name, conflicted, resolved)
     # =========================================================================
+    # Per-skill grants over an edge (delegated to db/peer_skill_grants.py) — ent#662
+    def granted_peer_skills(self, caller_agent: str, target_agent: str):
+        return self._peer_skill_grant_ops.granted_peer_skills(caller_agent, target_agent)
+
+    def list_peer_skill_grants(self, caller_agent: str):
+        return self._peer_skill_grant_ops.list_peer_skill_grants(caller_agent)
+
+    def grant_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str, granted_by: str):
+        return self._peer_skill_grant_ops.grant_peer_skill(caller_agent, target_agent, skill_name, granted_by)
+
+    def revoke_peer_skill(self, caller_agent: str, target_agent: str, skill_name: str):
+        return self._peer_skill_grant_ops.revoke_peer_skill(caller_agent, target_agent, skill_name)
+
+    def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
+        return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def delete_agent_peer_skill_grants(self, agent_name: str):
+        return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
+
     # Agent capability grants (delegated to db/capability_grants.py) — ent#596
     def agent_has_capability(self, agent_name: str, capability: str) -> bool:
         return self._capability_grant_ops.agent_has_capability(agent_name, capability)
@@ -2999,21 +3067,30 @@ class DatabaseManager:
         cost: float = None,
         sender_email: str = None,
         sender_label: str = None,
+        gate_hold: str = None,
     ):
         return self._public_chat_ops.add_message(
             session_id, role, content, cost,
-            sender_email=sender_email, sender_label=sender_label,
+            sender_email=sender_email, sender_label=sender_label, gate_hold=gate_hold,
         )
 
-    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None):
-        return self._public_chat_ops.get_session_messages(session_id, limit, sender_email=sender_email)
+    def get_public_chat_messages(self, session_id: str, limit: int = 20, sender_email: str = None,
+                                 include_held: bool = False):
+        return self._public_chat_ops.get_session_messages(
+            session_id, limit, sender_email=sender_email, include_held=include_held)
 
     def get_recent_public_chat_messages(
         self, session_id: str, limit: int = 20, sender_email: str = None, since: str = None,
+        include_held: bool = False,
     ):
+        # trinity#3402: rows the skill gate stopped are left out unless asked for.
         return self._public_chat_ops.get_recent_messages(
-            session_id, limit, sender_email=sender_email, since=since,
+            session_id, limit, sender_email=sender_email, since=since, include_held=include_held,
         )
+
+    def mark_public_chat_messages_held(self, message_ids: list, gate_hold: str) -> int:
+        # trinity#3402: a held / refused turn and its notice are never replayed.
+        return self._public_chat_ops.mark_messages_held(message_ids, gate_hold)
 
     def prune_public_chat_session(self, session_id: str, keep: int) -> int:
         # ent#600: bound a Telegram group session that records every visible message.
@@ -3080,12 +3157,8 @@ class DatabaseManager:
     def increment_public_user_memory_count(self, agent_name: str, user_email: str) -> int:
         return self._public_link_ops.increment_message_count(agent_name, user_email)
 
-    def update_public_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        return self._public_link_ops.update_user_memory_agent_notes(
-            agent_name, user_email, agent_notes
-        )
+    def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
     def update_public_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str
@@ -3806,6 +3879,46 @@ class DatabaseManager:
         return self._voip_ops.count_calls_since(agent_name, hours=hours)
 
     # =========================================================================
+    # Nevermined card delegation (delegated to db/nevermined_delegation.py) - ent#966
+    # =========================================================================
+
+    def get_nevermined_organization(self):
+        return self._nevermined_delegation_ops.get_organization()
+
+    def get_nevermined_organization_secrets(self):
+        return self._nevermined_delegation_ops.get_organization_secrets()
+
+    def save_nevermined_organization(self, org_id, environment, secrets, updated_by):
+        return self._nevermined_delegation_ops.save_organization(
+            org_id, environment, secrets, updated_by
+        )
+
+    def delete_nevermined_organization(self):
+        return self._nevermined_delegation_ops.delete_organization()
+
+    def count_active_agent_delegations(self):
+        return self._nevermined_delegation_ops.count_active_delegations()
+
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
+
+    # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================
 
@@ -3963,6 +4076,10 @@ class DatabaseManager:
             item_id, response, response_text, responded_by_id, responded_by_email,
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
         )
+
+    def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
+        # trinity-enterprise#901: the agent ends its own pending ask, no successor.
+        return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
                                    disposition="cancelled"):

@@ -583,6 +583,11 @@ class ProactiveMessageService:
                     text=chunk,
                     parse_mode="HTML",
                 )
+                if result is None:
+                    return DeliveryResult(
+                        success=False, channel="telegram",
+                        error="Telegram chunk delivery unconfirmed; later chunks were not sent",
+                    )
             if result:
                 message_id = result.get("message_id")
                 # #1600: resolve the recipient's session key through the adapter

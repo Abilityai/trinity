@@ -19,6 +19,8 @@ Expose a public URL that fires an agent schedule from an external system (CI/CD,
 | `/api/agents/{name}/schedules/{id}/webhook/secret` | DELETE | JWT | Disable signature auth (URL stays live, unauthenticated) |
 | `/api/webhooks/{token}` | POST | Token (in URL) | Public trigger — returns `202 Accepted`; optional `{"context": "..."}` body (≤4000 chars) is appended to the schedule message |
 
+**The URL you get back.** `webhook_url` in the responses above is built from the request that minted or read it: its host is the request's host, and its scheme is `https://` when the proxy in front of Trinity sent `X-Forwarded-Proto: https`, otherwise `http://` (the scheme is upgraded by that header, never downgraded). Call these routes through your public address — the tunnel or reverse proxy — to get the URL external callers can use; a call straight to the backend port returns an `http://` URL on that host. See [Public Access](../guides/deploying/public-access.md#webhook-urls-after-enabling-public-access).
+
 **Request body.** The body is optional. It may carry `{"context": "..."}` (up to 4,000 characters). A body larger than 16 KiB (`WEBHOOK_MAX_BODY_BYTES`) is refused with `413`, and a body that is not a valid request returns `422`. A revoked, rotated or unknown token returns `404`.
 
 **Duplicate deliveries.** Send an `Idempotency-Key` header when your caller may deliver the same event twice. A repeat with the same key within 24 hours does not fire again: it returns the first result with `X-Idempotent-Replay: true`, or `409` while the first delivery is still being processed. A call without the header fires a new run every time, so a plain "ping to trigger" is never swallowed.

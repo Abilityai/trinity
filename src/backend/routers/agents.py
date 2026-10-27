@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, capability_fence
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -394,13 +394,20 @@ async def get_all_agent_slots(
     Returns:
     - agents: Dict mapping agent_name to {"max": N, "active": M}
     - timestamp: ISO timestamp of response
+
+    Scoped to the agents the caller may see (trinity-enterprise#872): an admin
+    person every agent, anyone else their visible set, an agent key its reach.
     """
     from db_models import BulkSlotState
     from services.capacity_manager import get_capacity_manager
+    from services.agent_service.helpers import visible_agent_names
     from datetime import datetime
 
     # Get all agents with their capacities
     agent_capacities = db.get_all_agents_parallel_capacity()
+    visible = visible_agent_names(current_user)  # None = sees every agent
+    if visible is not None:
+        agent_capacities = {n: c for n, c in agent_capacities.items() if n in visible}
 
     # CAPACITY-CONSOLIDATE (#428): bulk capacity meter via CapacityManager.
     capacity = get_capacity_manager()
@@ -439,7 +446,6 @@ async def get_all_permission_edges(
     """
     # Get accessible agents once (not N times)
     accessible = {a['name'] for a in get_accessible_agents(current_user)}
-
     # Single DB query filtered at SQL level
     edges = db.get_all_permission_edges(accessible)
 
@@ -496,6 +502,14 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     # edit and the surfaces disagree (§1.3.1 FR-3). One extra read; not the list
     # path, so a per-agent call is fine here.
     agent_dict["display_label"] = db.get_display_label(agent_name)
+    # #3872: whether a repository is bound, known at first paint. The header
+    # reserves its GitHub row on this so the live git status (an exec into the
+    # running container, seconds later) cannot push the tab strip down when it
+    # lands. The template string cannot be the signal — an agent deployed
+    # locally and bound afterwards carries a `local:` label (or none, #1811) —
+    # but the persisted git config is exactly what `_reconstruct_template_id`
+    # already treats as "GitHub-backed". One read, like the label above.
+    agent_dict["git_configured"] = db.get_git_config(agent_name) is not None
     agent_dict["can_delete"] = db.can_user_delete_agent(current_user.username, agent_name)
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
@@ -1497,13 +1511,11 @@ async def send_voice_reply_endpoint(
     misses return ``{delivered: false, reason}`` (HTTP 200) so the agent falls back
     to text; an in-flight duplicate for the same turn returns 409.
     """
-    import config as app_config
-    from services import voice_reply_service, idempotency_service
-
     # Self-gate (mirrors reports / heartbeat): an agent-scoped key can only speak
     # as itself; a user-scoped key already passed AuthorizedAgentByName.
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(status_code=403, detail="Agent-scoped key may only speak as itself")
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only speak as itself")
+    import config as app_config
+    from services import voice_reply_service, idempotency_service
 
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
@@ -1592,8 +1604,9 @@ async def agent_heartbeat(agent_name: str, payload: HeartbeatPayload, request: R
 
     Authenticated with the agent's own ``TRINITY_MCP_API_KEY`` (Option B,
     least-privilege) — *not* the user JWT and not the master internal secret.
-    An agent may only heartbeat itself: the key must be agent-scoped and its
-    bound ``agent_name`` must equal the path. User/system/null keys → 403.
+    An agent may only heartbeat itself: the key must be agent-scoped (or the
+    system agent's own system-scoped key, #3814) and its bound ``agent_name``
+    must equal the path. User/null keys → 403.
 
     Validation runs with ``track_usage=False`` so a 5s beat doesn't amplify the
     key's ``usage_count`` or write to SQLite on every beat. The write is
@@ -1672,7 +1685,7 @@ async def agent_execution_result(
     async-marker gate**.
 
     Acceptance rules (fail-closed):
-      * Missing/non-Bearer auth, or a user/system/wrong-agent key → 403.
+      * Missing/non-Bearer auth, or a user or wrong-agent key → 403.
       * Execution missing or not owned by ``agent_name`` → 404.
       * Execution already terminal → idempotent replay → 200 ``{replayed: true}``
         (the row is final; no write happens — safe to ACK so the agent stops

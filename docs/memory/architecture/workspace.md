@@ -44,7 +44,13 @@ with the code. Inside the Workspace such a member keeps the **team view**: signe
 (`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
 (`agent_page._client_scope`), voice and model choice — the narrower client view is for people
 without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
-before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+before). **The code page is not a second door for a platform account (#3922).** An address with a
+platform account that `/login` can sign in (`service.platform_login_admits`: a `users` row, and
+either a password or the email login would admit it — email login on, the policy allows codes,
+allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
+409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
+platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
+prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -664,7 +670,7 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   cancellation shield bound the cascade; the ent#218 rule keeps an in-flight reply that
   was already billed from being discarded by a budget trip.
 - **A reply is never refused for its size, and a landed message never fails its post
-  (#3210).** `MAX_CONTENT_CHARS` (8,000) is an **inbound** rule — people, Workspace
+  (#3210).** `MAX_CONTENT_CHARS` (100,000 since #3706, matching Workspace chat and `MAX_AGENT_REPLY_CHARS`) is an **inbound** rule — people, Workspace
   clients, and agents calling the API. The engine's own post of a turn's reply is fitted
   to `MAX_AGENT_REPLY_CHARS` (100,000) by `_fit_reply` instead: past the bound it keeps
   head and tail around a marker, and there is no size at which it raises. It stays **one
@@ -687,6 +693,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
+  refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
+  `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
+  the notice line. Every later wake of that agent leaves those rows out of the transcript
+  and of the text the gate scans (one list feeds both), and so does MCP `read_room` by that
+  agent; other agents and people still read them. The read cursor keeps its success-only
+  rule, so an ordinary post that landed in the held delta is delivered on the next wake; a
+  refusal that clears by itself records nothing and the post comes back. Before this, a held
+  wake left the cursor in place and every later wake asked again for the same post.
+  `room_gate_holds` is an `AGENT_REFS` CASCADE entry, and deliberately carries no
+  `enterprise_` prefix: on the room tables that prefix is the three legacy names' history.
 - **Three tables** — `enterprise_rooms`, `enterprise_room_participants`,
   `enterprise_room_messages`. The `enterprise_` prefix is **retained history, not a
   licensing claim** (the ent#356 portal precedent): every entitled install already holds
@@ -921,7 +938,10 @@ verdict. On phone nothing is previewed. The pinned sidebar row is its own compon
 feed — `portalInbox.inboxCanvasCount({tabs, canvases, agent})` over
 `stores/portalRailFeeds.canvases` for the selected item's agent, which the rail loads
 anyway — and shows only when that agent has a canvas and the Canvas tab is one this
-session has, on chats and asks alike (T6); it emits `open-canvas` → `openRailOn('canvas')`.
+session has, on chats only (#3714); it emits `open-canvas` → `openRailOn('canvas')`. An
+ask's header instead offers Open in chat via `portalInbox.askOriginThread` → `askThreadLink`
+(raised in a turn → its `chat_id`; a background ask → none), emitted as `open-thread` like
+the card's own link — so a chat the sidebar has not loaded still opens (#3140).
 
 **Reply to one message** (sign-off). Each agent message in the Inbox pane carries an arrow
 (not Copy): it opens the chat anchored at that message (`?anchor=m:<id>`, landed by

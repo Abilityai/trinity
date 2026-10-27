@@ -161,6 +161,58 @@ def metadata_reason_is_unreadable(reason: Optional[str]) -> bool:
     return not reason.startswith("HTTP 404")
 
 
+def metadata_reason_is_token_rejection(reason: Optional[str]) -> bool:
+    """Did GitHub refuse the TOKEN that asked, rather than the request? (#3725)
+
+    401 (bad/revoked token) and 403 (rate limit, SSO, insufficient scope) say
+    nothing about whether the repo is readable by another identity, so the
+    creation path may retry with the next tier or the credential-free read.
+    """
+    return bool(reason) and reason.startswith(("HTTP 401", "HTTP 403"))
+
+
+# Same shape `crud._GITHUB_REPO_PATH_RE` accepts; kept local because crud
+# imports this module.
+_RAW_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_RAW_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _fetch_template_yaml_raw_result(repo: str, sha: str) -> tuple:
+    """Credential-free template.yaml read, pinned to a commit SHA (#3725).
+
+    `raw.githubusercontent.com` serves public repos without a token and outside
+    the REST API's anonymous 60/h cap, so a public template stays readable when
+    every tier's token is rejected. Never sends an Authorization header. `sha`
+    must be the 40-hex commit an anonymous `ls-remote` resolved, so the read
+    sees the same tree the clone will. Same `(metadata, reason)` contract as
+    `_fetch_template_yaml_result`.
+    """
+    if (
+        not isinstance(repo, str)
+        or not _RAW_REPO_PATH_RE.match(repo)
+        or any(seg in (".", "..") for seg in repo.split("/"))
+    ):
+        return {}, "invalid repo"
+    if not isinstance(sha, str) or not _RAW_SHA_RE.match(sha):
+        return {}, "invalid sha"
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://raw.githubusercontent.com/{repo}/{sha}/template.yaml",
+                headers={},
+            )
+
+        if resp.status_code != 200:
+            return {}, f"HTTP {resp.status_code}"
+
+        # ent#314: author-controlled, so the hardened loader, as above.
+        return (parse_template_yaml(resp.text) or {}), None
+    except HardenedYamlError as e:
+        return {}, f"{e.code}: {e}"
+    except Exception as e:
+        return {}, f"{type(e).__name__}: {e}"
+
+
 def fetch_template_metadata_result_for_create(
     repo: str, pat: Optional[str] = None, ref: Optional[str] = None
 ) -> tuple:
@@ -1194,6 +1246,11 @@ def _catalog_credential_metadata(data, template_id: str, source_trust: str):
     return requirements, errors
 
 
+# trinity-enterprise#964: the cap on a catalog entry's `agent_name`. Bounds an
+# untrusted value in every catalog payload; a real agent name is far shorter.
+_AGENT_NAME_MAX_LEN = 128
+
+
 def _build_template(
     repo: str,
     metadata: dict,
@@ -1246,6 +1303,16 @@ def _build_template(
         or metadata.get("description", "")
     )
 
+    # trinity-enterprise#964: the agent name the template declares, for the
+    # Create Agent dialog to prefill. Not `display_name`, which is the admin's
+    # or the template's catalog title. `name:` is untrusted (#1900): anything
+    # but a non-blank string is None, and the dialog falls back to the repo.
+    _declared = metadata.get("name")
+    agent_name = (
+        _declared.strip()[:_AGENT_NAME_MAX_LEN] or None
+        if isinstance(_declared, str) else None
+    )
+
     # S4 (#383): import lazily to avoid any circular-import risk with
     # git_service, which imports database/docker modules at module load.
     from services.git_service import DEFAULT_PERSISTENT_STATE
@@ -1282,6 +1349,7 @@ def _build_template(
     return {
         "id": f"github:{repo}",
         "display_name": display_name,
+        "agent_name": agent_name,
         "description": description,
         "github_repo": repo,
         "github_credential_id": GITHUB_PAT_CREDENTIAL_ID,

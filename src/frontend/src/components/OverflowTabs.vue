@@ -447,16 +447,21 @@ onUnmounted(() => {
         :aria-keyshortcuts="tab.ariaKeyshortcuts || undefined"
         @click="select(tab.id)"
         :class="[
-          'w-full px-4 py-2 text-left text-sm transition-colors flex items-center justify-between gap-2',
+          'w-full px-4 py-2 text-left text-sm transition-colors flex items-center gap-2',
           tab.closable ? CLOSE_PAD : '',
           modelValue === tab.id
             ? 'bg-action-primary-50 dark:bg-action-primary-900/30 text-action-primary-700 dark:text-action-primary-300 font-medium'
             : 'text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700'
         ]"
       >
-        <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
-        <svg v-if="tab.starred" class="w-3.5 h-3.5 mr-1 shrink-0" fill="currentColor" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true" data-tab-star><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M11.48 3.5a.56.56 0 011.04 0l2.13 4.82 5.24.53c.48.05.67.65.31.97l-3.94 3.5 1.12 5.16c.1.47-.4.84-.82.6L12 16.5l-4.56 2.58c-.42.24-.92-.13-.82-.6l1.12-5.16-3.94-3.5c-.36-.32-.17-.92.31-.97l5.24-.53 2.13-4.82z" /></svg>
-        <span :class="fixedWidth ? 'max-w-[20rem] truncate' : ''">{{ tab.label }}</span>
+        <!-- Glyphs and label are ONE leading group that takes the free space, so
+             the title sits beside its glyph and the trailing items keep the
+             right edge (#3737). -->
+        <span data-menu-lead class="flex min-w-0 flex-1 items-center">
+          <svg v-if="tab.pinned" class="w-3.5 h-3.5 mr-1 shrink-0 opacity-70" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+          <svg v-if="tab.starred" class="w-3.5 h-3.5 mr-1 shrink-0" fill="currentColor" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true" data-tab-star><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.8" d="M11.48 3.5a.56.56 0 011.04 0l2.13 4.82 5.24.53c.48.05.67.65.31.97l-3.94 3.5 1.12 5.16c.1.47-.4.84-.82.6L12 16.5l-4.56 2.58c-.42.24-.92-.13-.82-.6l1.12-5.16-3.94-3.5c-.36-.32-.17-.92.31-.97l5.24-.53 2.13-4.82z" /></svg>
+          <span :class="fixedWidth ? 'max-w-[20rem] truncate' : ''">{{ tab.label }}</span>
+        </span>
         <!-- Its own `v-if`, placed BEFORE the badge/signal pair below: that pair
              is a `v-if`/`v-else-if` chain, and an element inserted between its
              arms would silently repoint the `v-else-if` (#2794). -->

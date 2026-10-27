@@ -176,12 +176,20 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
 /**
  * #3232: how a chat_with_* call runs, which decides whether it can carry a parent.
  * `task-async` = parallel+async, `task-sync` = parallel sync, `pull` = the #946
- * pull-routed sequential call (always an async receipt), `chat` = sequential /chat.
+ * pull-routed sequential call (always an async receipt), `chat` = sequential
+ * /chat, which carries its parent to the backend only when the call ends in a
+ * receipt (#3295: `armChatReportBack`, after the fact — the body never has it).
  */
 export type ReportBackRoute = "task-async" | "task-sync" | "pull" | "chat";
 
-/** Why an opted-in call sends no parent, in precedence order. */
-export type ReportBackReason = "disabled" | "manual_session" | "invalid_execution_id" | "sequential_chat";
+/**
+ * Why a call reports nothing, in precedence order. The first three are decided
+ * before the call; the last two only on the sequential `/chat` route, from its
+ * outcome (#3295): `answered_inline` — the reply came back, so there is nothing
+ * to report later; `not_armed` — a receipt came back but the backend refused
+ * to attach the report (or the agent was busy and nothing ran).
+ */
+export type ReportBackReason = "disabled" | "manual_session" | "invalid_execution_id" | "answered_inline" | "not_armed";
 
 /** The fields a result gains when a parent is (or, for an opted-in call, cannot be) sent. */
 export interface ReportBackFields {
@@ -223,7 +231,8 @@ export interface ReportBackDecision {
  */
 export const EXECUTION_ID_PARAM_DESCRIPTION =
   "Report-back to the Slack, Telegram or Workspace conversation you are serving. It is on by default " +
-  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task): " +
+  "for async delegation (parallel=true, async=true, or a sequential call this platform routes as a task), " +
+  "and for a sequential call that comes back with a receipt instead of the reply: " +
   "when the delegated run ends, success or failure, it posts a note there, and runs it delegates onward may " +
   "post their own. An error from an async call, or from one you opted in, does not mean nothing will post: the run may have started. " +
   "Pass \"manual\" to turn it off for this call. For a sync " +
@@ -240,9 +249,29 @@ export const REPORT_BACK_DEFAULT_NOTE =
   "Report-back is on by default: when this run ends it posts its outcome into the Slack, Telegram or " +
   "Workspace conversation your turn is serving, if there is one and it allows such notes, possibly after " +
   "your reply; runs it delegates onward may post too. If you follow up yourself (or set a reminder to), add " +
-  "what is new; do not repeat the outcome. A repeat of an earlier identical request reports where that run " +
-  "was asked to; never re-send or reword this call to change that. To stop it on a later call, pass " +
-  "execution_id=\"manual\".";
+  "what is new; do not repeat the outcome. Repeating this exact call from this same turn replays this run " +
+  "instead of starting another; never re-send or reword this call to change that. To stop it on a later call, " +
+  "pass execution_id=\"manual\".";
+
+/**
+ * #3296: on a receipt the backend REPLAYED. Keys are scoped to the caller's
+ * turn, so a replay only answers a repeat from this same turn — the run it
+ * names was asked to report here. What it must not claim is a fresh request.
+ */
+export const REPORT_BACK_REPLAY_NOTE =
+  "This repeats an earlier identical call from this same turn (or an earlier attempt of this run): no new " +
+  "run was started, and the receipt names that earlier run. It reports into this conversation once when it " +
+  "ends, and may already have. Do not re-send this one.";
+
+/**
+ * #3296 review: a replay on the TYPED arm. The key does not carry a typed id
+ * (Invariant #18), so with no header turn two typed ids collapse onto one key,
+ * and the replayed run reports into the parent the FIRST call named.
+ */
+export const REPORT_BACK_TYPED_REPLAY_NOTE =
+  "This repeats an earlier identical call: no new run was started, and the receipt names that earlier " +
+  "run. It reports once, into the execution the earlier call named, which may not be the one you named " +
+  "now. Do not re-send this one.";
 
 /**
  * On `report_back: off` results of an opted-in call. Future-only, and never on a
@@ -257,9 +286,12 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
   invalid_execution_id:
     "The execution_id you passed is not an execution id, so nothing reports back. Next time pass your own " +
     "execution_id from your Execution Context. Do not re-send this one.",
-  sequential_chat:
-    "A sequential call that answers with the reply itself does not report back. For your next long " +
-    "delegation, use parallel=true, async=true. Do not re-send this one.",
+  answered_inline:
+    "This call answered with the reply itself, so nothing reports back later: you have the result. " +
+    "Do not re-send this one.",
+  not_armed:
+    "The platform could not attach a report to this run, so nothing reports back; read it with " +
+    "get_execution_result when you follow up. Do not re-send this one.",
 };
 
 /**
@@ -271,12 +303,18 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
  *   send the platform header turn when it names a real turn — the caller's turn
  *   ends with a receipt, so the child's note is usually the person's only news.
  *   A self-task with `inject_result` is excluded (it already named a destination).
- * - **Sync is opt-in**: a typed id arms it (the caller answers inline, so a default
- *   would double-post). A typed `manual` opts out everywhere.
+ * - **Sequential /chat defaults on too (#3295)**, under the same rule — but its
+ *   parent never travels in the `/chat` body. `runAgentChat` sends it through
+ *   `armChatReportBack` only when the call ends in a `queued_timeout` receipt,
+ *   so a call that answers inline is never armed and cannot double-post. The
+ *   `fields` here are what a RECEIPT carries; `chatRouteFields` picks the
+ *   result fields from the outcome.
+ * - **Sync parallel is opt-in**: a typed id arms it (the caller answers inline,
+ *   so a default would double-post). A typed `manual` opts out everywhere.
  * - **Header first**: the header turn wins over a typed id (resumed sessions copy
  *   stale ids) — `resolveExecutionId`, the house rule. A typed id is forwarded only
  *   if it passes the header's own format check; `manual` is never forwarded.
- * - Sequential /chat never carries one; `enabled=false` sends nothing anywhere.
+ * - `enabled=false` sends nothing anywhere.
  *
  * Decides only the body field and the result fields — never `callerTurn`, the
  * turn header forwarded to the backend, which the skill gate reads.
@@ -284,17 +322,17 @@ export const REPORT_BACK_OFF_NOTES: Record<ReportBackReason, string> = {
 export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
   const typed = input.typed?.trim() ?? "";
   const headerTurn = input.header && input.header !== MANUAL_EXECUTION_ID ? input.header : undefined;
-  const asyncRoute = input.route === "task-async" || input.route === "pull";
+  const defaultsOn = input.route === "task-async" || input.route === "pull" || input.route === "chat";
 
   let arm: ReportBackDecision["arm"];
   if (typed === MANUAL_EXECUTION_ID) arm = "opt_out";
   else if (typed !== "") arm = "typed";
-  else if (asyncRoute && headerTurn && !(input.isSelfTask && input.injectResult)) arm = "default";
+  else if (defaultsOn && headerTurn && !(input.isSelfTask && input.injectResult)) arm = "default";
   else arm = "none";
 
   const typedOk = arm === "typed" && isWellFormedExecutionId(typed);
   let parent: string | undefined;
-  if (input.enabled && input.route !== "chat") {
+  if (input.enabled) {
     if (arm === "default") {
       parent = headerTurn;
     } else if (arm === "typed") {
@@ -313,13 +351,14 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
     if (parent !== undefined) {
       fields = { report_back: "requested" };
     } else {
+      // No parent on a typed call has exactly these causes, in this order:
+      // the switch is off; the session has no execution; the typed id is not
+      // one and no header could stand in for it.
       const reason: ReportBackReason = !input.enabled
         ? "disabled"
         : input.header === MANUAL_EXECUTION_ID
           ? "manual_session"
-          : !typedOk && !headerTurn
-            ? "invalid_execution_id"
-            : "sequential_chat";
+          : "invalid_execution_id";
       fields = { report_back: "off", report_back_reason: reason, report_back_note: REPORT_BACK_OFF_NOTES[reason] };
     }
   }
@@ -347,12 +386,84 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
  */
 function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
   if (!fields) return result;
+  // #3296: a replayed receipt says it repeats an earlier run rather than
+  // reading as a fresh request. A typed-arm `requested` carries no note on a
+  // fresh run (the caller asked); on a replay it says where the report goes,
+  // since the replayed run reports into the parent the FIRST call named.
+  if (
+    fields.report_back === "requested" &&
+    (result as { idempotent_replay?: unknown }).idempotent_replay === true
+  ) {
+    const note = fields.report_back_note !== undefined ? REPORT_BACK_REPLAY_NOTE : REPORT_BACK_TYPED_REPLAY_NOTE;
+    return { ...result, ...fields, report_back_note: note };
+  }
   const status = (result as { status?: unknown }).status;
   if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy" || status === "rate_limited")) {
     const { report_back_note: _note, ...rest } = fields;
     return { ...result, ...rest };
   }
   return { ...result, ...fields };
+}
+
+/**
+ * #3296 review: the turn a delegation's idempotency key is scoped to — the
+ * retry chain's ORIGINAL execution when the caller's turn is a scheduler retry
+ * (the backend links each retry to it in `retry_of_execution_id`), else the
+ * turn itself. Read from the caller's own execution row; any failure to read
+ * it falls back to the turn (the #3296 behaviour: a retry then runs a second
+ * child rather than the call failing). No turn → undefined, so the key stays
+ * byte-identical to the pre-#3296 one.
+ */
+export async function delegationTurnScope(
+  apiClient: TrinityClient,
+  sourceAgent: string | undefined,
+  callerTurn: string | undefined,
+): Promise<string | undefined> {
+  if (!callerTurn || !sourceAgent) return callerTurn;
+  try {
+    const row = await apiClient.getExecution(sourceAgent, callerTurn);
+    const root = row?.retry_of_execution_id;
+    return typeof root === "string" && root.length > 0 ? root : callerTurn;
+  } catch (err) {
+    console.warn(
+      `[#3296] retry-chain lookup failed for ${sourceAgent}/${callerTurn}; scoping to the turn: ${String(err)}`,
+    );
+    return callerTurn;
+  }
+}
+
+/** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
+export type ChatOutcome = "inline" | "receipt" | "busy";
+
+/**
+ * #3295: the result fields for the sequential `/chat` route, from the decision
+ * AND the outcome. `armed` is `armChatReportBack`'s answer for a receipt:
+ * `true`/`undefined` (unknown — the backend may have processed it) keep the
+ * decision's `requested`; an explicit `false` says `off`/`not_armed`.
+ *
+ * - **inline**: the caller has the reply. Default-armed → no fields (today's
+ *   result, byte-identical); typed with a parent → `off`/`answered_inline`.
+ * - **receipt**: the decision's fields, unless the backend refused the arm.
+ * - **busy**: nothing ran. Default-armed → no fields; typed → `off`/`not_armed`.
+ *
+ * A typed call that resolved to no parent (`disabled`, `manual_session`,
+ * `invalid_execution_id`) keeps that reason whatever the outcome; opt-out and
+ * `none` carry nothing, as everywhere else.
+ */
+export function chatRouteFields(
+  decision: ReportBackDecision,
+  outcome: ChatOutcome,
+  armed?: boolean,
+): ReportBackFields | undefined {
+  const { arm, parentExecutionId: parent, fields } = decision;
+  if (!fields) return undefined;
+  if (fields.report_back === "off") return fields;
+  if (outcome === "receipt") {
+    return armed === false ? { report_back: "off", report_back_reason: "not_armed" } : fields;
+  }
+  if (arm === "default" || parent === undefined) return undefined;
+  const reason: ReportBackReason = outcome === "inline" ? "answered_inline" : "not_armed";
+  return { report_back: "off", report_back_reason: reason, report_back_note: REPORT_BACK_OFF_NOTES[reason] };
 }
 
 /**
@@ -479,6 +590,23 @@ export async function runAgentChat(
   // in-flight key is invalidated on deploy.
   const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
 
+  // #3296: the turn this delegation is made from is part of its identity. The
+  // same text from a LATER turn is a new delegation that must run and report
+  // into that turn; only a repeat from the same turn (a transport retry) may
+  // replay. The turn is the PLATFORM-stamped one (`callerTurn`, #2392), never
+  // the model-typed `execution_id`: Invariant #18 still holds — a re-send that
+  // only adds, drops or changes report-back (a typed id, `manual`) keeps its
+  // key, so it cannot run the work twice. Appended only when there is a turn,
+  // so a key without one is byte-identical to before and nothing in flight for
+  // user keys or manual sessions is invalidated.
+  //
+  // #3296 review: a scheduler retry is a NEW execution row
+  // (`retry_of_execution_id` → the chain's original), so scoping by the raw
+  // turn made every delegation of a retried scheduled run run a second child.
+  // The scope is the retry chain's original execution, as the backend
+  // records it; attempt 1 and its retries share one key and replay.
+  const turnScope = await delegationTurnScope(apiClient, sourceAgent, callerTurn);
+
   // RELIABILITY-006 (#525): deterministic key so a transport retry of this
   // exact call dedupes at the backend.
   const idempotencyKey = deriveMcpIdempotencyKey([
@@ -488,6 +616,7 @@ export async function runAgentChat(
     model,
     asyncMode ? "async" : "sync",
     message,
+    ...(turnScope ? [`turn:${turnScope}`] : []),
   ]);
 
   // Use parallel task mode or sequential chat mode based on parameter
@@ -571,14 +700,32 @@ export async function runAgentChat(
   // Surface the structured receipt so the caller polls rather than retries.
   if ('status' in response && response.status === 'queued_timeout') {
     console.log(`[Chat Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#914)`);
-    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+    // #3295: the caller is NOT getting the reply, so this is the moment the
+    // run is asked to report into the caller's conversation when it ends. The
+    // backend inherits the destination through the same provenance guard a
+    // /task child uses; a refusal reads as `off`/`not_armed`, an unanswered arm
+    // as `requested` (it may well have landed).
+    let armed: boolean | undefined;
+    if (reportBack.parentExecutionId) {
+      armed = await apiClient.armChatReportBack(
+        agent_name, response.execution_id, reportBack.parentExecutionId, sourceAgent,
+      );
+      console.log(
+        `[Report-Back #3295] ${sourceAgent || authContext?.userId || "unknown"} -> ${agent_name} ` +
+        `execution_id=${response.execution_id} parent=${reportBack.parentExecutionId} ` +
+        `armed=${armed === undefined ? "unknown" : armed}`,
+      );
+    }
+    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), null, 2);
   }
 
   // #3244: a 429 that is not the admission refusal — the run may have started
   // (or ran and failed). A result the model reads, never "wait and retry".
+  // #3295: the caller holds this outcome and the row was never armed, so it
+  // reads as answered inline, never `requested`.
   if (isRateLimitedRun(response)) {
     console.log(`[Rate Limited] Agent '${agent_name}' answered 429 after dispatch, execution_id=${response.execution_id ?? "unknown"} (#3244)`);
-    return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
@@ -593,10 +740,10 @@ export async function runAgentChat(
         `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
         `Consider using parallel=true for independent tasks.`,
       details: response.details,
-    }, reportBack.fields), null, 2);
+    }, chatRouteFields(reportBack, "busy")), null, 2);
   }
 
-  return JSON.stringify(withReportBack(response, reportBack.fields), null, 2);
+  return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
 }
 
 /**

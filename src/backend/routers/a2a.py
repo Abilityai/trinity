@@ -42,8 +42,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
 
 from database import db
-from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
-from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
+from db.write_params import TaskExecutionFields
+from dependencies import AuthorizedAgentByName, assert_own_agent, get_current_user, get_user_or_anonymous, agent_may_reach
+from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, TaskExecutionStatus, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
@@ -53,6 +54,7 @@ from services import (
     idempotency_service,
     paid_turn_service,
     rate_limiter,
+    settings_service,
 )
 from services.a2a_card_service import generate_a2a_card, with_payment_extension
 from services.aauth import config as aauth_config
@@ -76,6 +78,7 @@ from services.platform_prompt_service import build_public_channel_caller_prompt
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
+    _close_unclaimed_turn,
     dispatch_and_await_terminal,
     get_task_execution_service,
     terminate_execution_on_agent,
@@ -436,6 +439,37 @@ def _exec_field(row: Any, name: str) -> Any:
     return getattr(row, name, None)
 
 
+def _bearer_started_by(row: Any, current_user: Optional[User]) -> bool:
+    """Did THIS bearer credential start this task through A2A? (#3751)
+
+    The bearer twin of AAuth's `execution_owned_by` and the payer binding: a
+    task handle answers only for the credential that sent it. All three must
+    match what `_mint_a2a_execution` / `_run_a2a_task` stamped:
+
+    * `triggered_by == "a2a"` — the same person's UI chat, `/task` or MCP
+      `chat_with_agent` rows on this agent are not A2A tasks, and `tasks/cancel`
+      must never reach them;
+    * `source_user_id` — set, and the caller's (AAuth and paid rows carry none);
+    * `source_mcp_key_id` — the caller's key, or None on both sides for a
+      signed-in person. The key, not the user, is the identity: every agent key
+      of one owner resolves to that owner's user id and role, so the user id
+      alone would let a sibling agent poll another agent's task. A re-minted key
+      therefore loses its in-flight tasks, as it loses its `messageId`
+      namespace (`_a2a_idem_scope`, which keys on the same credential).
+
+    No owner/admin override: an agent key carries its owner's role. Who may see
+    every run of an agent is the execution REST surface's question, not the
+    A2A task handle's."""
+    if current_user is None or _exec_field(row, "triggered_by") != "a2a":
+        return False
+    started_by = _exec_field(row, "source_user_id")
+    return (
+        started_by is not None
+        and started_by == getattr(current_user, "id", None)
+        and _exec_field(row, "source_mcp_key_id") == getattr(current_user, "mcp_key_id", None)
+    )
+
+
 def _text_from_message(message: Dict[str, Any]) -> str:
     """Concatenate the text parts of an A2A message (v0.3 part kind='text')."""
     parts = message.get("parts") if isinstance(message, dict) else None
@@ -511,6 +545,140 @@ def _a2a_state_for(status: str) -> str:
     not be told the task errored.
     """
     return {"success": "completed", "cancelled": "canceled"}.get(status, "failed")
+
+
+# #3749: how long `message/send` holds the HTTP request for the turn before
+# answering a `working` Task the caller polls with `tasks/get`. Two ceilings
+# bound it, and it must sit strictly under both:
+#   1. the bundled outbound client's per-request `A2A_RPC_TIMEOUT` (30 s,
+#      services/a2a_client.py) — the caller must have the Task in hand, TLS,
+#      proxy hop and JSON included, before its own read timeout fires;
+#   2. the MCP `call_a2a_agent` tool's 40 s outer limit (`MCP_A2A_TIMEOUT_MS`),
+#      which also has to fit a cold card fetch (`A2A_CARD_FETCH_TIMEOUT`, 10 s)
+#      in front of the send.
+# 25 s leaves 5 s of head-room at each layer. Not settings-backed, for the same
+# reason the client caps are constants (§32.5 FR-9); `test_3749` pins both
+# inequalities so the three numbers cannot drift apart silently.
+A2A_SEND_WORKING_AFTER_SECONDS = 25.0
+
+#: Strong references to detached `message/send` turns (#1968: a bare
+#: `create_task` is a weak ref the loop may collect mid-turn). A turn joins the
+#: set when it is created and leaves it through its done-callback.
+_INFLIGHT_SENDS: set = set()
+
+#: Trinity execution status → A2A task state, for a Task built FROM THE ROW
+#: (`tasks/get`, the early `working` answer, the replay-while-running branch).
+#: `skipped` is a gate-refused or held row (#3749, P4 finding): without its own
+#: entry it fell through to `working` and a refused task polled as "still
+#: running" forever. `pending_retry` and anything unknown stay `working`.
+_ROW_STATE = {
+    "success": "completed", "failed": "failed", "cancelled": "canceled",
+    "running": "working", "queued": "submitted", "skipped": "rejected",
+}
+
+#: Row statuses `tasks/cancel` treats as terminal — exactly the ones `_ROW_STATE`
+#: maps to a terminal A2A state, so a task that polls `rejected` is not
+#: cancelable either (#3749, review I3).
+_TERMINAL_ROW_STATUSES = ("success", "failed", "cancelled", "skipped")
+
+
+def _task_from_row(exec_id: str, row: Any) -> Dict[str, Any]:
+    """The A2A Task an execution row reads as, through the full status map.
+
+    `row` may be `None` for a row this process minted an instant ago that a
+    read-replica or a test double does not surface yet — the honest state is
+    then `working`, which is what the row was created as (RUNNING).
+    """
+    status = _exec_field(row, "status") if row is not None else "running"
+    a2a_state = _ROW_STATE.get(status, "working")
+    return _task_object(
+        exec_id, a2a_state,
+        text=_exec_field(row, "response") if a2a_state == "completed" else None,
+        error=_exec_field(row, "error") if a2a_state in ("failed", "rejected") else None,
+    )
+
+
+def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User],
+                        *, model: Optional[str] = None,
+                        aauth_identity: Optional[str] = None) -> str:
+    """Create the execution row BEFORE dispatch, so the router holds the id while
+    the turn runs (#3749). `execute_task(execution_id=...)` then skips its own row
+    creation — the pre-created-row contract `/chat` has used since #96.
+
+    `model_used` is resolved here because `execute_task` stamps it only on rows
+    it creates itself; `subscription_id` is best-effort for the same reason the
+    `/chat` precreate's is. A failure to create the row raises — the caller
+    releases its idempotency claim and answers an error, never falls back to an
+    un-minted dispatch that would hand the caller a Task with no pollable id.
+    A settings read failure raises too, before the row exists: `execute_task`
+    resolves the same default for a `None` model and would fail the turn a
+    moment later, leaving a RUNNING row with no terminal writer.
+    """
+    if model is None:
+        model = settings_service.get_platform_default_model()
+    try:
+        subscription_id = db.get_agent_subscription_id(agent_name)
+    except Exception:  # noqa: BLE001
+        subscription_id = None
+    execution = db.create_task_execution(
+        agent_name=agent_name,
+        message=text,
+        triggered_by="a2a",
+        fields=TaskExecutionFields(
+            source_user_id=getattr(current_user, "id", None),
+            source_user_email=getattr(current_user, "email", None),
+            source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+            source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
+            model_used=model,
+            subscription_id=subscription_id,
+            # ent#862: the AAuth peer identity that triggered this execution.
+            a2a_caller_identity=aauth_identity,
+        ),
+    )
+    if execution is None or not getattr(execution, "id", None):
+        raise RuntimeError("execution row was not created")
+    return execution.id
+
+
+def _send_blocking(params: Dict[str, Any]) -> Optional[bool]:
+    """`params.configuration.blocking` (A2A v0.3 `MessageSendConfiguration`).
+
+    `True` → hold the request for the whole turn, as before #3749; `False` →
+    answer as soon as the row is minted; absent/non-bool (what the bundled
+    client sends) → the `A2A_SEND_WORKING_AFTER_SECONDS` budget.
+    """
+    configuration = params.get("configuration")
+    if not isinstance(configuration, dict):
+        return None
+    blocking = configuration.get("blocking")
+    return blocking if isinstance(blocking, bool) else None
+
+
+async def _hold_turn(turn: "asyncio.Task", blocking: Optional[bool]) -> bool:
+    """Wait for a detached turn under the `blocking` rule; True when it finished.
+
+    `asyncio.wait` never cancels `turn` (unlike `wait_for`) — a caller that walks
+    away at its own read timeout no longer kills the agent's turn (L831).
+    """
+    if blocking is True:
+        await asyncio.wait({turn})
+        return True
+    timeout = 0 if blocking is False else A2A_SEND_WORKING_AFTER_SECONDS
+    done, _ = await asyncio.wait({turn}, timeout=timeout)
+    return bool(done)
+
+
+def _detach_turn(coro, execution_id: Optional[str], agent_name: str) -> "asyncio.Task":
+    """`execution_id` is `None` on the paid door, whose id is minted inside the
+    turn — the log line then names the agent only."""
+    turn = asyncio.create_task(coro)
+    _INFLIGHT_SENDS.add(turn)
+    turn.add_done_callback(_INFLIGHT_SENDS.discard)
+    label = f"{execution_id} " if execution_id else ""
+    turn.add_done_callback(
+        lambda t: logger.info("a2a: detached turn %sfor %s finished", label, agent_name)
+        if not t.cancelled() else None)
+    return turn
 
 
 def _a2a_idem_scope(agent_name: str, current_user: Optional[User],
@@ -637,8 +805,12 @@ def _authorize_inbound(current_user: User, agent_name: str) -> None:
         raise HTTPException(status_code=403, detail="Caller not on the agent's A2A inbound allow-list")
 
 
-async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]):
+async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User],
+                        *, execution_id: Optional[str] = None):
     """Bridge one inbound A2A message into the Trinity execution stack.
+
+    `execution_id` (#3749) is the row `_mint_a2a_execution` created before the
+    dispatch; `execute_task` runs on that row instead of creating its own.
 
     #2524: goes through `dispatch_and_await_terminal`, not `execute_task`
     directly. Both callers below consume `result.status` / `result.response` to
@@ -658,6 +830,7 @@ async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]
         source_user_id=getattr(current_user, "id", None),
         source_user_email=getattr(current_user, "email", None),
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
+        execution_id=execution_id,
     )
 
 
@@ -666,8 +839,33 @@ async def _run_a2a_task(agent_name: str, text: str, current_user: Optional[User]
 # ===========================================================================
 
 
-async def _run_a2a_paid_execution(agent_name: str, text: str):
+class _TurnHandle:
+    """What a paid turn hands back to the request while it runs (#3749).
+
+    `minted` resolves to the execution id the moment the row exists — which on
+    the paid path is only AFTER verify, dedup and the allow-list have passed
+    (an unverified stranger must never leave a RUNNING row behind) — or to
+    `None` when the mint failed, so a waiter is never left hanging. `payer` is
+    set by the gate's `on_verified` hook once the allow-list admitted the
+    wallet, so a refused payer is never bound to a task.
+    """
+
+    def __init__(self) -> None:
+        self.minted: "asyncio.Future[Optional[str]]" = asyncio.get_running_loop().create_future()
+        self.payer: Optional[str] = None
+
+    def resolve(self, execution_id: Optional[str]) -> None:
+        if not self.minted.done():
+            self.minted.set_result(execution_id)
+
+
+async def _run_a2a_paid_execution(agent_name: str, text: str,
+                                  handle: Optional[_TurnHandle] = None):
     """The execution bridge for a PAYING caller: no Trinity principal.
+
+    #3749: the row is minted HERE — inside `run_paid_turn`'s `execute()`, after
+    verify, dedup and the allow-list — and its id travels back to the request
+    through `handle.minted`, so the `working` answer can name it.
 
     `source_user_*` are all None — there is no Trinity identity to attribute
     this to, and inventing one would put a stranger's turn on a real user's
@@ -684,6 +882,15 @@ async def _run_a2a_paid_execution(agent_name: str, text: str):
     the same reason it applies them: a paying stranger is a public caller, not
     a tenant (#1205 caller prompt, #894 per-agent model override).
     """
+    model = db.get_public_channel_model(agent_name)
+    try:
+        execution_id = _mint_a2a_execution(agent_name, text, None, model=model)
+    except Exception:
+        if handle is not None:
+            handle.resolve(None)
+        raise
+    if handle is not None:
+        handle.resolve(execution_id)
     return await dispatch_and_await_terminal(
         agent_name=agent_name,
         message=text,
@@ -692,7 +899,8 @@ async def _run_a2a_paid_execution(agent_name: str, text: str):
         source_user_email=None,
         source_mcp_key_id=None,
         system_prompt=build_public_channel_caller_prompt(agent_name),
-        model=db.get_public_channel_model(agent_name),
+        model=model,
+        execution_id=execution_id,
     )
 
 
@@ -735,13 +943,13 @@ async def _payer_for_task(
     for as long as the settle ran (three 30-second attempts), and for good when
     a concurrent settle wrote no row of its own (`settle_in_progress`).
 
-    NOT bound mid-turn, stated: `execute()` is `dispatch_and_await_terminal`,
-    which returns at the terminal on push and pull alike, so the execution id
-    does not exist in `run_paid_turn` while the turn is running. A poll during
-    the turn reads as not-found, and a payer's `tasks/cancel` can only answer
-    "already in a terminal state" — the paying caller holds no task id until
-    the turn ends anyway. Binding earlier needs the execution id minted before
-    dispatch; that is a change to the dispatch contract, not to this function.
+    Bound MID-TURN too, since #3749: the execution row is minted inside
+    `execute()` before the dispatch, and when the turn outlives the
+    `message/send` budget the router writes a `verify` row carrying the id for
+    the admitted payer BEFORE it answers `working`. The payer can therefore
+    `tasks/get` the turn while it runs — and `tasks/cancel` it: a cancelled
+    paid turn is never settled (no charge) and delivers no answer, the same
+    contract the bearer door has had since ent#157.
 
     Residual, stated: a consumer that timed out never received the task id in
     the first place, so polling is only available to a client that HAS one. The
@@ -850,6 +1058,7 @@ async def _anonymous_jsonrpc(agent_name: str, request: Request):
             )
         return await _send_paid_task(
             agent_name, text, priced, access_token, base_url, rpc_id, caller_ip, request,
+            blocking=_send_blocking(params),
         )
 
     if method in ("tasks/get", "tasks/cancel"):
@@ -950,10 +1159,15 @@ def _paid_outcome_refusal(outcome, rpc_id: Any):
     return _rpc_error(rpc_id, refusal.code, refusal.message, data=refusal.data)
 
 
-async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
-                          base_url: str, rpc_id: Any, caller_ip: Optional[str],
-                          request: Request):
-    """`message/send` on the payment path: verify → dedup → execute → settle → Task."""
+async def _finish_paid_send(agent_name: str, text: str, priced, access_token: str,
+                            base_url: str, rpc_id: Any, caller_ip: Optional[str],
+                            endpoint_path: str, handle: _TurnHandle):
+    """The whole paid turn: verify → dedup → execute → settle → Task → audit.
+
+    Runs as a detached task (#3749) so the request can answer `working` while
+    it continues; takes `endpoint_path`/`caller_ip` as values, never the
+    `Request`, because the response may be long gone when the tail runs.
+    """
     try:
         outcome = await a2a_payment_gate.run_a2a_paid_turn(
             agent_name=agent_name,
@@ -961,14 +1175,21 @@ async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
             access_token=access_token,
             text=text,
             base_url=base_url,
-            execute=lambda: _run_a2a_paid_execution(agent_name, text),
+            execute=lambda: _run_a2a_paid_execution(agent_name, text, handle),
             payment_service=get_nevermined_payment_service(),
             idem=idempotency_service,
             db=db,
+            on_verified=lambda verify: setattr(handle, "payer", verify.payer),
         )
+    except asyncio.CancelledError:
+        handle.resolve(None)
+        raise
     except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
+        handle.resolve(None)
         logger.warning("a2a paid message/send failed for %s: %s", agent_name, exc)
         return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+    # A refusal or replay never reached `execute()` — release any waiter.
+    handle.resolve(None)
 
     refusal = _paid_outcome_refusal(outcome, rpc_id)
     if refusal is not None:
@@ -981,7 +1202,7 @@ async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
         # The payer wallet is the identity, and it goes in the details (T4).
         actor_user=None, actor_ip=caller_ip,
         target_type="agent", target_id=agent_name,
-        endpoint=request.scope["path"],
+        endpoint=endpoint_path,
         details={
             "execution_id": outcome.execution_id,
             "state": (task or {}).get("status", {}).get("state"),
@@ -993,6 +1214,51 @@ async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
     return JSONResponse(
         {"jsonrpc": "2.0", "id": rpc_id, "result": task}, headers=headers,
     )
+
+
+async def _send_paid_task(agent_name: str, text: str, priced, access_token: str,
+                          base_url: str, rpc_id: Any, caller_ip: Optional[str],
+                          request: Request, blocking: Optional[bool] = None):
+    """`message/send` on the payment path: verify → dedup → execute → settle → Task.
+
+    #3749: the turn runs detached and the request holds it for
+    `A2A_SEND_WORKING_AFTER_SECONDS` (or as `configuration.blocking` says). A
+    turn that outlives the budget is answered `working` with its execution id
+    — but only once the id EXISTS: verify and the allow-list run before the
+    mint and the facilitator's latency is unbounded, so at the deadline with no
+    id yet the request waits for whichever comes first, the mint or the
+    terminal, and never hands out a handle to nothing. Before the early answer
+    the admitted payer is bound to the row (a `verify` row carrying the id, the
+    same row `run_paid_turn` writes at the terminal) so `tasks/get` with the
+    token finds the task mid-turn. A paid re-send while the turn runs keeps the
+    `IN_FLIGHT` refusal from the shared orchestrator — the payer holds the id
+    and polls.
+    """
+    handle = _TurnHandle()
+    turn = _detach_turn(
+        _finish_paid_send(agent_name, text, priced, access_token, base_url, rpc_id,
+                          caller_ip, request.scope["path"], handle),
+        None, agent_name,
+    )
+    if await _hold_turn(turn, blocking):
+        return turn.result()
+    if not handle.minted.done():
+        await asyncio.wait({turn, handle.minted}, return_when=asyncio.FIRST_COMPLETED)
+        if turn.done():
+            return turn.result()
+    exec_id = handle.minted.result()
+    if exec_id is None:
+        # The mint failed or never ran (refused / replayed) — the tail's own
+        # answer is the only honest one.
+        await asyncio.wait({turn})
+        return turn.result()
+    if handle.payer:
+        db.log_nevermined_payment(
+            agent_name=agent_name, action="verify", success=True,
+            subscriber_address=handle.payer, execution_id=exec_id,
+        )
+    logger.info("a2a: paid message/send for %s answers working for %s", agent_name, exec_id)
+    return _rpc_result(rpc_id, _task_from_row(exec_id, db.get_execution(exec_id)))
 
 
 async def _stream_paid_task(agent_name: str, text: str, priced, access_token: str,
@@ -1094,22 +1360,18 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     status = _exec_field(row, "status")
 
     if method == "tasks/get":
-        a2a_state = {
-            "success": "completed", "failed": "failed", "cancelled": "canceled",
-            "running": "working", "queued": "submitted",
-        }.get(status, "working")
-        return _rpc_result(rpc_id, _task_object(
-            exec_id, a2a_state,
-            text=_exec_field(row, "response") if a2a_state == "completed" else None,
-            error=_exec_field(row, "error") if a2a_state == "failed" else None,
-        ))
+        return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
-    if status in ("success", "failed", "cancelled"):
+    if status in _TERMINAL_ROW_STATUSES:
         return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                           "Task is already in a terminal state")
     if status == "queued":
         cancelled = bool(db.cancel_queued_execution(
             exec_id, reason="Cancelled by A2A caller"))
+        if cancelled:
+            # #3651: the cancel CAS winner owes the #1804 close + terminal event.
+            _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                  "Cancelled by A2A caller")
     else:
         cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
     if not cancelled:
@@ -1306,6 +1568,63 @@ def _audit_actor(current_user: Optional[User], aauth) -> Dict[str, Any]:
     return {"actor_user": current_user}
 
 
+async def _finish_send(agent_name: str, text: str, current_user: Optional[User],
+                       aauth, rpc_id: Any, decision, caller_ip: Optional[str],
+                       endpoint_path: str, execution_id: str) -> JSONResponse:
+    """Run one `message/send` turn to its terminal and build the answer.
+
+    This is the pre-#3749 dispatch tail, moved verbatim into one coroutine so
+    the request can detach it: the terminal Task, the idempotency snapshot (the
+    claim is completed exactly once, here, never with a `working` Task), the
+    AAuth ownership + activity, and the single `a2a_task` audit row. Takes
+    `endpoint_path`/`caller_ip` as values because the response may already be
+    sent when this runs. A loop-shutdown `CancelledError` re-raises WITHOUT
+    `fail()`: the container may still be running the turn and the row is the
+    authority a replay answers from.
+    """
+    try:
+        result = await _run_a2a_task(agent_name, text, current_user, execution_id=execution_id)
+    except asyncio.CancelledError:
+        logger.warning("a2a: detached turn %s for %s cancelled with the loop", execution_id, agent_name)
+        raise
+    except SkillGateError as exc:
+        task = _gate_task(exc)
+        if isinstance(exc, SkillApprovalRequired):
+            idempotency_service.complete(decision, exc.request_id, task)
+        else:
+            idempotency_service.fail(decision)
+        return _rpc_result(rpc_id, task)
+    except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
+        idempotency_service.fail(decision)
+        logger.warning("a2a message/send failed for %s: %s", agent_name, exc)
+        return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+
+    state = _a2a_state_for(result.status)
+    task = _task_object(
+        result.execution_id, state,
+        text=result.response if state == "completed" else None,
+        error=result.error if state == "failed" else None,
+    )
+    idempotency_service.complete(decision, result.execution_id, task)
+    details = {"execution_id": result.execution_id, "state": state}
+    if aauth is not None:
+        aauth_inbound.remember_execution(result.execution_id, aauth.identity)
+        details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
+        await aauth_inbound.record_activity(
+            agent_name, aauth, allowlist="allowed",
+            execution_id=result.execution_id, state=state,
+            error=None if state == "completed" else f"task {state}",
+        )
+    await platform_audit_service.log(
+        event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
+        **_audit_actor(current_user, aauth), actor_ip=caller_ip,
+        target_type="agent", target_id=agent_name,
+        endpoint=endpoint_path,
+        details=details,
+    )
+    return _rpc_result(rpc_id, task)
+
+
 async def _dispatch_jsonrpc(
     agent_name: str,
     request: Request,
@@ -1348,6 +1667,17 @@ async def _dispatch_jsonrpc(
                 return _replay_stream(rpc_id, decision.snapshot)
             return _rpc_result(rpc_id, decision.snapshot)
         if decision.in_flight:
+            # #3749: a claim that names its row (attached at mint time) is
+            # answered FROM THE ROW — `working`/`submitted` while it runs, the
+            # terminal Task once the row finished (even before the tail
+            # completed the claim, or after a restart mid-turn). The scope
+            # carries the caller principal, so the attached id can only be the
+            # caller's own; the agent check is the `tasks/get` guard. A claim
+            # with no id (a duplicate that raced the mint) keeps today's answer.
+            if method == "message/send" and decision.execution_id:
+                row = db.get_execution(decision.execution_id)
+                if row and _exec_field(row, "agent_name") == agent_name:
+                    return _rpc_result(rpc_id, _task_from_row(decision.execution_id, row))
             return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR,
                               "A task for this messageId is already in progress", data={"retryable": True})
 
@@ -1359,44 +1689,34 @@ async def _dispatch_jsonrpc(
                                   "message/stream is not supported for AAuth callers; use message/send")
             return await _stream_task(agent_name, text, current_user, rpc_id, decision, caller_ip)
 
+        # #3749: mint the row first so the request holds the id while the turn
+        # runs; the claim names it at once (a concurrent duplicate inside the
+        # budget then gets a pollable `working` instead of "retry").
         try:
-            result = await _run_a2a_task(agent_name, text, current_user)
-        except SkillGateError as exc:
-            task = _gate_task(exc)
-            if isinstance(exc, SkillApprovalRequired):
-                idempotency_service.complete(decision, exc.request_id, task)
-            else:
-                idempotency_service.fail(decision)
-            return _rpc_result(rpc_id, task)
-        except Exception as exc:  # noqa: BLE001 — never 5xx; A2A wants a JSON-RPC error
-            idempotency_service.fail(decision)
-            logger.warning("a2a message/send failed for %s: %s", agent_name, exc)
-            return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
-
-        state = _a2a_state_for(result.status)
-        task = _task_object(
-            result.execution_id, state,
-            text=result.response if state == "completed" else None,
-            error=result.error if state == "failed" else None,
-        )
-        idempotency_service.complete(decision, result.execution_id, task)
-        details = {"execution_id": result.execution_id, "state": state}
-        if aauth is not None:
-            aauth_inbound.remember_execution(result.execution_id, aauth.identity)
-            details.update(aauth_inbound.audit_details(aauth, allowlist="allowed"))
-            await aauth_inbound.record_activity(
-                agent_name, aauth, allowlist="allowed",
-                execution_id=result.execution_id, state=state,
-                error=None if state == "completed" else f"task {state}",
+            exec_id = _mint_a2a_execution(
+                agent_name, text, current_user,
+                aauth_identity=getattr(aauth, "identity", None),
             )
-        await platform_audit_service.log(
-            event_type=AuditEventType.EXECUTION, event_action="a2a_task", source="a2a",
-            **_audit_actor(current_user, aauth), actor_ip=caller_ip,
-            target_type="agent", target_id=agent_name,
-            endpoint=request.scope["path"],
-            details=details,
+        except Exception as exc:  # noqa: BLE001
+            idempotency_service.fail(decision)
+            logger.warning("a2a message/send could not mint a row for %s: %s", agent_name, exc)
+            return _rpc_error(rpc_id, _RPC_INTERNAL_ERROR, "Task execution failed")
+        idempotency_service.attach_execution(decision, exec_id)
+
+        turn = _detach_turn(
+            _finish_send(agent_name, text, current_user, aauth, rpc_id, decision,
+                         caller_ip, request.scope["path"], exec_id),
+            exec_id, agent_name,
         )
-        return _rpc_result(rpc_id, task)
+        if await _hold_turn(turn, _send_blocking(params)):
+            return turn.result()
+        if aauth is not None and not aauth_inbound.remember_execution(exec_id, aauth.identity):
+            # The id would 404 on the caller's `tasks/get` — keep holding
+            # instead of disclosing a handle that cannot be used.
+            await asyncio.wait({turn})
+            return turn.result()
+        logger.info("a2a: message/send for %s answers working for %s", agent_name, exec_id)
+        return _rpc_result(rpc_id, _task_from_row(exec_id, db.get_execution(exec_id)))
 
     # ---- tasks/get --------------------------------------------------------
     if method == "tasks/get":
@@ -1410,16 +1730,11 @@ async def _dispatch_jsonrpc(
         # read via _exec_field so both the model and a dict work.
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
-        status = _exec_field(row, "status")
-        a2a_state = {
-            "success": "completed", "failed": "failed", "cancelled": "canceled",
-            "running": "working", "queued": "submitted",
-        }.get(status, "working")
-        return _rpc_result(rpc_id, _task_object(
-            exec_id, a2a_state,
-            text=_exec_field(row, "response") if a2a_state == "completed" else None,
-            error=_exec_field(row, "error") if a2a_state == "failed" else None,
-        ))
+        # #3751: a bearer caller reads only a task it started; anyone else gets
+        # the unknown-id answer, byte for byte (no existence oracle).
+        if aauth is None and not _bearer_started_by(row, current_user):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
     # ---- tasks/cancel -----------------------------------------------------
     if method == "tasks/cancel":
@@ -1431,12 +1746,15 @@ async def _dispatch_jsonrpc(
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: and cancels only its own, before anything is signalled.
+        if aauth is None and not _bearer_started_by(row, current_user):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
         # task is still queued means it drains minutes later, runs, bills, and
         # performs side effects the caller believed were cancelled.
         status = _exec_field(row, "status")
-        if status in ("success", "failed", "cancelled"):
+        if status in _TERMINAL_ROW_STATUSES:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_CANCELABLE,
                               "Task is already in a terminal state")
 
@@ -1446,6 +1764,10 @@ async def _dispatch_jsonrpc(
             # CAS inside cancel_queued_execution is what makes a lost race honest.
             cancelled = bool(db.cancel_queued_execution(
                 exec_id, reason="Cancelled by A2A caller"))
+            if cancelled:
+                # #3651: same close + terminal event as _bound_task_rpc.
+                _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                      "Cancelled by A2A caller")
         else:
             cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
 
@@ -1600,33 +1922,25 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
-def _assert_outbound_self(current_user: User, agent_name: str) -> None:
-    """An agent-scoped key may place outbound calls only AS ITSELF.
-
-    `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
-    access, so without this a permitted sibling could place calls under a
-    neighbour's name.
-
-    Be precise about what that buys, because the obvious reading is wrong under
-    the shipped OSS provider: endpoints there are **platform-scope**, so there
-    is no "own" versus "neighbour" credential — every agent may name every
-    registered endpoint. What this check protects is **attribution**: the
-    rate-limit key, the audit row and the `agent_activities` row all name the
-    agent that actually spent the call, so a sibling cannot launder its egress
-    through a neighbour. It also holds the line for a future per-agent provider,
-    where the obvious reading becomes the literal one — which is why it is here
-    now rather than added later, after the surface has callers.
-
-    `reject_agent_principal` is deliberately NOT used. This is a *use* of a
-    capability an admin already granted by registering the endpoint, not a
-    *grant* of one (the Invariant #8 line) — refusing agent principals here
-    would make the feature unreachable by the only callers it exists for.
-    """
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="An agent may only place outbound A2A calls as itself",
-        )
+# An agent-scoped key may place outbound calls only AS ITSELF: both routes call
+# `assert_own_agent` as their first statement (trinity-enterprise#840).
+#
+# `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
+# access, so without this a permitted sibling could place calls under a
+# neighbour's name. Be precise about what that buys, because the obvious reading
+# is wrong under the shipped OSS provider: endpoints there are **platform-scope**,
+# so there is no "own" versus "neighbour" credential — every agent may name every
+# registered endpoint. What this check protects is **attribution**: the
+# rate-limit key, the audit row and the `agent_activities` row all name the agent
+# that actually spent the call, so a sibling cannot launder its egress through a
+# neighbour. It also holds the line for a future per-agent provider, where the
+# obvious reading becomes the literal one.
+#
+# `reject_agent_principal` is deliberately NOT used. This is a *use* of a
+# capability an admin already granted by registering the endpoint, not a *grant*
+# of one (the Invariant #8 line) — refusing agent principals here would make the
+# feature unreachable by the only callers it exists for.
+_OWN_OUTBOUND = "An agent may only place outbound A2A calls as itself"
 
 
 def _require_outbound_enabled() -> None:
@@ -1635,6 +1949,13 @@ def _require_outbound_enabled() -> None:
     404, not 403: "this capability is not present" is answered with a 404
     everywhere else in Trinity, and it keeps a disabled deployment from
     advertising a surface it will not serve.
+
+    A DEPENDENCY, declared after the access dependency and the principal, so it
+    runs before the body is validated: with the switch off a body that fails
+    schema validation, or none, answers the same 404 as a good one (the
+    `aauth_person.require_live` shape), and the handler's first statement can be
+    the self-gate. JSON that does not parse is still a 422: FastAPI decodes the
+    body before it solves dependencies.
     """
     if not a2a_outbound_service.is_outbound_enabled():
         raise HTTPException(status_code=404, detail="Not found")
@@ -1646,6 +1967,7 @@ async def call_a2a_agent(
     body: A2ACallRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Task an external A2A agent from `agent_name` and return its answer (#736).
 
@@ -1665,8 +1987,7 @@ async def call_a2a_agent(
       agent running untrusted work is the last principal that should be able to
       spend a stored credential.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.call_agent(
@@ -1736,6 +2057,7 @@ async def get_a2a_task(
     body: A2ATaskRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Poll a remote A2A task by id on a registered endpoint (#736).
 
@@ -1747,8 +2069,7 @@ async def get_a2a_task(
     would answer "has it finished yet?" from a cached snapshot of the last time
     it had not.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.poll_task(

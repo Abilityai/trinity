@@ -321,6 +321,10 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # #3872: a persisted git config exists (the repo is bound) — set by the
+    # detail endpoint only; the header reserves its GitHub row on it at first
+    # paint. None = not resolved (the list path never reads it).
+    git_configured: Optional[bool] = None
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
@@ -496,6 +500,9 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -535,6 +542,16 @@ class ChatMessageRequest(BaseModel):
     """Request model for chat messages."""
     message: str
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
+
+
+class ReportBackRequest(BaseModel):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation. Sent by the MCP server when a sequential call
+    ends in a receipt instead of the reply, naming the CALLER's own turn; the
+    row inherits that turn's channel context through the same provenance
+    guard a ``/task`` child uses (``_inherited_channel_context``)."""
+    model_config = ConfigDict(extra="forbid")
+    parent_execution_id: str = Field(min_length=1, max_length=128)
 
 
 class ModelChangeRequest(BaseModel):
@@ -1521,10 +1538,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)
@@ -2985,7 +2998,7 @@ class CanaryStatusResponse(BaseModel):
 
     enabled: bool = Field(
         ...,
-        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        description="CANARY_ENABLED is 1/true/yes/on (any case). Answers the disabled case; "
         "default-OFF is the normal state for most installs.",
     )
     status: str = Field(
@@ -3807,6 +3820,19 @@ class OperatorAskCreate(BaseModel):
     replaces: Optional[str] = None  # #3247 — one of the agent's own PENDING asks this one replaces
 
 
+class OperatorAskWithdraw(BaseModel):
+    """Body for an agent withdrawing one of its own pending asks
+    (trinity-enterprise#901): `POST /api/agents/{name}/operator-queue/{request_id}/withdraw`.
+
+    TYPES ONLY, like `OperatorAskCreate`: the reason's bound (1..500 after
+    trimming) is the ask sink's, so the refusal is a NAMED `invalid_reason`.
+    Unknown fields are refused — the ending is the platform's to record.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Any = None
+
+
 class SkillGateCheckRequest(BaseModel):
     """What the in-container skill-gate hook asks (trinity-enterprise#752):
     `POST /api/skill-gate/check`, with the agent's own key.
@@ -3866,6 +3892,8 @@ class SkillGateEntry(BaseModel):
     set_by_agent: Optional[str] = None
     set_at: Optional[str] = None
     approver_reachable: Optional[bool] = None
+    # trinity-enterprise#881: why nobody can approve — `unfilled` | `not_shared` — or null.
+    approver_unreachable: Optional[str] = None
 
 
 class SkillGateApproverStatus(BaseModel):
@@ -3882,6 +3910,9 @@ class SkillGateApproverStatus(BaseModel):
     viewer_fills: bool
     label: Optional[str] = None
     role_id: Optional[str] = None
+    # trinity-enterprise#881: why it reaches nobody — `unfilled` (nobody fills
+    # it) | `not_shared` (its people can't open the agent) — or null.
+    unreachable: Optional[str] = None
 
 
 class SkillGateMapResponse(BaseModel):
@@ -3907,7 +3938,9 @@ class SkillGateMapResponse(BaseModel):
 class SkillGateWriteResponse(BaseModel):
     """What `PUT .../skill-gates/{skill_name}` did. `warnings`:
     `approver_unassigned` (the approver kind reaches nobody now, so a gated
-    request would be refused) and `marker_not_written` (the running agent's
+    request would be refused), `approver_not_shared` (its people can't open
+    the agent, so they would never see the approval — trinity-enterprise#881)
+    and `marker_not_written` (the running agent's
     fail-closed marker could not be written; the check re-syncs it)."""
     agent_name: str
     skill_name: str
@@ -4161,6 +4194,10 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # RETRY-001: a scheduler retry links to its chain's original execution.
+    # The MCP server scopes a delegation's idempotency key to it (#3296), so a
+    # retried scheduled run replays attempt 1's children instead of re-running.
+    retry_of_execution_id: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001
@@ -4176,6 +4213,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
@@ -4522,6 +4561,31 @@ class SlackChannelMessageRequest(IntentKeyFields):
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / portal
+    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
 
 
 class UpdateMyEmailRequest(BaseModel):
@@ -5749,3 +5813,73 @@ class AAuthResourceCallResponse(BaseModel):
     detail: Optional[str] = None
     do_not_retry: Optional[bool] = None
     next_step: str
+
+
+# ---------------------------------------------------------------------------
+# Nevermined card delegation (trinity-enterprise#966). Nevermined holds the
+# card and the mandate; these models carry the organization config and never
+# echo a secret back.
+# ---------------------------------------------------------------------------
+
+def _nevermined_secret(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.splitlines() not in ([], [value]):  # the agent .env splitter's boundary set
+        raise ValueError("a Nevermined secret cannot contain a newline")
+    value = value.strip()
+    return value or None
+
+
+class NeverminedOrganizationUpdate(BaseModel):
+    """PUT /api/nevermined/organization. Secrets are write-only: an absent one
+    keeps the stored value."""
+    org_id: str = Field(..., min_length=1, max_length=256)
+    environment: Literal["sandbox", "live"] = "sandbox"
+    widget_secret: Optional[str] = Field(default=None, max_length=4096)
+    agent_api_key: Optional[str] = Field(default=None, max_length=4096)
+
+    @field_validator("org_id")
+    @classmethod
+    def _org_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or any(c in v for c in "\r\n"):
+            raise ValueError("org_id must be a non-empty single line")
+        return v
+
+    @field_validator("widget_secret", "agent_api_key")
+    @classmethod
+    def _secret(cls, v: Optional[str]) -> Optional[str]:
+        return _nevermined_secret(v)
+
+
+class NeverminedOrganizationState(BaseModel):
+    """The organization as any route returns it — no secret field exists here."""
+    configured: bool
+    org_id: Optional[str] = None
+    environment: Optional[Literal["sandbox", "live"]] = None
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+    active_delegations: int = 0
+
+
+NEVERMINED_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+class NeverminedDelegationBind(BaseModel):
+    """POST /api/nevermined/agents/{agent_name}/delegation — the ids the
+    Nevermined widget handed the browser. Both spellings are accepted."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    delegation_id: str = Field(..., alias="delegationId", pattern=NEVERMINED_ID_PATTERN)
+    payment_method_id: Optional[str] = Field(default=None, alias="paymentMethodId", pattern=NEVERMINED_ID_PATTERN)
+    provider: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if any(c in v for c in "\r\n"):
+            raise ValueError("provider must be a single line")
+        return v or None

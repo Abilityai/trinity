@@ -31,7 +31,7 @@ function rates(successRate, firstTryRate) {
   }
   const w = mount(PortalAgentBand, {
     props: { agentName: 'scout' },
-    global: { stubs: { StackedBarChart: true, ScanlineReveal: { template: '<div><slot /></div>' } } },
+    global: { stubs: { ActivityWave: true } }, // the chart is stubbed: the numbers are under test, not the wave (ent#968)
   })
   const text = w.text()
   w.unmount()

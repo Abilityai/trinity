@@ -55,6 +55,9 @@ ROSTER = {"roles": [{"id": "finance", "title": None}, {"id": "Head-of-Sales", "t
 def seat(monkeypatch):
     """Register a FakeProvider for the test; `world` pins `get_provider` to
     None, so that is re-pointed at the fake as well."""
+    # trinity-enterprise#881: approvers here can open the agent; reach is pinned in test_ent881.
+    monkeypatch.setattr(skill_gate_service, "_can_open", lambda agent, email: True)
+
     def _seat(**kw):
         p = FakeProvider(**kw)
         monkeypatch.setattr(assignment_provider, "_provider", p)
@@ -156,10 +159,10 @@ def test_get_lists_roles_after_the_kinds_with_label_and_role_id(env, seat):
     assert body["approver_kinds"] == ["primary", "approver"]   # stays kinds
     k = _by_kind(body)
     assert k["role:finance"] == {"kind": "role:finance", "reachable": True, "viewer_fills": True,
-                                 "label": "Finance", "role_id": "finance"}
+                                 "label": "Finance", "role_id": "finance", "unreachable": None}
     assert k["role:head-of-sales"] == {"kind": "role:head-of-sales", "reachable": False,
                                        "viewer_fills": False, "label": "Head of sales",
-                                       "role_id": "head-of-sales"}
+                                       "role_id": "head-of-sales", "unreachable": "unfilled"}
     assert k["primary"]["role_id"] is None
     assert "example.com" not in str(body["approvers"]).lower()
 

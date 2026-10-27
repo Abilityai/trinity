@@ -77,7 +77,7 @@ def b(monkeypatch):
     from fastapi.testclient import TestClient
 
     state = {"issuer": B_ISS, "exposed": {"bot"}, "dispatched": [], "audit": [], "activity": [],
-             "owners": {}, "executions": {}}
+             "owners": {}, "executions": {}, "minted": []}
 
     monkeypatch.setattr(a2a, "db", types.SimpleNamespace(
         get_a2a_exposed=lambda name: name in state["exposed"],
@@ -88,6 +88,10 @@ def b(monkeypatch):
         can_user_access_agent=lambda user, name: True,
         get_execution=lambda eid: state["executions"].get(eid),
         cancel_queued_execution=lambda eid, reason=None: False,
+        # #3749: message/send mints the row before dispatch.
+        create_task_execution=lambda **kw: (
+            state["minted"].append(kw) or types.SimpleNamespace(id="exec-minted-623")),
+        get_agent_subscription_id=lambda name: None,
     ))
     monkeypatch.setattr(a2a, "get_agent_container",
                         lambda name: types.SimpleNamespace(status="running", labels={}))
@@ -98,7 +102,9 @@ def b(monkeypatch):
 
     async def _dispatch(**kwargs):
         state["dispatched"].append(kwargs)
-        return types.SimpleNamespace(execution_id="exec-1", status="success", response="pong", error=None)
+        # #3749: echo the minted id rather than a literal of the stub's own.
+        return types.SimpleNamespace(execution_id=kwargs["execution_id"], status="success",
+                                     response="pong", error=None)
     monkeypatch.setattr(a2a, "dispatch_and_await_terminal", _dispatch)
 
     class _Audit:
@@ -109,7 +115,11 @@ def b(monkeypatch):
     class _Idem:
         def begin(self, scope, key):
             state.setdefault("scopes", []).append(scope)
-            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None)
+            return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None,
+                                         execution_id=None)
+
+        def attach_execution(self, *a):
+            pass
 
         def complete(self, *a):
             pass
@@ -244,9 +254,24 @@ def test_listed_identity_runs_task_without_a_trinity_user(b):
     assert row["details"]["verification"] == "verified"
     assert row["details"]["allowlist"] == "allowed"
     assert b.state["activity"][0][1] == ECHO
-    assert b.state["owners"] == {"exec-1": ECHO}
+    assert b.state["owners"] == {"exec-minted-623": ECHO}
     # Its own namespace, distinct from any bearer principal's (ent#623).
     assert b.state["scopes"] == [f"a2a:bot:aauth|{ECHO}"]
+
+
+def test_minted_row_records_the_aauth_peer_identity(b):
+    # ent#862 PR3: the execution row names the peer that triggered it. Since
+    # #3749 the row is minted before dispatch, so the stamp lives on the mint.
+    r = b.sign_as("echo", _send())
+    assert r.status_code == 200, r.text
+    assert [kw["fields"].a2a_caller_identity for kw in b.state["minted"]] == [ECHO]
+
+
+def test_bearer_minted_row_records_no_aauth_identity(b):
+    _bearer(b)
+    r = b.http.post("/a2a/bot", json=_send(), headers={"Authorization": "Bearer x"})
+    assert r.status_code == 200, r.text
+    assert [kw["fields"].a2a_caller_identity for kw in b.state["minted"]] == [None]
 
 
 def test_unlisted_identity_of_a_trusted_issuer_is_403(b):

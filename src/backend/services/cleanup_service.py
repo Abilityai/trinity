@@ -1068,7 +1068,13 @@ class CleanupService:
             # failed) so the re-delivery's fresh dispatch activity is the only
             # open one. Without this the agent reads as running two turns.
             for execution_id in result.requeued_execution_ids:
-                await self._close_requeued_activity(execution_id)
+                if execution_id not in result.requeued_activity_ids:
+                    await self._close_requeued_activity(execution_id)
+                elif result.requeued_activity_ids[execution_id]:
+                    await self._close_requeued_activity(
+                        execution_id,
+                        activity_id=result.requeued_activity_ids[execution_id],
+                    )
             if result.requeued or result.parked:
                 logger.info(
                     "[Cleanup] lease reaper: re-queued=%d parked=%d",
@@ -1094,7 +1100,9 @@ class CleanupService:
             error=f"{_LEASE_EXPIRED_TAG}: pull lease expired, poison-parked (#429)",
         )
 
-    async def _close_requeued_activity(self, execution_id: str) -> None:
+    async def _close_requeued_activity(
+        self, execution_id: str, activity_id: Optional[str] = None
+    ) -> None:
         """Close the superseded attempt's dispatch activity on lease re-queue (#1804).
 
         The re-queue preserves ``execution_id`` by construction (#1402), so the
@@ -1112,6 +1120,7 @@ class CleanupService:
             execution_id,
             TaskExecutionStatus.CANCELLED,
             error=f"{_LEASE_EXPIRED_TAG}: attempt superseded by lease re-delivery (#1402)",
+            activity_id=activity_id,
         )
 
     def _sweep_stale_executions(self, report: CleanupReport) -> list:
@@ -1210,7 +1219,8 @@ class CleanupService:
             logger.warning("[#1714] bulk terminal-event emit failed: %s", e)
 
     async def _close_bulk_swept_activities(self, rows: list) -> int:
-        """#1804: close the open dispatch activity for every CAS-won bulk-swept row.
+        """#1804: close the open dispatch and companion activities (#3651) for
+        every CAS-won bulk-swept row.
 
         Batched at the db layer (ONE transaction, no per-row WS) — mirrors what
         ``mark_stale_activities_failed`` already does, and avoids a WebSocket
@@ -1241,7 +1251,7 @@ class CleanupService:
             )
             if closed:
                 logger.info(
-                    "[#1804] Closed %d dispatch activity(ies) for bulk-swept executions",
+                    "[#1804] Closed %d activity(ies) for bulk-swept executions",
                     closed,
                 )
             return closed

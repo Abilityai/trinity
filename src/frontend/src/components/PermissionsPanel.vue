@@ -71,7 +71,7 @@
         <!-- Save Button -->
         <div class="flex items-center space-x-3">
           <button
-            @click="savePermissions"
+            @click="saveAndRefresh"
             :disabled="permissionsSaving || !permissionsDirty"
             class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-action-primary-600 hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 dark:focus:ring-offset-gray-800 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed"
           >
@@ -90,6 +90,10 @@
             {{ permissionsMessage.text }}
           </div>
         </div>
+
+        <!-- abilityai/trinity-enterprise#662: what each edge exposes. Reads the
+             SAVED edges, so it refreshes after a save. -->
+        <PeerSkillGrants ref="peerSkillGrants" :agent-name="agentName" />
       </div>
 
       <!-- No Other Agents -->
@@ -105,7 +109,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import PeerSkillGrants from './PeerSkillGrants.vue'
 import { useAgentsStore } from '../stores/agents'
 import { agentDisplayName, agentNameTooltip, hasDistinctLabel } from '../utils/agentName'
 import { useAgentPermissions } from '../composables/useAgentPermissions'
@@ -141,6 +146,13 @@ const {
   allowNoAgents,
   markDirty
 } = useAgentPermissions(agent, agentsStore)
+
+// ent#662: the grants list reads the saved edges, so refresh it after a save.
+const peerSkillGrants = ref(null)
+const saveAndRefresh = async () => {
+  await savePermissions()
+  peerSkillGrants.value?.reload()
+}
 
 // Load permissions on mount
 onMounted(() => {

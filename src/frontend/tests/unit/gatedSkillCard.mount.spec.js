@@ -14,8 +14,11 @@ import { mount, flushPromises, RouterLinkStub } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import { nextTick } from 'vue'
 
+// The viewer's platform role, settable per test (#3708). An operator by default,
+// so the assertions below describe the operator's card unless a test says otherwise.
+const auth = vi.hoisted(() => ({ user: { role: 'operator' } }))
 vi.mock('@/stores/auth', () => ({
-  useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn() }),
+  useAuthStore: () => ({ isAuthenticated: true, authHeader: {}, logout: vi.fn(), user: auth.user }),
 }))
 vi.mock('axios', () => {
   const mk = () => ({
@@ -52,6 +55,7 @@ const tid = (w, id) => w.find(`[data-testid="${id}"]`)
 const stubs = { RouterLink: RouterLinkStub, AgentAvatar: true }
 
 beforeEach(() => {
+  auth.user = { role: 'operator' }
   localStorage.clear()
   sessionStorage.clear()
   vi.clearAllMocks()
@@ -85,6 +89,23 @@ describe('the card itself', () => {
     const w = card({ gate: gate({ requester: { kind: 'agent', label: 'Agent marketing', agent: 'marketing', execution_id: 'run-1' } }) })
     expect(tid(w, 'gate-card-requester-run').findComponent(RouterLinkStub).props('to'))
       .toBe('/agents/marketing/executions/run-1')
+  })
+
+  // trinity#3708: an execution page is an operator route; a Workspace-only member
+  // is sent back to the Workspace, so neither run link is drawn for them.
+  it.each([
+    ['operator', true],
+    ['admin', true],
+    ['user', false],     // Workspace-only
+    [null, false],       // an external client: no platform account
+  ])('draws the run links for a %s viewer: %s', (role, shown) => {
+    auth.user = role ? { role } : null
+    const requested = card({ gate: gate({ requester: { kind: 'agent', label: 'Agent marketing', agent: 'marketing', execution_id: 'run-1' } }) })
+    expect(tid(requested, 'gate-card-requester').text()).toContain('Agent marketing')   // the label stays
+    expect(tid(requested, 'gate-card-requester-run').exists()).toBe(shown)
+    const ended = card({ status: 'responded', gate: gate({ state: 'succeeded', execution_id: 'run-9' }) })
+    expect(tid(ended, 'gate-card-outcome').text()).toContain('Ran')                      // the outcome stays
+    expect(tid(ended, 'gate-card-run').exists()).toBe(shown)
   })
 
   it('folds a long input and opens it whole', async () => {
@@ -247,6 +268,13 @@ describe('the Workspace (PortalAsks — the Inbox pane and the chat card)', () =
     expect(tid(w, 'gate-card-history-note').exists()).toBe(true)
     const plain = mountAsks([ask()])
     expect(tid(plain, 'gate-card-request').exists()).toBe(false)
+  })
+
+  it('a Workspace-only member sees who asked, with no run link (trinity#3708)', () => {
+    auth.user = { role: 'user' }
+    const w = mountAsks([ask({ gate: gate({ requester: { kind: 'agent', label: 'Agent marketing', agent: 'marketing', execution_id: 'run-1' } }) })])
+    expect(tid(w, 'gate-card-requester').text()).toContain('Agent marketing')
+    expect(tid(w, 'gate-card-requester-run').exists()).toBe(false)
   })
 
   it('an approved request keeps its card and says it ran', () => {

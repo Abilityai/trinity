@@ -102,7 +102,7 @@ def door(monkeypatch):
     from fastapi.testclient import TestClient
 
     _seed_legacy_row()
-    state = {"dispatched": [], "executions": {}}
+    state = {"dispatched": [], "executions": {}, "attached": []}
 
     monkeypatch.setattr(a2a.a2a_payment_gate, "is_priced", lambda n, db=None: None)
     monkeypatch.setattr(a2a, "get_agent_container",
@@ -131,6 +131,10 @@ def door(monkeypatch):
         def begin(self, scope, key):
             state["idem_scope"] = scope
             return types.SimpleNamespace(replay=False, in_flight=False, snapshot=None, key=None)
+
+        def attach_execution(self, decision, execution_id):
+            # #3749: `message/send` pre-mints the row and attaches its id to the claim.
+            state["attached"].append(execution_id)
 
         def complete(self, *a):
             pass
@@ -216,6 +220,8 @@ def test_a_keyed_caller_from_the_public_internet_runs_the_task(door):
     assert kw["triggered_by"] == "a2a"
     assert "source_host" not in kw
     assert door.state["idem_scope"] == f"a2a:{LEGACY}:k1"
+    # #3749: the claim names the pre-minted row the dispatch ran under.
+    assert door.state["attached"] == [kw["execution_id"]]
 
 
 def test_the_card_is_served_at_the_public_origin(door):

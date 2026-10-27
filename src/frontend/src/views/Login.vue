@@ -113,6 +113,8 @@
           <div v-if="authStore.emailCodeLoginEnabled">
             <!-- Step 1: Enter Email -->
             <div v-if="!codeSent">
+              <!-- #3922: the Workspace's code page sent a platform account here. -->
+              <p v-if="workspaceHandoff" data-testid="login-workspace-handoff" :class="[HELP_CLASS, 'mb-4']">This email has a Trinity account. Sign in here to open your Workspace.</p>
               <form @submit.prevent="handleRequestCode" class="space-y-4">
                 <div>
                   <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -142,7 +144,26 @@
             <!-- Step 2: Enter Code -->
             <div v-else>
               <div class="mb-4">
-                <p class="text-sm text-gray-600 dark:text-gray-400">
+                <!-- #3655: with no email provider the code is only in the backend
+                     log. Say so, and never render the code itself. -->
+                <div
+                  v-if="authStore.emailDeliveryAvailable === false"
+                  class="rounded-lg px-3 py-2 text-sm bg-status-warning-100 text-status-warning-700 dark:bg-status-warning-500/15 dark:text-status-warning-300"
+                  data-testid="login-no-email-provider"
+                  role="status"
+                >
+                  <p class="font-medium">No email provider is configured on this install, so no email was sent.</p>
+                  <p class="mt-1">
+                    If {{ emailInput }} may sign in here, its code was written to the backend
+                    log. Read it with <code class="font-mono">docker compose logs backend</code>.
+                  </p>
+                  <p class="mt-1">
+                    An admin can sign in with Admin Login and a password, and add an email
+                    provider under Settings → Integrations.
+                  </p>
+                  <BaseButton size="sm" variant="secondary" class="mt-2" @click="useAdminLogin">Admin Login</BaseButton>
+                </div>
+                <p v-else class="text-sm text-gray-600 dark:text-gray-400">
                   📧 We sent a 6-digit code to <strong class="text-gray-900 dark:text-white">{{ emailInput }}</strong>
                 </p>
                 <p v-if="countdown > 0" class="text-xs text-gray-500 dark:text-gray-400 mt-1">
@@ -290,6 +311,7 @@ import { useAuthStore } from '../stores/auth'
 import { landingAfterSignIn } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import QrCode from '../components/QrCode.vue'
+import BaseButton from '../components/base/BaseButton.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -310,7 +332,11 @@ const loginLoading = ref(false)
 const loadingMessage = ref('Checking authentication...')
 
 // Email authentication state
-const emailInput = ref('')
+// #3922: the Workspace's code page hands a platform account over with its
+// address in `?email=`, the only producer of that query.
+const handoffEmail = typeof route.query.email === 'string' ? route.query.email.trim() : ''
+const workspaceHandoff = !!handoffEmail
+const emailInput = ref(handoffEmail)
 const codeInput = ref('')
 const codeSent = ref(false)
 const countdown = ref(0)
@@ -419,6 +445,12 @@ const handleBackToEmail = () => {
     countdownInterval.value = null
   }
   countdown.value = 0
+}
+
+// #3655: from the no-email-provider notice straight to the password form.
+const useAdminLogin = () => {
+  handleBackToEmail()
+  showAdminLogin.value = true
 }
 
 // Initialize on mount

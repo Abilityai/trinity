@@ -14,6 +14,7 @@
 
 import {
   STAGE_QUERY_KEYS, WORKSPACE_ROOT, WORKSPACE_INBOX, totalUnread, askBadgeTitle, unreadBadgeTitle,
+  askThreadLink,
 } from './portalUtils'
 import { capCount } from '@/utils/tabTitle'
 import { queueTypeLabel } from '@/utils/operatorQueue'
@@ -32,7 +33,8 @@ export const INBOX_TAB_SHELL = Object.freeze([
 
 // All (§3g D-4a): EVERY chat the sidebar lists, of any age, plus the asks list —
 // pending asks always, ended ones for the 7 days the server keeps them
-// (`asks/service.py`, which also stops the read at 200 rows, pending first).
+// (`asks/service.py`, which also stops the read at 200 rows, pending first and
+// the longest-waiting of those first, #3679).
 // Not bounded here: the list pages it (`pageWindow`).
 export const ENDED_ASK_WINDOW_DAYS = 7
 export const ASKS_READ_CAP = 200
@@ -351,7 +353,9 @@ export function pageWindow(items, limit = PAGE_SIZE, selectedKey = null) {
 // when it was hit (server pagination + a total is #3059).
 export function allFooterNotes({ hasRooms = false, askCount = 0 } = {}) {
   const notes = ['Answered, expired and cancelled asks drop off after 7 days.']
-  if (askCount >= ASKS_READ_CAP) notes.push(`Showing your ${ASKS_READ_CAP} most recent asks.`)
+  // #3679: the server returns pending asks oldest first, so a capped read
+  // keeps the longest-waiting ones and drops the newest.
+  if (askCount >= ASKS_READ_CAP) notes.push(`Showing your first ${ASKS_READ_CAP} asks: the ones waiting longest come first.`)
   if (hasRooms) notes.push("Rooms aren't in the Inbox yet. Open them from the sidebar.")
   return notes
 }
@@ -692,8 +696,8 @@ export function paneRuns(messages) {
 
 // §3g C10: "Open canvas" appears only when there is a canvas to open — the
 // selected item's agent has one in the rail's canvas feed (which the rail loads
-// for that agent anyway), and the Canvas tab is one this session has. On chats
-// and asks alike (T6).
+// for that agent anyway), and the Canvas tab is one this session has. Shown on
+// chats only (#3714) — the pane gates it on the item type.
 export function inboxCanvasCount({ tabs = [], canvases = {}, agent = null } = {}) {
   if (!agent || !(Array.isArray(tabs) ? tabs : []).some((t) => t && t.id === 'canvas')) return 0
   const list = canvases && canvases[agent]
@@ -710,6 +714,15 @@ export function openInChatTarget(item) {
     return `${base}?anchor=${encodeURIComponent(`d:${item.latest.id}`)}`
   }
   return base
+}
+
+// #3714: the chat an ask came from — the turn that raised it (askThreadLink);
+// a background ask has none. {id, agent_name} | null — the `open-thread`
+// payload the ask card's own thread link sends.
+export function askOriginThread(item) {
+  if (!item || item.type !== 'ask') return null
+  const id = askThreadLink(item.ask)
+  return id ? { id, agent_name: item.ask?.agent_name || item.agent_name } : null
 }
 
 // agent name → the human-facing label, the sidebar's rule (`display_label`

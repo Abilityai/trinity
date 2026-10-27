@@ -319,6 +319,10 @@
             </div>
           </div>
 
+          <!-- #3825: change the admin's password in the app. Only an account
+               that has a password (has_password) renders it. -->
+          <ChangePasswordPanel v-if="activeTab === 'general' && authStore.user?.has_password" class="mb-6" />
+
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">Platform</h2>
@@ -1762,7 +1766,7 @@ Example:
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">MCP Server URL</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                Configure the external MCP server URL shown on the API Keys page. Leave empty to auto-detect from hostname.
+                Configure the external MCP server URL shown on the API Keys page. Leave empty to auto-detect from the hostname, using https when the reverse proxy reports an HTTPS connection.
               </p>
             </div>
             <div class="px-6 py-4">
@@ -2094,6 +2098,10 @@ Example:
                so this is the only place an orchestrator's skill map is unblocked. -->
           <SkillManagersPanel v-if="activeTab === 'agents'" />
 
+          <!-- ent#662: agent-to-agent calls that used a library skill and are
+               now refused for want of a grant — the honest upgrade notice. -->
+          <PeerSkillDriftNotice v-if="activeTab === 'agents'" />
+
           <!-- Skills Library automation (ent#236). Kept in Settings, NOT folded
                into SkillSourcesPanel: auto-sync and fleet re-inject are
                library-WIDE policy over every source, while the panel is a
@@ -2329,9 +2337,11 @@ import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
 import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
+import ChangePasswordPanel from '../components/settings/ChangePasswordPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import SkillManagersPanel from '../components/SkillManagersPanel.vue'
+import PeerSkillDriftNotice from '../components/PeerSkillDriftNotice.vue'
 import TwoFactorPanel from '../components/settings/TwoFactorPanel.vue'
 import SsoPanel from '../components/settings/SsoPanel.vue'
 import OverflowTabs from '../components/OverflowTabs.vue'

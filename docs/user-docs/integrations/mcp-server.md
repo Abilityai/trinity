@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 160 tools across 37 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 155 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 168 tools across 38 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 163 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -9,7 +9,7 @@ Trinity's MCP server exposes 160 tools across 37 modules for agent orchestration
 - **Model Context Protocol (MCP)** — An open standard for tool-based AI integrations. Trinity implements an MCP server that exposes agent management as callable tools.
 - **FastMCP** — The server framework used, with Streamable HTTP transport on port 8080.
 - **API Keys** — Authentication mechanism for MCP access. Keys are generated under **Settings → MCP Keys** and sent via `Authorization: Bearer` header.
-- **Agent-Scoped Keys** — Keys Trinity mints for each agent automatically (its **Trinity access key**, visible on the agent's Settings tab) so the agent can call the platform as itself. You do not create these by hand; the keys you create yourself are `user`-scoped, `ops`, or `portal_delegate` — see [Authentication](../api-reference/authentication.md#mcp-key-scopes).
+- **Agent-Scoped Keys** — Keys Trinity mints for each agent automatically (its **Trinity access key**, visible under the agent's **Settings › Integrations**) so the agent can call the platform as itself. You do not create these by hand; the keys you create yourself are `user`-scoped, `ops`, or `portal_delegate` — see [Authentication](../api-reference/authentication.md#mcp-key-scopes).
 
 ## How It Works
 
@@ -59,7 +59,7 @@ Add Trinity as an MCP server in your Claude Code configuration:
 - **Local install:** `http://localhost:8080/mcp` — the MCP server's own published port.
 - **Production install behind the frontend (nginx):** `https://your-domain.com/mcp`. The frontend proxies `/mcp` to the MCP server, so an install that exposes only ports 80/443 (a firewalled host, a one-click cloud image) still serves MCP without opening port 8080.
 
-The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request host as `http://<host>:8080/mcp`. On an 80/443-only install, an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
+The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request: `https://<host>/mcp` when the proxy in front of Trinity sends `X-Forwarded-Proto: https` (the frontend serves `/mcp` on the same origin, so no `:8080`), otherwise `http://<host>:8080/mcp`. A Cloudflare Tunnel sends that header; if you run your own proxy, configure it to (see [Public Access](../guides/deploying/public-access.md#tls-is-terminated-outside-trinity)). When the detected URL is still wrong — an 80/443-only install whose proxy reports plain HTTP — an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
 
 ### Tool Categories
 
@@ -88,24 +88,25 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 5 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator` — read and resolve Operating Room queue items; an agent raises its own asks and reads them back |
+| `operator_queue.ts` | 6 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer |
 | `reminders.ts` | 3 | `set_reminder`, `list_reminders`, `cancel_reminder` — durable one-shot deferred self-triggers |
 | `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)) |
 | `canvas.ts` | 5 | `set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas` — the agent's durable render surface in the Workspace (see [Agent Canvas](../agents/agent-canvas.md)) |
 | `git.ts` | 6 | Deterministic git operations — status, sync, log, pull, sync-state, and the destructive reset-to-main recovery |
 | `pipelines.ts` | 2 | Read-only introspection of an agent's self-published pipelines |
 | `reports.ts` | 3 | `report`, `list_reports`, `get_report` — publish a structured report and read reports back (see [Agent Reports](../operations/agent-reports.md)) |
-| `a2a.ts` | 7 | A2A management plane — per-agent exposure and card and the inbound allow-list (entitlement-gated), plus the outbound endpoint registry `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` (every edition; admin, human-only). See [A2A Protocol](a2a-protocol.md) |
+| `a2a.ts` | 7 | A2A management plane — per-agent exposure and card and the inbound allow-list (entitlement-gated), plus the outbound endpoint registry `register_a2a_endpoint` / `list_a2a_endpoints` / `remove_a2a_endpoint` (every edition; admin, human-only); `register_a2a_endpoint` takes `auth_scheme` (`bearer`, the default, or `aauth`). See [A2A Protocol](a2a-protocol.md) |
+| `aauth.ts` | 2 | `request_person_token`, `call_aauth_resource` — prototype AAuth legs (person-token binding, allow-listed resource calls); always registered, agent-scoped key only, answer `aauth_disabled: true` while the AAuth or prototype switch is off. See [A2A Protocol](a2a-protocol.md#prototypes-acting-for-the-owner-and-calling-aauth-resources) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `projects.ts` | 11 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
+| `projects.ts` | 13 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
 | `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
 ### Dedicated Agent Tools (Expose via MCP)
 
-An owner can publish an agent as its own first-class MCP tool. On the agent's **Settings** tab, the **Expose via MCP** section has a toggle; when enabled, the MCP server registers a dedicated `chat_with_<slug>` tool (the slug is derived from the agent name, with a short suffix on name collisions — the resolved tool name is shown next to the toggle).
+An owner can publish an agent as its own first-class MCP tool. Under the agent's **Settings › Integrations › Programmatic access**, the **Expose via MCP** section has a toggle; when enabled, the MCP server registers a dedicated `chat_with_<slug>` tool (the slug is derived from the agent name, with a short suffix on name collisions — the resolved tool name is shown next to the toggle).
 
 - No restart needed — the MCP server picks up the change on its next poll, and connected MCP clients see the tool appear (or disappear) within a few seconds.
 - The tool behaves exactly like `chat_with_agent` with the agent name pre-filled, including idempotency and timeout handling.
@@ -121,7 +122,7 @@ An owner can publish an agent as its own first-class MCP tool. On the agent's **
 
 Every agent carries its own agent-scoped key, injected into its container so it can call Trinity's MCP server. That key is what makes the agent-to-agent permission matrix apply — a container carrying a *user*-scoped key would operate with the owner's identity and bypass the matrix entirely.
 
-The agent's **Settings** tab surfaces this key so you can see and repair it. You never see the secret itself — only metadata and a health state:
+**Settings › Integrations › Programmatic access › Trinity access key** surfaces this key so you can see and repair it. You never see the secret itself — only metadata and a health state:
 
 | State | Meaning |
 |-------|---------|
@@ -166,11 +167,24 @@ When a tool refuses a call because the caller may not reach the target agent, it
 
 Every refusal is recorded in the audit log as a refusal, not as a successful call: the `mcp_operation` entry carries `success: false`, `denied: true`, and the reason. A backend `403` that surfaces through a tool is marked `denied` too. See [Audit Trail](../operations/audit-trail.md#refused-mcp-calls).
 
+### Receipts
+
+A **receipt** is what a chat tool returns when it has handed the work to the agent but cannot hand you the reply: an `execution_id` and a `status` of `accepted` (an async call), `queued` (the agent was at capacity and the task was queued) or `queued_timeout` (the call outlived `MCP_CHAT_TIMEOUT_MS`, default 25 s, or the platform's own wait, and the run is still going). The work is running. Read its outcome with `get_execution_result(agent_name, execution_id)` and never re-send the same message; the receipt's `message` says exactly that.
+
+When the caller is an agent serving a Slack, Telegram or Workspace conversation, a receipt can also carry `report_back`:
+
+- `report_back: "requested"` — when the delegated run ends, success or failure, it posts its outcome into that conversation; an informational `report_back_note` reminds the caller that this is best-effort. This is on by default for async delegation (`parallel=true, async=true`) and for a sequential call (`parallel=false`) that ends in a `queued_timeout` receipt: the platform attaches the report only at the moment it hands back the receipt, so a call that answered inline never posts a second "done".
+- `report_back: "off"` with `report_back_reason: "not_armed"` — the platform could not attach a report to this run (or, when the caller named its own `execution_id`, the agent was busy and nothing ran); read the outcome with `get_execution_result`.
+- A sequential call that answers inline carries no `report_back` fields; when the caller named its own `execution_id`, it says `off` / `answered_inline` — you have the reply, nothing more will be posted.
+- Pass `execution_id="manual"` to turn report-back off for one call; `MCP_REPORT_BACK_ENABLED=false` on the MCP server turns it off everywhere.
+
+`requested` means a report was attached, not a guarantee that a note lands — a conversation can refuse such notes. See [Agent Network](../collaboration/agent-network.md) for the delegation pattern.
+
 ### Key Tools Worth Knowing
 
 | Tool | Why it exists |
 |------|---------------|
-| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id`, marked `"idempotent_replay": true`, while that run is live or has succeeded — a **reworded** re-send is a new call and dispatches a second execution. After a confirmed `failed` or `cancelled` outcome, the identical re-send starts a new run instead (a `lease_expired` failure first waits out the agent's timeout + 5 minutes). `idempotent_replay` is positive evidence only: its absence does not prove a fresh run. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. **A receipt means the work is running:** an `execution_id` in place of the reply (`accepted`, `queued` or `queued_timeout`) proves the call arrived, and every receipt ends with *Do not re-send: read the outcome with get_execution_result(…)*. The tool's description teaches callers this delegation contract verbatim, as does every `chat_with_<agent>` tool. See [Agent Network](../collaboration/agent-network.md) for the async pattern. |
+| `chat_with_agent` | Send a message to another agent. **Gateway-timeout safe in every sync mode** — sequential chat (`parallel=false`) and the sync task route (`parallel=true, async=false`) alike: if the call exceeds `MCP_CHAT_TIMEOUT_MS` (default 25s), it returns `{status: "queued_timeout", agent, execution_id, message}` so the caller polls `get_execution_result` instead of duplicate-queueing the request. The receipt is only issued when the running execution can be attributed to *your* call unambiguously; otherwise the error says so and names `list_recent_executions`. Calls carry a deterministic idempotency key, so an identical re-send dedupes server-side and answers with the original `execution_id`, marked `"idempotent_replay": true`, while that run is live or has succeeded — a **reworded** re-send is a new call and dispatches a second execution. After a confirmed `failed` or `cancelled` outcome, the identical re-send starts a new run instead (a `lease_expired` failure first waits out the agent's timeout + 5 minutes). `idempotent_replay` is positive evidence only: its absence does not prove a fresh run. For work you know will outlive the gateway, use `parallel=true, async=true` from the start. **A receipt means the work is running:** an `execution_id` in place of the reply (`accepted`, `queued` or `queued_timeout`) proves the call arrived, and every receipt ends with *Do not re-send: read the outcome with get_execution_result(…)*. From an agent serving a conversation, a `queued_timeout` receipt on a sequential call also reports the run's outcome back into that conversation — see [Receipts](#receipts). The tool's description teaches callers this delegation contract verbatim, as does every `chat_with_<agent>` tool. See [Agent Network](../collaboration/agent-network.md) for the async pattern. |
 | `fan_out` | Dispatch N independent tasks to an agent in parallel and collect all the results. **Gateway-timeout safe**: a batch runs longer than any single task in it, so this is the tool most likely to outlive the 25s ceiling — when it does, it returns `{status: "fan_out_timeout", agent, fan_out_id, execution_ids, task_count, message}` and the batch keeps running. Poll `get_fan_out_result(agent_name, fan_out_id)`. Re-sending the *identical* call is deduplicated server-side and answers with the same batch; **rewording it dispatches all N tasks again**. For a batch you know will run long, pass `async_mode: true`: the tool returns `{fan_out_id, status: "accepted"}` at once and you poll. `timeout_seconds` bounds only the wait — tasks still open at the deadline report `running` and keep going. See [Fan-Out](../automation/fan-out.md). |
 | `get_fan_out_result` | Poll a fan-out batch: `running` while any task can still change, then `completed`, `partial` (some succeeded — normal for a best-effort batch) or `failed`, with per-task status and results. Each result carries the `task_id` you gave the task. |
 | `run_agent_loop` | Run the same task against an agent repeatedly (bounded, sequential), with templated messages and an optional stop signal. Poll with `get_loop_status`; stop gracefully with `stop_loop`. An agent-scoped key can loop only on itself or on agents it has permission to call — the same rule as `chat_with_agent` — and the refusal happens before any loop starts. `get_loop_status` and `stop_loop` apply the same rule to the loop's agent. See [Agent Loops](../automation/agent-loops.md). |
@@ -185,7 +199,7 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 | `call_user` | Place an outbound phone call to a user and hold a voice conversation. Server-gated: works only when VoIP is enabled platform-wide and the agent has a voice binding; rate-limited and daily-capped. See [VoIP Telephony](../advanced/voip-telephony.md). |
 | `share_file` | The agent drops a file into `/home/developer/public/` and calls this tool to mint a signed, expiring download URL (universal — works for web, Slack, Telegram, WhatsApp, email). |
 | `write_user_memory` | Per-user memory blob in an isolated store. Trinity resolves the user's email from `execution_id` server-side, so an agent cannot accidentally cross-write another user's memory. |
-| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. `recipient_email` is deprecated. Rate-limited and audit-logged. Takes an optional `idempotency_key` (see [Sending once across runs](#sending-once-across-runs)). |
+| `send_message` | Proactive message to a person, addressed by role (`to`: `primary`, `approver`, `viewer`); the platform resolves who fills it. When nobody holds the `primary` seat, the agent's owner receives it; any other unfilled role, or one several people fill, is refused by name. `recipient_email` is deprecated. Rate-limited and audit-logged. Takes an optional `idempotency_key` (see [Sending once across runs](#sending-once-across-runs)). |
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. Takes an optional `idempotency_key`. |
 | `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
 | `record_metrics` | Record observations of the agent's declared business metrics as data. A batch is all-or-nothing, with a reason code per bad point; declare a metric in `template.yaml` first and call `refresh_metric_definitions`. Read back with `get_metrics`, and targets vs actuals with `get_objectives`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics). |
@@ -202,7 +216,7 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 | `/api/mcp/keys/{key_id}` | GET | One key's metadata (never the secret) |
 | `/api/mcp/keys/{key_id}/revoke` | POST | Deactivate a key; its record stays for audit |
 | `/api/mcp/keys/{key_id}` | DELETE | Permanently delete a key |
-| `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the effective and auto-detected values, set an override, or clear it (admin) |
+| `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the override (`url`, `null` when none) and the auto-detected value (`default_url`), set an override, or clear it (admin) |
 
 ### MCP Endpoint
 

@@ -92,15 +92,25 @@ async def record_activity(agent_name: str, verified: VerifiedAgent, *, allowlist
         logger.warning("[aauth] inbound activity write failed for %s", agent_name, exc_info=True)
 
 
-def remember_execution(execution_id: str, identity: str) -> None:
+def remember_execution(execution_id: str, identity: str) -> bool:
+    """Bind `execution_id` to the AAuth caller so its `tasks/get` finds it.
+
+    Returns True only when the owner is actually recorded (#3749): the A2A
+    server consults this BEFORE disclosing an id on an early `working` answer —
+    a False means "keep holding the request", never "hand out an id the
+    fail-closed `execution_owned_by` would then 404".
+    """
     try:
         from services.rate_limiter import _get_redis
 
         client = _get_redis()
-        if client is not None:
-            client.set(_EXEC_KEY.format(execution_id), identity, ex=EXECUTION_OWNER_TTL)
+        if client is None:
+            return False
+        client.set(_EXEC_KEY.format(execution_id), identity, ex=EXECUTION_OWNER_TTL)
+        return True
     except Exception:  # noqa: BLE001 — the caller then simply cannot poll it
         logger.warning("[aauth] could not record execution owner for %s", execution_id, exc_info=True)
+        return False
 
 
 def execution_owned_by(execution_id: str, identity: str) -> bool:

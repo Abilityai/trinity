@@ -12,6 +12,7 @@ Provides endpoints for agent health monitoring:
 
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 
@@ -36,6 +37,7 @@ from services.monitoring_service import (
     DEFAULT_CONFIG,
 )
 from services.agent_service import get_accessible_agents
+from utils.helpers import parse_iso_timestamp
 
 
 router = APIRouter(prefix="/api/monitoring", tags=["monitoring"])
@@ -116,6 +118,85 @@ def _build_agent_summary(name: str, check: Optional[Dict[str, Any]]) -> AgentHea
         last_check_at=check.get("checked_at"),
         issues=issues,
     )
+
+
+# #3950: the statuses a reading can assert. Anything else counts as unknown —
+# the same rule `_coerce_status` and `get_health_summary` apply.
+_BUCKETS = ("healthy", "degraded", "unhealthy", "critical")
+_DEFAULT_CHECK_INTERVAL_S = 30
+
+
+def _stale_after_seconds() -> int:
+    """#3950: how old a reading may be and still describe the present.
+
+    Three check cycles — the rule the monitoring loop's leader lease already
+    uses (`MonitoringService._leader_ttl`): one or two missed refreshes are
+    tolerated, a third means nobody is measuring.
+    """
+    try:
+        interval = get_monitoring_service().config.docker_check_interval
+    except Exception:
+        interval = None
+    if not isinstance(interval, int) or isinstance(interval, bool):
+        interval = _DEFAULT_CHECK_INTERVAL_S
+    return max(1, interval) * 3
+
+
+def _format_age(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 120:
+        return f"{seconds}s"
+    if seconds < 7200:
+        return f"{seconds // 60}m"
+    if seconds < 172800:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _expire_reading(status: str, checked_at: Optional[str], *, stale_after: int,
+                    monitoring_running: bool, now: datetime) -> Optional[str]:
+    """#3950: the issue to lead with when a stored reading is no longer current.
+
+    Returns None while the reading is fresh. A row's status is a verdict about
+    the moment it was taken; past `stale_after` it says nothing about now, so
+    the caller degrades it to `unknown` instead of serving a days-old `healthy`
+    in the present tense. An unreadable timestamp fails closed.
+    """
+    try:
+        age = (now - parse_iso_timestamp(checked_at)).total_seconds()
+    except Exception:
+        age = None
+    if age is not None and age <= stale_after:
+        return None
+    off = "; monitoring is off" if not monitoring_running else ""
+    if age is None:
+        return f"Last health check time unreadable — not a current reading{off}"
+    return (f"Last health check {_format_age(age)} ago (reported {status})"
+            f" — not a current reading{off}")
+
+
+def _expire_stale_summaries(agents: List[AgentHealthSummary], *, stale_after: int,
+                            monitoring_running: bool) -> None:
+    now = datetime.now(timezone.utc)
+    for agent in agents:
+        if agent.last_check_at is None:
+            continue  # no row at all: already `unknown`, "No health check data"
+        issue = _expire_reading(agent.status, agent.last_check_at, stale_after=stale_after,
+                                monitoring_running=monitoring_running, now=now)
+        if issue:
+            agent.status = "unknown"
+            agent.issues = [issue, *agent.issues]
+
+
+def _count_statuses(agents: List[AgentHealthSummary]) -> FleetHealthSummary:
+    """#3950: the buckets come from the list they summarise, so they always
+    total `total_agents` — an agent with no row, or an expired one, is counted
+    `unknown` here exactly as it is listed."""
+    summary = FleetHealthSummary(total_agents=len(agents))
+    for agent in agents:
+        bucket = agent.status if agent.status in _BUCKETS else "unknown"
+        setattr(summary, bucket, getattr(summary, bucket) + 1)
+    return summary
 
 
 def _merge_sync_health(
@@ -212,8 +293,14 @@ async def get_fleet_status(
 
     # Filter to accessible agents (unless admin)
     if current_user.role != "admin":
-        accessible = get_accessible_agents(current_user)
-        accessible_names = {a["name"] for a in accessible}
+        agent = getattr(current_user, "agent_name", None)
+        if isinstance(agent, str) and agent:
+            # trinity-enterprise#706 D12: an agent key's fleet sweep sees its
+            # owner's set (get_accessible_agents would narrow it to its reach).
+            accessible_names = set(db.get_accessible_agent_names(
+                current_user.email or "", is_admin=False) or [])
+        else:
+            accessible_names = {a["name"] for a in get_accessible_agents(current_user)}
         agent_names = [n for n in all_agent_names if n in accessible_names]
     else:
         agent_names = all_agent_names
@@ -231,8 +318,11 @@ async def get_fleet_status(
     # and the UI can render *something*.
     try:
         latest_checks = db.get_all_latest_health_checks(agent_names, "aggregate")
-        summary = db.get_health_summary(agent_names)
         agents = [_build_agent_summary(name, latest_checks.get(name)) for name in agent_names]
+        monitoring_running = get_monitoring_service().is_running
+        stale_after = _stale_after_seconds()
+        _expire_stale_summaries(agents, stale_after=stale_after,
+                                monitoring_running=monitoring_running)
 
         # RELIABILITY-004 / #307: merge the heartbeat liveness layer in a single
         # batched Redis round-trip (D4). This is the PASSIVE (pull) annotation —
@@ -255,6 +345,7 @@ async def get_fleet_status(
         sync_summary = _merge_sync_health(agents, agent_names)
 
         agents.sort(key=_status_sort_key)
+        summary = _count_statuses(agents)
     except Exception:
         logger.exception("Fleet health aggregation failed for %d agents", len(agent_names))
         return FleetHealthStatus(
@@ -280,14 +371,8 @@ async def get_fleet_status(
     return FleetHealthStatus(
         enabled=get_monitoring_service().is_running,
         last_check_at=agents[0].last_check_at if agents else None,
-        summary=FleetHealthSummary(
-            total_agents=len(agent_names),
-            healthy=summary.get("healthy", 0),
-            degraded=summary.get("degraded", 0),
-            unhealthy=summary.get("unhealthy", 0),
-            critical=summary.get("critical", 0),
-            unknown=summary.get("unknown", 0)
-        ),
+        summary=summary,
+        stale_after_seconds=stale_after,
         agents=agents,
         circuit_breakers=cb_data,
         sync_summary=sync_summary,
@@ -343,6 +428,7 @@ async def get_agent_health(
         # been checked would be told it has no metrics rather than that it has
         # not been checked.
         fresh.metrics = _declared_metrics_block(agent_name)
+        fresh.stale_after_seconds = _stale_after_seconds()  # #3950
         return fresh
 
     # Build detailed response
@@ -400,9 +486,21 @@ async def get_agent_health(
     from services.circuit_breaker_view import build_circuit_breaker_block
     circuit_breaker = build_circuit_breaker_block(agent_name)
 
+    # #3950: a stored verdict expires like the fleet view's does.
+    aggregate_status = _coerce_status(aggregate_check.get("status"))
+    stale_after = _stale_after_seconds()
+    expired = _expire_reading(
+        aggregate_status, aggregate_check.get("checked_at"), stale_after=stale_after,
+        monitoring_running=get_monitoring_service().is_running,
+        now=datetime.now(timezone.utc))
+    if expired:
+        aggregate_status = "unknown"
+        issues = [expired, *issues]
+
     detail = AgentHealthDetail(
         agent_name=agent_name,
-        aggregate_status=aggregate_check.get("status", "unknown"),
+        aggregate_status=aggregate_status,
+        stale_after_seconds=stale_after,
         last_check_at=aggregate_check.get("checked_at"),
         docker=docker,
         network=network,

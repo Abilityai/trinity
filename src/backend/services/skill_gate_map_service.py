@@ -139,14 +139,19 @@ def _reachable(agent_name: str, kind: str) -> bool:
 def list_gates(agent_name: str) -> Dict[str, Any]:
     """The agent's gate map as the API shows it."""
     rows = db.list_agent_skill_gates(agent_name)
-    reach: Dict[str, bool] = {}
+    reach: Dict[str, Optional[str]] = {}
     gates = []
     for row in rows:
         if row["origin"] == ORIGIN_CLEARED:
             continue
         if row["approver"] not in reach:
-            reach[row["approver"]] = _reachable(agent_name, row["approver"])
-        gates.append({**_public(row), "approver_reachable": reach[row["approver"]]})
+            reach[row["approver"]] = skill_gate_service.approver_reason(agent_name, row["approver"])
+        why = reach[row["approver"]]
+        # trinity-enterprise#881: `approver_unreachable` says why nobody can
+        # approve — `unfilled` (nobody fills it) or `not_shared` (its people
+        # can't open the agent) — so the Skills tab names the right remedy.
+        gates.append({**_public(row), "approver_reachable": why is None,
+                      "approver_unreachable": why})
     return {
         "agent_name": agent_name,
         "gates": gates,
@@ -187,7 +192,10 @@ def approver_status(agent_name: str, principal) -> List[Dict[str, Any]]:
                            exc_info=True)
             people = []
         out.append({"kind": kind, "reachable": bool(people), "viewer_fills": bool(me) and me in people,
-                    "label": label, "role_id": role_id})
+                    "label": label, "role_id": role_id,
+                    # trinity-enterprise#881: why nobody can approve, or None.
+                    "unreachable": None if people
+                    else skill_gate_service.approver_reason(agent_name, kind)})
     return out
 
 
@@ -513,7 +521,9 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
             "previous": _public(previous) if previous else None,
         })
     warnings = _warnings(agent_name, current["approver"], marker)
-    gate = {**_public(current), "approver_reachable": "approver_unassigned" not in warnings}
+    why = ("not_shared" if "approver_not_shared" in warnings
+           else "unfilled" if "approver_unassigned" in warnings else None)
+    gate = {**_public(current), "approver_reachable": why is None, "approver_unreachable": why}
     return {"agent_name": agent_name, "skill_name": key, "gate": gate,
             "changed": changed, "warnings": warnings}
 
@@ -521,12 +531,15 @@ async def set_gate(agent_name: str, skill_name: str, *, changes: Mapping[str, An
 def _warnings(agent_name: str, approver: str, marker: Optional[str]) -> List[str]:
     """What the caller should know about a gate that was saved: the marker on a
     running agent could not be written (the hook fails open during an outage
-    until the check's heal re-syncs it), or the approver kind reaches nobody."""
+    until the check's heal re-syncs it), or the approver kind reaches nobody:
+    `approver_unassigned` when nobody fills it, `approver_not_shared` when its
+    people can't open the agent (trinity-enterprise#881)."""
     out = []
     if marker == MARKER_FAILED:
         out.append("marker_not_written")
-    if not _reachable(agent_name, approver):
-        out.append("approver_unassigned")
+    why = skill_gate_service.approver_reason(agent_name, approver)
+    if why:
+        out.append("approver_not_shared" if why == "not_shared" else "approver_unassigned")
     return out
 
 

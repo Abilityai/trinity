@@ -883,7 +883,7 @@ CREATE INDEX idx_canary_violations_snapshot
 **idempotency_keys** (RELIABILITY-006 — see [Idempotency](execution.md#idempotency-reliability-006-525) and Invariant #18):
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" (platform-derived keys) | "agent:{name}:caller:{principal}" (client header keys, ent#830) | "webhook:{token}"
     idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
     execution_id TEXT,               -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,            -- 'in_flight' | 'completed'
@@ -1167,6 +1167,24 @@ CREATE INDEX idx_agent_capability_grants_cap ON agent_capability_grants(capabili
 Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_grants` (← `0071`).
 `AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
 and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
+
+**agent_peer_skill_grants** (abilityai/trinity-enterprise#662) — caller X may run library-assigned
+skill Y on target Z over their `agent_permissions` edge (`db/peer_skill_grants.py`); without a row a
+peer may invoke only Z's declared skills (`services/peer_skill_policy.py`):
+```sql
+CREATE TABLE agent_peer_skill_grants (
+    caller_agent TEXT NOT NULL,
+    target_agent TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    granted_by TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (caller_agent, target_agent, skill_name)
+);
+CREATE INDEX idx_agent_peer_skill_grants_target ON agent_peer_skill_grants(target_agent);
+```
+Both tracks: SQLite `agent_peer_skill_grants`, Alembic `0099_agent_peer_skill_grants` (← `0098`).
+Both agent columns are `AgentRef(..., CASCADE)`. A grant goes with its edge: `db/permissions.py`
+`remove_permission` and `set_permissions` (full replace) delete the grants on the edges they drop.
 
 **skill_gate_requests** (trinity-enterprise#751) — a gated-skill request frozen while its approval ask is open (`db/skill_gate_requests.py`); the ask records the decision, this row the effect: `pending → dispatching` is a CAS and `dispatched_execution_id` is UNIQUE, so an approval runs exactly once; a `self_approved` row (#752) is the clearance the in-container hook honours. Both tracks (SQLite `skill_gate_requests_table`, Alembic `0088`); `agent_name` and `source_agent` are CASCADE AgentRefs; machine keys never read these rows (#715).
 

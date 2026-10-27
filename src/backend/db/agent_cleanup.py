@@ -25,6 +25,9 @@ The current KEEP set is intentionally small:
 | schedule_executions    | Billing rollup by subscription_id; retention   |
 |                        | sweep prunes terminal rows past 90d (#772).    |
 | nevermined_payment_log | Forever financial record.                      |
+| agent_delegations      | Forever financial record of who funded the     |
+|                        | agent through Nevermined; `cascade_delete`     |
+|                        | stamps `agent_deleted_at` (ent#966).           |
 
 Rename always touches every entry (CASCADE *and* KEEP) — the row's
 `agent_name` is a foreign-key value; renaming the agent must update
@@ -162,6 +165,9 @@ AGENT_REFS: List[AgentRef] = [
     # explicitly instead — the guard is the test, not the regex.
     #
     # Children before parents, matching the chat and portal pairs above.
+    # trinity#3402: what this agent's skill gate stopped in a room is about
+    # this agent alone, and goes with it.
+    AgentRef("room_gate_holds",              "agent_name",        Policy.CASCADE),
     AgentRef("enterprise_room_messages",     "sender_identity",   Policy.CASCADE,
              extra_filter="sender_kind = 'agent'"),
     AgentRef("enterprise_room_participants", "identity",          Policy.CASCADE,
@@ -213,6 +219,8 @@ AGENT_REFS: List[AgentRef] = [
     # keeps its historical name on the rows it wrote; the parity-test regex
     # does not match the column, which is that same distinction.
     AgentRef("agent_capability_grants",      "agent_name",        Policy.CASCADE),  # ent#596
+    AgentRef("agent_peer_skill_grants",      "caller_agent",      Policy.CASCADE),  # ent#662
+    AgentRef("agent_peer_skill_grants",      "target_agent",      Policy.CASCADE),  # ent#662
     AgentRef("agent_tags",                   "agent_name",        Policy.CASCADE),
     # #668 — latest compatibility snapshot (transient/recomputable): wipe on
     # delete, re-key on rename via this registry.
@@ -275,6 +283,10 @@ AGENT_REFS: List[AgentRef] = [
     # --- Monetization -------------------------------------------------------
     AgentRef("nevermined_agent_config",      "agent_name",        Policy.CASCADE),
     AgentRef("nevermined_payment_log",       "agent_name",        Policy.KEEP),
+    # trinity-enterprise#966 — who bound which Nevermined mandate. KEEP: the
+    # row is a financial record; cascade_delete stamps `agent_deleted_at`, which
+    # takes it out of the partial unique "active" index.
+    AgentRef("agent_delegations",            "agent_name",        Policy.KEEP),
     AgentRef("subscription_rate_limit_events", "agent_name",      Policy.CASCADE),
 
     # --- Operations ---------------------------------------------------------
@@ -448,6 +460,22 @@ def cascade_delete(conn, agent_name: str) -> Dict[str, int]:
         if result.rowcount > 0:
             key = f"{ref.table}:{ref.column}" if _multi_column(ref.table) else ref.table
             deleted[key] = deleted.get(key, 0) + result.rowcount
+
+    # trinity-enterprise#966 — the agent's kept delegation rows stop counting as
+    # active: they must never block the organization's DELETE or a later agent
+    # that reuses the name.
+    if _table_exists(conn, "agent_delegations"):
+        from sqlalchemy import update as sa_update
+        from utils.helpers import utc_now_iso
+
+        ad = _table("agent_delegations")
+        result = conn.execute(
+            sa_update(ad)
+            .where(ad.c.agent_name == agent_name, ad.c.agent_deleted_at.is_(None))
+            .values(agent_deleted_at=utc_now_iso())
+        )
+        if result.rowcount and result.rowcount > 0:
+            deleted["agent_delegations:stamped"] = result.rowcount
 
     # Entitled-module agent-scoped tables (ent#46), resolved by NAME via raw
     # text() — these aren't in the OSS metadata, so `_table()` can't build a

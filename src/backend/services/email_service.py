@@ -6,6 +6,7 @@ Supports multiple providers:
 - smtp: Standard SMTP
 - sendgrid: SendGrid API
 """
+import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -22,6 +23,10 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Socket timeout for each SMTP connect/read (#3637). Without it a slow or
+# unreachable server holds the send thread until the OS gives up on the socket.
+SMTP_TIMEOUT_SECONDS = 30
 
 
 class EmailService:
@@ -52,6 +57,29 @@ class EmailService:
             settings_service.get_resend_api_key(),
             settings_service.get_email_from_address(),
         )
+
+    def can_deliver(self) -> bool:
+        """Can this install actually deliver an email right now? (#3655)
+
+        False when the provider resolved per send is `console`, unknown, or
+        missing what it needs — every one of those falls back to printing the
+        message to the backend log while the send reports success. The Login
+        page reads it (install-level, via `GET /api/auth/mode`) to stop saying
+        "we sent a code" when nothing was sent. An unreadable config answers
+        True, so the page behaves exactly as it did before.
+        """
+        try:
+            provider, resend_key, _ = self._runtime_config()
+        except Exception:  # noqa: BLE001 — copy only; never fail the mode read
+            logger.warning("[email] could not read the email provider config", exc_info=True)
+            return True
+        if provider == "resend":
+            return bool(resend_key)
+        if provider == "smtp":
+            return all([SMTP_HOST, SMTP_USER, SMTP_PASSWORD])
+        if provider == "sendgrid":
+            return bool(SENDGRID_API_KEY)
+        return False   # console, or a provider this service does not know
 
     async def send_verification_code(
         self,
@@ -106,7 +134,10 @@ class EmailService:
             if provider == "console":
                 return self._send_console(to_email, subject, body)
             elif provider == "smtp":
-                return self._send_smtp(to_email, subject, body, html_body, from_address)
+                # smtplib is synchronous: run it off the event loop (#3637).
+                return await asyncio.to_thread(
+                    self._send_smtp, to_email, subject, body, html_body, from_address
+                )
             elif provider == "sendgrid":
                 return await self._send_sendgrid(to_email, subject, body, html_body, from_address)
             elif provider == "resend":
@@ -217,7 +248,7 @@ If you didn't request this code, you can safely ignore this email.
                 msg.attach(MIMEText(html_body, "html"))
 
             # Connect and send
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=SMTP_TIMEOUT_SECONDS) as server:
                 server.starttls()
                 server.login(SMTP_USER, SMTP_PASSWORD)
                 server.sendmail(from_address, to_email, msg.as_string())

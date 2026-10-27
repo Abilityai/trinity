@@ -52,7 +52,7 @@ On an agent in the pull pilot, a turn can be delivered again after its lease exp
 |------|-------------|
 | `chat_with_agent(agent_name, message)` | Send a message to another agent and wait for the response. |
 | `chat_with_agent(agent_name, message, parallel=true, async=true)` | Send a message asynchronously. Returns an `execution_id`. |
-| `chat_with_agent(agent_name, message, parallel=true, async=true)` from a Slack, Telegram or Workspace turn | Same receipt, plus `report_back: "requested"`: when the delegated run ends, success or failure, it posts its outcome into that conversation (if the conversation allows such notes). On by default for async delegation; pass `execution_id="manual"` to turn it off for one call. A `parallel=true` sync call opts in by passing your own `execution_id`; a plain sequential call does not report back. |
+| `chat_with_agent(agent_name, message, parallel=true, async=true)` from a Slack, Telegram or Workspace turn | Same receipt, plus `report_back: "requested"`: when the delegated run ends, success or failure, it posts its outcome into that conversation (if the conversation allows such notes). On by default for async delegation; pass `execution_id="manual"` to turn it off for one call. A `parallel=true` sync call opts in by passing your own `execution_id`. A plain sequential call reports back only when it returns a receipt instead of the reply (the platform stopped waiting); when it answers in time, you have the reply and nothing is posted. |
 | `get_execution_result(agent_name, execution_id)` | Poll for the result of an async execution. |
 | `list_recent_executions(agent_name)` | List recent executions for an agent. |
 | `get_agent_activity_summary(agent_name)` | Activity summary over a configurable time window. |
@@ -66,11 +66,11 @@ On an agent in the pull pilot, a turn can be delivered again after its lease exp
 
 ### Shared Folder Configuration
 
-![Agent Folders tab showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../../screenshots/agent-folders.png)
+![Settings › Storage › Shared folders showing Expose Shared Folder and Mount Shared Folders toggles with step-by-step workflow](../../screenshots/agent-folders.png)
 
 Agents can share files via Docker volumes:
 
-1. On the **source agent**, open the **Folders** tab and enable **Expose Shared Folder**. Files placed in `/home/developer/shared-out` are made available to permitted agents.
+1. On the **source agent**, open **Settings › Storage › Shared folders** and enable **Expose Shared Folder**. Files placed in `/home/developer/shared-out` are made available to permitted agents.
 2. Grant the consuming agent permission via the **Permissions** tab.
 3. On the **consuming agent**, enable **Mount Shared Folders**. Exposed folders appear at `/home/developer/shared-in/{agent-name}`.
 4. Restart both agents to apply the volume mounts.
@@ -87,3 +87,4 @@ Removing the permission (or turning **Mount Shared Folders** off) takes the fold
 - [Event Subscriptions](./event-subscriptions.md) -- Pub/sub for inter-agent pipelines
 - [System Manifest](./system-manifest.md) -- Deploy multi-agent systems from a single file
 - [Scheduling](../automation/scheduling.md) -- Automated agent execution
+- [A2A Protocol](../integrations/a2a-protocol.md) -- Calling agents on another Trinity instance, or any A2A agent, including signed calls under AAuth

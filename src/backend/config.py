@@ -533,7 +533,9 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # catalog's releases — the seed is fresh-install only, so a bump reaches new
 # installs and nothing else (#2545 moved it to v0.2.0, the release that added
 # the project-management category; #3123 to v0.3.0, the release that added
-# `update-dashboard`, which the metrics tiles point users at; `.env.example` and
+# `update-dashboard`, which the metrics tiles point users at; #3430 to v0.5.0,
+# the release whose `project-status` and `add-pipeline` match the platform's
+# ask and escalation contracts; `.env.example` and
 # `docs/user-docs/automation/skills-and-playbooks.md` state the same value and
 # `tests/unit/test_2545_skill_source_pin.py` keeps the three in step). The env
 # var is the escape hatch for an instance that wants an older or newer catalog.
@@ -543,7 +545,7 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
     "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
 )
-DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.3.0")
+DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.5.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
 
 # ============================================================================

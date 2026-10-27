@@ -384,6 +384,11 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     #3247: `replaced` — a cancel the AGENT authored by replacing its own
  *     ask (`disposed_by` / the projection's `ended_by` is `agent`); never a
  *     person's cancel, a timeout or a platform ending.
+ *     trinity-enterprise#901: `withdrawn` — the agent ended its own ask with a
+ *     reason and no successor. Which of the two is the server's derived
+ *     `agent_ending`, read first; never inferred from the reason text or from
+ *     a `replaced_by` the Workspace projection may withhold. A row without the
+ *     field (an older payload) keeps reading `replaced`.
  *   - `who` — the person, for the Operating Room (`disposed_by_email`, or a
  *     legacy answer's `responded_by_email`); the Workspace projection's coarse
  *     `ended_by` (`you` / `the operator`; `someone_else` → the projection's
@@ -392,7 +397,10 @@ export const QUEUE_RESPONSE_NOT_ADDRESSEE =
  *     'platform'`, or the projection's `ended_by = 'platform'`); `null` when the
  *     platform does not know.
  *   - `reason` — #3246: the platform's ending in words (`condition_cleared`,
- *     `superseded`); `null` for every other ending. A platform ending is never a
+ *     `superseded`); trinity-enterprise#901: the agent's own one-line reason
+ *     for a withdraw (the Workspace's `ending_reason`, the operator row's
+ *     `disposition_reason`) — agent text, rendered on its own line, never in
+ *     the ending's words; `null` for every other ending. A platform ending is never a
  *     person's answer and never a timeout.
  *   - `alert` — the row is an alert: its expiry reads "nobody acted on it",
  *     because nobody was asked anything.
@@ -406,6 +414,7 @@ export const ENDING_LABELS = Object.freeze({
   cancelled: 'Cancelled',
   expired: 'Expired',
   replaced: 'Replaced',   // #3247
+  withdrawn: 'Withdrawn', // trinity-enterprise#901
 })
 
 /** #3246 — why the platform ended a row, in words. An unknown reason token
@@ -425,7 +434,10 @@ export const TIMEOUT_ENDING_REASONS = Object.freeze({
 
 function endingKind(item) {
   const kind = ledgerKind(item)
-  if (kind === 'cancelled' && (item.disposed_by === 'agent' || item.ended_by === 'agent')) return 'replaced'
+  if (kind !== 'cancelled') return kind
+  // trinity-enterprise#901: the server's derived kind first.
+  if (item.agent_ending === 'replaced' || item.agent_ending === 'withdrawn') return item.agent_ending
+  if (item.disposed_by === 'agent' || item.ended_by === 'agent') return 'replaced'
   return kind
 }
 
@@ -450,6 +462,9 @@ export function queueEnding(item) {
     reason = TIMEOUT_ENDING_REASONS[item.disposition_reason] || null
   } else if (kind === 'replaced') {
     who = 'the agent'
+  } else if (kind === 'withdrawn') {
+    who = 'the agent'
+    reason = item.ending_reason || item.disposition_reason || null
   } else if (item.disposed_by === 'platform' || item.ended_by === 'platform') {
     who = 'the platform'
     reason = PLATFORM_ENDING_REASONS[item.disposition_reason] || null
@@ -672,4 +687,43 @@ export function proposalRows(proposal) {
     key,
     value: typeof value === 'string' ? value : JSON.stringify(value),
   }))
+}
+
+/** `POST /api/operator-queue/bulk-cancel` takes at most this many ids (`models.BulkCancelRequest`). */
+export const BULK_CANCEL_MAX_IDS = 500
+
+/**
+ * #3302 — the bulk-cancel batches for a list longer than the route takes. The
+ * list is complete now, so Clear All can hold more than 500 asks. Each
+ * bulk-cancel ends its rows as ONE event, and the wake observer gives each
+ * agent one turn per event — so batches keep an agent's asks together (whole
+ * agents, in first-seen order, packed up to the limit) and Clear All still
+ * costs each agent one turn. Only an agent holding more than the limit by
+ * itself is split. `items` are `{id, agent_name}`; returns lists of ids.
+ */
+export function bulkCancelBatches(items, max = BULK_CANCEL_MAX_IDS) {
+  const byAgent = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const ids = byAgent.get(item.agent_name) || []
+    ids.push(item.id)
+    byAgent.set(item.agent_name, ids)
+  }
+  const batches = []
+  let batch = []
+  for (const ids of byAgent.values()) {
+    if (batch.length + ids.length > max && batch.length) {
+      batches.push(batch)
+      batch = []
+    }
+    for (let i = 0; i < ids.length; i += max) {
+      const part = ids.slice(i, i + max)
+      if (batch.length + part.length > max) {
+        batches.push(batch)
+        batch = []
+      }
+      batch = batch.concat(part)
+    }
+  }
+  if (batch.length) batches.push(batch)
+  return batches
 }

@@ -215,6 +215,7 @@ services:
       # tuning lever rather than a dead feature — but this compose launches
       # standalone (no base merge / env_file), so wire them here too (#1056 class).
       - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_DELEGATION_MAX_INFLIGHT=${NEVERMINED_DELEGATION_MAX_INFLIGHT:-4}  # concurrent Nevermined delegation verify/revoke calls, fleet-wide
       - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Prod compose launches

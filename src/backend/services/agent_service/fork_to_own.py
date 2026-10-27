@@ -217,8 +217,8 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
 
 
 # #3164 — which personal token a fork/bind may fall back to, and how a failure
-# of that token is named. The creator's SAVED personal token (Settings → GitHub
-# token, ent#162 `per_user`) is the user's own identity and may stand in for an
+# of that token is named. The creator's SAVED personal token (Settings → MCP Keys →
+# Personal GitHub Token, ent#162 `per_user`) is the user's own identity and may stand in for an
 # omitted form token. The PLATFORM token never may: the destination would be
 # created under the platform's account, and the fork path persists its token as
 # the agent's per-agent PAT (`github_pat_tier = "fork"`), which would bake the
@@ -243,7 +243,7 @@ def fork_pat_required():
     return _http_error(
         400, "FORK_PAT_REQUIRED",
         "A GitHub token is needed to create the repository in your account. "
-        "Save your personal token in Settings → GitHub token, or enter one here. "
+        "Save your personal token in Settings → MCP Keys → Personal GitHub Token, or enter one here. "
         "The platform's token is never used to create a repository for you.",
     )
 
@@ -280,7 +280,7 @@ def saved_token_message(code: str, message: str) -> Optional[str]:
     None when `code` is not about the token."""
     if code not in _TOKEN_FAILURE_CODES:
         return None
-    return (f"Your saved GitHub token (Settings → GitHub token) was used and failed: "
+    return (f"Your saved GitHub token (Settings → MCP Keys → Personal GitHub Token) was used and failed: "
             f"{message} Update it in Settings, or enter a different token here.")
 
 

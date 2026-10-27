@@ -9,7 +9,7 @@ Both use the production compose shape: no hot-reload, health checks and `unless-
 
 ## Prerequisites
 
-- Linux server (Ubuntu 22.04 LTS or later recommended), **8 GB RAM minimum** — below that the agent containers and the platform services contend and turns start failing under load
+- Linux server (Ubuntu 22.04 LTS or later recommended), **4 GB RAM minimum, 8 GB recommended**. 4 GB runs the platform and two or three agents; budget 8 GB for a working fleet
 - Docker Engine 24+ and the Docker Compose plugin (`docker compose` — no hyphen)
 - A domain or subdomain pointing to your server's IP (e.g., `trinity.your-domain.com`), or a plan for private access — see [TLS on a bare VM](#tls-on-a-bare-vm)
 - `openssl` on the server for secret generation
@@ -132,7 +132,7 @@ Trinity uses two separate Redis passwords by design. `REDIS_BACKEND_PASSWORD` is
 | Variable | Notes |
 |---|---|
 | `FRONTEND_URL` | Your public-facing domain (e.g., `https://trinity.your-domain.com`). Used for OAuth redirect callbacks and email verification links. |
-| `PUBLIC_CHAT_URL` | The externally reachable URL for public chat links and webhooks. Often the same as `FRONTEND_URL`. Leave blank if all users access via VPN. |
+| `PUBLIC_CHAT_URL` | The externally reachable URL for public chat links, the A2A agent card and paid-agent URLs. Often the same as `FRONTEND_URL`. Leave blank if all users access via VPN. Telegram and WhatsApp webhooks read only the **Public URL** under **Settings → General**, not this variable. Schedule webhook URLs take the host you opened Trinity on — see [Public Access](public-access.md). |
 | `FRONTEND_PORT` | Host port the web UI binds (default `80`). Honoured by the prod and hosted compose files as well as dev. |
 | `TRINITY_DATA_PATH` | Bind-mount directory for `/data` (see [Data path](#data-path)). |
 
@@ -525,6 +525,11 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `WORKSPACE_VOICE_MAX_DURATION` | dev · prod · hosted | Max length of one Workspace voice call, seconds (default 1800). |
 | `VOIP_ENABLED` | dev · prod · hosted | Outbound phone calls via Twilio (default off; also needs a per-agent binding). |
 | `A2A_OUTBOUND_ENABLED` | dev · prod · hosted | Let agents task external A2A agents (default off; also needs registered endpoints). |
+| `AAUTH_ENABLED` (commented) | dev · prod · hosted | Seed for the AAuth switch — agents sign their calls to other Trinity instances and verified callers are accepted. Ships unset so the **Settings › Integrations** switch stays authoritative; a value saved there wins over this variable. Needs `AAUTH_ISSUER` to take effect. See [A2A Protocol → AAuth](../../integrations/a2a-protocol.md#aauth-agent-identity--trinity-to-trinity-without-a-shared-key). |
+| `AAUTH_ISSUER` | dev · prod · hosted | This instance's AAuth identity domain: `https://<host>`, lowercase, no port, no path. Must match the host in the Agent Card URLs. Editable in Settings; a saved value wins. |
+| `AAUTH_PROTOTYPE_ENABLED` | dev · prod · hosted | The person-token and resource-calling prototypes (default `false`; inert without `AAUTH_ENABLED`). |
+| `AAUTH_PERSON_SERVER` | dev · prod · hosted | Prototype: the person server agents bind through, `https://<host>`. Unset → person-token requests fail closed. |
+| `AAUTH_RESOURCE_ALLOWLIST` | dev · prod · hosted | Prototype: the AAuth resources agents may call, as a comma-separated list or JSON array of `https://<host>` origins. Empty or malformed → **no** resource is callable (fail closed). |
 | `VOIP_MAX_CALL_DURATION` / `VOIP_DEFAULT_DAILY_CALL_CAP` / `VOIP_CALL_RATE_LIMIT` / `VOIP_CALL_RATE_WINDOW` / `VOIP_TICKET_TTL_SECONDS` / `VOIP_INTENT_TTL_SECONDS` | dev · prod · hosted | Telephony spend and abuse controls. |
 
 ### Rate limits and caps
@@ -556,7 +561,7 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |
-| `PUBLIC_CHAT_URL` | dev · prod · hosted | External base URL for public chat links and webhooks. |
+| `PUBLIC_CHAT_URL` | dev · prod · hosted | External base URL for public chat links, the A2A agent card and paid-agent URLs (the **Public URL** setting overrides it). |
 | `TRINITY_IMAGE_TAG` | hosted | Which published image set to pull (default `latest`). Ignored by source builds. |
 | `TUNNEL_TOKEN` | prod · hosted | Cloudflare Tunnel token; the `cloudflared` service is profile-gated. |
 | `PRIVATE_NETWORK_CIDRS` | none — read by `start.sh --provision` | Source ranges served over plain HTTP by the Caddy that provisioning installs (a VPN-only instance). Empty = every HTTP request redirects to HTTPS. Apply a change with `--caddy-only` — see [Hardening](hardening.md#reaching-the-ui-over-the-tailnet). |

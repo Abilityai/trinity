@@ -1,354 +1,291 @@
 <template>
-  <!-- z-50: the house modal tier (SystemViewEditor / FirstRunOverlay). Was
-       z-10, which sat UNDER the Dashboard's z-30 filter pill + z-20
-       query-empty overlay (ent#261) — chassis chrome floated above the open
-       modal. All full-screen modals must outrank page-level overlay chrome. -->
-  <div class="fixed z-50 inset-0 overflow-y-auto">
-    <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
-      <div class="fixed inset-0 bg-gray-500 dark:bg-gray-900 bg-opacity-75 dark:bg-opacity-75 transition-opacity"></div>
+  <!--
+    #3792: a fixed-size two-pane picker. The panel's size never depends on what
+    is selected: the header and footer are fixed, and each pane scrolls on its
+    own, vertically only. Source-specific options (repository, import intent,
+    agent-or-codebase, fork-to-own) open inside the right pane, below the
+    control that revealed them, so nothing outside that pane moves.
 
-      <span class="hidden sm:inline-block sm:align-middle sm:h-screen">&#8203;</span>
-
-      <div class="inline-block align-bottom bg-white dark:bg-gray-800 rounded-lg text-left shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full max-h-[90vh] overflow-y-auto">
-        <!-- trinity-enterprise#15: after a github-sourced create succeeds the
-             body swaps to the post-create validation step (below). `created`
-             has already been emitted; only the auto-close is deferred. -->
-        <form v-if="!postCreate" @submit.prevent="createAgent">
-          <div class="bg-white dark:bg-gray-800 px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
-            <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-white mb-4">Create New Agent</h3>
-
-            <div class="space-y-4">
-              <div>
-                <BaseInput
-                  id="agent-name"
-                  v-model="form.name"
-                  label="Slug / Identifier"
-                  required
-                  placeholder="my-agent"
-                  :error="nameError"
-                  :aria-describedby="sanitizedName ? 'agent-name-help agent-name-preview' : 'agent-name-help'"
-                />
-                <p id="agent-name-help" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  The permanent identifier used in URLs, containers, and API keys.
-                  Check the identifier below before creating your agent.
-                </p>
-                <div class="mt-1 min-h-[20px]">
-                  <p v-if="sanitizedName" id="agent-name-preview" aria-live="polite" class="text-xs text-gray-600 dark:text-gray-300">
-                    Identifier after formatting: <code class="break-all">{{ sanitizedName }}</code>
-                  </p>
-                </div>
-              </div>
-
-              <!-- ent#1640: optional human-facing display name, set at creation. -->
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                  Display name <span class="font-normal text-gray-400">(optional)</span>
-                </label>
-                <input
-                  v-model="form.display_label"
-                  type="text"
-                  maxlength="120"
-                  class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                  placeholder="e.g. Marketing Assistant"
-                />
-                <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                  A friendly name shown in the UI. Leave blank to display the slug.
-                  You can change this any time.
-                </p>
-              </div>
-
-              <div>
-                <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Template</label>
-
-                <!-- Loading state -->
-                <div v-if="templatesLoading" class="mt-2 flex items-center justify-center py-4">
-                  <svg class="animate-spin h-5 w-5 text-action-primary-500 mr-2" fill="none" viewBox="0 0 24 24">
-                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                  </svg>
-                  <span class="text-sm text-gray-500 dark:text-gray-400">Loading templates...</span>
-                </div>
-
-                <!-- Error state -->
-                <div v-else-if="templatesError" class="mt-2 p-3 bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800 rounded-lg">
-                  <p class="text-sm text-status-danger-600 dark:text-status-danger-400">{{ templatesError }}</p>
-                  <button @click="fetchTemplates" type="button" class="mt-1 text-sm text-status-danger-700 dark:text-status-danger-300 underline">
-                    Try again
-                  </button>
-                </div>
-
-                <div v-else class="mt-1 space-y-2 max-h-80 overflow-y-auto">
-                  <!-- Featured fork-to-own templates (trinity-enterprise#93) -->
-                  <div v-if="featuredTemplates.length > 0" class="pb-1">
-                    <div
-                      v-for="template in featuredTemplates"
-                      :key="template.id"
-                      @click="form.template = template.id"
-                      :class="[
-                        'relative flex items-center p-3 border-2 rounded-lg cursor-pointer transition-all',
-                        form.template === template.id ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-action-primary-300 dark:border-action-primary-700 hover:border-action-primary-400 dark:hover:border-action-primary-500 bg-action-primary-50/40 dark:bg-action-primary-900/10'
-                      ]"
-                    >
-                      <div class="flex-shrink-0 w-8 h-8 rounded-full bg-action-primary-600 flex items-center justify-center">
-                        <svg class="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-                        </svg>
-                      </div>
-                      <div class="ml-3 flex-1">
-                        <p class="text-sm font-medium text-gray-900 dark:text-white">{{ template.display_name }}</p>
-                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ template.tagline || truncateDescription(template.description) }}</p>
-                        <p class="text-[11px] text-action-primary-700 dark:text-action-primary-300 mt-0.5">Creates a copy in your own GitHub account</p>
-                      </div>
-                      <div v-if="form.template === template.id" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
-                        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                        </svg>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Blank agent option -->
-                  <div
-                    @click="form.template = ''"
-                    :class="[
-                      'relative flex items-center p-3 border rounded-lg cursor-pointer transition-all',
-                      form.template === '' ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
-                    ]"
-                  >
-                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center">
-                      <svg class="w-4 h-4 text-gray-500 dark:text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                      </svg>
-                    </div>
-                    <div class="ml-3 flex-1">
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">Blank Agent (Claude Code)</p>
-                      <p class="text-xs text-gray-500 dark:text-gray-400">Start with empty config using Claude Code runtime</p>
-                    </div>
-                    <div v-if="form.template === ''" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
-                      <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                  </div>
-
-                  <!-- GitHub Repository URL option -->
-                  <div
-                    @click="form.template = 'github-custom'"
-                    :class="[
-                      'relative flex items-center p-3 border rounded-lg cursor-pointer transition-all',
-                      form.template === 'github-custom' ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
-                    ]"
-                  >
-                    <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-900 dark:bg-gray-700 flex items-center justify-center">
-                      <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                      </svg>
-                    </div>
-                    <div class="ml-3 flex-1">
-                      <p class="text-sm font-medium text-gray-900 dark:text-white">GitHub Repository</p>
-                      <p class="text-xs text-gray-500 dark:text-gray-400">Create from any GitHub repository URL</p>
-                    </div>
-                    <div v-if="form.template === 'github-custom'" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
-                      <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                      </svg>
-                    </div>
-                  </div>
-                  <!-- GitHub repo URL input (shown when GitHub Repository is selected) -->
-                  <div v-if="form.template === 'github-custom'" class="pl-11">
-                    <input
-                      v-model="githubRepoUrl"
-                      type="text"
-                      ref="githubRepoInput"
-                      class="block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                      placeholder="owner/repo or https://github.com/owner/repo"
-                      @click.stop
-                    />
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Enter a GitHub repository in <code>owner/repo</code> format</p>
-                    <!-- trinity-enterprise#15: clone/copy/fork intent selector -->
-                    <ImportIntentPicker v-model="importIntent" />
-                  </div>
-
-                  <!-- Local templates section (shown first after Blank Agent) -->
-                  <div v-if="localTemplates.length > 0" class="pt-2">
-                    <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2 flex items-center">
-                      <svg class="w-4 h-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 19a2 2 0 01-2-2V7a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1M5 19h14a2 2 0 002-2v-5a2 2 0 00-2-2H9a2 2 0 00-2 2v5a2 2 0 01-2 2z" />
-                      </svg>
-                      Local Templates
-                    </p>
-                    <div
-                      v-for="template in localTemplates"
-                      :key="template.id"
-                      @click="form.template = template.id"
-                      :class="[
-                        'relative flex items-center p-3 border rounded-lg cursor-pointer transition-all',
-                        form.template === template.id ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
-                      ]"
-                    >
-                      <div class="flex-shrink-0 w-8 h-8 rounded-full bg-action-primary-100 dark:bg-action-primary-900/50 flex items-center justify-center">
-                        <svg class="w-4 h-4 text-action-primary-600 dark:text-action-primary-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                        </svg>
-                      </div>
-                      <div class="ml-3 flex-1">
-                        <p class="text-sm font-medium text-gray-900 dark:text-white">{{ template.display_name }}</p>
-                        <p class="text-xs text-gray-500 dark:text-gray-400 truncate">{{ truncateDescription(template.description) }}</p>
-                      </div>
-                      <div v-if="form.template === template.id" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
-                        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                        </svg>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- GitHub templates section -->
-                  <div v-if="githubTemplates.length > 0" class="pt-2">
-                    <p class="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-2 flex items-center">
-                      <svg class="w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                      </svg>
-                      GitHub Templates
-                    </p>
-                    <div
-                      v-for="template in githubTemplates"
-                      :key="template.id"
-                      @click="form.template = template.id"
-                      :class="[
-                        'relative flex items-center p-3 border rounded-lg cursor-pointer transition-all',
-                        form.template === template.id ? 'border-action-primary-500 bg-action-primary-50 dark:bg-action-primary-900/30 ring-2 ring-action-primary-500' : 'border-gray-300 dark:border-gray-600 hover:border-gray-400 dark:hover:border-gray-500'
-                      ]"
-                    >
-                      <div class="flex-shrink-0 w-8 h-8 rounded-full bg-gray-900 dark:bg-gray-700 flex items-center justify-center">
-                        <svg class="w-4 h-4 text-white" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
-                        </svg>
-                      </div>
-                      <div class="ml-3 flex-1">
-                        <p class="text-sm font-medium text-gray-900 dark:text-white">{{ template.display_name }}</p>
-                        <p class="text-xs text-gray-500 dark:text-gray-400">{{ template.github_repo }}</p>
-                      </div>
-                      <div v-if="form.template === template.id" class="flex-shrink-0 text-action-primary-500 dark:text-action-primary-400">
-                        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-                          <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-                        </svg>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- trinity-enterprise#704: agent vs deployment, on the paths that bind git -->
-                <AgentKindPicker v-if="showKindPicker" v-model="agentKind" />
-
-                <!-- Fork-to-own fields (trinity-enterprise#93; also shown for
-                     the github-custom 'fork' intent, trinity-enterprise#15) -->
-                <div v-if="showForkFields" class="mt-3 p-3 border border-action-primary-200 dark:border-action-primary-800 rounded-lg space-y-3">
-                  <p class="text-xs text-gray-600 dark:text-gray-300">
-                    This template is copied into a repository <span class="font-medium">you own</span> — your agent's
-                    knowledge lives there, and template updates stay one <code class="text-[11px]">git pull upstream</code> away.
-                  </p>
-                  <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Your repository <span class="text-status-danger-500">*</span></label>
-                    <input
-                      v-model="forkDestination"
-                      type="text"
-                      class="mt-1 block w-full border border-gray-300 dark:border-gray-600 rounded-md shadow-sm px-3 py-2 focus:ring-action-primary-500 focus:border-action-primary-500 sm:text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500"
-                      placeholder="your-github-username/my-agent-brain"
-                    />
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">Doesn't need to exist — it will be created for you. (If you pre-create it, leave it empty: no README.)</p>
-                  </div>
-                  <SavedGithubTokenField v-model="forkPat" v-model:overriding="forkPatOverriding" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                      <span class="font-medium">Recommended:</span> a fine-grained token scoped to just this repository
-                      (Administration + Contents write). A classic PAT with <code>repo</code> scope also works but grants
-                      access to <em>all</em> your repositories — and the agent can read its own git credential, so prefer
-                      the narrow token. Stored encrypted as this agent's git identity.
-                    </p>
-                  </SavedGithubTokenField>
-                  <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</label>
-                    <div class="mt-1 flex gap-4">
-                      <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
-                        <input type="radio" v-model="forkPrivate" :value="true" class="text-action-primary-600 focus:ring-action-primary-500" />
-                        <span class="ml-1.5">Private (recommended)</span>
-                      </label>
-                      <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
-                        <input type="radio" v-model="forkPrivate" :value="false" class="text-action-primary-600 focus:ring-action-primary-500" />
-                        <span class="ml-1.5">Public</span>
-                      </label>
-                    </div>
-                    <div v-if="!forkPrivate" class="mt-2 p-2 bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-300 dark:border-status-danger-700 rounded-md">
-                      <p class="text-xs font-medium text-status-danger-700 dark:text-status-danger-300">
-                        ⚠ Everything this agent captures — notes, insights, potentially personal information — will be
-                        publicly visible on GitHub. Choose Private unless you are certain.
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Selected template description -->
-                <div v-if="selectedTemplate" class="mt-3 p-3 bg-gray-50 dark:bg-gray-700 rounded-lg">
-                  <p class="text-sm text-gray-700 dark:text-gray-300">{{ selectedTemplate.description }}</p>
-                  <div v-if="selectedTemplate.mcp_servers && selectedTemplate.mcp_servers.length > 0" class="mt-2">
-                    <p class="text-xs text-gray-500 dark:text-gray-400 mb-1">MCP Servers:</p>
-                    <div class="flex flex-wrap gap-1">
-                      <span v-for="server in selectedTemplate.mcp_servers" :key="typeof server === 'string' ? server : server.name" class="px-2 py-0.5 text-xs bg-gray-200 dark:bg-gray-600 text-gray-700 dark:text-gray-300 rounded">
-                        {{ typeof server === 'string' ? server : server.name }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div v-if="error" class="mt-4 text-status-danger-600 dark:text-status-danger-400 text-sm">
-              {{ error }}
-            </div>
-          </div>
-
-          <div class="bg-gray-50 dark:bg-gray-900 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
-            <BaseButton
-              type="submit"
-              :disabled="!sanitizedName"
-              :loading="loading"
-              :loading-label="showForkFields ? 'Creating your repository…' : 'Creating...'"
-              class="w-full sm:ml-3 sm:w-auto"
-            >
-              Create Agent
-            </BaseButton>
-            <button
-              type="button"
-              @click="$emit('close')"
-              class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 dark:border-gray-600 shadow-sm px-4 py-2 bg-white dark:bg-gray-700 text-base font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800 focus:ring-action-primary-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm"
-            >
-              Cancel
-            </button>
-          </div>
-        </form>
-        <ImportValidationStep
-          v-else
-          :agent-name="postCreate.name"
-          :import-snapshot="postCreate.snapshot"
-          :git-mode="postCreate.gitMode"
-          @close="$emit('close')"
-        />
+    BaseModal owns the overlay, Esc, the focus trap and the scroll lock (z-50,
+    teleported to <body>, so it outranks page-level overlay chrome, ent#261).
+    Backdrop clicks do not close it: a stray click must not discard typing.
+  -->
+  <BaseModal
+    :model-value="true"
+    :close-on-backdrop="false"
+    labelledby="create-agent-title"
+    :panel-class="PANEL_CLASS"
+    @close="$emit('close')"
+  >
+    <!-- trinity-enterprise#15: after a github-sourced create succeeds the body
+         swaps to the post-create validation step, inside the same panel. -->
+    <form v-if="!postCreate" class="flex flex-col h-full min-h-0" @submit.prevent="createAgent">
+      <div class="flex items-center justify-between h-14 px-5 shrink-0 border-b border-gray-200 dark:border-gray-750">
+        <h3 id="create-agent-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">New agent</h3>
+        <BaseButton variant="ghost" size="sm" type="button" aria-label="Close" @click="$emit('close')">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </BaseButton>
       </div>
+
+      <div class="flex flex-col sm:flex-row flex-1 min-h-0">
+        <!-- Left pane: every source in one list. Fixed width; scrolls itself. -->
+        <div class="flex flex-col shrink-0 h-44 sm:h-auto sm:w-72 border-b sm:border-b-0 sm:border-r border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-900">
+          <div class="p-3 shrink-0">
+            <BaseInput
+              id="template-search"
+              v-model="search"
+              type="search"
+              placeholder="Search templates"
+              aria-label="Search templates"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="flex-1 min-h-0 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] px-2 pb-3" data-testid="source-list">
+            <p :class="OVERLINE_CLASS">Start</p>
+            <button
+              v-for="opt in startOptions"
+              :key="opt.id"
+              type="button"
+              data-testid="source-option"
+              :aria-pressed="form.template === opt.id ? 'true' : 'false'"
+              :class="[OPTION_CLASS, form.template === opt.id ? OPTION_SELECTED_CLASS : OPTION_IDLE_CLASS]"
+              @click="selectSource(opt.id)"
+            >
+              <span :class="[ICON_CLASS, ICON_NEUTRAL_CLASS]"><SourceIcon :kind="opt.icon" /></span>
+              <span class="min-w-0 truncate text-sm font-medium">{{ opt.title }}</span>
+            </button>
+
+            <!-- Loading → failed → empty → ready share the list's footprint. -->
+            <div v-if="listState.state === 'loading'" aria-busy="true" class="px-2 pt-4 space-y-3">
+              <span class="sr-only">Loading templates</span>
+              <div v-for="n in 4" :key="n" class="h-7 rounded-md bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none" />
+            </div>
+            <LoadFailed
+              v-else-if="listState.state === 'failed'"
+              dense
+              title="Templates didn't load"
+              message="Blank and GitHub repository still work."
+              :detail="templatesError"
+              @retry="fetchTemplates"
+            />
+            <template v-else>
+              <template v-for="group in templateGroups" :key="group.key">
+                <p v-if="group.items.length" :class="OVERLINE_CLASS">{{ group.title }}</p>
+                <button
+                  v-for="template in group.items"
+                  :key="template.id"
+                  type="button"
+                  data-testid="source-option"
+                  :aria-pressed="form.template === template.id ? 'true' : 'false'"
+                  :title="template.display_name"
+                  :class="[OPTION_CLASS, form.template === template.id ? OPTION_SELECTED_CLASS : OPTION_IDLE_CLASS]"
+                  @click="selectSource(template.id)"
+                >
+                  <span :class="[ICON_CLASS, group.key === 'featured' ? ICON_ACCENT_CLASS : ICON_NEUTRAL_CLASS]">
+                    <SourceIcon :kind="group.icon" />
+                  </span>
+                  <span class="min-w-0 truncate text-sm font-medium">{{ template.display_name }}</span>
+                </button>
+              </template>
+              <p v-if="search && !matchCount" class="px-2 pt-4 text-sm text-gray-600 dark:text-gray-400">
+                No templates match “{{ search }}”.
+              </p>
+            </template>
+          </div>
+        </div>
+
+        <!-- Right pane: the selected source, the name, and its options. -->
+        <div class="flex-1 min-w-0 min-h-0 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] px-6 py-5 space-y-5" data-testid="source-detail">
+          <div class="flex items-start gap-3">
+            <span :class="['w-10 h-10 rounded-lg', ICON_BOX_CLASS, isForkToOwn ? ICON_ACCENT_CLASS : ICON_NEUTRAL_CLASS]">
+              <SourceIcon :kind="detail.icon" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <h4 class="text-base font-semibold text-gray-900 dark:text-gray-100 break-words">{{ detail.title }}</h4>
+                <BaseBadge v-if="detail.badge" size="sm" :variant="isForkToOwn ? 'primary' : 'neutral'">{{ detail.badge }}</BaseBadge>
+              </div>
+              <!-- Always two lines tall, so the Name field sits at one height for every source. -->
+              <p class="mt-1 h-10 text-sm leading-5 text-gray-600 dark:text-gray-400 line-clamp-2 break-words" :title="detail.description">{{ detail.description }}</p>
+                          </div>
+          </div>
+
+          <!-- One name. The ID row is always present (preview, override or the
+               named error), so typing never changes this block's height. -->
+          <div class="min-h-[6.5rem]">
+            <BaseInput
+              id="agent-name"
+              v-model="form.name"
+              label="Name"
+              required
+              placeholder="e.g. Marketing Assistant"
+              autocomplete="off"
+              :error="nameError"
+              :aria-describedby="sanitizedName ? 'agent-name-preview' : undefined"
+            />
+            <div v-if="!nameError" class="mt-1.5 flex items-center gap-2 min-h-[2rem] text-xs text-gray-600 dark:text-gray-400">
+              <template v-if="editingId">
+                <label for="agent-id" class="shrink-0">ID</label>
+                <input
+                  id="agent-id"
+                  ref="idInput"
+                  v-model="idOverride"
+                  type="text"
+                  autocomplete="off"
+                  class="flex-1 min-w-0 h-7 px-2 rounded-md font-mono text-xs border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-action-primary-500/40 focus:border-action-primary-500"
+                />
+                <button type="button" class="shrink-0 font-medium text-action-primary-700 dark:text-action-primary-300 hover:underline" @click="resetId">Use name</button>
+              </template>
+              <template v-else>
+                <span class="shrink-0">ID</span>
+                <p v-if="sanitizedName" id="agent-name-preview" aria-live="polite" class="min-w-0 truncate">
+                  <code class="font-mono px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-750 text-gray-800 dark:text-gray-200">{{ sanitizedName }}</code>
+                  <span class="ml-1.5">permanent, used in URLs and API keys</span>
+                </p>
+                <span v-else class="min-w-0 truncate">Created from the name</span>
+                <button v-if="sanitizedName" type="button" class="ml-auto shrink-0 font-medium text-action-primary-700 dark:text-action-primary-300 hover:underline" @click="startEditId">Edit</button>
+              </template>
+            </div>
+          </div>
+
+          <div>
+            <p class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Runtime</p>
+            <div class="flex items-center gap-2 h-10 px-3 rounded-md border border-gray-200 dark:border-gray-750 text-sm text-gray-700 dark:text-gray-300" data-testid="runtime-row">
+              <svg class="w-3.5 h-3.5 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 018 0v3" /></svg>
+              <span class="truncate">{{ runtimeLabel }}</span>
+            </div>
+          </div>
+
+          <!-- github-custom: the repository, then how to import it. -->
+          <div v-if="form.template === 'github-custom'">
+            <BaseInput
+              id="github-repo"
+              v-model="githubRepoUrl"
+              label="Repository"
+              placeholder="owner/repo or https://github.com/owner/repo"
+              autocomplete="off"
+              spellcheck="false"
+            />
+            <!-- trinity-enterprise#15: clone/copy/fork intent selector -->
+            <ImportIntentPicker v-model="importIntent" />
+          </div>
+
+          <!-- trinity-enterprise#704: agent vs deployment, on the paths that bind git -->
+          <AgentKindPicker v-if="showKindPicker" v-model="agentKind" />
+
+          <!-- Fork-to-own fields (trinity-enterprise#93; also shown for the
+               github-custom 'fork' intent, trinity-enterprise#15) -->
+          <div v-if="showForkFields" class="p-4 rounded-lg border border-gray-200 dark:border-gray-750 space-y-4">
+            <p class="text-xs text-gray-600 dark:text-gray-400">
+              This is copied into a repository <span class="font-medium">you own</span>. Your agent's
+              knowledge lives there, and template updates stay one <code>git pull upstream</code> away.
+            </p>
+            <BaseInput
+              id="fork-destination"
+              v-model="forkDestination"
+              label="Your repository"
+              placeholder="your-github-username/my-agent-brain"
+              help="It is created for you if it doesn't exist. If you create it yourself, leave it empty, with no README."
+              autocomplete="off"
+            />
+            <SavedGithubTokenField v-model="forkPat" v-model:overriding="forkPatOverriding" :has-saved="hasSavedGithubPat" input-id="fork-github-token">
+              <p class="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                Prefer a fine-grained token scoped to this repository (Administration and Contents write).
+                A classic token with <code>repo</code> scope reaches all your repositories, and the agent can read
+                its own git credential. Stored encrypted as this agent's git identity.
+              </p>
+            </SavedGithubTokenField>
+            <fieldset>
+              <legend class="text-sm font-medium text-gray-700 dark:text-gray-300">Visibility</legend>
+              <div class="mt-1 flex gap-4">
+                <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="forkPrivate" type="radio" :value="true" class="text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="ml-1.5">Private (recommended)</span>
+                </label>
+                <label class="inline-flex items-center text-sm text-gray-700 dark:text-gray-300">
+                  <input v-model="forkPrivate" type="radio" :value="false" class="text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="ml-1.5">Public</span>
+                </label>
+              </div>
+              <p v-if="!forkPrivate" class="mt-2 p-2 rounded-md text-xs font-medium bg-status-danger-100 text-status-danger-700 dark:bg-status-danger-500/16 dark:text-status-danger-300">
+                Everything this agent captures, including notes and possibly personal information, will be public on GitHub. Choose Private unless you are certain.
+              </p>
+            </fieldset>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-3 h-16 px-5 shrink-0 border-t border-gray-200 dark:border-gray-750 bg-gray-50 dark:bg-gray-900">
+        <p
+          v-if="error"
+          role="alert"
+          :title="error"
+          class="flex-1 min-w-0 text-sm text-status-danger-700 dark:text-status-danger-400 line-clamp-2"
+        >{{ error }}</p>
+        <span v-else class="flex-1" />
+        <BaseButton variant="secondary" type="button" @click="$emit('close')">Cancel</BaseButton>
+        <BaseButton
+          type="submit"
+          :disabled="!sanitizedName"
+          :loading="loading"
+          :loading-label="showForkFields ? 'Creating your repository…' : 'Creating…'"
+        >
+          Create agent
+        </BaseButton>
+      </div>
+    </form>
+    <div v-else class="h-full overflow-y-auto">
+      <ImportValidationStep
+        :agent-name="postCreate.name"
+        :import-snapshot="postCreate.snapshot"
+        :git-mode="postCreate.gitMode"
+        @close="$emit('close')"
+      />
     </div>
-  </div>
+  </BaseModal>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, computed, watch, nextTick, h } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import api from '../api'
 import ImportIntentPicker from './ImportIntentPicker.vue'
 import AgentKindPicker from './AgentKindPicker.vue'
 import ImportValidationStep from './ImportValidationStep.vue'
 import SavedGithubTokenField from './SavedGithubTokenField.vue'
+import LoadFailed from './LoadFailed.vue'
 import { useAuthStore } from '../stores/auth'
+import BaseModal from './base/BaseModal.vue'
 import BaseInput from './base/BaseInput.vue'
 import BaseButton from './base/BaseButton.vue'
+import BaseBadge from './base/BaseBadge.vue'
+import { viewState } from '../utils/loadingState'
+
+// #3792: the panel's footprint. A fixed height (clamped to the viewport) is
+// what keeps every selection change inside the panes.
+const PANEL_CLASS = 'relative flex flex-col w-full max-w-[880px] h-[min(600px,calc(100dvh-2rem))] overflow-hidden rounded-xl bg-white dark:bg-gray-800 shadow-xl text-left'
+const OVERLINE_CLASS = 'px-2 pt-3 pb-1 font-mono text-[11px] uppercase tracking-wider text-gray-500 dark:text-gray-400'
+const OPTION_CLASS = 'flex items-center gap-2.5 w-full p-2 rounded-md text-left transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40'
+const OPTION_IDLE_CLASS = 'text-gray-900 dark:text-gray-100 hover:bg-gray-100 dark:hover:bg-gray-750'
+const OPTION_SELECTED_CLASS = 'text-gray-900 dark:text-gray-100 bg-action-primary-100 dark:bg-action-primary-500/16 ring-1 ring-inset ring-action-primary-500'
+const ICON_BOX_CLASS = 'flex items-center justify-center shrink-0'
+const ICON_CLASS = `w-7 h-7 rounded-md ${ICON_BOX_CLASS}`
+const ICON_NEUTRAL_CLASS = 'bg-gray-200 text-gray-600 dark:bg-gray-750 dark:text-gray-300'
+const ICON_ACCENT_CLASS = 'bg-action-primary-600 text-white'
+
+const ICON_PATHS = {
+  plus: 'M12 5v14M5 12h14',
+  repo: 'M6 3v12M6 15a3 3 0 103 3M6 15a3 3 0 013 3m0 0h3a6 6 0 006-6V9M18 9a3 3 0 100-6 3 3 0 000 6z',
+  bulb: 'M9 18h6M10 21h4M12 3a6 6 0 00-3.5 10.9c.6.5 1 1.2 1 2.1h5c0-.9.4-1.6 1-2.1A6 6 0 0012 3z',
+  doc: 'M9 12h6M9 16h6M7 3h6l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5a2 2 0 012-2z',
+}
+// Stroke icons, text-coloured; decorative (the label sits beside each).
+const SourceIcon = (props) => h('svg', {
+  class: 'w-4 h-4', fill: 'none', viewBox: '0 0 24 24', stroke: 'currentColor',
+  'stroke-width': '2', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true',
+}, [h('path', { d: ICON_PATHS[props.kind] || ICON_PATHS.doc })])
+SourceIcon.props = ['kind']
 
 const props = defineProps({
   initialTemplate: {
@@ -362,34 +299,58 @@ const agentsStore = useAgentsStore()
 
 const form = reactive({
   name: '',
-  display_label: '',   // ent#1640: optional human-facing display name
   template: props.initialTemplate || ''
 })
 
+// #3792: one Name field. The typed name is the display name; the permanent ID
+// is derived from it unless the user overrides it. `idOverride` is null while
+// the ID follows the name.
+const editingId = ref(false)
+const idOverride = ref('')
+const idInput = ref(null)
+const rawId = computed(() => (editingId.value ? idOverride.value : form.name))
+
 // Keep the preview in sync with utils/helpers.py::sanitize_agent_name.
 // The API still receives the original input and owns authoritative sanitization.
-const sanitizedName = computed(() => form.name
+const sanitize = (value) => value
   .replace(/[^a-zA-Z0-9_.-]/g, '-')
   .replace(/^[^a-zA-Z0-9]+/, '')
   .replace(/-+/g, '-')
   .replace(/-+$/, '')
-  .toLowerCase())
+  .toLowerCase()
+const sanitizedName = computed(() => sanitize(rawId.value))
 const nameSubmitted = ref(false)
-const nameError = computed(() => !sanitizedName.value && (form.name || nameSubmitted.value)
-  ? 'Enter a name with at least one ASCII letter or number (a-z, 0-9), for example my-agent.'
+const nameError = computed(() => !sanitizedName.value && (rawId.value || nameSubmitted.value)
+  ? (editingId.value
+    ? 'Enter an ID with at least one ASCII letter or number (a-z, 0-9), for example my-agent.'
+    : 'Enter a name with at least one ASCII letter or number (a-z, 0-9), for example my-agent.')
   : '')
 
+const startEditId = async () => {
+  idOverride.value = sanitizedName.value
+  editingId.value = true
+  await nextTick()
+  idInput.value?.focus()
+}
+const resetId = () => {
+  editingId.value = false
+  idOverride.value = ''
+}
+
+// Mirrors DISPLAY_LABEL_MAX_LEN in src/backend/models.py.
+const DISPLAY_LABEL_MAX_LEN = 120
+
 const githubRepoUrl = ref('')
-const githubRepoInput = ref(null)
+const search = ref('')
 
 // trinity-enterprise#15: import intent for the github-custom path.
 // 'clone' (default) | 'copy' | 'fork'. Featured templates never send it.
 const importIntent = ref('clone')
 
 // trinity-enterprise#704: 'agent' (default) | 'deployment'. Asked only where the
-// create binds git: a GitHub template from the list, or a custom repo CLONE.
-// Copy has no git link; Fork is an agent in the user's own repo by definition;
-// featured fork-to-own templates are the same case.
+// create binds git: a custom repo CLONE. Copy has no git link; Fork is an agent
+// in the user's own repo by definition; featured fork-to-own templates are the
+// same case.
 const agentKind = ref('agent')
 
 // trinity-enterprise#15: post-create validation context. Non-null swaps the
@@ -412,20 +373,25 @@ watch(() => props.initialTemplate, (newVal) => {
   form.template = newVal || ''
 })
 
-// Auto-focus GitHub repo input when selected
-watch(() => form.template, (newVal) => {
-  if (newVal === 'github-custom') {
-    nextTick(() => {
-      githubRepoInput.value?.focus()
-    })
+const selectSource = async (id) => {
+  form.template = id
+  if (id === 'github-custom') {
+    await nextTick()
+    document.getElementById('github-repo')?.focus()
   }
-})
+}
 
 const templates = ref([])
 const loading = ref(false)
 const error = ref('')
-const templatesLoading = ref(true)
+const templatesLoaded = ref(false)
 const templatesError = ref('')
+const listState = computed(() => viewState({ hasLoaded: templatesLoaded.value, error: templatesError.value }))
+
+const startOptions = [
+  { id: '', title: 'Blank agent', icon: 'plus' },
+  { id: 'github-custom', title: 'Import a GitHub repository', icon: 'repo' },
+]
 
 // Computed properties to separate GitHub and local templates.
 // Fork-to-own templates (trinity-enterprise#93) get the featured section and
@@ -443,6 +409,19 @@ const githubTemplates = computed(() => {
 const localTemplates = computed(() => {
   return templates.value.filter(t => t.source === 'local' || !t.source)
 })
+
+const matches = (t) => {
+  const q = search.value.trim().toLowerCase()
+  if (!q) return true
+  return [t.display_name, t.description, t.tagline, t.github_repo]
+    .some(v => typeof v === 'string' && v.toLowerCase().includes(q))
+}
+const templateGroups = computed(() => [
+  { key: 'featured', title: 'Featured', icon: 'bulb', items: featuredTemplates.value.filter(matches) },
+  { key: 'local', title: 'Local templates', icon: 'doc', items: localTemplates.value.filter(matches) },
+  { key: 'github', title: 'GitHub templates', icon: 'repo', items: githubTemplates.value.filter(matches) },
+])
+const matchCount = computed(() => templateGroups.value.reduce((n, g) => n + g.items.length, 0))
 
 const isForkToOwn = computed(() => selectedTemplate.value?.fork_to_own === 'required')
 
@@ -465,15 +444,35 @@ const selectedTemplate = computed(() => {
   return templates.value.find(t => t.id === form.template)
 })
 
-// Helper function to truncate long descriptions
-const truncateDescription = (description) => {
-  if (!description) return ''
-  const firstLine = description.split('\n')[0]
-  if (firstLine.length > 60) {
-    return firstLine.substring(0, 57) + '...'
+// The right pane's header for whatever is selected.
+const detail = computed(() => {
+  if (form.template === '') {
+    return { icon: 'plus', title: 'Blank agent', description: 'An empty agent. Add skills, credentials and schedules after it is created.' }
   }
-  return firstLine
-}
+  if (form.template === 'github-custom') {
+    return { icon: 'repo', title: 'Import a GitHub repository', description: 'Create the agent from any repository you can read.' }
+  }
+  const t = selectedTemplate.value
+  if (!t) return { icon: 'doc', title: 'Template', description: '' }
+  if (isForkToOwn.value) {
+    return { icon: 'bulb', title: t.display_name, badge: 'Your own copy', description: t.tagline || firstLine(t.description) }
+  }
+  if (t.source === 'github') {
+    return { icon: 'repo', title: t.display_name, badge: 'GitHub template', description: firstLine(t.description), repo: t.github_repo }
+  }
+  return { icon: 'doc', title: t.display_name, badge: 'Local template', description: firstLine(t.description) }
+})
+
+// Runtime selection is trinity-enterprise#603; until then this row is
+// read-only. The catalog does not report a template's runtime, so a template
+// row says who decides rather than guessing.
+const runtimeLabel = computed(() => {
+  if (form.template === '') return 'Claude Code'
+  const source = form.template === 'github-custom' ? 'repository' : 'template'
+  return `Set by the ${source} (Claude Code unless it declares another)`
+})
+
+const firstLine = (description) => (description ? description.split('\n')[0] : '')
 
 // Parse GitHub repo from various input formats into owner/repo
 const parseGithubRepo = (input) => {
@@ -491,19 +490,37 @@ const parseGithubRepo = (input) => {
   return null
 }
 
-const onTemplateChange = () => {
-  // Template selection changed - no action needed
-  // All config comes from backend based on template
-}
+// trinity-enterprise#964: the name the picked source already carries — a
+// repository's own name without the owner, or the agent name a GitHub
+// template declares (its template.yaml `name:`, else its repo name). Blank and
+// local templates carry none. A candidate that sanitizes to nothing is none,
+// so the field stays empty and submit shows the usual error.
+const repoName = (repo) => (repo ? repo.split('/').pop() : '')
+const sourceName = computed(() => {
+  let candidate = ''
+  if (form.template === 'github-custom') {
+    candidate = repoName(parseGithubRepo(githubRepoUrl.value))
+  } else if (selectedTemplate.value?.source === 'github') {
+    candidate = selectedTemplate.value.agent_name || repoName(selectedTemplate.value.github_repo)
+  }
+  return sanitize(candidate) ? candidate : ''
+})
+// Prefill never clobbers the person: Name takes the source's name only while
+// it is empty or still the previous prefill. The ID override is never touched.
+let lastPrefill = ''
+watch(sourceName, (next) => {
+  if (form.name === '' || form.name === lastPrefill) form.name = next
+  lastPrefill = next
+})
 
 const fetchTemplates = async () => {
-  templatesLoading.value = true
   templatesError.value = ''
   try {
     // Invariant #7 — shared api client (was the last raw-axios /api/templates
     // consumer alongside the Library page, migrated together in ent#263).
     const response = await api.get('/api/templates')
     templates.value = response.data
+    templatesLoaded.value = true
     // If a caller injected an initialTemplate that doesn't exist in this
     // deploy (e.g. the onboarding wizard prefilling `local:scout` on an
     // install without that template), fall back to the blank agent so the
@@ -515,11 +532,11 @@ const fetchTemplates = async () => {
     ) {
       form.template = ''
     }
+    // A preselected template (Library → Use Template) may sit below the fold.
+    await nextTick()
+    document.querySelector('[data-testid="source-option"][aria-pressed="true"]')?.scrollIntoView?.({ block: 'nearest' })
   } catch (err) {
-    console.error('Failed to fetch templates:', err)
-    templatesError.value = 'Failed to load templates'
-  } finally {
-    templatesLoading.value = false
+    templatesError.value = err?.message || 'Failed to load templates'
   }
 }
 
@@ -531,19 +548,22 @@ const createAgent = async () => {
   error.value = ''
 
   try {
-    // Only send name and template - backend handles everything else
+    // The raw ID goes to the API, which owns authoritative sanitization (#3463).
     const payload = {
-      name: form.name
+      name: rawId.value
     }
-    // ent#1640: optional display name (trimmed); omit when blank so the agent
-    // falls back to its slug, exactly as before.
-    const label = (form.display_label || '').trim()
-    if (label) payload.display_label = label
+    // #3792: the typed name is the display name (ent#1640) whenever it reads
+    // differently from the ID. Over the backend's cap the agent renders under
+    // its ID instead of failing the create.
+    const label = (form.name || '').trim()
+    if (label && label !== sanitizedName.value && label.length <= DISPLAY_LABEL_MAX_LEN) {
+      payload.display_label = label
+    }
 
     if (form.template === 'github-custom') {
       const repo = parseGithubRepo(githubRepoUrl.value)
       if (!repo) {
-        error.value = 'Please enter a valid GitHub repository (e.g., owner/repo)'
+        error.value = 'Enter a GitHub repository as owner/repo, for example acme/my-agent.'
         loading.value = false
         return
       }
@@ -571,7 +591,7 @@ const createAgent = async () => {
       }
       const typedPat = forkPat.value.trim()
       if (!typedPat && (!hasSavedGithubPat.value || forkPatOverriding.value)) {
-        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → GitHub token'
+        error.value = 'A GitHub token is required to create the repository in your account — enter one, or save your personal token in Settings → MCP Keys → Personal GitHub Token'
         loading.value = false
         return
       }
@@ -597,7 +617,7 @@ const createAgent = async () => {
     const githubSourced = form.template === 'github-custom' || selectedTemplate.value?.source === 'github'
     if (githubSourced) {
       postCreate.value = {
-        name: agent?.name || form.name,
+        name: agent?.name || sanitizedName.value,
         snapshot: agent?.import_snapshot || null,
         gitMode: agent?.git_mode || null,  // trinity-enterprise#704
       }
@@ -625,5 +645,8 @@ const createAgent = async () => {
 onMounted(() => {
   fetchTemplates()
   useAuthStore().fetchGithubPatStatus().then((saved) => { hasSavedGithubPat.value = saved })
+  // BaseModal focuses the first tabbable control (the Close button); the name
+  // is where the user starts, so take focus once the shell has settled.
+  setTimeout(() => document.getElementById('agent-name')?.focus(), 0)
 })
 </script>

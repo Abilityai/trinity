@@ -911,7 +911,7 @@ def _record_tool_result(state: _CodexParseState, tool_id: str, item: dict, item_
         )
     )
     try:
-        complete_tool_execution(tool_id, not is_error, output)
+        complete_tool_execution(tool_id, not is_error, output, execution_id=state.execution_id)
     except Exception:  # noqa: BLE001
         logger.debug("[Codex] complete_tool_execution failed for %s", tool_id, exc_info=True)
 
@@ -945,9 +945,10 @@ def _process_codex_event(event: dict, state: _CodexParseState) -> None:
     elif event_type == "turn.failed":
         error = event.get("error") or {}
         state.metadata.error_type = "turn_failed"
+        message = error.get("message") if isinstance(error, dict) else str(error)
         state.metadata.error_message = (
-            error.get("message") if isinstance(error, dict) else str(error)
-        ) or "Codex turn failed"
+            message if isinstance(message, str) and message.strip() else "Codex turn failed"
+        )
 
     elif event_type == "error":
         state.metadata.error_type = "error"
@@ -1046,20 +1047,24 @@ def _classify_codex_failure(
     auth → 503, rate-limit → 429, everything else → 500 (runtime-unavailable).
     Crucially a generic runtime failure is 500, NOT 503 — 503 is the backend's
     AUTH signal and the dispatch breaker counts AUTH only (#1187 decision 3)."""
-    haystack = " ".join(
+    # turn.failed is the terminal provider verdict. Stderr can contain older
+    # retries and warnings; those must not turn a final model/transport error
+    # into AUTH or mask a final authentication failure with an earlier 429.
+    terminal = metadata.error_type == "turn_failed"
+    haystack = (metadata.error_message or "Codex turn failed") if terminal else " ".join(
         s for s in (stderr or "", metadata.error_message or "") if s
     )
+    detail = haystack if terminal else (stderr.strip() or metadata.error_message or "see agent logs")
     haystack_lower = haystack.lower()
     if _RATE_STATUS_PATTERN.search(haystack) or any(
         marker in haystack_lower for marker in _RATE_MARKERS
     ):
-        return 429, f"Codex rate limit: {(stderr or metadata.error_message or '')[:300]}"
+        return 429, f"Codex rate limit: {detail[:300]}"
     if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
         return 503, (
-            f"Codex authentication failure: {(stderr or metadata.error_message or '')[:300]}. "
+            f"Codex authentication failure: {detail[:300]}. "
             "Check OPENAI_API_KEY."
         )
-    detail = stderr.strip() or metadata.error_message or "see agent logs"
     return 500, f"Codex execution failed (exit code {return_code}): {detail[:300]}"
 
 
@@ -1148,11 +1153,12 @@ class CodexRuntime(AgentRuntime):
         # thread. Emitted AFTER the exec-level flags above (narrower arg set).
         if resume_thread_id:
             cmd += ["resume", resume_thread_id]
-        # End-of-options separator (review I3): the caller appends the prompt as
-        # the next (positional) token — for a resume it is resume's PROMPT arg —
-        # so a prompt starting with "-"/"--" can never be reparsed as a flag
-        # (worst case weakening the sandbox).
-        cmd.append("--")
+        # End-of-options separator (review I3), then `-`: the PROMPT positional
+        # (resume's PROMPT arg on a resume) read from stdin. #3838: Linux
+        # refuses one argv element over 131,072 bytes (MAX_ARG_STRLEN), and a
+        # room transcript or a long 1:1 message passes that, so the prompt is
+        # never an argument. On stdin no prompt text can be parsed as a flag.
+        cmd += ["--", "-"]
         return cmd
 
     # -- core subprocess execution (stubbed in unit tests) ---------------------
@@ -1206,7 +1212,6 @@ class CodexRuntime(AgentRuntime):
             agent_home=_AGENT_HOME,
             resume_thread_id=resume_thread_id,
         )
-        cmd.append(composed_prompt)
 
         env = build_execution_env({
             EXECUTION_TAG_NAME: execution_id,
@@ -1251,12 +1256,13 @@ class CodexRuntime(AgentRuntime):
             sandbox_mode, bool(resume_thread_id), model or "(default)", execution_id,
         )
 
-        # stdin=DEVNULL: the prompt is a positional arg, so Codex must not block
-        # waiting on stdin. start_new_session=True isolates the process group so
-        # cleanup signals only Codex's descendants, never sibling executions.
+        # stdin=PIPE: the prompt is written there (#3838) and stdin is closed,
+        # so Codex reads to EOF. start_new_session=True isolates the process
+        # group so cleanup signals only Codex's descendants, never sibling
+        # executions.
         process = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1268,6 +1274,15 @@ class CodexRuntime(AgentRuntime):
         registry.register(
             execution_id, process, metadata={"type": "codex", "pgid": process_pgid}
         )
+        # Same guard as the Claude and Gemini runtimes (#2433): the
+        # `finally: registry.unregister()` below starts after this write, so a
+        # BrokenPipeError here would leak the registry entry.
+        try:
+            process.stdin.write(composed_prompt)
+            process.stdin.close()
+        except BaseException:
+            registry.unregister(execution_id)
+            raise
 
         import threading
 
