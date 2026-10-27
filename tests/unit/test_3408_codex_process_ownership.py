@@ -58,6 +58,20 @@ if result != "-":
 @pytest.fixture
 def registry(monkeypatch):
     value = registry_module.ProcessRegistry()
+    # The release wakes subscribers' asyncio queues (`put_nowait`), so it must
+    # run on the event loop: record the thread of the call that drops the entry.
+    value.release_threads = []
+    real_unregister = value.unregister
+
+    def unregister(execution_id):
+        held = value.is_execution_running(execution_id)
+        try:
+            return real_unregister(execution_id)
+        finally:
+            if held and not value.is_execution_running(execution_id):
+                value.release_threads.append(threading.get_ident())
+
+    monkeypatch.setattr(value, "unregister", unregister)
     monkeypatch.setattr(codex_runtime, "get_process_registry", lambda: value)
     # A unit test owns only its children, never the surrounding cgroup.
     monkeypatch.setattr(registry_module, "kill_cgroup_orphans", lambda **kw: 0)
@@ -68,20 +82,20 @@ def registry(monkeypatch):
 @pytest.fixture
 def refused_signals(monkeypatch):
     """Refuse (never forward) a signal aimed at this test session's own
-    process or group. The conftest net is a pass-through without cgroup v2
-    (macOS), so the file carries its own."""
+    process or group, or at every process (-1). The conftest net is a
+    pass-through without cgroup v2 (macOS), so the file carries its own."""
     refused = []
     own_pid, own_pgrp = os.getpid(), os.getpgrp()
     real_kill, real_killpg = os.kill, os.killpg
 
     def kill(pid, sig):
-        if pid in (own_pid, 0, -own_pgrp):
+        if pid in (own_pid, own_pgrp, 0, -1, -own_pgrp):
             refused.append(("kill", pid, sig))
             raise RuntimeError(f"refused os.kill({pid}, {sig}) at the test session")
         return real_kill(pid, sig)
 
     def killpg(pgid, sig):
-        if pgid in (own_pgrp, 0):
+        if pgid in (own_pgrp, 0, -1):
             refused.append(("killpg", pgid, sig))
             raise RuntimeError(f"refused os.killpg({pgid}, {sig}) at the test session")
         return real_killpg(pgid, sig)
@@ -99,6 +113,7 @@ class _Harness:
                  write_result=True, lock_home=False):
         self.monkeypatch = monkeypatch
         self.loop = asyncio.get_running_loop()
+        self.loop_thread = threading.get_ident()
         self.codex_home = tmp_path / "codex"
         self.codex_home.mkdir()
         control = tmp_path / "control"
@@ -279,6 +294,9 @@ async def _assert_released(harness, entries):
     assert not registry.is_execution_running(EXECUTION_ID)
     assert registry.get_buffered_logs(EXECUTION_ID) is None
     assert EXECUTION_ID in registry.list_recently_completed_ids()
+    assert registry.release_threads == [harness.loop_thread], (
+        "released exactly once, on the event loop (never directly from the worker thread)"
+    )
     assert sorted(p.name for p in harness.codex_home.glob("*-last.txt")) == []
     # `stream_end` can arrive before the executor marks the reader done.
     _, return_code = await _real_wait_for(asyncio.wrap_future(harness.reader_future), timeout=5)
@@ -389,6 +407,7 @@ async def test_result_file_that_cannot_be_removed_does_not_block_the_release(
         assert entries[-1] == {"type": "stream_end"}
         assert not registry.is_execution_running(EXECUTION_ID)
         assert registry.get_buffered_logs(EXECUTION_ID) is None
+        assert registry.release_threads == [harness.loop_thread]
         _, return_code = await _real_wait_for(asyncio.wrap_future(harness.reader_future), timeout=5)
         assert return_code == 0
     finally:
