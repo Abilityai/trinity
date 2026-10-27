@@ -76,6 +76,8 @@ def clock(monkeypatch):
 
     monkeypatch.setattr(pa, "datetime", _Pinned)
     monkeypatch.setattr(helpers, "utc_now_iso", c.iso)
+    from services import skills_sync_service
+    monkeypatch.setattr(skills_sync_service, "_utc_now_iso", c.iso)   # a sweep's started_at
     monkeypatch.setitem(type(db._operator_queue_ops).create_platform_item.__globals__,
                         "utc_now_iso", c.iso)
     return c
@@ -132,12 +134,19 @@ class TestReconcileRefusal:
     SUBJECT = "skills_reconcile_refused:worker-3"
 
     @pytest.fixture
-    def svc(self):
+    def svc(self, clock):
         from services.skill_service import SkillService
         svc = SkillService.__new__(SkillService)
         svc.remove_skills = AsyncMock(
             return_value={"skills_removed": 3, "skills_failed": 0, "results": {}})
         svc._audit_removal = AsyncMock()
+        real_pass = svc.reconcile_agent_skills
+
+        async def _pass(*args, **kwargs):
+            clock.advance(minutes=1)        # a pass starts after the last reading
+            return await real_pass(*args, **kwargs)
+
+        svc.reconcile_agent_skills = _pass
         return svc
 
     def _reconcile(self, svc, orphans=0, *, managed=None, error=None):
@@ -167,8 +176,9 @@ class TestReconcileRefusal:
         assert row["context"]["seen_count"] == 2
         assert row["context"]["orphan_count"] == 31          # the latest reading
         assert "31 orphaned" in row["question"]
-        assert _parse(row["last_seen_at"]) == T0 + timedelta(hours=3)
-        assert _parse(row["expires_at"]) == T0 + timedelta(hours=3) + NET
+        second = T0 + timedelta(hours=3, minutes=2)          # two passes, a minute each
+        assert _parse(row["last_seen_at"]) == second
+        assert _parse(row["expires_at"]) == second + NET
 
     def test_the_alarm_carries_counts_never_skill_names(self, db, svc):
         self._reconcile(svc, managed=[f"secret-skill-{i:02d}" for i in range(12)])
@@ -299,6 +309,34 @@ class TestReconcileRefusal:
         assert self._reconcile(svc, 25)["status"] == "refused"
         assert _pending(db, self.SUBJECT) == []
 
+    def test_an_older_pass_that_finishes_last_never_ends_a_newer_refusal(self, db, svc, clock):
+        """Passes on one agent overlap: the start path, the fleet sweep's prune
+        and the reconcile route each run one. P1 finds 3 orphans and starts
+        removing them; P2 starts later, finds 25 (the assignments shrank) and
+        refuses; P1 then finishes "reconciled". P1's evidence predates P2's
+        refusal, so it must not end it."""
+        async def scenario():
+            removing, release = asyncio.Event(), asyncio.Event()
+
+            async def _slow_remove(agent_name, names):
+                removing.set()
+                await release.wait()
+                return {"skills_removed": len(names), "skills_failed": 0, "results": {}}
+
+            svc.remove_skills = _slow_remove
+            svc._list_managed_skills = AsyncMock(side_effect=[
+                [f"o{i:02d}" for i in range(3)], [f"o{i:02d}" for i in range(25)]])
+            older = asyncio.create_task(svc.reconcile_agent_skills(self.AGENT, []))
+            await removing.wait()
+            assert (await svc.reconcile_agent_skills(self.AGENT, []))["status"] == "refused"
+            [newer] = _pending(db, self.SUBJECT)
+            release.set()
+            assert (await older)["status"] == "reconciled"
+            return newer
+
+        newer = asyncio.run(scenario())
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [newer["id"]]   # not ended
+
     def test_r1_the_legacy_row_derives_the_subject_the_seam_files(self, db, svc):
         """R1: the second upgrade sweep stamps a pre-move row with exactly the
         subject `observe` now uses for the same agent."""
@@ -319,11 +357,12 @@ class TestFleetReinject:
     SUBJECT = "skills_fleet_reinject:fleet"
 
     @pytest.fixture
-    def sweep(self, monkeypatch):
+    def sweep(self, monkeypatch, clock):
         from services.skills_sync_service import SkillsLibrarySyncService as S
         monkeypatch.setattr(S, "_audit_fleet", staticmethod(AsyncMock()))
 
         def _run(outcomes, *, agents=None, commit="abc123"):
+            clock.advance(minutes=1)        # a sweep starts after the last reading
             names = list(outcomes) if agents is None else agents
             monkeypatch.setattr(S, "_eligible_agents", staticmethod(lambda: names))
             monkeypatch.setattr(S, "_reinject_agent", staticmethod(
@@ -355,9 +394,10 @@ class TestFleetReinject:
         assert row["context"]["agents"] == ["a2", "a3"]    # the latest reading
         assert row["context"]["commit_sha"] == "c2"
         assert "a2, a3" in row["question"]
-        assert _parse(row["last_seen_at"]) == T0 + timedelta(hours=6)
+        second = T0 + timedelta(hours=6, minutes=2)          # two sweeps, a minute each
+        assert _parse(row["last_seen_at"]) == second
         lifetime = pa.lifetime_for("skills_fleet_reinject")
-        assert _parse(row["expires_at"]) == T0 + timedelta(hours=6) + lifetime
+        assert _parse(row["expires_at"]) == second + lifetime
 
     @pytest.mark.parametrize("outcomes", [
         {"a1": OK, "a2": OK},
@@ -373,7 +413,7 @@ class TestFleetReinject:
         _assert_ended_by_platform(db, row)
 
     def test_a_docker_error_enumerates_nothing_and_ends_nothing(
-            self, db, sweep, monkeypatch):
+            self, db, sweep, monkeypatch, clock):
         """R10 (the #2196 class): `_eligible_agents` returns [] when Docker is
         unreadable — an empty sweep is not a recovered fleet."""
         import services.docker_service as docker_service
@@ -388,6 +428,7 @@ class TestFleetReinject:
         monkeypatch.setattr(S, "_eligible_agents", real_enumeration)
         monkeypatch.setattr(docker_service, "list_all_agents_fast", _unreadable)
         assert S._eligible_agents() == []
+        clock.advance(minutes=1)
         report = asyncio.run(S().run_fleet_reinject(commit_sha="abc123"))
         assert report["agents_total"] == 0 and report["agents_failed"] == 0
         assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]   # not ended
@@ -415,6 +456,46 @@ class TestFleetReinject:
         report = sweep(_Partial({"a1": self.OK}), agents=["a1", "a2"])
         assert report["agents_failed"] == 0
         assert [r["id"] for r in _pending(db, self.SUBJECT)] == [row["id"]]   # not ended
+
+    def test_an_older_sweep_that_finishes_last_never_ends_a_newer_failure(
+            self, db, clock, monkeypatch):
+        """Sweeps overlap: every library sync that moves the commit spawns one,
+        from the auto-sync loop or the Settings button, whether or not another
+        is still running. Sweep A injects a1 and waits on a2; sweep B starts
+        later and fails a1 (the alarm); A then finishes with every agent
+        injected. A's evidence for a1 predates B's failure, so A must leave the
+        row for the next sweep."""
+        from services.skills_sync_service import SkillsLibrarySyncService as S
+        monkeypatch.setattr(S, "_audit_fleet", staticmethod(AsyncMock()))
+        enumerations = [["a1", "a2"], ["a1"]]
+        monkeypatch.setattr(S, "_eligible_agents", staticmethod(lambda: enumerations.pop(0)))
+
+        async def scenario():
+            waiting, release = asyncio.Event(), asyncio.Event()
+            seen = []
+
+            async def _reinject(name, sets_lib=None):
+                seen.append(name)
+                if name == "a2":
+                    waiting.set()
+                    await release.wait()
+                    return self.OK
+                return self.OK if seen.count("a1") == 1 else self.BAD
+
+            monkeypatch.setattr(S, "_reinject_agent", staticmethod(_reinject))
+            older = asyncio.create_task(S().run_fleet_reinject(commit_sha="c1"))
+            await waiting.wait()
+            clock.advance(minutes=5)
+            assert (await S().run_fleet_reinject(commit_sha="c2"))["agents_failed"] == 1
+            [newer] = _pending(db, self.SUBJECT)
+            clock.advance(minutes=5)
+            release.set()
+            report = await older
+            assert report["agents_total"] == 2 and report["agents_failed"] == 0
+            return newer
+
+        newer = asyncio.run(scenario())
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [newer["id"]]   # not ended
 
     def test_a_persons_ending_stands_and_snoozes_the_next_failure(self, db, sweep, clock):
         sweep({"a1": self.BAD})

@@ -41,6 +41,7 @@ from services.skill_service import (
     RECONCILE_ALARM_AGENT_NAME,
     SkillInjectionBusy,
     skill_service,
+    skills_alarm_last_read_before,
 )
 
 logger = logging.getLogger(__name__)
@@ -277,7 +278,7 @@ class SkillsLibrarySyncService:
         if failures:
             self._announce_fleet_failures(report)
         elif self._sweep_reached_every_agent(agents, results):
-            self._clear_fleet_failures()
+            self._clear_fleet_failures(started_at)
         logger.info(
             "Skills fleet re-inject: %s agents, %s injected, %s skipped, %s failed",
             report["agents_total"], report["agents_injected"],
@@ -402,8 +403,12 @@ class SkillsLibrarySyncService:
         updates the one pending row in place (the latest counts, agents and
         commit; seen count, last-seen time), where the old id carried the run's
         finish timestamp and filed every bad run as its own row that nothing
-        ever ended. The kind's lifetime runs from the latest bad run; a sweep
-        that reached every agent ends the row (`_clear_fleet_failures`).
+        ever ended. A sweep that reached every agent ends the row
+        (`_clear_fleet_failures`). The kind's 14-day lifetime runs from the
+        latest bad run; sweeps run only when a sync moves the library commit,
+        so a failure no later sweep re-reads leaves the queue after 14 days
+        even if the agent was never fixed (accepted in the #3254 plan; the
+        Settings panel keeps the last report).
         """
         try:
             from services import platform_alerts
@@ -460,13 +465,18 @@ class SkillsLibrarySyncService:
         return bool(agents) and all(_current(results.get(name)) for name in agents)
 
     @staticmethod
-    def _clear_fleet_failures() -> None:
+    def _clear_fleet_failures(sweep_started_at: str) -> None:
         """A sweep reached every running agent and saw each one current: the
-        platform ends the fleet alarm's row (#3254). On an install that never
-        raised it this is one indexed read and no write. Never raises."""
+        platform ends the fleet alarm's row (#3254). Sweeps overlap, so a
+        failure read after this sweep started — a newer sweep's — is newer
+        than this sweep's evidence and stays for the next sweep
+        (`skills_alarm_last_read_before`). On an install that never raised it
+        this is one read and no write. Never raises."""
         from services import platform_alerts
-        platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_fleet_reinject",
-                              FLEET_ALERT_KEY)
+        if skills_alarm_last_read_before("skills_fleet_reinject", FLEET_ALERT_KEY,
+                                         sweep_started_at):
+            platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_fleet_reinject",
+                                  FLEET_ALERT_KEY)
 
     @staticmethod
     async def _audit_sync(result: Dict[str, Any]) -> None:

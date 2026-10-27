@@ -214,6 +214,43 @@ def _scrub_pat(text: str) -> str:
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
 
 
+def skills_alarm_last_read_before(kind: str, key: str, since: str) -> bool:
+    """True when the `_skills-sync` host holds a pending `<kind>:<key>` row
+    whose LAST reading is older than `since` (ISO-8601 UTC) — the only kind of
+    row a recovery observed from `since` on may end (#3254, R10).
+
+    The two skills alarms are raised and cleared by passes that can overlap: a
+    reconcile pass on one agent (the start path, a fleet sweep's prune, the
+    route), and fleet sweeps (every library sync that moves the commit spawns
+    one). An older pass that finishes last must not end a condition a newer
+    pass reported after it started. So a caller passes its own start time and
+    clears only on True. False when there is no pending row (nothing to end),
+    when the row was read at or after `since`, or when anything here cannot be
+    read: unknown is never evidence. Never raises.
+
+    Residual: this read and the platform's end are two statements, so a newer
+    reading that lands between them is still ended. Closing that needs the
+    seam's own end to carry the condition.
+    """
+    from services import platform_alerts
+    from utils.helpers import parse_iso_timestamp
+
+    try:
+        subject = platform_alerts.subject_for(kind, key)
+        cutoff = parse_iso_timestamp(since)
+        # include_cleared: read what `platform_alerts.clear` finds, which never
+        # filters on `cleared_at` (Clear All, #1017, hides only ended rows today).
+        rows = db.list_operator_queue_items(
+            agent_name=RECONCILE_ALARM_AGENT_NAME, status="pending", limit=1000,
+            include_cleared=True)
+        seen = [parse_iso_timestamp(r["last_seen_at"])
+                for r in rows if r.get("subject") == subject]
+        return bool(seen) and all(t < cutoff for t in seen)
+    except Exception as e:  # noqa: BLE001 — unreadable: leave the alarm standing
+        logger.warning(f"could not read the {kind} alarm; leaving it standing: {e}")
+        return False
+
+
 def _read_last_fleet_reinject() -> Optional[Dict[str, Any]]:
     """The persisted last fleet re-inject report, or None. Never raises.
 
@@ -2584,6 +2621,9 @@ print(json.dumps(out))
         Never raises: reconciliation is best-effort cleanup and must not be able
         to fail an agent start.
         """
+        from utils.helpers import utc_now_iso
+
+        started_at = utc_now_iso()   # the refusal clear's evidence floor (#3254)
         try:
             if assigned_names is None:
                 assigned_names = db.get_agent_skill_names(agent_name)
@@ -2595,7 +2635,7 @@ print(json.dumps(out))
 
             orphans = sorted(set(managed) - assigned)
             if not orphans:
-                self._clear_reconcile_refusal(agent_name)
+                self._clear_reconcile_refusal(agent_name, started_at)
                 return {"status": "clean", "removed": 0}
 
             cap = _reconcile_max_removals()
@@ -2616,7 +2656,7 @@ print(json.dumps(out))
             await self._audit_removal(
                 agent_name, orphans, result, trigger="reconcile"
             )
-            self._clear_reconcile_refusal(agent_name)
+            self._clear_reconcile_refusal(agent_name, started_at)
             return {
                 "status": "reconciled",
                 "removed": result.get("skills_removed", 0),
@@ -2645,10 +2685,13 @@ print(json.dumps(out))
         refusal (each start of that agent, whatever its orphan count) updates
         the one pending row in place — latest count, seen count, last-seen
         time — where the old `skills-reconcile-{agent}-{count}` id filed a new
-        row whenever the count moved. The kind's 30-day net lifetime is the
-        fallback for a clear lost to a crash; the clear itself is
-        `_clear_reconcile_refusal`. `observe` never raises and logs its own
-        failure, and nothing here retries: the next start re-reads it.
+        row whenever the count moved. The clear is `_clear_reconcile_refusal`.
+        The kind's 30-day net lifetime is the fallback for a clear lost to a
+        crash, and it also ends a refusal that nothing re-reads: the refusal is
+        read again only when that agent next starts, so one left running past
+        30 days with the refusal standing leaves the queue (accepted in the
+        #3254 plan). `observe` never raises and logs its own failure, and
+        nothing here retries: the next start re-reads it.
         """
         from services import platform_alerts
 
@@ -2672,15 +2715,19 @@ print(json.dumps(out))
             },
         )
 
-    def _clear_reconcile_refusal(self, agent_name: str) -> None:
+    def _clear_reconcile_refusal(self, agent_name: str, pass_started_at: str) -> None:
         """The agent's orphan set is back under the cap — a "clean" or
         "reconciled" pass — so the refusal no longer holds and the platform
         ends its row (#3254). Only those two outcomes call this: a skipped pass
         (unreadable inventory, a busy lock, an error) looked at nothing and is
-        not evidence of recovery (R10). On an install that never raised the
-        alarm this is one indexed read and no write. Never raises."""
+        not evidence of recovery (R10). A refusal read after this pass started
+        is newer than its evidence and stays (`skills_alarm_last_read_before`).
+        On an install that never raised the alarm this is one read and no
+        write. Never raises."""
         from services import platform_alerts
-        platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused", agent_name)
+        if skills_alarm_last_read_before("skills_reconcile_refused", agent_name, pass_started_at):
+            platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused",
+                                  agent_name)
 
     def _record_adoption_failure(
         self, url: str, message: str, *, steady_state: bool = False
