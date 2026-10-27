@@ -493,10 +493,15 @@ class TestMint:
         assert res.status_code == 403 and "interactive session" in res.json()["detail"], res.text
 
     def test_isolated_the_agent_rung_refuses_an_agent(self, world, monkeypatch):
+        """The in-handler `reject_agent_principal` alone: both rungs that shadow
+        it — the interactive rung, and `assert_admin`, which runs the same agent
+        rejection itself — are neutralized, so only this one can refuse."""
         self._as(world, mcp_scope="agent", agent_name=TARGET, mcp_key_id="k-agent-3180")
         _patch(monkeypatch, _KEYS.create_mcp_api_key_endpoint, "reject_non_interactive_principal", lambda u: None)
+        _patch(monkeypatch, _KEYS.create_mcp_api_key_endpoint, "assert_admin", lambda u, **k: None)
         res = world.client.post("/api/mcp/keys", json={"name": "x", "scope": "ops_write"})
         assert res.status_code == 403 and "human-only" in res.json()["detail"], res.text
+        assert self._count() == 0
 
     def test_isolated_the_admin_gate_refuses_an_agent_alone(self, world, monkeypatch):
         self._as(world, mcp_scope="agent", agent_name=TARGET, mcp_key_id="k-agent-3180")
