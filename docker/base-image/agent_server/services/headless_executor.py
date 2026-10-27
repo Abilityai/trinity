@@ -1166,8 +1166,25 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     else:
         stdin_payload = ctx.prompt
 
-    process.stdin.write(stdin_payload)
-    process.stdin.close()
+    try:
+        process.stdin.write(stdin_payload)
+        process.stdin.close()
+    except BaseException:
+        # #3408: since #3307 the caller's `finally: unregister()` keeps a live
+        # child, so a write that fails while the child lives (an unencodable
+        # prompt, say) must end it here; this already runs off the event loop.
+        # The reader threads are running, so drain them as the normal path
+        # does and never close stdout/stderr under them. No unregister here:
+        # the caller's `finally` releases the now-dead child.
+        _terminate_process_group(process, graceful_timeout=0, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+        try:
+            process.stdin.close()
+        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+            logger.debug(f"[Headless Task] stdin close after failed handoff of {ctx.task_session_id} raised", exc_info=True)
+        _drain_bounded(process, stdout_thread, stderr_thread,
+                       grace=3, pgid=ctx.process_pgid,
+                       execution_tag=ctx.task_session_id)
+        raise
 
     # Bounded, polling wait. Three exits beyond the overall budget (#970):
     #   (a) early-completion — claude emitted its {"type":"result"} (the turn

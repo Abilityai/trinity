@@ -3733,6 +3733,17 @@
       "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
     },
     {
+      "file": "unit/test_3408_failed_handoff.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "A prompt handoff that fails after register() (a lone-surrogate prompt makes the text-mode stdin write raise with the child alive) kills the child and observes its exit before releasing it, at all five sites: Claude chat and Codex kill their own group, both Gemini paths kill the pid only (the Gemini pgid is the agent server's own group; a refusing guard records every signal), Claude headless kills and drains in its worker and leaves the release to its caller. The async teardown runs off the event loop, and a cancel mid-teardown still releases once the child is dead. Other shape: an empty prompt hands off cleanly and the normal path releases. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_2467_turn_integrity.py",
       "feature": "#2467",
       "added": "2026-09-01",

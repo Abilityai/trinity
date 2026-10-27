@@ -47,7 +47,7 @@ pytestmark = pytest.mark.unit
 EID = "failed-handoff"
 # Accepted in a JSON body by the agent server, unencodable on a text-mode pipe.
 UNENCODABLE_PROMPT = "hi " + json.loads('"\\ud800"') + " there"
-SITES = ["claude_chat", "codex", "gemini_chat", "gemini_headless"]
+SITES = ["claude_chat", "claude_headless", "codex", "gemini_chat", "gemini_headless"]
 GEMINI_SITES = {"gemini_chat", "gemini_headless"}
 # Reads its prompt to EOF, then outlives the test: only a kill ends it early.
 BLOCKED_CHILD = "import sys,time; sys.stdin.read(); time.sleep(60)"
