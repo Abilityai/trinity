@@ -508,11 +508,13 @@
     agent keys. No credential reaches the caller. Consequence: an agent stopped
     and key-revoked for containment can be started again by this key; to contain
     an agent, delete it or take it out of the key owner's reach.
-  - **Dies with its owner, on every route**: demotion below `admin` refuses the
-    key at the fence (`ops_write_owner_not_admin`), suspension refuses it one
-    line earlier (401), and a password change with "revoke keys" revokes it
-    (`PERSON_KEY_SCOPES` equals the mintable set, pinned). It applies to the next
-    request, not to an operation already running.
+  - **Dies with its owner, on every route the resolver protects**: demotion
+    below `admin` refuses the key at the fence (`ops_write_owner_not_admin`),
+    suspension refuses it one line earlier (401), and a password change with
+    "revoke keys" revokes it (`PERSON_KEY_SCOPES` equals the mintable set,
+    pinned). It applies to the next request, not to an operation already
+    running. `/api/mcp/validate` keeps reporting the key valid until the key is
+    revoked (introspection; it grants nothing).
   - **Mint**: `POST /api/mcp/keys` with `scope: "ops_write"`, from an
     interactive admin session only (the `ops` ladder: `require_interactive`,
     then `reject_non_interactive_principal`, `reject_agent_principal`,
