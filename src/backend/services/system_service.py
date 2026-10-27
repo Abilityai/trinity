@@ -2309,7 +2309,9 @@ async def _restart_pending(name: str, container) -> bool:
         check_shared_folder_mounts_match,
     )
     resources_match = check_resource_limits_match(container, name)
-    folders_match = await check_shared_folder_mounts_match(container, name)
+    # strict: a failed source-volume inspect raises (a read failure, P-B)
+    # instead of reading as "mounts match" (Codex 3).
+    folders_match = await check_shared_folder_mounts_match(container, name, strict=True)
     return not (resources_match and folders_match)
 
 
@@ -3164,6 +3166,24 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         if len(blockers) > before or state.blocked:
             mp.verdict = "blocked"
 
+    # A member that consumes shared folders mounts every exposing agent it may
+    # call, so a new edge from it, or a peer's expose flipping, changes the
+    # mounts it must have. Predicted here; the real run re-reads the
+    # platform's predicate for every existing member after its writes.
+    expose_flips = any(
+        op.kind == "folders" and op.args.get("expose_enabled") is not None
+        for mp in members.values() for op in mp.ops)
+    for short, mp in members.items():
+        state = snapshot.members.get(short)
+        if mp.creating or mp.verdict == "blocked" or state is None or state.status != "managed":
+            continue
+        consumes = bool(getattr(state.folders, "consume_enabled", False))
+        for op in mp.ops:
+            if op.kind == "folders" and op.args.get("consume_enabled") is not None:
+                consumes = bool(op.args["consume_enabled"])
+        if consumes and (expose_flips or any(op.kind == "edge" for op in mp.ops)):
+            mp.restart_required = True
+
     # Drift: tagged members the manifest does not declare (AC3). Reported,
     # never touched. A prefix-only one never gets here: it blocks (H11).
     drift: List[SystemApplyDrift] = []
@@ -3467,17 +3487,23 @@ async def execute_apply_plan(
         if await attempt(name, mp.short_name, "start", lambda n=name: _started(start_agent_fn(n))):
             out.started.append(name)
 
-    # 5. `restart_required` for the existing members this run reconfigured,
-    # from the platform's predicates over the container as it now is.
-    for mp in plan.members.values():
-        if mp.creating or not any(op.kind in ("folders", "resources") for op in mp.ops):
-            continue
-        try:
-            container = _member_container(mp.name)
-            if _container_labels(container) is not None:
+    # 5. `restart_required` for EVERY existing member once anything landed,
+    # from the platform's predicates over its container as it now is: a write
+    # on one member (a new edge, a peer's expose) changes which shared-folder
+    # mounts another must have (Codex 4).
+    if out.succeeded:
+        for mp in plan.members.values():
+            if mp.creating:
+                continue
+            try:
+                container = _member_container(mp.name)
+                if _container_labels(container) is None:
+                    raise RuntimeError("the container could not be read")
                 out.restart_required[mp.name] = await _restart_pending(mp.name, container)
-        except Exception:  # noqa: BLE001 — keep the plan's prediction
-            pass
+            except Exception:  # noqa: BLE001 — keep the plan's prediction, and say so
+                out.warnings.append(
+                    f"restart_required for '{mp.name}' could not be re-read after the "
+                    "writes; the plan's prediction is shown.")
     return out
 
 

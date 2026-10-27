@@ -1066,6 +1066,65 @@ class TestH4RealStartPathKeepsTheVolumes:
         assert (provisioned["cpu"], provisioned["memory"]) == ("2", "8g")
 
 
+class TestRestartRequiredFollowsTheMounts:
+    """Codex pass 1 #3 and #4: `restart_required` comes from the platform's
+    own mount predicate, read strictly, for every existing member."""
+
+    def _consumer_and_exposer(self, ew):
+        ew.seed_agent("acme-a")
+        ew.seed_agent("acme-b")
+        db.upsert_shared_folder_config("acme-a", expose_enabled=False, consume_enabled=True)
+        db.upsert_shared_folder_config("acme-b", expose_enabled=True, consume_enabled=False)
+        # B's container exposes (its shared-out mount), so B itself is in step.
+        ew.docker.containers["acme-b"].attrs["Mounts"].append(
+            {"Destination": "/home/developer/shared-out", "Type": "volume",
+             "Name": "agent-acme-b-shared", "RW": True})
+        return _manifest("a", "b", extra="permissions:\n  explicit:\n    a: [b]\n")
+
+    def test_a_new_edge_into_an_exposer_makes_the_consumer_restart_required(self, ew, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from services.agent_service import helpers
+        monkeypatch.setattr(helpers, "volume_get", AsyncMock(return_value=object()))
+        mf = self._consumer_and_exposer(ew)
+        assert W.apply(ew, mf, dry_run=True).members[0].restart_required is True  # predicted
+
+        result = W.apply(ew, mf, dry_run=False)
+        a = next(m for m in result.members if m.short_name == "a")
+        assert db.get_permitted_agents("acme-a") == ["acme-b"]
+        assert a.restart_required is True  # B's mount is now required and missing
+        assert ew.docker.events == []      # and still never restarted
+
+    def test_the_real_run_reports_the_predicate_not_the_prediction(self, ew, monkeypatch):
+        """The dry run can only predict (a consumer gaining an edge MAY need a
+        new mount); the real run re-reads the platform's predicate. Here B does
+        not expose, so the new edge changes no mount: predicted true, false."""
+        from unittest.mock import AsyncMock
+
+        from services.agent_service import helpers
+        monkeypatch.setattr(helpers, "volume_get", AsyncMock(return_value=object()))
+        mf = self._consumer_and_exposer(ew)
+        db.upsert_shared_folder_config("acme-b", expose_enabled=False, consume_enabled=False)
+        ew.docker.containers["acme-b"].attrs["Mounts"] = [
+            m for m in ew.docker.containers["acme-b"].attrs["Mounts"]
+            if m["Destination"] != "/home/developer/shared-out"]
+        assert W.apply(ew, mf, dry_run=True).members[0].restart_required is True
+        result = W.apply(ew, mf, dry_run=False)
+        assert db.get_permitted_agents("acme-a") == ["acme-b"]
+        assert next(m for m in result.members if m.short_name == "a").restart_required is False
+
+    def test_a_failed_volume_inspect_is_a_read_failure_not_matching_mounts(self, ew, monkeypatch):
+        from unittest.mock import AsyncMock
+
+        from services.agent_service import helpers
+        mf = self._consumer_and_exposer(ew)
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        monkeypatch.setattr(helpers, "volume_get", AsyncMock(side_effect=RuntimeError("docker timeout")))
+        snap = world_snapshot = ew.snapshot(mf)
+        assert ("member_reads_unavailable", "acme-a") in _codes(world_snapshot)
+        assert snap.members["a"].blocked is True
+
+
 class TestH4bFolders:
     def test_an_existing_members_omitted_key_keeps_its_value(self, ew):
         ew.seed_agent("acme-a")
