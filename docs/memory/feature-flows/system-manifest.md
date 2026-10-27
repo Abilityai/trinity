@@ -159,6 +159,11 @@ permissions:
 
 ### MCP Tools
 - `deploy_system` - Deploy from YAML manifest
+- `apply_system` (ent#695) - Reconcile a live instance to a manifest: absent members created,
+  existing ones updated in place, undeclared tagged agents reported as drift; never suffixes.
+  A new tool, not a `mode` on `deploy_system`, so an older build fails closed. `dry_run`
+  defaults to **`true`**; 404/405 (no apply route on this build) come back as `not_available`
+  with a warning not to fall back to `deploy_system`
 - `list_systems` - List deployed systems
 - `restart_system` - Restart all system agents
 - `get_system_manifest` - Export system configuration as YAML
@@ -1387,6 +1392,52 @@ All tools support MCP API key authentication when `requireApiKey=true` in server
 On a total failure the backend answers HTTP 500 with the report as the body; the
 MCP client's `ApiError` embeds that body in the tool error message, so the report
 is still visible to the calling agent (trinity-enterprise#125).
+
+#### apply_system
+The reconcile verb (trinity-enterprise#695), proxying `POST /api/systems/apply`. A NEW tool
+rather than a `mode` argument on `deploy_system`: a released `deploy_system` has no `mode` in
+its schema, so `mode: "apply"` sent to an older instance would be dropped and run create
+(suffixing the fleet), while an unknown tool name fails closed. `deploy_system` is unchanged.
+```typescript
+{
+  name: "apply_system",
+  parameters: z.object({
+    manifest: z.string(),            // the same YAML deploy_system takes
+    dry_run: z.boolean().optional()  // defaults to TRUE
+  }),
+  execute: async ({ manifest, dry_run }, context?) => {
+    const preview = dry_run ?? true;           // opposite of deploy_system's `|| false`
+    try {
+      const apiClient = getClient(context?.session);  // inside the try: a missing key is returned
+      const response = await apiClient.request("POST", "/api/systems/apply", {
+        manifest,
+        dry_run: preview
+      });
+      return JSON.stringify(response, null, 2);
+    } catch (error) {
+      return applyFailure(error, context);     // never throws
+    }
+  }
+}
+```
+
+`applyFailure` is a deliberately thin mapping, so a status-code change in the backend apply
+contract cannot silently break the tool:
+
+| Backend answer | Tool result | Audit row |
+|---|---|---|
+| 2xx | the body, verbatim | `success: true` |
+| 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | not a denial |
+| 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
+| any other non-2xx with a JSON body (the 409 / 503 / 500 apply reports, 400, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | not a denial (an operational refusal; `ToolOutcome` has no non-denial kind yet, so the row reads like any returned failure today) |
+| a non-JSON body | `{success: false, http_status, detail}` (the raw text) | not a denial |
+| no HTTP status (missing API key, transport failure) | `{success: false, error}` | not a denial |
+
+Policy row in `access.ts`: `kind: "none"` (a manifest, not an agent target; the backend enforces
+the per-member manage checks and refuses every non-person key). With API-key auth on, each call
+builds a client on the server's configured backend URL carrying the calling session's own key.
+Tests: `src/mcp-server/src/tools/systems.apply.test.ts`, through the registered, audit-wrapped
+tool over the real MCP transport.
 
 #### list_systems (Lines 105-133)
 ```typescript
