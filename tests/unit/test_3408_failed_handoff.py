@@ -372,9 +372,9 @@ def _make_the_kill_raise(site, script, monkeypatch, *, after_killing):
     monkeypatch.setattr(module, "_terminate_process_group", terminate)
 
 
-def _logged_a_kill_failure(caplog):
+def _logged_a_teardown_failure(caplog):
     return any(
-        "failed handoff raised" in record.getMessage() and record.levelno >= logging.ERROR
+        "failed handoff" in record.getMessage() and record.levelno >= logging.ERROR
         for record in caplog.records
     )
 
@@ -397,7 +397,7 @@ async def test_a_kill_helper_that_raises_after_killing_does_not_replace_the_hand
             await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
 
     assert _is_the_handoff_failure(raised.value), repr(raised.value)
-    assert _logged_a_kill_failure(caplog)
+    assert _logged_a_teardown_failure(caplog)
     [child] = spawned
     assert child.poll() is not None
     assert child.stdin.closed
@@ -426,10 +426,71 @@ async def test_a_kill_that_raises_before_signalling_keeps_the_live_child_owned(
             await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
 
     assert _is_the_handoff_failure(raised.value), repr(raised.value)
-    assert _logged_a_kill_failure(caplog)
+    assert _logged_a_teardown_failure(caplog)
     [child] = spawned
     assert child.stdin.closed and child.stdout.closed and child.stderr.closed
     assert child.poll() is None, "control: nothing was signalled, so the child lives"
     assert registry.is_execution_running(EID), "a live child must stay owned"
     assert child.pid in registry.active_execution_pids()
     assert signals["sent"] == [] and signals["refused"] == [], signals
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("site", ["claude_chat", "codex", "gemini_chat", "gemini_headless"])
+async def test_an_executor_that_refuses_the_teardown_keeps_the_child_owned(
+    site, registry, signals, pools, children, monkeypatch, tmp_path, caplog,
+):
+    """The default executor refuses the teardown (shut down, or no thread to
+    start). The caller still sees the handoff error, the refusal is logged,
+    and the child, which nothing could kill, stays registered and
+    allowlisted."""
+    spawned, _ = children
+    loop = asyncio.get_running_loop()
+    real_run_in_executor = loop.run_in_executor
+
+    def refusing(executor, func, *args):
+        if getattr(func, "__name__", "") == "_abort_handoff":
+            raise RuntimeError("cannot schedule new futures after shutdown")
+        return real_run_in_executor(executor, func, *args)
+
+    monkeypatch.setattr(loop, "run_in_executor", refusing)
+    call = _prepare(site, monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises((UnicodeEncodeError, HTTPException)) as raised:
+            await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
+
+    assert _is_the_handoff_failure(raised.value), repr(raised.value)
+    assert _logged_a_teardown_failure(caplog)
+    [child] = spawned
+    assert child.poll() is None, "control: the teardown never ran, so the child lives"
+    assert registry.is_execution_running(EID), "a live child must stay owned"
+    assert child.pid in registry.active_execution_pids()
+    assert signals["sent"] == [] and signals["refused"] == [], signals
+
+
+@pytest.mark.asyncio
+async def test_a_headless_drain_that_cannot_start_does_not_replace_the_handoff_error(
+    registry, signals, pools, children, monkeypatch, tmp_path, caplog,
+):
+    """The bounded drain starts a thread of its own, and starting it can fail.
+    The caller still sees the handoff error, the failure is logged, and the
+    killed child is still released by the caller's `finally`."""
+    spawned, _ = children
+
+    def drain_cannot_start(*args, **kwargs):
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(headless, "_drain_bounded", drain_cannot_start)
+    call = _prepare("claude_headless", monkeypatch, tmp_path)
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(HTTPException) as raised:
+            await asyncio.wait_for(call(UNENCODABLE_PROMPT), timeout=30)
+
+    assert _is_the_handoff_failure(raised.value), repr(raised.value)
+    assert _logged_a_teardown_failure(caplog)
+    [child] = spawned
+    assert child.poll() is not None, "the kill ran before the drain"
+    _assert_released(registry, child)
+    assert signals["refused"] == []

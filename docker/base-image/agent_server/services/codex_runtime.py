@@ -1307,16 +1307,25 @@ class CodexRuntime(AgentRuntime):
                                 execution_id, exc_info=True,
                             )
 
-            teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
             try:
-                await asyncio.shield(teardown)
-            finally:
-                # Release only once the child is dead: now, or, if this await
-                # was cancelled mid-teardown, when the teardown ends.
-                if teardown.done():
-                    registry.unregister(execution_id)
-                else:
-                    teardown.add_done_callback(lambda _: registry.unregister(execution_id))
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            except Exception:
+                # The executor refused (shut down, or no thread to start): log it,
+                # keep the live child owned, and still re-raise the handoff error.
+                logger.exception("[Codex] could not start the teardown of %s after its failed handoff", execution_id)
+                teardown = None
+            if teardown is None:
+                registry.unregister(execution_id)
+            else:
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this await
+                    # was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        registry.unregister(execution_id)
+                    else:
+                        teardown.add_done_callback(lambda _: registry.unregister(execution_id))
             raise
 
         import threading

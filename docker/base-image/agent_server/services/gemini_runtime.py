@@ -351,16 +351,25 @@ class GeminiRuntime(AgentRuntime):
                             except Exception:  # noqa: BLE001 — a close after a failed write flushes again
                                 logger.debug(f"[Gemini] pipe close after failed handoff of {_registered_id} raised", exc_info=True)
 
-                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
                 try:
-                    await asyncio.shield(teardown)
-                finally:
-                    # Release only once the child is dead: now, or, if this
-                    # await was cancelled mid-teardown, when the teardown ends.
-                    if teardown.done():
-                        get_process_registry().unregister(_registered_id)
-                    else:
-                        teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
+                    teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                except Exception:
+                    # The executor refused (shut down, or no thread to start): log it,
+                    # keep the live child owned, and still re-raise the handoff error.
+                    logger.exception(f"[Gemini] could not start the teardown of {_registered_id} after its failed handoff")
+                    teardown = None
+                if teardown is None:
+                    get_process_registry().unregister(_registered_id)
+                else:
+                    try:
+                        await asyncio.shield(teardown)
+                    finally:
+                        # Release only once the child is dead: now, or, if this
+                        # await was cancelled mid-teardown, when the teardown ends.
+                        if teardown.done():
+                            get_process_registry().unregister(_registered_id)
+                        else:
+                            teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output (runs in thread pool)
@@ -833,14 +842,23 @@ class GeminiRuntime(AgentRuntime):
                             except Exception:  # noqa: BLE001 — a close after a failed write flushes again
                                 logger.debug(f"[Headless Task {session_id}] pipe close after failed handoff raised", exc_info=True)
 
-                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
                 try:
-                    await asyncio.shield(teardown)
-                finally:
-                    if teardown.done():
-                        get_process_registry().unregister(_registered_id)
-                    else:
-                        teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
+                    teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                except Exception:
+                    # The executor refused (shut down, or no thread to start): log it,
+                    # keep the live child owned, and still re-raise the handoff error.
+                    logger.exception(f"[Headless Task {session_id}] could not start the teardown after its failed handoff")
+                    teardown = None
+                if teardown is None:
+                    get_process_registry().unregister(_registered_id)
+                else:
+                    try:
+                        await asyncio.shield(teardown)
+                    finally:
+                        if teardown.done():
+                            get_process_registry().unregister(_registered_id)
+                        else:
+                            teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output

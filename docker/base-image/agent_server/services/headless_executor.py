@@ -1185,9 +1185,12 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
             process.stdin.close()
         except Exception:  # noqa: BLE001 — a close after a failed write flushes again
             logger.debug(f"[Headless Task] stdin close after failed handoff of {ctx.task_session_id} raised", exc_info=True)
-        _drain_bounded(process, stdout_thread, stderr_thread,
-                       grace=3, pgid=ctx.process_pgid,
-                       execution_tag=ctx.task_session_id)
+        try:
+            _drain_bounded(process, stdout_thread, stderr_thread,
+                           grace=3, pgid=ctx.process_pgid,
+                           execution_tag=ctx.task_session_id)
+        except Exception:  # e.g. the drain's own thread cannot start
+            logger.exception(f"[Headless Task] draining {ctx.task_session_id} after its failed handoff raised")
         raise
 
     # Bounded, polling wait. Three exits beyond the overall budget (#970):
