@@ -79,7 +79,8 @@ def _sqlalchemy_insert_lines(tree: ast.AST) -> list:
     """Lines of SQLAlchemy inserts into the run table, through any import alias
     (`insert as ins`, `make_insert`, a dialect `insert`, `sa.insert`) and any
     module-level or local alias of the table (`... import agent_loop_runs as t`,
-    `t = agent_loop_runs`, `tables.agent_loop_runs`). Not resolved: a table name
+    `t = agent_loop_runs`, `t: Table = agent_loop_runs`, `tables.agent_loop_runs`).
+    Not resolved: a table name
     built at runtime, a reflected `Table("agent_loop_runs", …)`, or a table passed
     in as a function argument — this guard cannot see those."""
     table_names, insert_names = {_TABLE}, set()
@@ -94,8 +95,14 @@ def _sqlalchemy_insert_lines(tree: ast.AST) -> list:
     while changed:  # follow `t = agent_loop_runs` / `t2 = t` to a fixed point
         changed = False
         for node in ast.walk(tree):
-            if isinstance(node, ast.Assign) and _is_table(node.value, table_names):
-                for target in node.targets:
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, ast.AnnAssign) and node.value is not None:
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if _is_table(value, table_names):
+                for target in targets:
                     if isinstance(target, ast.Name) and target.id not in table_names:
                         table_names.add(target.id)
                         changed = True
@@ -151,18 +158,18 @@ def _sites_in(text: str) -> tuple:
     return tree, sorted(lines)
 
 
-def _insert_sites() -> tuple[list, int]:
+def _insert_sites(roots=_SCAN_ROOTS) -> tuple[list, int]:
     sites, scanned = [], 0
-    for root in _SCAN_ROOTS:
+    for root in roots:
         for path in sorted(root.rglob("*.py")):
             if any(part in {"node_modules", "__pycache__"} for part in path.parts):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
             scanned += 1
-            if _TABLE not in text:
+            if _TABLE not in text.lower():  # SQL identifiers are case-insensitive
                 continue
             tree, lines = _sites_in(text)
-            rel = path.relative_to(_REPO).as_posix()
+            rel = (path.relative_to(_REPO) if path.is_relative_to(_REPO) else path).as_posix()
             sites.extend((rel, _enclosing_def(tree, line), line) for line in lines)
     return sites, scanned
 
@@ -192,9 +199,12 @@ _T = "from db.tables import agent_loop_runs\n"
         "from db.engine import make_insert\n" + _T + "make_insert(agent_loop_runs)",
         "from sqlalchemy.dialects.postgresql import insert as pg_insert\n" + _T + "pg_insert(agent_loop_runs)",
         _T + "t = agent_loop_runs\nu = t\nfrom sqlalchemy import insert\ninsert(u)",
+        "from sqlalchemy import insert\nfrom sqlalchemy.sql.schema import Table\n" + _T
+        + "t: Table = agent_loop_runs\ninsert(t)",
         _T + "agent_loop_runs.insert().values(x=1)",
         "from sqlalchemy import insert\n" + _T + "insert(table=agent_loop_runs)",
         'q = "INSERT INTO agent_loop_runs (id) VALUES (?)"',
+        'q = "INSERT INTO AGENT_LOOP_RUNS (id) VALUES (?)"',
         "q = 'insert or ignore into agent_loop_runs values (1)'",
         'q = "INSERT INTO \\"agent_loop_runs\\" (id)"',
         'q = "INSERT INTO public.agent_loop_runs (id) VALUES (1)"',
@@ -204,6 +214,18 @@ _T = "from db.tables import agent_loop_runs\n"
 )
 def test_the_guard_finds_every_spelling_it_claims(src):
     assert _sites_in(src)[1], src
+
+
+def test_the_scanner_reports_an_insert_in_a_file_it_walks(tmp_path):
+    """The entry point, not just the matcher: a module that names the table
+    only in upper case must still be read (a case-sensitive prefilter skipped it)."""
+    (tmp_path / "other_writer.py").write_text(
+        'def restore(conn):\n    conn.exec_driver_sql("INSERT INTO AGENT_LOOP_RUNS (id) VALUES (1)")\n'
+    )
+    (tmp_path / "reader.py").write_text('Q = "SELECT * FROM agent_loop_runs"\n')
+    sites, scanned = _insert_sites((tmp_path,))
+    assert scanned == 2
+    assert [(f.rsplit("/", 1)[-1], d, line) for f, d, line in sites] == [("other_writer.py", "restore", 2)]
 
 
 @pytest.mark.parametrize(
@@ -277,11 +299,26 @@ def _hold_rearm(lid):
     return hold
 
 
+# The test's own PostgreSQL probes never wait unboundedly.
+_BOUNDED = {"connect_timeout": 5, "options": "-c statement_timeout=5000 -c lock_timeout=5000"}
+
+
+def _cancel_backend(pid: int) -> None:
+    import sqlalchemy as sa
+
+    eng = sa.create_engine(os.environ["TEST_POSTGRES_URL"], connect_args=_BOUNDED)
+    try:
+        with eng.connect() as c:
+            c.execute(sa.text("SELECT pg_cancel_backend(:p)"), {"p": pid})
+    finally:
+        eng.dispose()
+
+
 def _waiting_on(holder_pid: int) -> bool:
     """PostgreSQL: some backend is blocked by the holder's transaction."""
     import sqlalchemy as sa
 
-    eng = sa.create_engine(os.environ["TEST_POSTGRES_URL"])
+    eng = sa.create_engine(os.environ["TEST_POSTGRES_URL"], connect_args=_BOUNDED)
     try:
         with eng.connect() as c:
             return bool(c.execute(
@@ -306,9 +343,11 @@ def _race(db_backend, hold, contend):  # noqa: F811
     issued = threading.Event()
 
     def _flag(conn, cursor, statement, params, context, executemany):
-        if threading.current_thread() is contender and statement.lstrip().upper().startswith(
-            "UPDATE AGENT_LOOPS"
-        ):
+        if threading.current_thread() is not contender:
+            return
+        if db_backend == "postgres" and "pid" not in box:
+            box["pid"] = cursor.connection.get_backend_pid()  # to cancel it if it hangs
+        if statement.lstrip().upper().startswith("UPDATE AGENT_LOOPS"):
             issued.set()
 
     def _run_contender():
@@ -348,6 +387,9 @@ def _race(db_backend, hold, contend):  # noqa: F811
     finally:
         if contender.ident is not None:
             contender.join(30)
+            if contender.is_alive() and "pid" in box:
+                _cancel_backend(box["pid"])  # never leave it holding a connection
+                contender.join(10)
         event.remove(engine, "before_cursor_execute", _flag)
     assert not contender.is_alive(), "the contender never finished"
     assert "error" not in box, box.get("error")
