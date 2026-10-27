@@ -1495,7 +1495,7 @@ class TestDeadAdvanceStillRecovers:
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap):
             moved = _run(ls.LoopService().reconcile_after_restart())
-        assert seen == [(lid, "armed")], "a real loss was not re-armed"
+        assert seen == [(lid, "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
         assert _loop(db, lid)["next_run_at"] is not None
         assert _sweep_at(ls, monkeypatch, _grace_end(db, lid)) == 1
@@ -1509,7 +1509,7 @@ class TestDeadAdvanceStillRecovers:
         seen = _record_rearms(db)
         with _SnapshotReadAs(db, snap):
             moved = _run(ls.LoopService().reconcile_after_restart())
-        assert seen == [(loop["id"], "armed")], "a real loss was not re-armed"
+        assert seen == [(loop["id"], "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
         assert _loop(db, loop["id"])["next_run_at"] == _iso(_grace_end(db, loop["id"]))
 
@@ -1554,7 +1554,7 @@ class TestDeadAdvanceStillRecovers:
         seen = _record_rearms(db)
         with caplog.at_level(logging.WARNING), _SnapshotReadAs(db, snap):
             moved = _run(ls.LoopService().reconcile_after_restart())
-        assert seen == [(lid, "armed")], "a real loss was not re-armed"
+        assert seen == [(lid, "armed")], f"a real loss was not re-armed: {seen}"
         assert moved == 1
         assert not any("not re-armed" in r.getMessage() for r in caplog.records)
         assert _loop(db, lid)["next_run_at"] == _iso(_grace_end(db, lid))
