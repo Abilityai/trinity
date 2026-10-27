@@ -700,6 +700,7 @@ def build_pull_queue_payload(
     attempt: Optional[int] = None,
     images: Optional[list] = None,
     collaboration_activity_id: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -777,6 +778,7 @@ def build_pull_queue_payload(
         timeout_seconds=timeout_seconds,
         async_mode=True,
         resume_session_id=resume_session_id,
+        max_turns=max_turns,
     )
     return PersistentTaskPayload(
         request=request,
@@ -1633,6 +1635,10 @@ class TaskExecutionService:
         # #3127: the agent-to-agent /chat collaboration activity. Only a pull
         # pilot's queue reads it (the pull sink closes it); ignored on push.
         collaboration_activity_id: Optional[str] = None,
+        # #2328: the caller's per-task turn cap (`POST /task` `max_turns`). Sent
+        # to the agent, which applies it to `--max-turns`; None ⇒ the agent's
+        # own guardrail. Queued for a pull pilot, frozen by the skill gate.
+        max_turns: Optional[int] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1763,6 +1769,7 @@ class TaskExecutionService:
             attempt=attempt,
             images=images,
             collaboration_activity_id=collaboration_activity_id,
+            max_turns=max_turns,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
@@ -1801,6 +1808,7 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
+                        max_turns=max_turns,
                     ),
                 )
 
@@ -1890,6 +1898,9 @@ class TaskExecutionService:
                 # Claude-runtime agent on a new base image; everyone else ignores
                 # it and runs synchronously (200 → sync fallback below).
                 "async_result": async_dispatch,
+                # #2328: the caller's per-task turn cap. Both retries copy the
+                # payload (`{**payload, ...}`), so they keep it too.
+                "max_turns": max_turns,
             }
 
             response = await self._call_agent_with_retries(
