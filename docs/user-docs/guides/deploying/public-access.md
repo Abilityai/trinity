@@ -40,7 +40,7 @@ If all your users and webhook sources can reach the server directly (e.g., via T
 
 ### 2. Configure public hostnames
 
-In the Cloudflare dashboard, add a public hostname for your tunnel under the **Public Hostnames** tab. The `cloudflared` container runs on both Trinity networks, so it reaches the platform containers by name.
+In the Cloudflare dashboard, add a public hostname for your tunnel under the **Public Hostnames** tab. The `cloudflared` container runs on the Trinity networks, so it reaches the platform containers by name. On production and hosted installs it also sits on the ingress network at a reserved address, and its `backend` and `trinity-backend` names are pinned there (compose `extra_hosts`), so both rule shapes below reach the backend from that address — which is how the backend knows a request came through the tunnel and reads the visitor's address from it (see [Visitor addresses](#visitor-addresses-behind-the-tunnel-and-other-proxies)).
 
 **Simplest: one catch-all rule** — route the whole hostname to the frontend, `http://trinity-frontend:8080`. The production frontend's nginx already proxies `/api/`, `/a2a/`, `/mcp`, `/ws` and `/health` to the right upstream, so a single rule serves the web UI, every webhook, and MCP. (The frontend container listens on **8080** inside the network; `FRONTEND_PORT` only changes the host-side mapping.)
 
@@ -95,6 +95,15 @@ Also set `FRONTEND_URL` if it differs from `PUBLIC_CHAT_URL`:
 ```
 FRONTEND_URL=https://trinity.your-domain.com
 ```
+
+## Visitor addresses behind the tunnel and other proxies
+
+Per-client sign-in limits and audit-log addresses use the **visitor's** address. The backend learns it from a proxy only when that proxy is trusted; nothing else (an agent, a direct caller to port 8000, the Docker bridge gateway) can choose the address it is recorded under.
+
+- **Cloudflare Tunnel, either rule shape.** A direct-to-backend rule (`http://trinity-backend:8000`) reaches the backend from the tunnel's reserved address; a catch-all rule (`http://trinity-frontend:8080`) goes through nginx, which appends the tunnel's address to `X-Forwarded-For`. In both cases the backend takes the visitor from Cloudflare's single `CF-Connecting-IP` header. No configuration is needed.
+- **When identity is missing.** A request that arrives through a trusted proxy without any client identity is still served, but it is attributed to the proxy itself: all such requests share one rate-limit bucket and the audit log shows the proxy's address. Identity that is present but malformed (an empty or duplicated `CF-Connecting-IP`, an `X-Forwarded-For` entry that is not an IP address) is refused with `400`, or a WebSocket close code `1008`. The backend logs a warning, at most once a minute, while requests arrive without identity.
+- **Your own reverse proxy or load balancer** in front of port 80: list its address or range in `TRUSTED_PROXIES` in `.env` (comma-separated, e.g. `TRUSTED_PROXIES=192.0.2.10,198.51.100.0/28`), and make sure it overwrites or appends `X-Forwarded-For` rather than passing a client's value through. Only the right-hand entries your trusted proxies appended are read. Wildcards, `0.0.0.0/0`, loopback and Trinity's own Docker networks are refused when the backend starts, with the offending entry named. A proxy on the **same host** should not be listed; it uses the loopback PROXY-protocol listener (`CADDY_PROXY_PORT`, see [Single-Server Deployment](single-server.md)).
+- **Development and bare containers.** The development compose (Vite on port 80) trusts no proxy: every request is attributed to its connecting address. A bare `docker run` of the backend image trusts none either until you configure it.
 
 ## Starting with the Tunnel
 
@@ -153,6 +162,7 @@ MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Se
 - `TUNNEL_TOKEN` is a long-lived credential. Store it only in `.env` (gitignored). Do not commit it.
 - Path prefixes not listed in your ingress rules return 404 at Cloudflare's edge before reaching your server.
 - Rate limits apply to the public endpoints — schedule webhooks, for example, accept 10 triggers per token per 60 s (`WEBHOOK_RATE_LIMIT`) and 60 requests per IP per 60 s before authentication (`WEBHOOK_IP_RATE_LIMIT`).
+- Forwarded client addresses are believed only from the bundled nginx, the bundled `cloudflared` and the proxies you list in `TRUSTED_PROXIES` — see [Visitor addresses](#visitor-addresses-behind-the-tunnel-and-other-proxies).
 - MCP over the tunnel is protected by the MCP API key on every request. Leave `MCP_INLINE_AUTH_ENABLED` at its default (`false`) unless you intend keyless email-code sign-in over MCP, and then only over TLS.
 
 ## See Also
