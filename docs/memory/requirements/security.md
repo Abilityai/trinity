@@ -57,7 +57,7 @@
   - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written only when this call ended the turn — a queued, parked or container cancel that won its CANCELLED CAS)
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set
-  - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle, circuit_breaker_reset (#3180: written after both breakers are reset, whatever the breaker feature flags say)
+  - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle, circuit_breaker_reset (#3180: written once both reset calls return, whatever the breaker feature flags say; the resets are fail-open, so with Redis unreachable the row records the request, not a confirmed reset)
   - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload), subscription_assign, subscription_clear, subscription_auto_adopt, subscription_auto_adopt_sweep (#2572 — the manual and automatic halves of subscription assignment; #2421 still owns register / delete / auto-switch-settings)
   - `MCP_OPERATION`: tool_call, key_create, key_revoke, key_delete
   - `GIT_OPERATION`: sync, pull, init (commit — folded into sync)

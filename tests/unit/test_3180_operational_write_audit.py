@@ -38,6 +38,7 @@ from types import SimpleNamespace
 import fakeredis
 import httpx
 import pytest
+from redis import exceptions as redis_exceptions
 
 os.environ.setdefault("REDIS_URL", "redis://u:p@localhost:6379")
 os.environ.setdefault("SECRET_KEY", "test-secret")
@@ -354,6 +355,10 @@ class TestCircuitBreakerReset:
         assert _rows(RESET) == []
 
     def test_a_failed_reset_writes_no_row(self, world, monkeypatch):
+        """Ordering guard: the row is written only after both reset calls have
+        returned, so a reset that raised leaves none. Production's resets are
+        fail-open and do not raise (the next test is that shape); this pins the
+        order, so a row moved above the resets goes red here."""
         breaker = importlib.import_module("services.dispatch_breaker")
 
         def _boom(agent_name):
@@ -366,6 +371,32 @@ class TestCircuitBreakerReset:
         assert res.status_code == 500
         assert world.redis.hget(f"agent:dispatch:{AGENT}", "state") == "open"
         assert _rows(RESET) == []
+
+    def test_with_redis_refusing_the_reset_the_row_records_the_request(
+        self, world, monkeypatch
+    ):
+        """Both resets are fail-open: when Redis refuses the DELETE they log and
+        return, so the route still answers 200 `closed` while both breakers stay
+        open (pre-existing route behaviour). The row is written once both reset
+        calls return, so it records the request, not a confirmed reset."""
+
+        def _refuse(*keys):
+            raise redis_exceptions.ConnectionError("redis refused the delete")
+
+        monkeypatch.setattr(world.redis, "delete", _refuse)
+
+        res = world.client.post(_reset_path(), headers=_session(ADMIN))
+
+        assert res.status_code == 200, res.text
+        assert res.json()["new_state"] == "closed"
+        assert _breaker_states(world.redis, AGENT) == ("open", "open")
+        rows = _rows(RESET)
+        assert len(rows) == 1
+        _assert_person_row(rows[0], ADMIN, ADMIN_EMAIL)
+        assert json.loads(rows[0]["details"]) == {
+            "prior_transport_state": "open",
+            "prior_dispatch_state": "open",
+        }
 
     def test_with_the_breaker_feature_off_the_reset_still_writes_its_row(
         self, world, monkeypatch

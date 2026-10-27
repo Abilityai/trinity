@@ -1144,7 +1144,9 @@ async def reset_circuit_breaker_endpoint(
     # both resets have returned, for every principal that reaches this route;
     # `log` derives the key fields from the principal (#2389), so a key's reset
     # names the key. Not conditional on DISPATCH_BREAKER_ENABLED or the
-    # per-agent toggle: the transport breaker trips with both off.
+    # per-agent toggle: the transport breaker trips with both off. Both resets
+    # are fail-open (when Redis refuses they log and return), so the row
+    # records the request, not a confirmed reset.
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="circuit_breaker_reset",
