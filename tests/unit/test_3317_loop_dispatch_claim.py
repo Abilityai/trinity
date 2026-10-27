@@ -301,6 +301,10 @@ def _hold_rearm(lid):
 
 # The test's own PostgreSQL probes never wait unboundedly.
 _BOUNDED = {"connect_timeout": 5, "options": "-c statement_timeout=5000 -c lock_timeout=5000"}
+# The holder's and the contender's race transactions (production engine, which
+# sets no timeouts of its own): bounded per transaction, well past the 15 s the
+# test allows for proving the wait.
+_PG_LOCAL_TIMEOUTS = "SET LOCAL lock_timeout = '30s'; SET LOCAL statement_timeout = '60s'"
 
 
 def _cancel_backend(pid: int) -> None:
@@ -347,6 +351,9 @@ def _race(db_backend, hold, contend):  # noqa: F811
             return
         if db_backend == "postgres" and "pid" not in box:
             box["pid"] = cursor.connection.get_backend_pid()  # to cancel it if it hangs
+            # Bound the contender's lock wait for its transaction only (LOCAL: it
+            # ends with that transaction, so nothing leaks into the pool).
+            cursor.execute(_PG_LOCAL_TIMEOUTS)
         if statement.lstrip().upper().startswith("UPDATE AGENT_LOOPS"):
             issued.set()
 
@@ -365,8 +372,10 @@ def _race(db_backend, hold, contend):  # noqa: F811
         with engine.connect() as holder:
             tx = holder.begin()
             try:
-                holder_pid = (holder.exec_driver_sql("SELECT pg_backend_pid()").scalar()
-                              if db_backend == "postgres" else None)
+                holder_pid = None
+                if db_backend == "postgres":
+                    holder.exec_driver_sql(_PG_LOCAL_TIMEOUTS)
+                    holder_pid = holder.exec_driver_sql("SELECT pg_backend_pid()").scalar()
                 hold(holder)
                 contender.start()
                 deadline = time.monotonic() + 15
@@ -385,12 +394,16 @@ def _race(db_backend, hold, contend):  # noqa: F811
                 if tx.is_active:
                     tx.rollback()
     finally:
-        if contender.ident is not None:
-            contender.join(30)
-            if contender.is_alive() and "pid" in box:
-                _cancel_backend(box["pid"])  # never leave it holding a connection
-                contender.join(10)
-        event.remove(engine, "before_cursor_execute", _flag)
+        try:
+            if contender.ident is not None:
+                contender.join(30)
+                if contender.is_alive() and "pid" in box:
+                    try:
+                        _cancel_backend(box["pid"])  # never leave it holding a connection
+                    finally:
+                        contender.join(10)
+        finally:
+            event.remove(engine, "before_cursor_execute", _flag)
     assert not contender.is_alive(), "the contender never finished"
     assert "error" not in box, box.get("error")
     assert box["waited"], "the contender never waited on the holder's row lock"
