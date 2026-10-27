@@ -1360,13 +1360,43 @@ class CodexRuntime(AgentRuntime):
         reader_executor = None if concurrent_reader else _executor
 
         loop = asyncio.get_event_loop()
+        # #3408, the Codex half of #3307: the child is spawned and has its
+        # prompt, so even a reader still queued in its pool must run to reap
+        # it (hence the shield). A waiter that stops waiting (cancelled, or
+        # past its outer timeout with the stop unconfirmed) hands release to
+        # that worker, which runs it once the child's exit is observed: the -o
+        # file first (Codex writes it at turn end, after the waiter's own
+        # unlink below), then the registry entry, on the loop.
+        waiter_abandoned = threading.Event()
+
+        def read_owned_subprocess_output():
+            try:
+                return read_subprocess_output()
+            finally:
+                if waiter_abandoned.is_set():
+                    try:
+                        _safe_unlink(result_file, codex_home)
+                    finally:
+                        loop.call_soon_threadsafe(
+                            lambda: registry.unregister(execution_id)
+                        )
+
+        worker = loop.run_in_executor(reader_executor, read_owned_subprocess_output)
+        # Consume the worker's eventual exception once no waiter awaits it.
+        worker.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
         try:
             try:
                 stderr_output, return_code = await asyncio.wait_for(
-                    loop.run_in_executor(reader_executor, read_subprocess_output),
+                    asyncio.shield(worker),
                     timeout=timeout_seconds + 60,
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 logger.error(
                     "[Codex] outer timeout on %s — killing group as last resort",
                     execution_id,
