@@ -19,6 +19,9 @@ driven through the code paths that call them in production:
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -207,6 +210,76 @@ class TestReconcileRefusal:
         assert result["status"] == "skipped"
         assert [(r["id"], r["context"]["seen_count"]) for r in _pending(db, self.SUBJECT)] == [
             (first["id"], 1)]                                 # untouched, not ended
+
+    # -- the REAL agent-side inventory (`_list_managed_skills`'s script) -------
+
+    @pytest.fixture
+    def agent_home(self, tmp_path, monkeypatch):
+        """Run the agent-side inventory script on this host instead of in a
+        container: the container exec is replaced by a local shell with HOME at
+        a temp dir, so `_list_managed_skills` and `_run_agent_python` run
+        unmodified against a real `~/.claude/skills`."""
+        import services.docker_service as docker_service
+        home = tmp_path / "home"
+        home.mkdir()
+
+        async def _exec(container_name, command, timeout=None, **_kw):
+            proc = subprocess.run(command, shell=True, capture_output=True, text=True,
+                                  env={**os.environ, "HOME": str(home)}, timeout=120)
+            return {"exit_code": proc.returncode, "output": proc.stdout}
+
+        monkeypatch.setattr(docker_service, "execute_command_in_container", _exec)
+        return home
+
+    @staticmethod
+    def _managed(home, count):
+        from services import skill_packaging as pkg
+        skills = home / ".claude" / "skills"
+        for i in range(count):
+            d = skills / f"orphan-{i:02d}"
+            d.mkdir(parents=True)
+            (d / pkg.META_FILENAME).write_text("{}")
+        return skills
+
+    @pytest.mark.parametrize("damage", ["not_a_directory", "unreadable"])
+    def test_an_unreadable_skills_dir_leaves_the_refusal_alone(
+            self, db, svc, agent_home, clock, damage):
+        """R10 through the real inventory: an enumeration that FAILS is "could
+        not look", never "nothing is managed". It used to print `[]`, which read
+        as a clean pass and would have ended the refusal."""
+        if damage == "unreadable" and os.geteuid() == 0:
+            pytest.skip("root can list a mode-000 directory")
+        skills = self._managed(agent_home, 12)
+        assert asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))["status"] == "refused"
+        [first] = _pending(db, self.SUBJECT)
+
+        if damage == "not_a_directory":
+            shutil.rmtree(skills)
+            skills.write_text("")
+        else:
+            skills.chmod(0)
+        clock.advance(minutes=1)
+        try:
+            result = asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))
+        finally:
+            if damage == "unreadable":
+                skills.chmod(0o755)
+        assert result == {"status": "skipped", "reason": "inventory_unavailable"}
+        assert [r["id"] for r in _pending(db, self.SUBJECT)] == [first["id"]]   # not ended
+
+    def test_an_absent_skills_dir_is_a_clean_pass_that_ends_the_refusal(
+            self, db, svc, agent_home, clock):
+        """No `~/.claude/skills` at all is positive evidence: nothing is managed,
+        so nothing is over the cap."""
+        skills = self._managed(agent_home, 12)
+        assert asyncio.run(svc.reconcile_agent_skills(self.AGENT, []))["status"] == "refused"
+        [row] = _pending(db, self.SUBJECT)
+        shutil.rmtree(skills)
+        clock.advance(minutes=1)
+        assert asyncio.run(svc.reconcile_agent_skills(self.AGENT, [])) == {
+            "status": "clean", "removed": 0}
+        assert _pending(db, self.SUBJECT) == []
+        _assert_ended_by_platform(db, row)
 
     def test_a_persons_ending_stands_and_snoozes_the_next_refusal(self, db, svc, clock):
         """AC 7 (#2372) on this kind: the answer lands `acknowledged` as the

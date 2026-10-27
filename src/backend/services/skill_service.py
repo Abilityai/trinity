@@ -1561,20 +1561,33 @@ print(json.dumps(out))
         everything". Names are re-validated backend-side before use: this list
         comes from the agent's own filesystem, i.e. untrusted input that later
         reaches path math.
+
+        An ABSENT skills directory is an empty inventory (nothing is managed).
+        A directory that exists but cannot be listed (permissions, not a
+        directory) is a failure: the script prints ``null``. It used to print
+        ``[]`` for both, so an unreadable directory read as a clean pass — and a
+        clean pass ends the reconcile-refusal alarm (#3254, R10) and lets the
+        gate reconcile drop unassigned defaults (`drop_after_prune`).
         """
         script = f"""
 import json, os
 base = os.path.expanduser("~/.claude/skills")
 meta_name = {json.dumps(pkg.META_FILENAME)}
-out = []
 try:
-    for name in os.listdir(base):
+    names = os.listdir(base)
+except FileNotFoundError:
+    names = []
+except Exception:
+    names = None
+if names is None:
+    print("null")
+else:
+    out = []
+    for name in names:
         d = os.path.join(base, name)
         if os.path.isdir(d) and os.path.isfile(os.path.join(d, meta_name)):
             out.append(name)
-except Exception:
-    pass
-print(json.dumps(sorted(out)))
+    print(json.dumps(sorted(out)))
 """
         result = await self._run_agent_python(agent_name, script)
         if not isinstance(result, list):
