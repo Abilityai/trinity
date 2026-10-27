@@ -61,7 +61,7 @@ diverged from origin for more than 24 h. See §2b and §5.
 | **API** | `GET/PUT /api/agents/{name}/git/freeze-schedules-if-failing` | Toggle the freeze-schedules-on-sync-failure flag |
 | **API** | `GET /api/fleet/sync-audit` | Fleet-wide audit including `duplicate_binding` flag (admins see all; non-admins filtered) |
 | **Operator Queue** | type=`sync_failing` | Observed by `SyncHealthService` through `platform_alerts.observe` (subject `sync_failing:<agent>`) on the crossing of `consecutive_failures` ≥ 3 and while it lasts (re-read at most every 6 h); ended by the platform on recovery (#3254) |
-| **Operator Queue** | type=`sync_diverged` | ent#706: one pending row per divergence episode (subject `sync_diverged:<agent>`), only while a divergence freeze is in force; ended by the platform when the episode ends (#3254) |
+| **Operator Queue** | type=`sync_diverged` | ent#706: one pending row per divergence episode (subject `sync_diverged:<agent>`), filed only while a divergence freeze is in force; it stays while the episode lasts, even when `sync_failing` takes over the freeze, and the platform ends it when the episode ends (`diverged_since` clears) (#3254) |
 | **Scheduler** | `SchedulerDatabase.sync_freeze_reason` | ent#706: the cron gate's reason, written into the skipped row as `Git sync frozen: <reason>` |
 
 ## Data Model
