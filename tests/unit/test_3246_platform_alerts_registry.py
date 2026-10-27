@@ -62,8 +62,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
         ("ent615-git-token-scrub-", _PR2),
     ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
         ("ent615-git-token-scrub-unreadable-", _PR2),
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        ("val_", _PR2),
     ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         ("alert-budget-", _PR2),

@@ -228,10 +228,14 @@ async def test_empty_response_files_no_operator_queue_item(monkeypatch):
     """End-to-end on the notifier itself, not a stub of it: no high-priority
     "Validation Failed" item is created for a run with nothing to inspect."""
     vs = _vs()
+    from services import platform_alerts
     created = []
     monkeypatch.setattr(vs.db, "update_business_status", lambda *a, **k: True)
-    monkeypatch.setattr(vs.db, "create_operator_queue_item",
-                        lambda agent, item: created.append(item))
+    # #3254 re-pin (write-observation point): the notifier reports through
+    # the platform alert seam, so the recorder sits on `observe`; the old
+    # `db.create_operator_queue_item` recorder would pass with nothing to see.
+    monkeypatch.setattr(platform_alerts, "observe",
+                        lambda agent, kind, key=None, **k: created.append((kind, key)) or "created")
     monkeypatch.setattr(vs.db, "create_validation_execution",
                         lambda **k: pytest.fail("no validator run for empty input"))
     service = vs.ValidationService(task_execution_service=SimpleNamespace())

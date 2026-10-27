@@ -599,19 +599,33 @@ def _validation_result():
     )
 
 
+def _seam_db(monkeypatch):
+    """#3254 re-pin (write-observation point): the notifier reports through the
+    platform alert seam, which writes with the facade's
+    `create_platform_operator_queue_item` on `database.db`, not with
+    `validation_service.db.create_operator_queue_item`. The facade is replaced
+    there; the asserted shape is unchanged."""
+    import database
+    db = MagicMock()
+    db.find_pending_operator_queue_by_subject.return_value = None
+    db.find_person_ended_operator_queue_by_subject.return_value = None
+    db.create_platform_operator_queue_item.return_value = {
+        "outcome": "created", "row": None, "changed": False}
+    monkeypatch.setattr(database, "db", db)
+    return db
+
+
 class TestValidationServiceDirectCreate:
     def test_notifies_via_direct_db_create_with_reserved_val_id(self, monkeypatch):
         # The platform exemption's concrete producer: one DIRECT create (never an
         # agent-file write → never rate/depth-capped), reserved `val_` id, alert.
-        import services.validation_service as vs
-        db = MagicMock()
-        monkeypatch.setattr(vs, "db", db)
+        db = _seam_db(monkeypatch)
         svc = _validation_service()
 
         asyncio.run(svc._notify_operator_on_failure("exec-1", "agent-a", _validation_result()))
 
-        assert db.create_operator_queue_item.call_count == 1
-        agent_arg, item = db.create_operator_queue_item.call_args.args
+        assert db.create_platform_operator_queue_item.call_count == 1
+        agent_arg, item = db.create_platform_operator_queue_item.call_args.args
         assert agent_arg == "agent-a"
         assert item["id"].startswith("val_")           # reserved prefix (agent can't pre-create)
         assert item["type"] == "alert"
@@ -620,13 +634,13 @@ class TestValidationServiceDirectCreate:
 
     def test_notify_is_best_effort_swallows_create_failure(self, monkeypatch):
         # Validation must not fail because the operator-queue create failed.
-        import services.validation_service as vs
-        db = MagicMock()
-        db.create_operator_queue_item.side_effect = Exception("db down")
-        monkeypatch.setattr(vs, "db", db)
+        # #3254 re-pin: the fault is injected at the seam's create.
+        db = _seam_db(monkeypatch)
+        db.create_platform_operator_queue_item.side_effect = Exception("db down")
         svc = _validation_service()
 
         asyncio.run(svc._notify_operator_on_failure("exec-1", "agent-a", _validation_result()))  # must not raise
+        assert db.create_platform_operator_queue_item.call_count == 1   # the fault was reached
 
 
 # ---------------------------------------------------------------------------

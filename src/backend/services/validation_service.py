@@ -24,14 +24,12 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum
 from typing import Optional
 
 from database import db
 from models import BusinessStatus
 from services.task_execution_service import TaskExecutionService, TaskExecutionResult
-from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -546,14 +544,16 @@ class ValidationService:
     ):
         """Notify the operator queue when validation fails.
 
-        Creates the item via a **direct DB create** (#1632), NOT by writing the
-        agent's operator-queue.json. This is a *platform* notification, so it must
-        bypass the agent-authored sync-ingestion caps (per-agent rate/depth/size)
-        — routing it through the agent file would flow it through `_sync_agent`
-        and cap it. The direct create also fixes a pre-existing latent bug: this
-        method used to `.append` to a bare list (`queue_data = []`), but the sync
-        service expects `{"requests": [...]}`, so the notification was never
-        actually ingested.
+        Reports through the platform alert seam (#3246, #3254), NOT by writing
+        the agent's operator-queue.json. This is a *platform* notification, so
+        it must bypass the agent-authored sync-ingestion caps (per-agent
+        rate/depth/size) — routing it through the agent file would flow it
+        through `_sync_agent` and cap it (#1632). One pending row per execution
+        (subject `validation_failed:<execution_id>`): a second failed
+        validation of the same run updates that row. Nothing observes the
+        failure clearing, so the kind's 14-day lifetime ends it. `val_` is a
+        platform-reserved id prefix at the sync boundary (#1632), so an agent
+        cannot pre-create (and thereby suppress) one.
 
         Args:
             execution_id: The original execution that failed validation.
@@ -561,33 +561,29 @@ class ValidationService:
             validation_result: The validation result details.
         """
         try:
-            # Build the notification payload. `val_` is a platform-reserved id
-            # prefix at the sync boundary (#1632), so an agent cannot pre-create
-            # (and thereby suppress) one.
-            notification = {
-                "id": f"val_{execution_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}",
-                "type": "alert",
-                "priority": "high",
-                "status": "pending",
-                "title": "Validation Failed",
-                "question": f"Execution validation failed: {validation_result.summary}",
-                "context": {
+            from services import platform_alerts
+            outcome = platform_alerts.observe(
+                agent_name, "validation_failed", execution_id,
+                priority="high",
+                title="Validation Failed",
+                question=f"Execution validation failed: {validation_result.summary}",
+                context={
                     "execution_id": execution_id,
                     "validation_status": validation_result.status.value,
                     "summary": validation_result.summary,
                     "items": validation_result.items,
                     "recommendation": validation_result.recommendation,
                 },
-                "created_at": utc_now_iso(),
-            }
-
-            db.create_operator_queue_item(agent_name, notification)
+            )
             logger.info(
-                f"Added validation failure notification to operator queue for agent '{agent_name}'"
+                "Validation failure of execution %s reported to the operator queue for "
+                "agent '%s' (%s)", execution_id, agent_name, outcome,
             )
 
         except Exception as e:
-            # Best effort — don't fail validation because notification failed
+            # Best effort: building the reading from a referee's verdict is the
+            # only part that can raise (observe never does), and it must not
+            # fail validation.
             logger.warning(f"Failed to notify operator queue for agent '{agent_name}': {e}")
 
 
