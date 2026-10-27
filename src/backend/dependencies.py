@@ -939,6 +939,10 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
                 _enforce_ops_key_fence(request)
+            # #3180 — the bounded write tier: listed route, marked handler, and an
+            # owner who is still an admin (it dies with its owner on every route).
+            if scope == OPS_WRITE_SCOPE:
+                _enforce_ops_write_key_fence(request, user)
             return User(
                 id=user["id"],
                 username=user["username"],
@@ -1359,6 +1363,119 @@ def _enforce_ops_key_fence(request: Request) -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# #3180 — the `ops_write` scope: the bounded WRITE tier beside `ops`.
+# --------------------------------------------------------------------------- #
+# `ops` (above) is read-only. `ops_write` is its write sibling for the
+# operational writes a machine actually makes: the four routes below, measured
+# from the ops toolkit's deploy records and nothing else. It does NOT include
+# the `ops` reads — a writer holds both keys — so the read tier and its seven
+# opt-ins are untouched.
+#
+# A request from this scope is admitted only when ALL THREE hold, checked here
+# at the single auth entry point (the ent#293/#297 placement, beside the other
+# fences):
+#
+#   1. (method, routed path) full-matches an entry in `_OPS_WRITE_ALLOWED_ROUTES`;
+#   2. the routed handler carries the `@ops_write_route("<why>")` mark, read from
+#      `scope["route"].endpoint`;
+#   3. the key's OWNER is still an admin.
+#
+# (1) and (2) are two independently maintained declarations with ONE
+# enforcement point. An overbroad or holed regex is refused by every unmarked
+# handler (every grant route among them), a stray mark is refused by the path
+# list, and the mark is what lets a test catch an overbroad regex at all — a
+# sweep that uses the regex itself cannot. They are not independent
+# ENFORCEMENT: removing the call below bypasses all three. Route-local
+# enforcement exists only where a route has its own scope-aware gate — reset
+# (`require_admin_allowing("ops_write")`) and start/stop (the target policy in
+# `enforce_agent_spawn_scope`). Terminate has only this fence.
+#
+# (3) is what makes the key die with its owner on routes with no admin gate:
+# the owner row is already loaded by the resolver, so the comparison costs no
+# query and cannot fail open. Suspension is refused one line before this runs
+# (#995); demotion is refused here; a password change with "revoke keys"
+# revokes it (`services/password_service.PERSON_KEY_SCOPES`). It applies to the
+# next request, not to an operation already running.
+#
+# Same rules as the `ops` fence: method and path only, no DB, no Redis, no
+# settings lookup; `scope["path"]`, never `request.url` (#3102); every entry
+# anchored; fail CLOSED on a route that moves. The mark is also read from the
+# scope, never from the Host-built URL.
+OPS_WRITE_SCOPE = "ops_write"
+
+OPS_WRITE_ROUTE_ATTR = "__trinity_ops_write_route__"
+
+_OPS_WRITE_ALLOWED_ROUTES = (
+    # Re-close both breakers on an agent the operator knows is healthy (#526).
+    ("POST", re.compile(r"^/api/agents/[^/]+/circuit-breaker/reset$")),
+    # Start / stop one agent. The system agent and ephemeral agents are refused
+    # in `enforce_agent_spawn_scope`, the lifecycle gate both handlers call first.
+    ("POST", re.compile(r"^/api/agents/[^/]+/start$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/stop$")),
+    # Cancel one execution.
+    ("POST", re.compile(r"^/api/agents/[^/]+/executions/[^/]+/terminate$")),
+)
+
+OPS_WRITE_ROUTE_MESSAGE = (
+    "Ops-write keys may only reset an agent's circuit breaker, start or stop an "
+    "agent, or terminate an execution"
+)
+OPS_WRITE_NOT_LISTED_DETAIL = {"code": "ops_write_route_not_listed", "message": OPS_WRITE_ROUTE_MESSAGE}
+OPS_WRITE_NOT_MARKED_DETAIL = {"code": "ops_write_route_not_marked", "message": OPS_WRITE_ROUTE_MESSAGE}
+OPS_WRITE_OWNER_DETAIL = {
+    "code": "ops_write_owner_not_admin",
+    "message": "Ops-write keys work only while the account that minted them is an admin",
+}
+OPS_WRITE_PROTECTED_TARGET_DETAIL = {
+    "code": "ops_write_protected_target",
+    "message": "Ops-write keys cannot start or stop the system agent or an ephemeral agent",
+}
+
+
+def ops_write_route(reason: str):
+    """Mark a handler an `ops_write` key may reach (#3180).
+
+    The second admission predicate of the `ops_write` fence: a request is
+    admitted only when its routed handler carries this mark AND its method and
+    path are listed in `_OPS_WRITE_ALLOWED_ROUTES`. Sets an attribute on the
+    function and returns the function itself, so FastAPI sees the same
+    signature. Keep it BELOW the route decorator (the census test checks this),
+    so the registered function is the marked one. The reason says why the route
+    is a USE, never a grant (Invariant #8)::
+
+        @router.post("/{agent_name}/start")
+        @ops_write_route("starts one agent; no credential reaches the caller")
+        async def start_agent_endpoint(...):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("ops_write_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, OPS_WRITE_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
+def _enforce_ops_write_key_fence(request: Request, owner: dict) -> None:
+    """Route containment for `ops_write`-scoped keys (#3180).
+
+    `owner` is the key owner's row the resolver already loaded. Each refusal
+    depends only on the principal and the matched route, never on whether an
+    addressed agent exists, so it discloses nothing (Invariant #8, #186).
+    """
+    if (owner or {}).get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_OWNER_DETAIL))
+    method = request.method.upper()
+    path = request.scope["path"]
+    if not any(method == m and pattern.fullmatch(path) for m, pattern in _OPS_WRITE_ALLOWED_ROUTES):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_NOT_LISTED_DETAIL))
+    endpoint = getattr(request.scope.get("route"), "endpoint", None)
+    if not getattr(endpoint, OPS_WRITE_ROUTE_ATTR, None):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_NOT_MARKED_DETAIL))
+
+
 def reject_agent_principal(current_user: User) -> None:
     """Human-only operation guard (trinity-enterprise#69 Part 2).
 
@@ -1592,6 +1709,31 @@ def _spawned_by_caller(agent_name: str, target_agent: str) -> bool:
     return bool(parent_key) and parent_key.id == expected_key_id
 
 
+def _refuse_ops_write_protected_target(target_agent: str) -> None:
+    """#3180 — the agents an `ops_write` key may not start or stop.
+
+    * The system agent: stopping and then starting it replaces its container,
+      which is the operation #1816 made human-only (`POST /api/system-agent/
+      restart`); admitting both halves would admit that restart by another
+      spelling. Refused by name and by the `is_system` flag.
+    * An ephemeral ("ghost") agent: a start with config drift recreates it, and
+      a ghost is volume-less, so that destroys its workspace; ghost lifecycle
+      belongs to its spawner (trinity-enterprise#69).
+
+    Fails CLOSED: a lookup that raises, or an answer that does not carry the
+    flag, is refused — an unprovable claim of "durable" is not a claim.
+    """
+    from db.agents import SYSTEM_AGENT_NAME
+
+    try:
+        system = target_agent == SYSTEM_AGENT_NAME or db.is_system_agent(target_agent)
+        info = None if system else db.get_agent_ephemeral_info(target_agent)
+    except Exception:
+        info = None  # an unreadable answer is not a durable agent
+    if not (isinstance(info, dict) and "is_ephemeral" in info and not info["is_ephemeral"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_PROTECTED_TARGET_DETAIL))
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -1602,7 +1744,15 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     name reuse; the key id is stable and cascade-deletes with the parent).
     No-op for human/system principals. #948 workflow-scoped capability tokens
     will subsume this parenthood check; ``spawned_by_*`` stays as provenance.
+
+    #3180 — the TARGET policy for an `ops_write` key: it may not start or stop
+    the system agent or an ephemeral agent (`_refuse_ops_write_protected_target`).
     """
+    # `getattr(..., None)` is safe here, unlike at an allowlist gate: the default
+    # can only ever mean "not an ops_write key", and an ops_write principal is
+    # built by the resolver, which always sets `mcp_scope`.
+    if getattr(current_user, "mcp_scope", None) == OPS_WRITE_SCOPE:
+        _refuse_ops_write_protected_target(target_agent)
     if not current_user.agent_name:
         return
     if not _spawned_by_caller(current_user.agent_name, target_agent):
