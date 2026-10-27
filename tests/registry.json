@@ -1561,6 +1561,17 @@
       "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
     },
     {
+      "file": "unit/test_3254_unended_kinds.py",
+      "feature": "Issue #3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 slice 6: the poison-park, inbox-collision and validation-failure alerts report through platform_alerts.observe (no clear site). Against the unit island's real SQLite with a frozen clock: two readings are one pending row with the subject <kind>:<key>, seen_count bumped, last_seen_at moved, expires_at moved for validation and NULL for the must-act kinds; the poison park follows the seam outcome (failed or refused never parks and the next pass retries, snoozed parks); an acknowledgement through ask_service.answer lands acknowledged and snoozes; a person's ending of a collision is final (no re-file at +8 days, a new claimant or a raised priority re-alerts); a legacy collision ended inside the sweep's window and a stamped legacy pending collision ended before its first refresh both stay snoozed although legacy rows carry no claimants_digest; the collision is observed at most once per 6 hours per claimant set and a failed reading is retried; each new subject equals the sweep's legacy derivation (R1); 30 days ahead the poison and collision rows are still pending with expires_at NULL while the validation row has expired."
+    },
+    {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",
