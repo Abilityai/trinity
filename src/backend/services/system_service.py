@@ -2343,10 +2343,12 @@ def _evidence_remedy(name: str, system_name: str, declared: bool) -> str:
 async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> ApplySnapshot:
     """Read what apply needs to plan. Reads only, never writes (AC4).
 
-    Roster: the tri-state container list UNION the live ownership rows,
-    filtered by the manage predicate H1 uses (`can_user_share_agent` +
-    `agent_may_reach(manage=True)`; an agent merely shared with the caller is
-    outside it, so it never blocks the run or shows as drift) — never
+    Roster: the live ownership rows (a recovered agent with no container
+    included) the caller may manage, by the predicate H1 uses (a live owner +
+    `can_user_share_agent` + `agent_may_reach(manage=True)`): an agent merely
+    shared with the caller, or a container nobody owns, is outside it, so it
+    never blocks the run or shows as drift. The tri-state container list is
+    still read (an unreadable Docker refuses) — never
     `get_accessible_agents`, which is built on `list_all_agents_fast` and
     returns `[]` without a Docker client, so the evidence gate would pass over
     an empty membership (#2196 class). The ownership rows bring in a recovered
@@ -2385,8 +2387,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         caller_is_admin=caller_is_admin,
     )
 
-    # 1. Roster (tri-state containers U live ownership rows), manage-filtered
-    # (see the docstring: a merely shared agent is outside it).
+    # 1. Roster (see the docstring).
     states = docker_service.agent_container_states()
     roster_ok = docker_ok = states is not None
     if states is None:
@@ -2409,8 +2410,12 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         ))
     if roster_ok:
         try:
+            # A live owner row first, as H1 requires (`bool(owner)`): an admin
+            # passes `can_user_share_agent` for ANY name, so a container with no
+            # live owner row (nobody's to manage; its tag route 404s) would
+            # otherwise refuse an admin's run or show as drift.
             snapshot.roster = [
-                n for n in sorted(set(states) | live_rows)
+                n for n in sorted(live_rows)
                 if db.can_user_share_agent(current_user.username, n)
                 and agent_may_reach(current_user, n, manage=True)
             ]

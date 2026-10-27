@@ -246,9 +246,9 @@ class TestManagedMemberGates:
 
 
 class TestRoster:
-    """Engineering F1 + Codex 6: containers UNION live ownership rows, filtered
-    by the manage predicate (fresh review #1); never `list_all_agents_fast`
-    (the world makes it raise)."""
+    """Engineering F1 + Codex 6: the live ownership rows (a container-less one
+    included) the caller may manage (fresh review #1, Codex at Stage 3); never
+    `list_all_agents_fast` (the world makes it raise)."""
 
     def test_a_live_row_without_a_container_is_a_member(self, world):
         world.seed_agent("acme-restored", container=False)
@@ -291,6 +291,19 @@ class TestRoster:
         # Bob, who manages both, still sees them: the gate is the caller's reach.
         bob = world.snapshot(_manifest("a"), username=W.BOB)
         assert ("membership_evidence_prefix_only", "acme-notes") in _codes(bob)
+
+    def test_a_container_nobody_owns_is_outside_even_an_admins_roster(self, world):
+        """Codex (Stage 3): `can_user_share_agent` is True for any admin, so the
+        roster also requires a live owner row, as the name classification does.
+        An ownerless container is nobody's to manage (its tag route 404s): it
+        must neither refuse an admin's run nor show as drift."""
+        world.seed_agent("acme-a", owner=W.ADMIN)
+        world.docker.add("acme-orphan")  # no ownership row: untagged, name-only
+        world.seed_agent("acme-gone", owner=W.BOB)
+        db.delete_agent_ownership("acme-gone")  # soft-deleted, its container lingers
+        snap = world.snapshot(_manifest("a"), username=W.ADMIN)
+        assert snap.roster == ["acme-a"]
+        assert not snap.blockers and snap.membership.members == ["acme-a"]
 
     def test_with_docker_unreadable_a_name_that_reads_as_free_is_blocked_never_create(self, ew):
         """Fresh review #6 (P-B): a name held only by a container reads as free
