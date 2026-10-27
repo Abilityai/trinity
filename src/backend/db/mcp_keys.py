@@ -109,7 +109,8 @@ class McpKeyOperations:
     # #2323: `ops` is a bounded read-only machine credential. Admin-gated AND
     # human-only at the router; refused here too so a bad value can never reach
     # the column by another path.
-    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops")
+    # #3180: `ops_write` is its bounded write sibling, gated the same way.
+    _USER_CREATABLE_SCOPES = ("user", "portal_delegate", "ops", "ops_write")
 
     # #2323 INVARIANT — every scope this creator can mint (`_USER_CREATABLE_SCOPES`
     # above) must leave `agent_name` NULL. Three separate sweeps filter on

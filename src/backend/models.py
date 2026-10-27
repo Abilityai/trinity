@@ -2211,7 +2211,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -2221,7 +2221,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None
@@ -4568,8 +4568,8 @@ class ChangePasswordRequest(BaseModel):
     service with the rule first-run setup uses, so the reasons come back named."""
     current_password: str = Field(..., max_length=1024)
     new_password: str = Field(..., max_length=1024)
-    # Also revoke the MCP API keys this person minted (user / ops / portal
-    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    # Also revoke the MCP API keys this person minted (user / ops / ops_write /
+    # portal delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
     revoke_api_keys: bool = False
 
 
