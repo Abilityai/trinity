@@ -432,7 +432,7 @@ The count only: a fleet-level trigger reaches every `/ws` connection and any key
 
 ### Sync Service
 
-**File**: `src/backend/services/operator_queue_service.py` (290 lines)
+**File**: `src/backend/services/operator_queue_service/`
 
 Background async service that bridges agent containers and the database. Global singleton instance at line 290.
 
@@ -853,16 +853,16 @@ The "Operator Communication" instructions agents receive — `ask_operator` / `g
 | Cancel non-pending | 400 | "Cannot cancel item with status '{status}'" | `operator_queue.py:286-290` |
 | Inaccessible agent | 403 | "Access denied" | `_assert_agent_accessible()` (`operator_queue.py:73-76`) |
 | List: agent key with no agent identity (trinity-enterprise#815) | 403 | "agent key carries no agent identity" | `operator_queue_service.narrow_to_agent_key` |
-| List: `agent_names` over 500 or blank (trinity-enterprise#815) | 422 | "agent_names: …" | `operator_queue_service._effective_agents` |
+| List: `agent_names` over 500 or blank (trinity-enterprise#815) | 422 | "agent_names: …" | `operator_queue_service.listing._effective_agents` |
 | List: malformed cursor, `cursor` with `offset`, filter mismatch (trinity-enterprise#815) | 422 | "cursor: …" / "cursor and offset cannot be combined…" | `operator_queue_service.decode_cursor` / `list_for_principal` |
-| List: walk snapshot expired (trinity-enterprise#815) | 410 | "this walk has expired; restart with cursor=start" | `operator_queue_service._load_walk_snapshot` |
-| List: walk without Redis (trinity-enterprise#815) | 503 | "cursor walks need Redis, …" | `operator_queue_service._walk_redis` |
+| List: walk snapshot expired (trinity-enterprise#815) | 410 | "this walk has expired; restart with cursor=start" | `operator_queue_service.listing._load_walk_snapshot` |
+| List: walk without Redis (trinity-enterprise#815) | 503 | "cursor walks need Redis, …" | `operator_queue_service.listing._walk_redis` |
 | Bulk-cancel ids out of bounds (#1017) | 422 | Validation error (`ids` 1-500 items) | Pydantic `BulkCancelRequest` |
 | Missing response body | 422 | Validation error (Pydantic) | FastAPI automatic |
 | Unauthenticated | 401 | "Not authenticated" | `get_current_user` dependency |
-| Invalid JSON in agent file | -- | Logged as warning, skipped | `operator_queue_service.py:124` |
-| Agent unreachable | -- | Silently skipped (no log) | `operator_queue_service.py:109-111` |
-| Write-back failure | -- | Logged as warning/error | `operator_queue_service.py:281-286` |
+| Invalid JSON in agent file | -- | Logged as warning, skipped | `operator_queue_service/ingest.py` |
+| Agent unreachable | -- | Silently skipped (no log) | `operator_queue_service/ingest.py` |
+| Write-back failure | -- | Logged as warning/error | `operator_queue_service/write_back.py` |
 
 Note: bulk-cancel never errors on individual ids — non-pending or inaccessible ids are silently skipped and reported in the `skipped` count. An empty accessible-agent set (zero-agent user) is a no-op (`cancelled: 0` / `cleared: 0`), not a 403.
 
@@ -1090,7 +1090,7 @@ Clear All on **Resolved** instead calls `clearResolved()` -> `POST /api/operator
 |------|-------|---------|
 | `src/backend/main.py` | 70, 82, 193-194, 254-258, 290-294, 357 | Router/service imports, WS injection, lifespan start/stop, router registration |
 | `src/backend/routers/operator_queue.py` | 311 | REST API endpoints (8 endpoints incl. #1017 bulk-cancel/clear-resolved) |
-| `src/backend/services/operator_queue_service.py` | 290 | Background sync service (poll, create, write-back incl. #1017 terminal-status flips, restart resilience) |
+| `src/backend/services/operator_queue_service/` | — | Background sync service (poll, create, write-back incl. #1017 terminal-status flips, restart resilience) |
 | `src/backend/db/operator_queue.py` | 495 | Database operations class (15 methods incl. #1017 bulk_cancel_items/clear_resolved_items/get_terminal_items_for_agent) |
 | `src/backend/db/schema.py` | 981-1005, 1313-1317 | Table definition (incl. #1017 `cleared_at`) + 5 indexes |
 | `src/backend/db/migrations.py` | 2386-2402 | #1017 `operator_queue_cleared_at` migration (`_migrate_operator_queue_cleared_at`) |

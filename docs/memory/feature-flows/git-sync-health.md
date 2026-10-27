@@ -796,7 +796,7 @@ the data-loss setup.
 | `services/sync_health_view.py` | ent#706: `sync_view(row, config)` — the backend's single call into the policy |
 | `db/migrations.py`, `migrations/versions/0082_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
 | `db/sync_state.py` | ent#706: `KEEP` sentinel, the new upsert kwargs, `list_health_rows` (the shared reader) |
-| `services/operator_queue_service.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
+| `services/operator_queue_service/__init__.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
 | `src/scheduler/sync_freeze_policy.py` | ent#706: byte-identical mirror of the policy |
 | `src/scheduler/database.py` | ent#706: `sync_freeze_reason`; the threshold is imported from the mirror |
 | `src/scheduler/service.py` | ent#706: the gate writes `Git sync frozen: <reason>` into the skipped row |

@@ -12,6 +12,41 @@ Polling cycle:
   4. Detect 'acknowledged' entries -> update DB records
   5. Write operator responses back to agent JSON files
   6. Handle expired entries
+
+#3785: this was one 2,848-line module. It is now a package; every import its
+callers make (`from services.operator_queue_service import X`,
+`operator_queue_service.X`) resolves unchanged. Who owns what:
+
+  * `__init__` (O1) owns the names that must stay one binding on the package:
+    the config block (a test reads its literals out of this file); module
+    state that is rebound or mutated, with its only mutators (the
+    `_websocket_manager` and the #1677 budget episode with its cooldown
+    state); the names read on both sides of the package boundary that tests
+    patch (the ask contract, the person-prefix tuples); the `rate_limiter`
+    binding ask_service reads through the package; and the composed
+    `OperatorQueueSyncService` with its singleton.
+    Submodules read these as `_oq.X` (`from services import
+    operator_queue_service as _oq`), never a copy, so a patch on `oqs.X`
+    reaches every reader inside and outside.
+  * `deps` (O2) binds the collaborators (`db`, `AgentClient`, `ask_service`,
+    …) once. They are absent from the package, so a stale
+    `monkeypatch.setattr(oqs, "db", …)` raises; tests patch `oqs.deps.X`.
+  * Everything else has one owner module (O3): `listing` (the ent#815 list
+    engine), `poller` (`PollerCoreMixin`: instance state, the lease, the loop,
+    the cycle), `filechannel` and `rows` (the agent-file helpers and the row
+    vocabulary), `ingest` / `write_back` (`IngestMixin`, `WriteBackMixin`),
+    `alerts` (the bounded-alert delegates) and `flood` (`FloodAlertMixin`).
+    Siblings read each other through the owning module object
+    (`filechannel.X`), never through a re-export alias or a from-import.
+  * The re-exports at the end of this file exist only for readers outside the
+    package (production code, or a test reading the name as data).
+  * Every module logs as `services.operator_queue_service` (O4).
+
+Where new code goes: a new concern gets its own module, composed here as a
+mixin if it is service behaviour. `__init__` takes only an O1 name: config,
+rebound or mutated state with its mutators, or a name read on both sides of
+the boundary that must stay one binding.
+`tests/unit/test_3785_operator_queue_package.py` holds these rules.
 """
 
 # ruff: noqa: F401
@@ -135,7 +170,7 @@ OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
 # but an emitter whose VOLUME an agent can drive (e.g. skill-not-found: one
 # high-priority item per distinct unknown slash-command, #1410) re-opens the
 # operator-fatigue channel #1632 closed. Such emitters route through
-# `create_bounded_alert` below: a per-(agent, registered-type) pending-DEPTH
+# `create_bounded_alert` (in `alerts`): a per-(agent, registered-type) pending-DEPTH
 # cap — DB-measured ⇒ Redis-independent, the #1632 primary-bound mirror; no
 # rate cap, because depth is rate-independent (a fast spray only reaches the
 # cap faster). The caller-parity test
@@ -452,118 +487,6 @@ def reset_alert_budget_state() -> None:
     _alert_budget_cooldown.clear()
 
 
-# `create_bounded_alert_outcome` results. Only `ALERT_CREATED` means a row was
-# written; the rest separate a deliberate REFUSAL (unregistered type, budget
-# full) from a FAILURE (count read or create raised) for a caller that must
-# treat them differently (#3130 review I1: the flood emitter retries a failure
-# but not a refusal).
-ALERT_CREATED = "created"
-ALERT_REFUSED_UNREGISTERED = "refused_unregistered"
-ALERT_REFUSED_AT_BUDGET = "refused_at_budget"
-ALERT_FAILED_COUNT = "failed_count"
-ALERT_FAILED_CREATE = "failed_create"
-
-
-async def create_bounded_alert(agent_name: str, item: dict) -> bool:
-    """#1677: the bool view of `create_bounded_alert_outcome` (see there)."""
-    return await create_bounded_alert_outcome(agent_name, item) == ALERT_CREATED
-
-
-async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
-    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters,
-    since #3254 a thin delegate of ``platform_alerts.observe``.
-
-    Every in-repo budgeted emitter now reports through ``observe`` itself, which
-    composes the same per-(agent, registered-type) pending budget inside its
-    locked create (``OPERATOR_ALERT_MAX_PENDING_PER_TYPE``) and spawns the budget
-    episode on a refusal. This helper keeps its signature and its outcome
-    contract for any caller still on it; the #3246 ratchet counts each such
-    caller as off the seam, which steers new code to ``observe``.
-
-    The budget type is derived from ``item["type"]`` (never a separate
-    parameter: two sources of one fact silently void the bound) and MUST be a
-    static literal registered in ``_BUDGETED_ALERT_TYPES``. That type names its
-    platform-alert kind (the kind whose ``budgeted_type`` it is), and the key is
-    read back from ``item["id"]`` + ``item["context"]`` by
-    ``platform_alerts.derive_legacy_subject``, which must resolve to that same
-    kind. The two kinds whose ids carry no derivable subject (the gitignore
-    sweep's alert and the Workspace problem report) are keyed by the request id
-    minus the kind's prefix: for the problem report that is the per-person /
-    target / day digest its own emitter keys by; for gitignore it is the old
-    per-call id, so a call still files one row.
-
-    Outcomes (never raises; every refused or failed arm logs ``[#1677 budget]``):
-      * type not registered          → ``ALERT_REFUSED_UNREGISTERED`` (fail-closed,
-        nothing written: register the type, a one-line reviewed act);
-      * the id does not read back as the type's kind, or carries no key
-                                     → ``ALERT_FAILED_CREATE`` (fail-closed);
-      * else ``observe``'s outcome: ``ALERT_CREATED``; ``"updated"`` (the
-        subject's pending row was rewritten in place); ``"snoozed"`` (a person
-        ended the subject inside the snooze window, nothing written);
-        ``ALERT_REFUSED_AT_BUDGET`` (the budget was full; the episode alert is
-        spawned by ``observe``); ``ALERT_FAILED_CREATE`` for its ``"failed"``.
-
-    ``ALERT_FAILED_COUNT`` stays importable and is no longer returned: the
-    per-type count now runs inside the seam's locked create, where a failed
-    count and a failed create are one exception path. ``create_bounded_alert``
-    is the bool view and is true for ``ALERT_CREATED`` only, so a paired side
-    effect (a notification) never fires twice for one pending row.
-    """
-    from services import platform_alerts
-
-    item_type = item.get("type") if isinstance(item, dict) else None
-    if item_type not in _BUDGETED_ALERT_TYPES:
-        logger.error(
-            "[#1677 budget] refusing operator alert for '%s': type %r is not a "
-            "registered budgeted type (%s) — add it to _BUDGETED_ALERT_TYPES "
-            "before routing an emitter through create_bounded_alert "
-            "(fail-closed; no item created)",
-            agent_name, item_type, sorted(_BUDGETED_ALERT_TYPES),
-        )
-        return ALERT_REFUSED_UNREGISTERED
-
-    kind = next(
-        (k for k in platform_alerts.KINDS.values() if k.budgeted_type == item_type), None
-    )
-    match = platform_alerts.derive_legacy_subject(item.get("id"), item.get("context"))
-    key = None
-    if kind is not None and match is not None and match.kind == kind.name:
-        if match.subject is not None:
-            key = match.subject[len(kind.name) + 1:]
-        elif kind.name in ("gitignore_untracked", "workspace_problem_report"):
-            key = item["id"][len(kind.prefix):] or None
-    if key is None:
-        logger.error(
-            "[#1677 budget] refusing operator alert for '%s': id %r does not read "
-            "back as a keyed %r alert, the kind its type %r registers "
-            "(fail-closed; no item created)",
-            agent_name, item.get("id"), kind.name if kind else None, item_type,
-        )
-        return ALERT_FAILED_CREATE
-
-    outcome = platform_alerts.observe(
-        agent_name, kind.name, key,
-        title=item.get("title") or "",
-        question=item.get("question") or "",
-        priority=item.get("priority") or "high",
-        context=item.get("context"),
-    )
-    if outcome == platform_alerts.OBSERVED_FAILED:
-        logger.error(
-            "[#1677 budget] operator alert create failed for %s/%s — suppressed "
-            "(fail-closed; the seam logged the cause)",
-            agent_name, item_type,
-        )
-        return ALERT_FAILED_CREATE
-    if outcome == ALERT_REFUSED_AT_BUDGET:
-        logger.warning(
-            "[#1677 budget] alert budget full for %s/%s (cap=%d) — refused; the "
-            "budget episode alert reports it",
-            agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
-        )
-    return outcome
-
-
 async def _maybe_emit_alert_budget_episode(
     agent_name: str, item_type: str, last_triggered_by=None
 ) -> None:
@@ -658,147 +581,16 @@ from . import rows  # noqa: E402
 from . import ingest  # noqa: E402
 from . import write_back  # noqa: E402
 
+# #3785 (S6): the bounded-alert delegates live in `alerts` and the flood alert
+# in `flood.FloodAlertMixin`, composed below. Neither reads a package name at
+# import time.
+from . import alerts  # noqa: E402
+from . import flood  # noqa: E402
 
-class OperatorQueueSyncService(poller.PollerCoreMixin, ingest.IngestMixin, write_back.WriteBackMixin):
+
+class OperatorQueueSyncService(poller.PollerCoreMixin, ingest.IngestMixin, write_back.WriteBackMixin,
+                              flood.FloodAlertMixin):
     """Background service that syncs operator queue files with the database."""
-
-    async def _maybe_emit_flood_alert(
-        self, agent_name: str, held: int = 0, reason: str = "ingestion_cap"
-    ):
-        """#1632 / #3130: ONE flood alert per over-cap EPISODE.
-
-        Fired when this agent's ingestion was depth-held / rate-skipped, or its
-        queue file was oversized.
-
-        Edge-triggered (#3130): an episode alerts once, however many cycles or
-        cooldown windows it lasts, and the next alert needs the condition to
-        have cleared first (`_sync_agent` ends the episode through
-        `_end_flood_episode`, which ends its alert too). It used to be one
-        alert per cooldown window for as long as the condition held — and since
-        the alert counted toward the very depth it reported, the condition never
-        cleared: 241 alerts in one day on one agent. The cooldown stays as the
-        minimum spacing between episodes, so a cap that flaps cannot re-alert
-        every cycle.
-
-        Reported through `platform_alerts.observe` (#3254) as kind
-        `queue_flood`, keyed by the reason: one pending row per (agent, reason),
-        rewritten in place. Budgeted (#1677, #3130): the kind's budgeted type is
-        `queue_flood`, so `observe` applies the per-(agent, type) budget — an
-        agent's own filing volume drives this emitter, which is the test that
-        classification applies. The budget is the backstop for what the
-        in-memory episode state cannot see (a leader failover re-reads once,
-        onto the same row). Excluded from the agent's own depth read by its
-        reserved prefix. Softened wording to avoid cry-wolf (C9).
-
-        Re-read while it lasts (#3254 R9): an episode that persists is observed
-        again at most every 6 hours, so the kind's 14-day lifetime ends only a
-        row nobody re-read (a lost clear), never one whose condition still
-        holds. The refresh time per (agent, reason) lives in a dict this method
-        creates on the instance for itself (`_flood_refreshed_at`).
-
-        The cooldown and the episode are stamped BEFORE every reading (a re-read
-        included). Outcomes:
-          * created / updated / snoozed → the episode is consumed (one alert per
-            episode; a snoozed reading is a person's ending, which stands);
-          * failed on the episode's first reading → the episode is RELEASED so
-            the alarm is retried, and the cooldown stamp spaces those retries to
-            at most one per window (review I1: holding the episode on a failure
-            silenced the alarm until the condition cleared — for a runaway agent,
-            never);
-          * failed on a re-read → the episode is KEPT: an earlier reading filed
-            its alert, and only a live episode lets `_end_flood_episode` end it
-            when the condition clears (AC 2). The re-read is retried after the
-            cooldown, not after the full 6 hours;
-          * refused at budget → the episode is consumed. The agent already has
-            a full budget of pending flood alerts and the budget emits its own
-            `alert-budget-` episode alert, so re-knocking every window would
-            add nothing but budget-episode churn. An unregistered kind is the
-            same (a code defect retrying cannot fix).
-        Never raises (`observe` never does): an alert must not kill the sync.
-        """
-        from services import platform_alerts
-
-        key = (agent_name, reason)
-        now = time.monotonic()
-        refreshed = vars(self).setdefault("_flood_refreshed_at", {})
-        rereading = key in self._flood_episodes
-        if rereading:
-            # R9: the 6-hour re-read of a persisting episode, the #3255
-            # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
-            last_read = refreshed.get(key)
-            if last_read is not None and now - last_read < 6 * 60 * 60:
-                return  # this episode already alerted and was read recently
-        else:
-            # `None` = never alerted for this agent. A `0.0` default would be
-            # wrong: `time.monotonic()` is seconds from an arbitrary reference
-            # and can be < COOLDOWN on a freshly-booted process, so
-            # `now - 0.0 < COOLDOWN` would suppress the FIRST-ever alert for
-            # the first COOLDOWN seconds of uptime.
-            last = self._flood_alert_cooldown.get(agent_name)
-            if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
-                return  # too soon after the last episode — the next cycle retries
-            self._flood_episodes.add(key)
-        # Stamped before every reading, a re-read included, so a failed one —
-        # released below — is retried no sooner than the cooldown (I1).
-        self._flood_alert_cooldown[agent_name] = now
-        refreshed[key] = now
-
-        if reason == "oversize_file":
-            title = f"Agent '{agent_name}' produced an oversized operator-queue file"
-            question = (
-                f"Agent '{agent_name}' wrote an operator-queue.json larger than the "
-                f"allowed size; its requests are not being ingested. This can "
-                f"indicate a runaway or compromised agent — review its recent "
-                f"activity before acting on its requests."
-            )
-        else:
-            title = f"Agent '{agent_name}' exceeded its operator-queue ingestion limit"
-            question = (
-                f"Agent '{agent_name}' produced more operator-queue requests than the "
-                f"per-agent ingestion limit allows; {held} request(s) were held and "
-                f"are not shown. Held requests stay in the agent's file and are read "
-                f"again once it is under the limit; the agent is told they are held. "
-                f"This can indicate a runaway or compromised agent — review its "
-                f"recent activity before acting on its requests."
-            )
-
-        outcome = platform_alerts.observe(
-            agent_name, "queue_flood", reason,
-            title=title, question=question, priority="high",
-            context={"held": held, "reason": reason},
-        )
-        if outcome == platform_alerts.OBSERVED_FAILED:
-            if rereading:
-                # keep the episode so its end still clears the alert; retry the
-                # re-read once the cooldown has passed
-                refreshed[key] = now - 6 * 60 * 60 + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS
-            else:
-                self._flood_episodes.discard(key)  # retry next window (I1)
-                refreshed.pop(key, None)
-            return
-        if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
-            logger.warning(
-                f"Operator-queue flood alert {outcome} for {agent_name} "
-                f"(reason={reason}, held={held})"
-            )
-
-    def _end_flood_episode(self, agent_name: str, reason: str) -> None:
-        """#3130 / #3254: the over-cap condition behind `reason` cleared.
-
-        Called from `_sync_agent` where it knows (a sane-size read ends an
-        oversize episode; a cycle that held nothing ends an ingestion-cap one).
-        Ends the episode, so the next over-cap reading alerts again, and, only
-        when one was running, ends its alert as the platform
-        (`platform_alerts.clear`, a compare-and-set on pending: a person's
-        ending is never overwritten). Every cycle without an episode costs no
-        read. Never raises (`clear` never does).
-        """
-        key = (agent_name, reason)
-        if key not in self._flood_episodes:
-            return
-        self._flood_episodes.discard(key)
-        from services import platform_alerts
-        platform_alerts.clear(agent_name, "queue_flood", reason)
 
 
 # Global service instance
@@ -867,4 +659,15 @@ from .rows import (  # noqa: E402,F401
     is_owner_only,
     is_person_tag,
     is_platform_minted,
+)
+# alerts: the bounded-alert delegates and their outcomes, which callers outside
+# the package (and the #3254 suite) read through the package.
+from .alerts import (  # noqa: E402,F401
+    ALERT_CREATED,
+    ALERT_FAILED_COUNT,
+    ALERT_FAILED_CREATE,
+    ALERT_REFUSED_AT_BUDGET,
+    ALERT_REFUSED_UNREGISTERED,
+    create_bounded_alert,
+    create_bounded_alert_outcome,
 )

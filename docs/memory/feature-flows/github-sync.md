@@ -1455,7 +1455,7 @@ X-Conflict-Type: branch_ownership_collision
 }
 ```
 
-The backend's `OperatorQueueSyncService` (5s polling, see `services/operator_queue_service.py`) picks this up on its next sweep and surfaces it in the Operating Room. The losing instance now learns it lost the race, instead of believing its push succeeded — that's the substantive behavior change versus the pre-#382 silent-clobber regime.
+The backend's `OperatorQueueSyncService` (5s polling, see `services/operator_queue_service/`) picks this up on its next sweep and surfaces it in the Operating Room. The losing instance now learns it lost the race, instead of believing its push succeeded — that's the substantive behavior change versus the pre-#382 silent-clobber regime.
 
 Append failures are caught and logged but never raised — surfacing the alert is best-effort; the 409 to the caller is the authoritative signal.
 

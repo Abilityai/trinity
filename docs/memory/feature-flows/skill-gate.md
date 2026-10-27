@@ -342,7 +342,7 @@ On a refusal: the scheduler leaves the row `skipped`; channels, rooms and public
 ## Security Considerations
 
 - **Budget:** gate asks have their own budget. The agent's ask caps and rate buckets never count them (`db/operator_queue._NOT_A_GATE_ROW`).
-- **#715:** gate rows name people (who asked, who decided), so they are in `operator_queue_service._ABOUT_A_PERSON_ID_PREFIXES` (`src/backend/services/operator_queue_service.py:302`). A machine key's queue reads never return them (`routers/operator_queue.py:109`), and `get_my_ask` answers 404 for them (`:510`).
+- **#715:** gate rows name people (who asked, who decided), so they are in `operator_queue_service._ABOUT_A_PERSON_ID_PREFIXES` (`src/backend/services/operator_queue_service/__init__.py`). A machine key's queue reads never return them (`routers/operator_queue.py:109`), and `get_my_ask` answers 404 for them (`:510`).
 - **Fingerprint read:** the script runs as root through the image's interpreter with `-I -S`, so the agent's Python startup files (`sitecustomize`, a `.pth`, `PYTHON*` env) do not run inside it, and symlinks and ambiguous names are refused. This guards against accidental interference, not an adversarial executor: the agent user has passwordless sudo and could replace the interpreter itself.
 - **Execution id:** `X-Trinity-Execution-Id` is kept only when it is one of the requesting agent's own executions. The MCP server forwards the platform header, never the model-typed `execution_id`.
 - **Schedule names:** a name is free text an agent can set, so it is collapsed to one line of at most 80 characters before it appears on the approver's card. It is scanned whole, and as the prompt renders it (#3274).
