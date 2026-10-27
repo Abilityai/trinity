@@ -30,6 +30,7 @@ from models import (
     BundledManifestDetail,
     BundledManifestSummary,
     MANIFEST_MAX_BYTES,
+    SystemApplyBlocker,
     SystemDeployFailure,
     SystemDeployResponse,
     SystemSchedulePreview,
@@ -2149,3 +2150,391 @@ async def deploy_manifest(
     except Exception as e:
         logger.exception(f"System deployment failed: {e}")
         raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+
+
+# ============================================================================
+# Apply mode (trinity-enterprise#695): reconcile a live system to its manifest.
+#
+# `deploy_manifest` above is CREATE mode and stays exactly as it is (AC6): it
+# can only create, so re-sending a manifest whose agents exist builds `_N`
+# copies. Apply is the sibling verb (`POST /api/systems/apply`): per declared
+# member, absent -> create, present -> update the declared fields in place,
+# present but undeclared -> report as drift. Four parts, in this order:
+#
+#   read_apply_snapshot   reads only; a failed read is a retryable blocker,
+#                         never an empty value (create fails OPEN, apply CLOSED)
+#   resolve_apply_plan    pure; per-member verdicts and the ordered write-set
+#   execute_apply_plan    writes only, each outcome from the writer's return
+#   apply_manifest        snapshot + plan -> refuse, or lock -> re-snapshot +
+#                         re-plan under the lock -> execute under a lease keeper
+#
+# Requirement: docs/memory/requirements/roadmap.md §16.5.4.
+# ============================================================================
+
+# Blocker codes. The first five are RETRYABLE: nothing about the manifest is
+# wrong, a read or the lock failed (the router answers 503 when only these
+# are present, 409 otherwise).
+APPLY_RETRYABLE_BLOCKERS = frozenset({
+    "membership_tags_unreadable",
+    "roster_unreadable",
+    "member_reads_unavailable",
+    "apply_in_progress",
+    "apply_lock_unavailable",
+})
+
+# One detail for EVERY declared name the caller may not manage (another user's
+# agent, a shared-with-me agent, a soft-deleted name, a reserved volume base,
+# a container nobody owns). Byte-identical apart from the name, which the
+# caller supplied, so the code and the text never say which of those it is
+# (Invariant #8). Create mode's dry run already discloses existence through
+# its `_2` warning, so the refusal adds no oracle.
+_NAME_UNAVAILABLE_DETAIL = (
+    "The agent name '{name}' is in use or reserved by an agent you cannot manage."
+)
+_NAME_UNAVAILABLE_REMEDY = (
+    "Rename this member in the manifest, or have the agent's owner or an admin "
+    "run apply."
+)
+
+
+def _apply_blocker(
+    code: str, member: Optional[str], detail: str, remedy: str
+) -> "SystemApplyBlocker":
+    return SystemApplyBlocker(
+        code=code,
+        member=member,
+        detail=detail,
+        remedy=remedy,
+        retryable=code in APPLY_RETRYABLE_BLOCKERS,
+    )
+
+
+def _read_failed(member: Optional[str], what: str, exc: Optional[Exception] = None) -> "SystemApplyBlocker":
+    """A read apply depends on failed: retryable, never "absent" (P-B)."""
+    reason = f" ({_failure_reason(exc)[0]})" if exc is not None else ""
+    return _apply_blocker(
+        "member_reads_unavailable",
+        member,
+        f"Could not read {what}{reason}.",
+        "Retry; apply never treats an unreadable value as absent.",
+    )
+
+
+@dataclass
+class ApplyMemberState:
+    """What the snapshot knows about one DECLARED member.
+
+    `status` is `absent` (the name is free: create it), `unavailable` (taken
+    by something the caller may not manage: the uniform refusal) or `managed`
+    (a live agent the caller may manage: reconcile it). The per-member reads
+    are populated only for a `managed` member that passed every gate.
+    """
+
+    short_name: str
+    name: str
+    status: str = "absent"
+    owner_username: Optional[str] = None
+    labels: Optional[Dict[str, str]] = None
+    tags: List[str] = field(default_factory=list)
+    edges: List[str] = field(default_factory=list)
+    schedules: List = field(default_factory=list)
+    folders: Optional[object] = None  # db_models.SharedFolderConfig, or None
+    resource_limits: Optional[Dict[str, Optional[str]]] = None
+    restart_pending: bool = False
+    blocked: bool = False
+
+
+@dataclass
+class ApplySnapshot:
+    """Everything apply read, and every blocker the reads or gates produced."""
+
+    system_name: str
+    roster: List[str]
+    membership: SystemMembership
+    members: Dict[str, ApplyMemberState]
+    blockers: List["SystemApplyBlocker"]
+    caller_id: int
+    caller_username: str
+    caller_role: str
+    caller_is_admin: bool
+    stored_prompt: Optional[str] = None
+    views: List = field(default_factory=list)
+
+
+def _member_container(name: str):
+    """The one per-member container read apply makes (a test seam).
+
+    `get_agent_container` turns every Docker error into None, so a caller must
+    never read None as "no container" for a name the tri-state roster already
+    showed (Codex B-AC5): the snapshot treats it as a read failure.
+    """
+    from services.docker_service import get_agent_container
+    return get_agent_container(name)
+
+
+def _container_labels(container) -> Optional[Dict[str, str]]:
+    if container is None:
+        return None
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels")
+    except Exception:  # noqa: BLE001 — an unreadable container is a read failure
+        return None
+    return dict(labels) if isinstance(labels, dict) else None
+
+
+async def _restart_pending(name: str, container) -> bool:
+    """Does the stored config differ from what this container runs?
+
+    The platform's OWN start-path drift predicates, so apply's
+    `restart_required` cannot disagree with what the next start will do
+    (H4): computed every run from the container, never from this run's writes,
+    so an override stored by an earlier apply keeps reporting until a restart.
+    """
+    from services.agent_service.helpers import (
+        check_resource_limits_match,
+        check_shared_folder_mounts_match,
+    )
+    resources_match = check_resource_limits_match(container, name)
+    folders_match = await check_shared_folder_mounts_match(container, name)
+    return not (resources_match and folders_match)
+
+
+def _evidence_remedy(name: str, system_name: str, declared: bool) -> str:
+    if declared:
+        return (
+            f"Add this system's tag to '{name}' with the additive "
+            f"`POST /api/agents/{name}/tags/{system_name}` (or the MCP `tag_agent` "
+            f"tool); not `PUT /api/agents/{name}/tags`, which replaces the whole set."
+        )
+    return (
+        f"If '{name}' belongs to '{system_name}', add the tag '{system_name}' "
+        f"(`POST /api/agents/{name}/tags/{system_name}`). If it belongs to another "
+        f"system (e.g. '{system_name}-extra'), tag it with THAT system's name, "
+        f"which takes it out of this one. Or rename it."
+    )
+
+
+async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> ApplySnapshot:
+    """Read what apply needs to plan. Reads only, never writes (AC4).
+
+    Roster: the tri-state container list UNION the live ownership rows,
+    filtered by the canonical `can_user_access_agent` — never
+    `get_accessible_agents`, which is built on `list_all_agents_fast` and
+    returns `[]` without a Docker client, so the evidence gate would pass over
+    an empty membership (#2196 class). The ownership rows bring in a recovered
+    agent with no container (Codex 6).
+
+    Each declared name is classified GLOBALLY, never from the caller's roster
+    (H1): taken (a container, the #1790 predicate, or a reserved volume base)
+    AND a live agent the caller may manage (the deploy-local predicate,
+    `can_user_share_agent` + `agent_may_reach(manage=True)`) -> the specific
+    gates, then reconcile; taken but not manageable -> one uniform
+    `member_name_unavailable`; free -> create. Never "absent -> create" for a
+    taken name, so apply cannot suffix.
+    """
+    from dependencies import agent_may_reach, assert_admin
+    from services import docker_service
+    from services.agent_service.crud import agent_name_is_taken
+
+    system = manifest.name
+    blockers: List[SystemApplyBlocker] = []
+
+    try:
+        assert_admin(current_user)
+        caller_is_admin = True
+    except HTTPException:
+        caller_is_admin = False
+
+    snapshot = ApplySnapshot(
+        system_name=system,
+        roster=[],
+        membership=SystemMembership(members=[]),
+        members={},
+        blockers=blockers,
+        caller_id=current_user.id,
+        caller_username=current_user.username,
+        caller_role=current_user.role,
+        caller_is_admin=caller_is_admin,
+    )
+
+    # 1. Roster (tri-state containers U live ownership rows, access-filtered).
+    states = docker_service.agent_container_states()
+    roster_ok = states is not None
+    if states is None:
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            "Docker could not be asked which agent containers exist.",
+            "Retry when Docker is reachable. An unreadable Docker would read as "
+            "'no members, no drift', so apply refuses instead.",
+        ))
+        states = {}
+    try:
+        live_rows = set(db.get_all_agent_metadata().keys())
+    except Exception as e:  # noqa: BLE001 — fail closed (P-B)
+        roster_ok = False
+        live_rows = set()
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            f"Could not read the agent ownership rows ({_failure_reason(e)[0]}).",
+            "Retry; apply never plans over a roster it could not read.",
+        ))
+    if roster_ok:
+        try:
+            snapshot.roster = [
+                n for n in sorted(set(states) | live_rows)
+                if db.can_user_access_agent(current_user.username, n)
+            ]
+        except Exception as e:  # noqa: BLE001
+            roster_ok = False
+            blockers.append(_apply_blocker(
+                "roster_unreadable", None,
+                f"Could not check access to the agents ({_failure_reason(e)[0]}).",
+                "Retry; apply never plans over a roster it could not read.",
+            ))
+
+    # 2. Membership through THE one predicate, and the evidence gate (AC5).
+    declared = {short: f"{system}-{short}" for short in manifest.agents}
+    if roster_ok:
+        snapshot.membership = system_membership(system, snapshot.roster)
+        if not snapshot.membership.tags_readable:
+            blockers.append(_apply_blocker(
+                "membership_tags_unreadable", None,
+                "The agents' tags could not be read, so membership can only be "
+                "guessed from names.",
+                "Retry; apply refuses on unverified membership rather than guess.",
+            ))
+
+    # 3. Each declared name, classified globally (H1).
+    for short, name in declared.items():
+        state = ApplyMemberState(short_name=short, name=name)
+        snapshot.members[short] = state
+        try:
+            taken = (
+                name in states
+                or agent_name_is_taken(name)
+                or db.is_volume_base_reserved(name)
+            )
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"whether '{name}' exists", e))
+            state.blocked = True
+            continue
+        if not taken:
+            continue  # absent -> create
+
+        try:
+            owner = db.get_agent_owner(name)
+            manageable = bool(owner) and bool(
+                db.can_user_share_agent(current_user.username, name)
+            ) and agent_may_reach(current_user, name, manage=True)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"who manages '{name}'", e))
+            state.blocked = True
+            continue
+        if not manageable:
+            state.status = "unavailable"
+            state.blocked = True
+            blockers.append(_apply_blocker(
+                "member_name_unavailable", name,
+                _NAME_UNAVAILABLE_DETAIL.format(name=name),
+                _NAME_UNAVAILABLE_REMEDY,
+            ))
+            continue
+
+        # A live agent the caller may manage: only now the specific gates.
+        state.status = "managed"
+        state.owner_username = owner.get("owner_username")
+        try:
+            is_system = bool(owner.get("is_system")) or bool(db.is_system_agent(name))
+            ephemeral = db.get_agent_ephemeral_info(name)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is", e))
+            state.blocked = True
+            continue
+        if ephemeral is None:
+            # The name is known to exist; an empty follow-up read is a read
+            # failure, not an absence (P-B).
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is"))
+            state.blocked = True
+            continue
+        gate = None
+        if is_system:
+            gate = ("member_is_system_agent",
+                    f"'{name}' is a system agent; apply never reconfigures one.",
+                    "Remove it from the manifest.")
+        elif ephemeral.get("is_ephemeral"):
+            gate = ("member_is_ephemeral",
+                    f"'{name}' is an ephemeral agent (budgeted, discarded at its budget).",
+                    "Remove it from the manifest, or let it be discarded and re-apply.")
+        elif name not in states:
+            gate = ("member_container_missing",
+                    f"'{name}' has an ownership row but no container.",
+                    f"Start '{name}' (its container is rebuilt from the workspace "
+                    "volume), then re-apply.")
+        elif roster_ok and snapshot.membership.tags_readable and name not in snapshot.membership.members:
+            gate = ("member_claimed_by_another_system",
+                    f"'{name}' carries another system's tag that claims it.",
+                    f"Remove that tag from '{name}' if it belongs to '{system}', or "
+                    "rename this member in the manifest.")
+        if gate is not None:
+            blockers.append(_apply_blocker(gate[0], name, gate[1], gate[2]))
+            state.blocked = True
+            continue
+        if snapshot.membership.evidence.get(name) == "prefix":
+            state.blocked = True  # refused below by the evidence gate (AC5)
+            continue
+
+        # The member passed every gate: read what the plan compares.
+        try:
+            state.tags = list(db.get_agent_tags(name) or [])
+            state.edges = list(db.get_permitted_agents(name) or [])
+            state.schedules = list(db.list_agent_schedules(name) or [])
+            state.folders = db.get_shared_folder_config(name)
+            state.resource_limits = db.get_resource_limits(name)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
+            state.blocked = True
+            continue
+        try:
+            container = _member_container(name)
+            state.labels = _container_labels(container)
+            if state.labels is None:
+                blockers.append(_read_failed(name, f"the container of '{name}'"))
+                state.blocked = True
+                continue
+            state.restart_pending = await _restart_pending(name, container)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the container of '{name}'", e))
+            state.blocked = True
+            continue
+
+    # The evidence gate, literally (AC5, H11): ANY computed member, declared or
+    # not, matched by name only. Before any write, and before the lock.
+    if roster_ok and snapshot.membership.tags_readable:
+        unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
+        declared_names = set(declared.values())
+        for member in snapshot.membership.members:
+            if snapshot.membership.evidence.get(member) != "prefix" or member in unavailable:
+                continue
+            is_declared = member in declared_names
+            blockers.append(_apply_blocker(
+                "membership_evidence_prefix_only", member,
+                f"'{member}' is matched to '{system}' by its name only; no deploy "
+                f"ever tagged it{'' if is_declared else ', and the manifest does not declare it'}.",
+                _evidence_remedy(member, system, is_declared),
+            ))
+
+    # 4. The platform prompt and the system view (only when the manifest asks).
+    if manifest.prompt:
+        try:
+            setting = db.get_setting("trinity_prompt")
+            snapshot.stored_prompt = setting.value if setting is not None else None
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the platform prompt", e))
+    if manifest.system_view:
+        try:
+            # Own or shared views only: never another user's private view.
+            snapshot.views = list(db.list_user_system_views(str(current_user.id)) or [])
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "your system views", e))
+
+    return snapshot
