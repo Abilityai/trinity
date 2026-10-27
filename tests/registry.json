@@ -6642,6 +6642,39 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadTail.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "The open Workspace thread's catch-up read, pure half: the watcher's signature is a string over message_count|last_message_at (stable across the tick's re-stamped objects, blind to unread/stars/drafts); the read limit is unread + the reply-poll depth capped at the server's 50; the person's own id-less local question adopts the server row's id in place; fresh rows are the unseen ids in server order; a full-length read that is entirely unseen reports overflow."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalOpenThreadRefresh.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "PortalConversation mounted: when its own thread row in `threads` gains a message it reads the tail with {limit: unread+8}, appends the new row once and emits thread-caught-up; a re-stamp with the same values does not read; a moved time with nothing new appends and emits nothing; the local just-sent question is not duplicated (takes the server id); an all-fresh read at the cap merges the window read; another thread's row is ignored; a failed read is swallowed and never thread-missing."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadCaughtUpShell.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "Portal shell mounted: thread-caught-up marks the OPEN thread read once (markChatReadStrict) and re-reads no list, leaves another thread's badge alone; visibilitychange to visible runs the 20 s tick body at once (asks + thread list), hidden does nothing, and the listener is removed with the view."
     }
   ]
 }
