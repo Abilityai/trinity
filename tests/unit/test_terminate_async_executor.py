@@ -229,8 +229,8 @@ async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
 
     The status stays outside 2xx and is never 404 (either frees capacity for a
     child that is still alive); only the detail changes, to a string that
-    starts with the reason. The entry stays registered and a second stop still
-    works, which is what the detail promises."""
+    starts with the reason. The entry stays registered, so termination can be
+    retried, and a retry the child does respond to succeeds."""
     from fastapi import HTTPException
 
     real_registry.register("unconfirmed-exec", live_child)

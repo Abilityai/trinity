@@ -484,7 +484,7 @@ async def terminate_execution(execution_id: str):
             status_code=500,
             detail=(
                 f"termination_unconfirmed: execution {execution_id} did not exit after "
-                "SIGINT and SIGKILL; it is still registered and can be stopped again"
+                "SIGINT and SIGKILL; it remains registered and termination can be retried"
             ),
         )
     else:
