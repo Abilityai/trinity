@@ -83,8 +83,8 @@ export function createVoiceReplyTools(
           ),
         agent_name: z.string().optional()
           .describe(
-            "Agent name to send as. Required for user-scoped API keys. " +
-            "For agent-scoped keys, defaults to the calling agent."
+            "For a user-scoped key only. An agent-scoped key always speaks as its own agent; " +
+            "naming another is refused."
           ),
       }),
       execute: async (

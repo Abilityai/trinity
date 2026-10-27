@@ -302,6 +302,9 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- ent#862: AAuth peer identity that triggered this execution,
+            -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
+            a2a_caller_identity TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

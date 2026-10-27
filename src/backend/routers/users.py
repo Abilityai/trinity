@@ -20,6 +20,8 @@ from models import (
     UserPreferenceWrite,
     UserPreferenceRecord,
     UserPreferencesResponse,
+    ChangePasswordRequest,
+    ChangePasswordResponse,
 )
 from database import db
 from db.users import EmailInUseError
@@ -30,8 +32,9 @@ from dependencies import (
     workspace_route,
     reject_non_interactive_principal,
     require_interactive,
+    oauth2_scheme,
 )
-from services import user_preferences_service
+from services import password_service, user_preferences_service
 from services.user_preferences_service import PreferenceConflict, PreferenceError
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -182,6 +185,62 @@ async def update_my_email(
         details={"verified": verified},
     )
     return {"success": True, "email": email, "verified": verified}
+
+
+@router.put("/me/password", response_model=ChangePasswordResponse)
+async def change_my_password(
+    body: ChangePasswordRequest,
+    request: Request,
+    current_user: User = Depends(require_interactive),
+    token: str = Depends(oauth2_scheme),
+):
+    """Change the caller's own password (#3825).
+
+    Signed-in session only, like `/me/email`: a password is a sign-in secret, so
+    no MCP key may change it. Needs the current password, and an account that
+    has one — an email-only account gets 409 `no_password`. On success every
+    other session of the account is signed out and the response carries the
+    caller's fresh token. MCP API keys are not sessions: `revoke_api_keys`
+    revokes the ones this person minted, otherwise the response says how many
+    still work. Audited either way; no password reaches the audit row.
+    """
+    from jose import jwt
+
+    try:
+        mode = jwt.get_unverified_claims(token).get("mode")
+    except Exception:
+        mode = None
+    audit = dict(
+        event_type=AuditEventType.AUTHENTICATION, source="api", actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="user", target_id=current_user.username,
+        endpoint=request.scope["path"], request_id=getattr(request.state, "request_id", None),
+    )
+    try:
+        result = password_service.change_own_password(
+            current_user.username, body.current_password, body.new_password, mode,
+            revoke_keys=body.revoke_api_keys)
+    except password_service.PasswordChangeError as e:
+        if e.code in ("invalid_current_password", "too_many_attempts"):
+            await platform_audit_service.log(
+                event_action="password_change_failed", details={"reason": e.code}, **audit)
+        detail = {"code": e.code, "message": e.message}
+        if e.errors:
+            detail["errors"] = e.errors
+        raise HTTPException(status_code=e.status, detail=detail)
+
+    await platform_audit_service.log(
+        event_action="password_changed",
+        details={"other_sessions_signed_out": result.other_sessions_signed_out,
+                 "api_keys_revoked": result.revoked_key_ids,
+                 "api_keys_active": result.active_key_count}, **audit)
+    return ChangePasswordResponse(
+        access_token=result.access_token,
+        other_sessions_signed_out=result.other_sessions_signed_out,
+        admin_env_stale=result.admin_env_stale,
+        api_keys_revoked=len(result.revoked_key_ids),
+        api_keys_active=result.active_key_count,
+    )
 
 
 # ---------------------------------------------------------------------------

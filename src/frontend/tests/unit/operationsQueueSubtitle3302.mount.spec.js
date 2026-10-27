@@ -37,7 +37,9 @@ async function mountOn(tab, queue) {
     url === '/api/operator-queue' ? queue.get(config.params) : Promise.resolve({ data: {} }))
   const pinia = createPinia()
   setActivePinia(pinia)
-  wrapper = shallowMount(Operations, { global: { plugins: [pinia] } })
+  // #3451: the lists render in BoundedRegion's slot — render it, or a shallow
+  // mount drops the cards this spec counts.
+  wrapper = shallowMount(Operations, { global: { plugins: [pinia], stubs: { BoundedRegion: false } } })
   await flushPromises()
   return wrapper.find('p.mt-1.text-sm').text()
 }
