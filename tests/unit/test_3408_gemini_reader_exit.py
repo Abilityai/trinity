@@ -59,11 +59,16 @@ class _Child(_REAL_POPEN):
     delivered only after the code under test has entered ``wait()``. Code that
     kills without waiting therefore leaves the child alive every time, rather
     than depending on how fast the kernel happens to reap it.
+
+    With ``exit_unobserved`` a bounded ``wait()`` expires at once, as it would
+    for a child SIGKILL cannot end (uninterruptible sleep); a held kill is then
+    never delivered.
     """
 
-    def __init__(self, *args, hold_kill=False, **kwargs):
+    def __init__(self, *args, hold_kill=False, exit_unobserved=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.hold_kill = hold_kill
+        self.exit_unobserved = exit_unobserved
         self.kill_calls = 0
         self.wait_entered = threading.Event()
         self._abandon_held_kills = threading.Event()
@@ -85,6 +90,8 @@ class _Child(_REAL_POPEN):
         super().kill()
 
     def wait(self, timeout=None):
+        if self.exit_unobserved and timeout is not None:
+            raise subprocess.TimeoutExpired(self.args, timeout)
         self.wait_entered.set()
         return super().wait(timeout)
 
@@ -158,9 +165,12 @@ class _Harness:
         self.sweep_allowlists.append(list(extra_pids))
         return 0
 
-    async def run(self, execution_id, script, *, hold_kill=False, **kwargs):
+    async def run(self, execution_id, script, *, hold_kill=False, exit_unobserved=False, **kwargs):
         def popen(_cmd, **popen_kwargs):
-            child = _Child([sys.executable, "-c", script], hold_kill=hold_kill, **popen_kwargs)
+            child = _Child(
+                [sys.executable, "-c", script],
+                hold_kill=hold_kill, exit_unobserved=exit_unobserved, **popen_kwargs,
+            )
             self.children.append(child)
             self.child_pgids.append(os.getpgid(child.pid))
             real_close = child.stdin.close
@@ -246,6 +256,26 @@ async def test_a_non_object_json_line_reaps_the_child_before_raising(gemini, ref
     assert gemini.sweep_allowlists and child.pid not in gemini.sweep_allowlists[0], (
         "the error-path sweep ran while the child was still allowlisted"
     )
+    assert refused_signals == []
+
+
+@pytest.mark.asyncio
+async def test_an_exit_never_observed_keeps_the_entry_and_the_reader_error(gemini, refused_signals):
+    with pytest.raises(HTTPException) as error:
+        await gemini.run(
+            "s5-unobserved", _LINE_AFTER_THE_BUDGET,
+            hold_kill=True, exit_unobserved=True, timeout_seconds=0,
+        )
+
+    assert error.value.status_code == 504, "a failed kill must not replace the reader's own error"
+    child = gemini.children[0]
+    _assert_child_was_gemini_shaped(gemini)
+    assert child.kill_calls >= 1, "control: the error path tried to end the child"
+    assert child.poll() is None, "control: the child's exit was never observed"
+    assert gemini.registry.is_execution_running("s5-unobserved"), (
+        "a child whose exit was not observed must stay registered, so it can be stopped again"
+    )
+    assert gemini.subscribers[0].empty(), "a still-owned child must not end its stream"
     assert refused_signals == []
 
 

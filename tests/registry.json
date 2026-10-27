@@ -5105,7 +5105,7 @@
         "gemini-runtime",
         "unit"
       ],
-      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
+      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. A child whose exit is never observed stays registered and the reader's own 504 survives. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
     },
     {
       "file": "unit/test_ent751_skill_invocation.py",
