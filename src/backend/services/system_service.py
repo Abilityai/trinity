@@ -2219,9 +2219,17 @@ def _apply_blocker(
     )
 
 
+def _read_error(exc: Exception) -> str:
+    """What a caller is told about a failed READ: the exception class only.
+    A database error's message carries the SQL text and its parameters, which
+    belong in the server log, not in an API response (cso H2)."""
+    logger.warning("system apply: read failed (%s): %s", type(exc).__name__, exc)
+    return type(exc).__name__
+
+
 def _read_failed(member: Optional[str], what: str, exc: Optional[Exception] = None) -> "SystemApplyBlocker":
     """A read apply depends on failed: retryable, never "absent" (P-B)."""
-    reason = f" ({_failure_reason(exc)[0]})" if exc is not None else ""
+    reason = f" ({_read_error(exc)})" if exc is not None else ""
     return _apply_blocker(
         "member_reads_unavailable",
         member,
@@ -2391,7 +2399,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         live_rows = set()
         blockers.append(_apply_blocker(
             "roster_unreadable", None,
-            f"Could not read the agent ownership rows ({_failure_reason(e)[0]}).",
+            f"Could not read the agent ownership rows ({_read_error(e)}).",
             "Retry; apply never plans over a roster it could not read.",
         ))
     if roster_ok:
@@ -2404,7 +2412,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             roster_ok = False
             blockers.append(_apply_blocker(
                 "roster_unreadable", None,
-                f"Could not check access to the agents ({_failure_reason(e)[0]}).",
+                f"Could not check access to the agents ({_read_error(e)}).",
                 "Retry; apply never plans over a roster it could not read.",
             ))
 
@@ -2858,7 +2866,7 @@ def _normalized_resources(resources) -> Tuple[Dict[str, str], Optional[str]]:
         if resources.get("memory") not in (None, ""):
             out["memory"] = normalize_memory(resources["memory"], _get_default_resource("memory"))
     except ValueError as e:
-        return {}, str(e)
+        return {}, _failure_reason(e)[0]
     return out, None
 
 
@@ -2881,11 +2889,11 @@ def _schedule_entry_error(entry: dict, *, cron: Optional[str] = None,
     try:
         validate_timezone(tz)
     except Exception as e:  # noqa: BLE001
-        return "schedule_timezone_invalid", str(e)
+        return "schedule_timezone_invalid", _failure_reason(e)[0]
     try:
         validate_cron_expression(cron, tz or "UTC")
     except Exception as e:  # noqa: BLE001
-        return "schedule_cron_invalid", str(e)
+        return "schedule_cron_invalid", _failure_reason(e)[0]
     return None
 
 

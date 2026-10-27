@@ -119,6 +119,23 @@ class TestEvidenceGate:
         assert "member_container_missing" not in [c for c, _ in _codes(snap)]
 
 
+    def test_a_failed_reads_detail_names_the_error_class_never_its_sql(self, world, monkeypatch):
+        """cso H2: a database error's message embeds the statement and its
+        parameters; the caller gets the class, the server log gets the rest."""
+        world.seed_agent("acme-a")
+
+        class OperationalError(Exception):
+            pass
+
+        def _boom(name):
+            raise OperationalError("(sqlite3.OperationalError) locked [SQL: SELECT secret FROM t]")
+
+        monkeypatch.setattr(db, "get_permitted_agents", _boom)
+        (b,) = _blocker(world.snapshot(_manifest("a")), "member_reads_unavailable")
+        assert "OperationalError" in b.detail
+        assert "SQL" not in b.detail and "secret" not in b.detail
+
+
 class TestNameClassification:
     """H1: classified globally, never from the caller's roster; one uniform
     refusal for anything the caller may not manage."""
