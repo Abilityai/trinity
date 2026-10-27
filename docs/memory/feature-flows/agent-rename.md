@@ -333,7 +333,9 @@ renameAgent: {
   description:
     "Rename an agent in the Trinity platform. " +
     "Changes the agent name across all references. " +
-    "System agents cannot be renamed. Only owners or admins can rename.",
+    "System agents cannot be renamed. " +
+    HUMAN_ONLY_WHO_MAY_CALL.person,  // the owner or an admin, as a person
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   parameters: z.object({
     name: z.string().describe("Current agent name"),
     new_name: z.string().describe("New agent name"),
@@ -456,7 +458,7 @@ Note: Container is NOT auto-restarted, and its env and labels are unchanged. Vol
    - Expected: `{"message": "Agent renamed...", "old_name": "...", "new_name": "..."}`
 
 4. **MCP Tool Rename**
-   - Action: Use `rename_agent` tool with name and new_name
+   - Action: Use `rename_agent` tool with name and new_name, with the owner's user-scoped key (agent and system keys are not shown the tool)
    - Expected: Same response as API
 
 5. **Error Cases**

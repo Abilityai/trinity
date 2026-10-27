@@ -361,6 +361,67 @@ Failed logins have no `actor_user` — the service falls back to
 | `decide_access_request_endpoint` (approve) | `access_request_approved` | `{email, access_request_id}` |
 | `decide_access_request_endpoint` (reject) | `access_request_rejected` | `{email, access_request_id}` |
 
+### Refused person-only and session-only attempts (`error_handlers.py`, trinity-enterprise#719)
+
+A route behind the #2996 rules, which only a person (PERSON) or only a
+signed-in session (INTERACTIVE) may call, refuses every other principal with a
+403 (`requirements/auth.md` §2.8). The refusal is recorded, not only returned:
+
+```
+dependencies.py  assert_person / require_person / require_interactive /
+                 reject_non_interactive_principal / reject_non_person_principal
+                   └─ raise HumanOnlyRefused(HTTPException)  (rule, principal)
+main.py          app.add_exception_handler(HumanOnlyRefused, human_only_refused)
+error_handlers.py human_only_refused(request, exc)
+                   ├─ exc.audited?  → the site wrote its own row; skip
+                   ├─ first (principal, method, route) in 60 s? → platform_audit_service.log
+                   │    (a write that fails releases the key)
+                   └─ answer: the app's own HTTPException handler (unchanged 403)
+```
+
+| Event type | Event action | Actor | Target | Details payload |
+|---|---|---|---|---|
+| `authorization` | `human_only_refused` | an agent key → `agent` / its name; the system key → `agent` / `trinity-system`; a vouched loopback → `agent` / the agent it vouches for; the person's own `user` key → `user`; any other key → `mcp_client` / its key id; a principal that names no agent and no key (an unvouched loopback, a principal without `mcp_scope`) → `system` / `trinity-system`, the audit resolver's platform actor. The system key's row and the platform actor's row share `actor_id` `trinity-system`; `actor_type` (`agent` or `system`) tells them apart. The key's owner is `actor_email`; `mcp_key_id`, `mcp_key_name` and `mcp_scope` are the presented key's. | `agent` / the path's agent, when the route names one | `{method, route, rule, code?, loopback?}`: `route` is the template (`/api/agents/{agent_name}/autonomy`), `rule` is `person` or `interactive`, `code` is the detail's (`person_required`) |
+
+- `endpoint` is the routed path (`request.scope["path"]`, #3108), with the
+  path's own values (an agent name, an ask id, a preference key), and
+  `request_id` the request's id. When the MCP tool that made the call forwarded
+  its own `X-Request-ID` (#905, the git tools today), the row carries the same id
+  as that tool's `mcp_operation` row; otherwise the two rows are separate
+  records of the same attempt, one per layer. The path, the agent name in it
+  and the request id are cut to 256 characters, because the request chooses
+  their length.
+- The handler copies one request header into the row: the request id, which
+  the request-id middleware takes from an incoming `X-Request-ID` for every
+  audit row. `actor_ip` is `request.client.host`, as on every audit row: the
+  client address `utils/client_ip.py` resolves before any route runs
+  (trinity-enterprise#873). Behind a trusted proxy that forwards the client's
+  identity, the address comes from the entry the proxy appended (with none, it
+  is the proxy's own address); an entry the caller wrote, or a
+  forwarding header from any other peer, is never read, so `actor_ip` is never
+  a value the caller chose, unless the caller is itself a trusted proxy. Never
+  recorded: the request body or the query string, and the handler copies no
+  other header.
+- Bounded: at most one row per principal, method and route every 60 seconds in
+  each worker process. The in-memory window holds at most 65,536 keys and never
+  forgets one before its 60 seconds end; if it is full, nothing new is recorded
+  until entries expire, and that is logged once per window. Only a written row
+  uses the window: a write that fails releases its key, so the next refusal by
+  that principal on that route is recorded.
+- Best-effort: an audit failure is logged and the caller still gets the same
+  403, never a 500.
+- One row per refusal: the owner-tier file read already writes
+  `file_read_refused` for its refusal (`services/agent_service/files.py`) and
+  marks the refusal `audited`, so no `human_only_refused` row follows it. A
+  check that catches the refusal as a predicate records nothing.
+- Not this handler, because each raises a plain 403: the capability fence
+  (which writes its own `capability_refused` row), ent#69's agent-key denylist
+  `reject_agent_principal` / `Depends(human_only)` ("This operation is
+  human-only; agent-scoped keys cannot perform it"), the org-chart tag guard
+  (`routers/tags.py`), the person-mention tag refusal
+  (`services/person_mention_service.py`) and the Workspace doors' person
+  checks.
+
 ### Credentials (`routers/credentials.py`)
 
 | Handler | Event action | Details payload |
@@ -558,6 +619,16 @@ range returns `valid: null, status: "unverifiable"`; an empty range returns
 | Export | time-range query for export (DB layer) |
 
 Run: `.venv/bin/python -m pytest tests/test_audit_log_unit.py -v`
+
+`tests/unit/test_ent719_human_only_refusal_audit.py` — the refused person-only
+or session-only attempt, through the real app in a subprocess on a fresh
+database: one row per `Depends` and imperative refusal naming the right actor,
+the response byte-identical with the handler removed, an audit failure still a
+403 that leaves the window unused, no second row after `file_read_refused`, the
+60-second bound (a full window never forgets a key), no row for an unrelated
+403, the caller-sized values cut to 256 characters, and no sentinel from the
+body, the query, `User-Agent`, a custom header or the forwarding headers in any
+row.
 
 ### Phase 5 — Dashboard tests (#941)
 

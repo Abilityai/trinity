@@ -682,7 +682,8 @@
     changes), then the row, then best-effort env removal — agent down → 200
     with `env_removed: false` and an `env_note`.
   - **MCP**: `get_agent_spending` (GET pass-through) and
-    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+    `revoke_agent_delegation` (DELETE; advertised to `user` keys only, the one
+    key scope `require_person` admits — trinity-enterprise#719).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.

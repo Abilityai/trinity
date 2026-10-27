@@ -376,6 +376,8 @@ console.log(`Registered ${totalTools} tools`);
 > - `import_credentials` - Import from encrypted `.credentials.enc` file
 > - `get_credential_encryption_key` - Get platform encryption key for local agents
 
+> **Who is shown these tools (trinity-enterprise#719):** a tool whose route takes a human-only rule is listed only to the keys that rule admits (`access.ts::humanOnlyToolAccess`). `export_credentials`, `rename_agent`, `initialize_github_sync` and `set_agent_github_pat` are listed to a person's own `user` key (clearing a PAT works there; setting one takes a signed-in session); `inject_credentials` and `import_credentials` to no key; `get_credential_encryption_key` to `user` and `system` keys. Agent-scoped keys are shown none of them.
+
 ### Chat Tools (`src/mcp-server/src/tools/chat.ts`)
 
 | Tool | Line | Parameters | Backend Endpoint |
@@ -1252,6 +1254,7 @@ npx @modelcontextprotocol/inspector http://localhost:8080/mcp
 # - start_agent, stop_agent, list_templates
 # - get_credential_status, inject_credentials, export_credentials
 # - import_credentials, get_credential_encryption_key
+#   (with a key, inject_credentials and import_credentials are not listed: they take a signed-in session)
 # - get_agent_ssh_access, deploy_local_agent, initialize_github_sync
 # Chat tools (3):
 # - chat_with_agent, get_chat_history, get_agent_logs

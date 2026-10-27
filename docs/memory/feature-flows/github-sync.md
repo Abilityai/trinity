@@ -903,7 +903,7 @@ Agents can optionally have their own GitHub PAT, falling back to the global PAT 
 | **API** | `PUT /api/agents/{name}/github-pat` | Set per-agent PAT (validated, encrypted) |
 | **API** | `DELETE /api/agents/{name}/github-pat` | Clear per-agent PAT (revert to global) |
 | **MCP** | `get_agent_github_pat_status` | Check PAT configuration |
-| **MCP** | `set_agent_github_pat` | Set or clear per-agent PAT |
+| **MCP** | `set_agent_github_pat` | Set or clear per-agent PAT. Listed to a person's own user-scoped key only (trinity-enterprise#719); that key can clear the PAT, and setting one takes a signed-in session |
 
 **Database Storage:**
 - Column: `agent_git_config.github_pat_encrypted` (TEXT, nullable)

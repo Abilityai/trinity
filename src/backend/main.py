@@ -1264,6 +1264,14 @@ from error_handlers import secret_setting_value_error as _secret_setting_value_e
 
 app.add_exception_handler(_SecretSettingValueError, _secret_setting_value_error)
 
+# trinity-enterprise#719: a refused human-only attempt is recorded once, bounded,
+# then answered by the handler the app registers for HTTPException (FastAPI's
+# own, unless one replaces it), so the 403 is unchanged.
+from dependencies import HumanOnlyRefused as _HumanOnlyRefused
+from error_handlers import human_only_refused as _human_only_refused
+
+app.add_exception_handler(_HumanOnlyRefused, _human_only_refused)
+
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,

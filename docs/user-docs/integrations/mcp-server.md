@@ -65,18 +65,18 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 
 | Module | Tools | Description |
 |--------|-------|-------------|
-| `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (`get_agent_github_pat_status`, `set_agent_github_pat`), runtime-data export/import, compatibility report, `get_agent_info` (an agent's template metadata and capabilities) and `list_templates` (the template IDs `create_agent` accepts) |
+| `agents.ts` | 22 | Agent lifecycle, credentials, SSH, local deploy, GitHub sync, per-agent PAT (`get_agent_github_pat_status`, `set_agent_github_pat`), runtime-data export/import, compatibility report, `get_agent_info` (an agent's template metadata and capabilities) and `list_templates` (the template IDs `create_agent` accepts). `rename_agent`, `initialize_github_sync`, `set_agent_github_pat` and `export_credentials` are a person's: shown only to your own user-scoped key (that key can clear a per-agent PAT, but setting one takes a signed-in session). `inject_credentials` and `import_credentials` take a signed-in session and are shown to no key; `get_credential_encryption_key` is shown to user-scoped and system-scoped keys, and the backend admits an administrator only |
 | `chat.ts` | 4 | `chat_with_agent`, `get_chat_history`, `get_agent_logs`, `fan_out` — chat and parallel dispatch, all gateway-timeout safe |
 | `executions.ts` | 5 | `list_recent_executions`, `get_execution_result`, `get_fan_out_result`, `get_agent_activity_summary`, `search_executions` — execution queries, polling for async tasks and fan-out batches, activity monitoring; `search_executions` needs a matching entitlement and is never offered to agent keys |
 | `schedules.ts` | 8 | Schedule CRUD (including retries, post-run validation and Workspace delivery) and execution history |
 | `skills.ts` | 14 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), the per-agent skill gate map (`list_skill_gates`, `set_skill_gate`, `clear_skill_gate` — see [Approvals](../automation/approvals.md#gated-skill-approvals)), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
-| `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to an admin's user-scoped key and the system agent, never to agent-scoped or connector keys; the backend admits the same callers |
+| `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to user-scoped and system-scoped keys, never to agent-scoped or connector keys; the backend admits an administrator only |
 | `tags.ts` | 5 | Agent tagging |
 | `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
-| `subscriptions.ts` | 6 | Subscription management |
+| `subscriptions.ts` | 6 | Subscription management. `assign_subscription` takes a signed-in session and is shown to no key; `clear_agent_subscription` is shown only to your own user-scoped key |
 | `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
 | `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |
-| `nevermined.ts` | 4 | Payment configuration |
+| `nevermined.ts` | 4 | Payment configuration. `configure_nevermined` takes a signed-in session and is shown to no key; `toggle_nevermined` is shown only to your own user-scoped key |
 | `notifications.ts` | 1 | `send_notification` — agent-to-platform notifications (`alert`, `info`, `status`, `completion`, `question`) |
 | `events.ts` | 4 | Agent event pub/sub |
 | `docs.ts` | 2 | `get_agent_requirements`, `ask_trinity` — agent documentation and grounded Q&A about Trinity |
@@ -88,9 +88,9 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
-| `operator_queue.ts` | 6 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer |
+| `operator_queue.ts` | 6 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer. `respond_to_operator_queue` is shown only to your own user-scoped key, because only a person answers an item |
 | `reminders.ts` | 3 | `set_reminder`, `list_reminders`, `cancel_reminder` — durable one-shot deferred self-triggers |
-| `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)) |
+| `rooms.ts` | 5 | `create_room`, `list_rooms`, `read_room`, `post_to_room`, `close_room` — multi-agent rooms (see [Rooms](../collaboration/rooms.md)). `close_room` is shown only to your own user-scoped key, because only a person moderates a room |
 | `canvas.ts` | 5 | `set_canvas`, `patch_canvas`, `get_canvas`, `list_canvases`, `clear_canvas` — the agent's durable render surface in the Workspace (see [Agent Canvas](../agents/agent-canvas.md)) |
 | `git.ts` | 6 | Deterministic git operations — status, sync, log, pull, sync-state, and the destructive reset-to-main recovery |
 | `pipelines.ts` | 2 | Read-only introspection of an agent's self-published pipelines |

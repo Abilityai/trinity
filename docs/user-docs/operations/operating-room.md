@@ -149,7 +149,7 @@ A walk's guarantee has one stated bound: a change that ends an item (an answer, 
 |------|-------------|
 | `ask_operator` | Raise an approval, question, or alert from inside an agent (see [Approvals](../automation/approvals.md)) |
 | `list_operator_queue` / `get_operator_queue_item` | Read queue items you can access |
-| `respond_to_operator_queue` | Answer an item — works only with a person's user-scoped key; agent- and system-scoped keys are refused (403 `person_required`) |
+| `respond_to_operator_queue` | Answer an item — shown only to a person's user-scoped key; agent- and system-scoped keys are not shown it, and the backend refuses them (403 `person_required`) |
 | `get_my_ask` | From inside an agent: how one of its own asks ended |
 | `withdraw_ask` | From inside an agent: end one of its own pending asks that no longer needs an answer, with a one-line reason (see [Approvals](../automation/approvals.md)) |
 | `send_notification` | Send a notification to the Notifications tab from within an agent |

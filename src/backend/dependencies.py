@@ -1390,6 +1390,30 @@ def human_only(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+class HumanOnlyRefused(HTTPException):
+    """The 403 every human-only primitive below raises (trinity-enterprise#719).
+
+    To a caller it is the plain `HTTPException` it always was: the same status
+    and detail, answered by the handler the app registers for `HTTPException`
+    (`error_handlers.human_only_refused` delegates to it), so the response is
+    unchanged byte for byte and every `except HTTPException` still catches it.
+    The type exists so one app handler can record the refused attempt: a
+    `Depends` gate refuses before the handler body runs, and the imperative call
+    sites hold no `Request`.
+
+    `rule` names the allowlist that refused (`person` or `interactive`);
+    `principal` is the refused caller, for the audit row only. A site that
+    writes its own row for the refusal sets `audited` before re-raising, so the
+    app handler writes no second one.
+    """
+
+    def __init__(self, detail: Any, *, rule: str, principal: Any) -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+        self.rule = rule
+        self.principal = principal
+        self.audited = False
+
+
 def reject_non_interactive_principal(current_user: User) -> None:
     """Interactive-human-only guard — an ALLOWlist, not a denylist (#1854).
 
@@ -1410,12 +1434,13 @@ def reject_non_interactive_principal(current_user: User) -> None:
     decided — never for read/chat surfaces an MCP key legitimately drives.
     """
     if not is_interactive_principal(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
+        raise HumanOnlyRefused(
+            (
                 "This operation requires an interactive session; "
                 "MCP API keys cannot perform it"
             ),
+            rule="interactive",
+            principal=current_user,
         )
 
 
@@ -1497,9 +1522,8 @@ def reject_non_person_principal(current_user: User) -> None:
     (trinity-enterprise#611). Guards the three ways an ask ends by hand:
     respond, cancel and bulk-cancel."""
     if not is_person_principal(current_user):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(PERSON_REQUIRED_DETAIL),
+        raise HumanOnlyRefused(
+            dict(PERSON_REQUIRED_DETAIL), rule="person", principal=current_user
         )
 
 
@@ -1542,9 +1566,8 @@ def assert_person(current_user: User) -> None:
     if not is_person_principal(current_user) or getattr(
         current_user, "vouched_source_agent", None
     ):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(HUMAN_ONLY_DETAIL),
+        raise HumanOnlyRefused(
+            dict(HUMAN_ONLY_DETAIL), rule="person", principal=current_user
         )
 
 
@@ -1562,9 +1585,8 @@ def require_interactive(current_user: User = Depends(get_current_user)) -> User:
     """
     reject_non_interactive_principal(current_user)
     if getattr(current_user, "vouched_source_agent", None):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=dict(HUMAN_ONLY_DETAIL),
+        raise HumanOnlyRefused(
+            dict(HUMAN_ONLY_DETAIL), rule="interactive", principal=current_user
         )
     return current_user
 

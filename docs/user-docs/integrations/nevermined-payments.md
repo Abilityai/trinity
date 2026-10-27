@@ -121,7 +121,7 @@ empty; Trinity never estimates them. An agent can read its own budget and no
 other agent's.
 
 **Revoke.** `DELETE /api/nevermined/agents/{agent_name}/delegation` (or the
-`revoke_agent_delegation` MCP tool, human keys only) revokes the mandate at
+`revoke_agent_delegation` MCP tool, your own user-scoped key only) revokes the mandate at
 Nevermined — Nevermined refuses the agent's next paid call — and removes the
 keys from the agent. If the agent is stopped, the delegation id left in its
 `.env` is inert, but the organization's agent key stays until the next bind
@@ -167,10 +167,10 @@ Every payment verify and settle is a call to the Nevermined facilitator, and eve
 |------|-------------|
 | `configure_nevermined` | Set NVM API Key, environment, Agent ID, Plan ID and credits per request |
 | `get_nevermined_config` | Retrieve current payment configuration |
-| `toggle_nevermined` | Enable or disable payments |
+| `toggle_nevermined` | Enable or disable payments. Shown only to your own user-scoped key (the agent's owner or an admin) |
 | `get_nevermined_payments` | View payment history |
 | `get_agent_spending` | What the agent can still spend from its Nevermined card mandate |
-| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate (owner or admin, human keys only) |
+| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate. Shown only to your own user-scoped key (the agent's owner or an admin) |
 
 ## Limitations
 

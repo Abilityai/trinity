@@ -44,17 +44,17 @@
  *
  * Runner: built-in node:test → `node --import tsx --test src/*.test.ts`.
  */
-import { describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 import { createServer } from "node:net";
-import { createServer as createHttpServer, type Server } from "node:http";
+import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { FastMCP } from "fastmcp";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-import { TOOL_ACCESS_POLICY } from "./access.js";
+import { HUMAN_ONLY_KEYS_NOT_SHOWN, HUMAN_ONLY_POLICY_OWNER, HUMAN_ONLY_WHO_MAY_CALL, TOOL_ACCESS_POLICY } from "./access.js";
 import {
   createServer as createTrinityServer,
   OPERATOR_SCOPES,
@@ -500,15 +500,92 @@ describe("ent#500 get_agent_assignments is operator-scope only", () => {
   });
 });
 
+/**
+ * A real `createServer` in key mode behind a fake backend, driven over the real
+ * streamable-HTTP transport. `/api/mcp/validate` answers with the row of the
+ * key named in the bearer (`trinity_mcp_<key>`), so every scope is a real
+ * session, the platform's `system` key included. Every other request is logged
+ * (`requests`), so a test can prove a refused call never reached the backend,
+ * and answered by `route` (default: 200 `{}`).
+ */
+type KeyRow = { scope: string; agent_name?: string };
+
+interface KeyedServer {
+  url: URL;
+  requests: string[];
+  stop: () => Promise<void>;
+}
+
+async function bootKeyedServer(
+  keys: Record<string, KeyRow>,
+  route: (method: string, path: string) => { status: number; body: unknown } = () => ({ status: 200, body: {} }),
+): Promise<KeyedServer> {
+  const requests: string[] = [];
+  const backend = createHttpServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const path = String(req.url ?? "");
+      if (path === "/api/mcp/validate") {
+        const bearer = String(req.headers.authorization ?? "").replace(/^Bearer trinity_mcp_/, "");
+        const row = keys[bearer];
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end(JSON.stringify(row
+          ? { valid: true, key_id: `key-${bearer}`, user_id: "owner", user_email: "owner@example.com", key_name: bearer, ...row }
+          : { valid: false }));
+      }
+      requests.push(`${req.method} ${path}`);
+      const { status, body } = route(String(req.method), path);
+      res.writeHead(status, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(body));
+    });
+  });
+  await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
+  const backendPort = (backend.address() as AddressInfo).port;
+  const mcpPort = await freePort();
+  const { server } = await createTrinityServer({
+    trinityApiUrl: `http://127.0.0.1:${backendPort}`,
+    requireApiKey: true,
+    port: mcpPort,
+  });
+  await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
+  return {
+    url: new URL(`http://127.0.0.1:${mcpPort}/mcp`),
+    requests,
+    stop: async () => {
+      await server.stop().catch(() => {});
+      await new Promise<void>((r) => backend.close(() => r()));
+    },
+  };
+}
+
+async function asKey<T>(url: URL, key: string, body: (client: Client) => Promise<T>): Promise<T> {
+  const client = new Client({ name: `vis-${key}`, version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(url, {
+    requestInit: { headers: { Authorization: `Bearer trinity_mcp_${key}` } },
+  }));
+  try {
+    return await body(client);
+  } finally {
+    await client.close().catch(() => {});
+  }
+}
+
+const listedTo = (url: URL, key: string): Promise<string[]> =>
+  asKey(url, key, async (c) => (await c.listTools()).tools.map((t) => t.name));
+
+const NOT_FOUND = /not found|unknown tool|method not found/i;
+
 describe("#3435 human-only credential tools are not advertised to agent sessions", () => {
-  // export_credentials / import_credentials (owner or admin, human-only) and
-  // get_credential_encryption_key (admin, human-only) can never be called with
-  // an agent-scoped key: the backend refuses every one. Each carries its own
-  // canAccess allow-list {user, system}. This boots the REAL server in key
-  // mode and drives it over the real transport with a user key and an agent
-  // key — listing AND calling, because advertisement alone is not a control.
-  const CREDENTIAL_TOOLS = ["export_credentials", "get_credential_encryption_key", "import_credentials",
-    // ent#966 (M6): revoke_agent_delegation sits behind `require_person` — human keys only.
+  // export_credentials (a person's call) and get_credential_encryption_key (an
+  // admin's, human-only) can never be called with an agent-scoped key: the
+  // backend refuses every one. Each carries its own canAccess allow-list. This
+  // boots the REAL server in key mode and drives it over the real transport
+  // with a user key and an agent key — listing AND calling, because
+  // advertisement alone is not a control. import_credentials is shown to no
+  // key at all since ent#719; the block below pins that.
+  const CREDENTIAL_TOOLS = ["export_credentials", "get_credential_encryption_key",
+    // ent#966 (M6): revoke_agent_delegation sits behind `require_person` — user keys only
+    // (the system key is not shown it either since ent#719; the block below pins that).
     "revoke_agent_delegation"];
 
   /**
@@ -522,77 +599,32 @@ describe("#3435 human-only credential tools are not advertised to agent sessions
   const ADVERTISED_TO_AGENTS_BASELINE = [
     "get_agent_ssh_access",
     "get_nevermined_payments",
-    "inject_credentials",
     "register_a2a_endpoint",
     "remove_a2a_endpoint",
-    "rename_agent",
     "set_a2a_inbound_allowlist",
     "set_agent_a2a_exposure",
-    "toggle_nevermined",
   ];
   const ADMIN_ONLY_OWNER = /^backend rejects agent principals/;
 
-  let backend: Server;
-  let mcpServer: { stop: () => Promise<void> };
-  let mcpUrl: URL;
-
-  async function boot(): Promise<void> {
-    backend = createHttpServer((req, res) => {
-      req.resume();
-      req.on("end", () => {
-        res.writeHead(200, { "Content-Type": "application/json" });
-        if (req.url === "/api/mcp/validate") {
-          const agent = String(req.headers.authorization ?? "").includes("agent_key");
-          return res.end(JSON.stringify({
-            valid: true, key_id: agent ? "key-agent-1" : "key-user-1", user_id: "owner",
-            user_email: "owner@example.com", key_name: "vis", scope: agent ? "agent" : "user",
-            ...(agent ? { agent_name: "alpha" } : {}),
-          }));
-        }
-        return res.end("{}");
-      });
-    });
-    await new Promise<void>((r) => backend.listen(0, "127.0.0.1", () => r()));
-    const backendPort = (backend.address() as AddressInfo).port;
-    const mcpPort = await freePort();
-    const { server } = await createTrinityServer({
-      trinityApiUrl: `http://127.0.0.1:${backendPort}`,
-      requireApiKey: true,
-      port: mcpPort,
-    });
-    await server.start({ transportType: "httpStream", httpStream: { port: mcpPort, host: "127.0.0.1" } });
-    mcpServer = server;
-    mcpUrl = new URL(`http://127.0.0.1:${mcpPort}/mcp`);
-  }
-
-  async function asKey<T>(key: string, body: (client: Client) => Promise<T>): Promise<T> {
-    const client = new Client({ name: `vis-3435-${key}`, version: "1.0.0" });
-    await client.connect(new StreamableHTTPClientTransport(mcpUrl, {
-      requestInit: { headers: { Authorization: `Bearer trinity_mcp_${key}` } },
-    }));
-    try {
-      return await body(client);
-    } finally {
-      await client.close().catch(() => {});
-    }
-  }
-
   it("a user key lists them; an agent key neither lists nor can call them", async () => {
-    await boot();
+    const srv = await bootKeyedServer({
+      user_key: { scope: "user" },
+      agent_key: { scope: "agent", agent_name: "alpha" },
+    });
     try {
-      const userTools = await asKey("user_key", async (c) => (await c.listTools()).tools.map((t) => t.name));
-      const agentTools = await asKey("agent_key", async (c) => (await c.listTools()).tools.map((t) => t.name));
+      const userTools = await listedTo(srv.url, "user_key");
+      const agentTools = await listedTo(srv.url, "agent_key");
       assert.ok(agentTools.length > 50, `only ${agentTools.length} tools for the agent session — the census is not seeing the server`);
       for (const name of CREDENTIAL_TOOLS) {
         assert.ok(userTools.includes(name), `${name} must be listed for a user key`);
         assert.ok(!agentTools.includes(name), `${name} must NOT be listed for an agent key`);
       }
 
-      await asKey("agent_key", async (c) => {
+      await asKey(srv.url, "agent_key", async (c) => {
         for (const name of CREDENTIAL_TOOLS) {
           await assert.rejects(
             () => c.callTool({ name, arguments: name === "get_credential_encryption_key" ? {} : { name: "alpha" } }),
-            (err: unknown) => /not found|unknown tool|method not found/i.test(String((err as Error)?.message ?? err)),
+            (err: unknown) => NOT_FOUND.test(String((err as Error)?.message ?? err)),
             `${name}: an agent key calling it by name must be rejected as not found`,
           );
         }
@@ -609,11 +641,218 @@ describe("#3435 human-only credential tools are not advertised to agent sessions
         [],
         "an admin-only tool is advertised to agent sessions — give it a canAccess allow-list (the #3435 shape)",
       );
-      const stale = ADVERTISED_TO_AGENTS_BASELINE.filter((n) => userTools.includes(n) && !agentTools.includes(n));
-      assert.deepEqual(stale, [], "baseline entries now hidden from agents — remove them (shrink-only)");
+      const stale = ADVERTISED_TO_AGENTS_BASELINE.filter((n) => !agentTools.includes(n));
+      assert.deepEqual(stale, [], "baseline entries no longer advertised to agents — remove them (shrink-only)");
     } finally {
-      await mcpServer?.stop().catch(() => {});
-      await new Promise<void>((r) => backend.close(() => r()));
+      await srv.stop();
     }
+  });
+});
+
+describe("ent#719 human-only tools are listed exactly to the keys their backend rule admits", () => {
+  /**
+   * Each tool, and the key scopes that may be shown it. Written out here, not
+   * derived from the code under test: `person` routes admit a signed-in session
+   * or the person's own user-scoped key, `interactive` routes (credential binds)
+   * a signed-in session only, and the encryption key stays an admin's read that
+   * the platform's system key may also make. `set_agent_github_pat` is listed
+   * to user keys because clearing is a person's call; setting is refused there.
+   * Three more tools front a person-only route outside the agent's own
+   * settings: closing a room (its moderator acts), revoking a Nevermined
+   * mandate (`require_person`) and answering an operator-queue item
+   * (`reject_non_person_principal`).
+   */
+  const EXPECTED: Record<string, string[]> = {
+    rename_agent: ["user"],
+    initialize_github_sync: ["user"],
+    set_agent_github_pat: ["user"],
+    export_credentials: ["user"],
+    clear_agent_subscription: ["user"],
+    toggle_nevermined: ["user"],
+    inject_credentials: [],
+    import_credentials: [],
+    assign_subscription: [],
+    configure_nevermined: [],
+    get_credential_encryption_key: ["user", "system"],
+    close_room: ["user"],
+    revoke_agent_delegation: ["user"],
+    respond_to_operator_queue: ["user"],
+  };
+  const KEYS: Record<string, KeyRow> = {
+    user: { scope: "user" },
+    agent: { scope: "agent", agent_name: "alpha" },
+    system: { scope: "system", agent_name: "trinity-system" },
+    connector: { scope: "connector", agent_name: "alpha" },
+    portal_delegate: { scope: "portal_delegate" },
+    ops: { scope: "ops" },
+    some_future_tier: { scope: "some_future_tier" },
+  };
+  /** Arguments that satisfy each tool's schema, so a call is decided by visibility alone. */
+  const ARGS: Record<string, Record<string, unknown>> = {
+    rename_agent: { name: "ghost", new_name: "ghost-2" },
+    initialize_github_sync: { agent_name: "ghost", repo_owner: "example", repo_name: "ghost" },
+    set_agent_github_pat: { agent_name: "ghost", pat: "" },
+    export_credentials: { name: "ghost" },
+    clear_agent_subscription: { agent_name: "ghost" },
+    toggle_nevermined: { agent_name: "ghost", enabled: false },
+    inject_credentials: { name: "ghost", files: { ".env": "EXAMPLE=1\n" } },
+    import_credentials: { name: "ghost" },
+    assign_subscription: { agent_name: "ghost", subscription_name: "example" },
+    configure_nevermined: {
+      agent_name: "ghost", nvm_api_key: "sandbox:example", nvm_environment: "sandbox",
+      nvm_agent_id: "example", nvm_plan_id: "example", credits_per_request: 1,
+    },
+    get_credential_encryption_key: {},
+    close_room: { room_id: "r-ghost" },
+    revoke_agent_delegation: { agent_name: "ghost" },
+    respond_to_operator_queue: { item_id: "q-ghost", response: "approve" },
+  };
+
+  // A fresh install: no agents, rooms or queue items. The agent list is empty,
+  // and every route answers the backend's own 404 for a thing that does not
+  // exist: the rooms service's coded `room_not_found`, the queue's string, and
+  // the agent 404 everywhere else.
+  const freshInstall = (method: string, path: string) => {
+    if (method === "GET" && path === "/api/agents") return { status: 200, body: [] };
+    if (path === "/api/credentials/encryption-key") return { status: 200, body: { status: "ok" } };
+    if (path.startsWith("/api/rooms/")) {
+      return { status: 404, body: { detail: { code: "room_not_found", message: "Room not found" } } };
+    }
+    if (path.startsWith("/api/operator-queue/")) return { status: 404, body: { detail: "Queue item not found" } };
+    return { status: 404, body: { detail: "Agent not found" } };
+  };
+
+  let srv: KeyedServer;
+  const listing: Record<string, string[]> = {};
+
+  before(async () => {
+    srv = await bootKeyedServer(KEYS, freshInstall);
+    for (const key of Object.keys(KEYS)) listing[key] = await listedTo(srv.url, key);
+  });
+  after(async () => {
+    await srv?.stop();
+  });
+
+  it("each tool is listed to exactly the scopes its rule admits, for every key scope", () => {
+    assert.ok(listing.user.length > 100, `only ${listing.user.length} tools for a user key — the census is not seeing the server`);
+    assert.ok(listing.system.length > 50, `only ${listing.system.length} tools for the system key — the census is not seeing the server`);
+    for (const [tool, scopes] of Object.entries(EXPECTED)) {
+      const shown = Object.keys(KEYS).filter((key) => listing[key].includes(tool)).sort();
+      assert.deepEqual(shown, [...scopes].sort(), `${tool} is listed to [${shown}], expected [${scopes}]`);
+    }
+  });
+
+  it("the system key keeps get_credential_encryption_key and reaches the backend with it", async () => {
+    srv.requests.length = 0;
+    const out = await asKey(srv.url, "system", (c) => c.callTool({ name: "get_credential_encryption_key", arguments: {} }));
+    assert.notEqual((out as { isError?: boolean }).isError, true, JSON.stringify(out));
+    assert.deepEqual(srv.requests, ["GET /api/credentials/encryption-key"]);
+  });
+
+  it("a key calling a tool it is not shown gets 'not found', and the backend is never asked", async () => {
+    let refused = 0;
+    for (const key of ["user", "agent", "system"]) {
+      const hidden = Object.keys(EXPECTED).filter((tool) => !EXPECTED[tool].includes(KEYS[key].scope));
+      srv.requests.length = 0;
+      await asKey(srv.url, key, async (c) => {
+        for (const tool of hidden) {
+          await assert.rejects(
+            () => c.callTool({ name: tool, arguments: ARGS[tool] }),
+            (err: unknown) => NOT_FOUND.test(String((err as Error)?.message ?? err)),
+            `${tool}: a ${key} key calling it by name must be rejected as not found`,
+          );
+          refused += 1;
+        }
+      });
+      assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
+    }
+    // 4 interactive tools for the user key; 14 for the agent key; 13 for the system key.
+    assert.equal(refused, 4 + 14 + 13);
+  });
+
+  it("every policy row that names a human-only rule is listed as that rule says", () => {
+    const byRule = { person: ["user"], interactive: [] as string[] };
+    let rows = 0;
+    for (const [tool, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
+      if (policy.kind !== "baselined") continue;
+      for (const [rule, scopes] of Object.entries(byRule)) {
+        if (policy.owner !== HUMAN_ONLY_POLICY_OWNER[rule as keyof typeof HUMAN_ONLY_POLICY_OWNER]) continue;
+        rows += 1;
+        const shown = Object.keys(KEYS).filter((key) => listing[key].includes(tool));
+        assert.deepEqual(shown, scopes, `${tool}: its row says ${rule}, but it is listed to [${shown}]`);
+      }
+    }
+    // Every tool above but set_agent_github_pat (two rules on one tool), the key
+    // read, and the three whose rows keep their own kind (close_room `none`,
+    // respond_to_operator_queue `in-tool`, revoke_agent_delegation `enforce`);
+    // the first test above pins those three.
+    assert.equal(rows, 9, "the rows naming a human-only rule are not the nine this guard expects");
+  });
+
+  it("each description says who may call it and fits the 2,048-character cap, hidden tools included", async () => {
+    const { createAgentTools } = await import("./tools/agents.js");
+    const { createSubscriptionTools } = await import("./tools/subscriptions.js");
+    const { createNeverminedTools } = await import("./tools/nevermined.js");
+    const { createRoomTools } = await import("./tools/rooms.js");
+    const { createOperatorQueueTools } = await import("./tools/operator_queue.js");
+    const base = { getBaseUrl: () => "http://x" } as any;
+    const all = [
+      createAgentTools(base, true), createSubscriptionTools(base, true), createNeverminedTools(base, true),
+      createRoomTools(base, true), createOperatorQueueTools(base, true),
+    ].flatMap((group) => Object.values(group) as Array<{ name: string; description: string }>);
+    // A room's moderator and a queue item's reader are not "the agent's owner",
+    // so those two carry their own caller sentence, and the shared keys sentence.
+    const OWN_CALLER: Record<string, RegExp> = {
+      close_room: /WHO MAY CALL: the room's moderator or an admin, as a person/,
+      respond_to_operator_queue: /WHO MAY CALL: a person with access to the item's agent/,
+    };
+    for (const [tool, scopes] of Object.entries(EXPECTED)) {
+      const found = all.find((t) => t.name === tool);
+      assert.ok(found, `${tool} is not registered`);
+      assert.ok(found.description.length <= 2048, `${tool}: ${found.description.length} characters`);
+      if (tool === "get_credential_encryption_key") continue;
+      const rule = scopes.length === 0 ? "interactive" : "person";
+      assert.ok(found.description.includes(HUMAN_ONLY_KEYS_NOT_SHOWN[rule]), `${tool}: the description does not say which keys are not shown it`);
+      if (OWN_CALLER[tool]) {
+        assert.match(found.description, OWN_CALLER[tool], `${tool}: the description does not name its own caller`);
+      } else {
+        assert.ok(found.description.includes(HUMAN_ONLY_WHO_MAY_CALL[rule]), `${tool}: the description does not carry the ${rule} sentence`);
+      }
+    }
+    const pat = all.find((t) => t.name === "set_agent_github_pat")!;
+    assert.match(pat.description, /setting[^.]*signed-in session/i, "set_agent_github_pat must say setting needs a signed-in session");
+  });
+
+  it("fresh install: a user key on an instance with no agents lists its tools and gets a clean 404", async () => {
+    const shown = Object.keys(EXPECTED).filter((tool) => EXPECTED[tool].includes("user") && tool !== "get_credential_encryption_key");
+    assert.equal(shown.length, 9);
+    // Three tools map the backend's 404 to their own answer instead of a tool
+    // error; each answer still comes from the backend, never from the tool list.
+    const OWN_404: Record<string, RegExp> = {
+      close_room: /room_request_failed[\s\S]*\b404\b[\s\S]*room_not_found/,
+      revoke_agent_delegation: /agent_not_found_or_no_access/,
+      respond_to_operator_queue: /\b404\b[\s\S]*Queue item not found/,
+    };
+    srv.requests.length = 0;
+    await asKey(srv.url, "user", async (c) => {
+      const agents = await c.callTool({ name: "list_agents", arguments: {} });
+      const text = (agents as { content: Array<{ text?: string }> }).content[0]?.text ?? "";
+      assert.deepEqual(JSON.parse(text), [], "an instance with no agents lists none");
+      for (const tool of shown) {
+        const out = (await c.callTool({ name: tool, arguments: ARGS[tool] })) as {
+          isError?: boolean; content: Array<{ text?: string }>;
+        };
+        const body = out.content.map((p) => p.text ?? "").join(" ");
+        if (OWN_404[tool]) {
+          assert.notEqual(out.isError, true, `${tool}: expected its own not-found answer, got ${body}`);
+          assert.match(body, OWN_404[tool], `${tool}: expected its own answer to the backend's 404, got ${body}`);
+          continue;
+        }
+        assert.equal(out.isError, true, `${tool}: expected the backend's 404 as a tool error, got ${body}`);
+        assert.match(body, /\b404\b/, `${tool}: expected the backend's 404, got ${body}`);
+      }
+    });
+    // Every call was decided by the backend, not by the tool list.
+    assert.equal(srv.requests.length, 1 + shown.length, srv.requests.join(", "));
   });
 });

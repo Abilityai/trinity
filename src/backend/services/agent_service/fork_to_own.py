@@ -248,17 +248,20 @@ def fork_pat_required():
     )
 
 
-def saved_token_not_for_agents():
-    """The named 400 when an AGENT key asks for a fork with no form token.
+def saved_token_needs_a_session():
+    """The named 400 when a caller that is not a signed-in session asks for a
+    fork with no form token.
 
-    The saved token is a person's own GitHub identity. An agent key resolves to
-    its owner, so without this an agent could have a repository created in its
-    owner's account. Bind is human-only for the same reason; fork may still run
-    from an agent key, but only with a token the request carries itself."""
+    The saved token is a person's own GitHub identity, and the fork makes it
+    the new agent's per-agent token: a credential bind, which is INTERACTIVE
+    (requirements/auth.md §2.8; trinity-enterprise#719). A key resolves to its
+    owner, so without this a key could have a repository created in its
+    owner's account under the owner's token. A fork may still run from a key,
+    but only with a token the request carries itself."""
     return _http_error(
         400, "FORK_PAT_REQUIRED",
-        "An agent cannot use its owner's saved GitHub token to create a "
-        "repository. Pass fork_to_own.github_pat explicitly.",
+        "Your saved GitHub token is used only from a signed-in session. "
+        "Pass fork_to_own.github_pat explicitly.",
     )
 
 

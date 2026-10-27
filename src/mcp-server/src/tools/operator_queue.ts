@@ -6,7 +6,9 @@
  *   - get_operator_queue_item   — a single item by id
  *   - respond_to_operator_queue — resolve a pending item (answer / approve / deny);
  *                                 a PERSON's key only — the backend refuses
- *                                 agent- and system-scoped keys (#611)
+ *                                 agent- and system-scoped keys (#611), so
+ *                                 it is listed to user-scoped keys only
+ *                                 (abilityai/trinity-enterprise#719)
  *   - get_my_ask                — an agent reads back its OWN ask by the
  *                                 request_id it chose (#611, self-acting)
  *   - ask_operator              — an agent raises an ask as ITSELF, validated
@@ -24,16 +26,18 @@
  * `agent_names` and the backend also narrows agent keys, so the page is
  * complete before the limit (ent#815). The write tool resolves the item's
  * `agent_name` first, then
- * runs the SAME `checkAgentAccess` gate before proxying the response — an
- * agent-scoped key may resolve items for {self} ∪ permitted only. (#1104 v1
- * exposes `respond` only; `cancel` is deferred — wider blast radius.)
+ * runs the SAME `checkAgentAccess` gate before proxying the response. Since
+ * #611 the backend refuses every key but a person's there, and since
+ * abilityai/trinity-enterprise#719 no agent key is shown the tool, so the gate
+ * is a belt for the keys that are. (#1104 v1 exposes `respond` only; `cancel`
+ * is deferred — wider blast radius.)
  */
 
 import { z } from "zod";
 import { ApiError, TrinityClient, operatorQueueListTarget } from "../client.js";
 import { SOMETHING_ELSE } from "../types.js";
 import type { McpAuthContext, OperatorAskCreate } from "../types.js";
-import { accessDenied, resolveActingAgent } from "../access.js";
+import { accessDenied, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, resolveActingAgent } from "../access.js";
 
 /**
  * Pure helper: keep only items whose agent is in the allowed set. Used to gate
@@ -696,11 +700,15 @@ export function createOperatorQueueTools(
         "instruction_required, reserved_value, not_off_menu. Only items in the " +
         "'pending' state can be resolved — responding to an already-resolved, " +
         "expired, or cancelled item, or one past its deadline, returns a " +
-        "structured error. A person answers or cancels an ask: this works with a " +
-        "person's user-scoped key; agent- and system-scoped keys are refused " +
-        "by the platform (403 person_required). An agent can only replace its " +
+        "structured error. Only a person answers or cancels an ask. WHO MAY CALL: " +
+        "a person with access to the item's agent: a signed-in session or their own " +
+        "user-scoped key. " + HUMAN_ONLY_KEYS_NOT_SHOWN.person + " An agent can only replace its " +
         "own pending ask (ask_operator, replaces) or withdraw it (withdraw_ask); the platform expires one at " +
         "its deadline. To learn how one of your own asks ended, use get_my_ask.",
+      // The route refuses every principal but a person (reject_non_person_principal,
+      // trinity-enterprise#611), so it is listed to user keys only
+      // (abilityai/trinity-enterprise#719).
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         item_id: z.string().min(1).describe("Operator queue item id to resolve."),
         response: z

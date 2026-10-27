@@ -216,12 +216,12 @@ path needs.
 
 | Tool | Description |
 |------|-------------|
-| `configure_nevermined` | Set up payment config |
+| `configure_nevermined` | Set up payment config. The route takes a signed-in session, so the tool is listed to no MCP key (trinity-enterprise#719) |
 | `get_nevermined_config` | Read config (no key) |
-| `toggle_nevermined` | Enable/disable |
+| `toggle_nevermined` | Enable/disable. Listed to a person's own user-scoped key only (trinity-enterprise#719) |
 | `get_nevermined_payments` | Payment history |
 | `get_agent_spending` | What the agent can still spend from its Nevermined card mandate — live from Nevermined; agent keys own agent only (ent#966) |
-| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate — owner or admin, human keys only; hidden from agent sessions (ent#966) |
+| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate — owner or admin, as a person; listed to a person's own user-scoped key only, so agent and system sessions are not shown it (ent#966, trinity-enterprise#719) |
 
 ## Error Handling
 

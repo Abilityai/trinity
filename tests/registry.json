@@ -1,6 +1,44 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_saved_token_fork_session_only.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "github",
+        "unit"
+      ],
+      "description": "POST /api/agents through the real route (require_role creator, the agents.manage gate, create_agent_internal, _resolve_template, _apply_fork_to_own): the fork_to_own arm with no token in the body, which makes the creator's saved personal GitHub token the new agent's, is INTERACTIVE. The agent key, the system key, the person's own user key and a vouched loopback JWT get 400 FORK_PAT_REQUIRED with no fork attempted; a signed-in session forks with the saved token. A fork with a token in the body and a create with no fork are unchanged for every principal. GitHub, name, volume and quota checks are stubbed; the create stops at the step after the arm."
+    },
+    {
+      "file": "unit/test_ent719_no_agent_only_grant_guard.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "The issue's acceptance scan (tests/unit/_grant_guard_scan.py, stdlib AST, never imports src/): every route the census walks is followed into the code it runs, across modules, its signature and decorator dependencies, Annotated aliases and inline Annotated parameters, and a dependency's own dependencies included. A route that reaches an agent-only check (reject_agent_principal, Depends(human_only), an `if <principal>.agent_name: raise` or `is not None` test, a scope test naming the agent scope, an early return for non-agents before a refusal) fails unless its census class is person / interactive / person_or_grant, it is admin-gated, or the check's own function refuses a non-person, each credit read only as a top-level statement before any return and refusing on every path; a reviewed exemption (NOT_GRANT_GUARDS, REVIEWED_CREDITS, DEFERRED) names both the check and the routes it covers, and a named route that no longer rests on it fails as stale. An agent-only check no route reaches is a table problem. Every census portal write must refuse a non-person first, be a reviewed Workspace use, or be listed in DEFERRED (stale once an arm refuses a non-person); outside portal routes the Workspace door is exempt only through a listed fallback. Every admitting exit of the room moderator check must carry a positive person term or follow a top-level person refusal; a person helper's truthy constant counts only on a branch PERSON_BRANCHES lists. Self-tests plant trees for each rule, and each rule's revert turns at least one red."
+    },
+    {
+      "file": "unit/test_ent719_human_only_refusal_audit.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "A refused human-only attempt (require_person / assert_person / require_interactive / reject_non_interactive_principal / reject_non_person_principal now raise HumanOnlyRefused) is recorded once by the app handler in error_handlers.py, through the REAL app in a subprocess (helper tests/unit/_human_only_audit_app.py) on a fresh database: one authorization/human_only_refused row per Depends and imperative refusal, naming the agent, trinity-system or the person (never the owner for a key); every other machine scope filed as itself; the response byte-identical with the handler removed and answered by whatever handler the app registers for HTTPException; an audit failure still answers the same 403 and does not use the window (the same refusal a second later writes its row); the already-auditing owner-tier file read writes no second row; one row per principal, method and route (the template) per 60 s window, a full window recording nothing new rather than forgetting a key; principals naming no agent or key filed as the platform; an unrelated 403 writes none; the path, agent name and request id cut to 256 characters; no row carries a sentinel sent in the body, the query, User-Agent, a custom header or the forwarding headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP), the handler copying no header but the request id; the driver removes its temp dir."
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
@@ -1035,7 +1073,7 @@
         "auth",
         "security"
       ],
-      "description": "Human-only principal primitives (dependencies.py): assert_person / require_person (PERSON rule: JWT or the person's own user key) and require_interactive (INTERACTIVE: JWT only) across 10 principal kinds (JWT, user, agent, system, connector, portal_delegate, ops, unknown future scope, user scope carrying an agent identity, event-loopback JWT) plus a principal missing mcp_scope (fails closed); HUMAN_ONLY_DETAIL code person_required, a fresh copy per refusal; the key branch keeps reject_non_interactive_principal's detail; Depends forms resolve through get_current_user; ent#611 PERSON_REQUIRED_DETAIL and is_person_principal pinned byte-identical."
+      "description": "Human-only principal primitives (dependencies.py): assert_person / require_person (PERSON rule: JWT or the person's own user key) and require_interactive (INTERACTIVE: JWT only) across 10 principal kinds (JWT, user, agent, system, connector, portal_delegate, ops, unknown future scope, user scope carrying an agent identity, event-loopback JWT) plus a principal missing mcp_scope (fails closed); HUMAN_ONLY_DETAIL code person_required, a fresh copy per refusal; the key branch keeps reject_non_interactive_principal's detail; Depends forms resolve through get_current_user; ent#611 PERSON_REQUIRED_DETAIL and is_person_principal pinned byte-identical; every refusal of the family is a HumanOnlyRefused (an HTTPException subclass carrying the rule and the refused principal, trinity-enterprise#719) while reject_agent_principal stays a plain HTTPException."
     },
     {
       "file": "unit/test_mcp_key_creation_requires_session.py",

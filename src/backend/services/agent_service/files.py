@@ -452,6 +452,8 @@ async def _enforce_owner_tier_read(path, current_user, request, agent_name) -> N
         )
         await _audit_read("file_read_refused", request, current_user, agent_name, path,
                           refusal.status_code, rule)
+        # This row is the record; the app's human-only handler adds none (ent#719).
+        refusal.audited = True
         raise
     if not _is_owners_interactive_session(current_user, agent_name):
         await _audit_read("file_read_allowed", request, current_user, agent_name, path, 200, rule)

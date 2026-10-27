@@ -17,6 +17,13 @@ has `mcp_scope=None` and is otherwise contained only by its entry-point fence.
 ent#611's `reject_non_person_principal` and `PERSON_REQUIRED_DETAIL` are pinned
 byte-identical so this change cannot alter the ask-endings contract.
 
+Every refusal of the family is a `HumanOnlyRefused` (trinity-enterprise#719): an
+`HTTPException` subclass carrying the rule and the refused principal, so the app
+handler can audit it. The status and detail are the ones pinned above; the
+denylist guard `reject_agent_principal` stays a plain `HTTPException`. The audit
+row itself is pinned through the real app in
+`test_ent719_human_only_refusal_audit.py`.
+
 Related: docs/memory/requirements/auth.md §2.8, requirements/security.md §20.10.
 """
 
@@ -216,3 +223,87 @@ class TestAskEndingsContractUnchanged:
         from dependencies import is_person_principal
 
         assert is_person_principal(_principal(vouched_source_agent="agent-a")) is True
+
+
+class TestTheRefusalIsTyped:
+    """trinity-enterprise#719: the family raises `HumanOnlyRefused`, so one app
+    handler can record the refusal; a caller still sees an `HTTPException`."""
+
+    @staticmethod
+    def _gates():
+        from dependencies import (
+            assert_person,
+            reject_non_interactive_principal,
+            require_interactive,
+            require_person,
+        )
+
+        # (gate, rule, which KINDS it refuses: kwargs, PERSON, INTERACTIVE)
+        return {
+            "assert_person": (assert_person, "person", lambda kw, p, i: not p),
+            "require_person": (require_person, "person", lambda kw, p, i: not p),
+            "require_interactive": (
+                require_interactive, "interactive", lambda kw, p, i: not i,
+            ),
+            # the bare helper is the key branch only: a vouched loopback carries
+            # no scope, and `require_interactive` adds its refusal on top
+            "reject_non_interactive_principal": (
+                reject_non_interactive_principal,
+                "interactive",
+                lambda kw, p, i: kw.get("mcp_scope") is not None,
+            ),
+        }
+
+    @pytest.mark.parametrize(
+        "gate",
+        ["assert_person", "require_person", "require_interactive",
+         "reject_non_interactive_principal"],
+    )
+    def test_every_refusal_is_a_human_only_refusal_carrying_rule_and_principal(self, gate):
+        from fastapi import HTTPException
+        from dependencies import HumanOnlyRefused
+
+        fn, rule, refused = self._gates()[gate]
+        kinds = [kw for _kid, kw, p, i in KINDS if refused(kw, p, i)]
+        assert kinds
+        for kw in kinds:
+            user = _principal(**kw)
+            with pytest.raises(HumanOnlyRefused) as ei:
+                fn(user)
+            assert isinstance(ei.value, HTTPException)
+            assert ei.value.status_code == 403
+            assert ei.value.principal is user
+            assert ei.value.audited is False
+            # the loopback branch of require_interactive is still the INTERACTIVE rule
+            assert ei.value.rule == rule
+
+    def test_the_ask_refusal_is_typed_with_its_own_detail(self):
+        from dependencies import (
+            PERSON_REQUIRED_DETAIL,
+            HumanOnlyRefused,
+            reject_non_person_principal,
+        )
+
+        user = _principal(mcp_scope="system")
+        with pytest.raises(HumanOnlyRefused) as ei:
+            reject_non_person_principal(user)
+        assert ei.value.detail == PERSON_REQUIRED_DETAIL
+        assert (ei.value.rule, ei.value.principal) == ("person", user)
+
+    def test_a_predicate_use_still_catches_it_as_an_http_exception(self):
+        """`except HTTPException` (e.g. `files._passes_owner_tier`) is unchanged:
+        a refusal caught there never reaches the app handler."""
+        from fastapi import HTTPException
+        from dependencies import assert_person
+
+        with pytest.raises(HTTPException) as ei:
+            assert_person(_principal(mcp_scope="agent", agent_name="agent-a"))
+        assert ei.value.status_code == 403
+
+    def test_the_agent_denylist_guard_is_not_part_of_the_family(self):
+        from fastapi import HTTPException
+        from dependencies import HumanOnlyRefused, reject_agent_principal
+
+        with pytest.raises(HTTPException) as ei:
+            reject_agent_principal(_principal(mcp_scope="agent", agent_name="agent-a"))
+        assert not isinstance(ei.value, HumanOnlyRefused)

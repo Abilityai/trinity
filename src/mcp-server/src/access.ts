@@ -176,6 +176,91 @@ export async function checkAgentEdge(
 }
 
 // ---------------------------------------------------------------------------
+// Who may SEE a human-only tool (the #3435 shape, one home since
+// abilityai/trinity-enterprise#719)
+// ---------------------------------------------------------------------------
+
+/**
+ * The human-only rule a tool's backend route follows, and the key scopes that
+ * rule admits. A tool is listed to exactly those scopes, so no key is shown a
+ * tool that its scope can never call (#3435). Visibility is decided by scope
+ * alone: within a listed scope the route still decides who passes (the agent's
+ * owner, the room's moderator, the admin role), so a key that is listed a tool
+ * can still be refused by it for who it is.
+ *
+ *   - `person`      — the PERSON rule (`require_person`, or
+ *                     `is_person_principal` inline): a signed-in session or the
+ *                     person's own `user`-scoped key. Listed to `user` keys.
+ *   - `interactive` — `require_interactive`: a signed-in session only (a route
+ *                     that binds a credential). Listed to no key.
+ *   - `admin`       — `require_admin` on a human-only admin read. Listed to
+ *                     `user` and `system` keys; the backend admits an
+ *                     administrator only, so a non-admin's `user` key is shown
+ *                     the tool and refused.
+ *
+ * An ALLOW-list over `mcp_api_keys.scope`, which is free text (#848, #2323): a
+ * context with an unknown scope, a non-string scope or no scope, and a missing
+ * auth context, are all refused. A validated key whose row carries no scope
+ * never reaches this predicate scope-less: `server.ts` authenticate maps it to
+ * `user`, the same default the backend applies to that key (the column's
+ * `DEFAULT 'user'`, `dependencies.py` `scope or "user"`), so its listing still
+ * equals what the route admits. FastMCP consults `canAccess` only when an auth
+ * context exists, so the keyless dev mode (`MCP_REQUIRE_API_KEY=false`) still
+ * lists every tool.
+ */
+export type HumanOnlyRule = "person" | "interactive" | "admin";
+
+const HUMAN_ONLY_TOOL_SCOPES: Readonly<Record<HumanOnlyRule, ReadonlySet<string>>> = {
+  person: new Set(["user"]),
+  interactive: new Set(),
+  admin: new Set(["user", "system"]),
+};
+
+/** The `canAccess` predicate for a tool whose backend route follows `rule`. */
+export function humanOnlyToolAccess(rule: HumanOnlyRule): (auth: unknown) => boolean {
+  const scopes = HUMAN_ONLY_TOOL_SCOPES[rule];
+  return (auth: unknown): boolean => {
+    const scope = (auth as { scope?: unknown } | null | undefined)?.scope;
+    return typeof scope === "string" && scopes.has(scope);
+  };
+}
+
+/**
+ * The sentence every `person` or `interactive` tool's description carries: which
+ * keys can never call it, and so are not shown it. It is what the predicate
+ * lists, stated once.
+ */
+export const HUMAN_ONLY_KEYS_NOT_SHOWN: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person: "Agent-scoped and system-scoped keys can never call it, so their sessions are not shown it.",
+  interactive: "No MCP key (user, agent or system scope) can call it, so no key session is shown it.",
+};
+
+/**
+ * The caller sentence of a `person` or `interactive` tool that acts on one agent
+ * as its owner or an admin. A tool whose route names a different caller (a
+ * room's moderator, a person with access to a queue item's agent) writes its own
+ * WHO MAY CALL sentence and appends `HUMAN_ONLY_KEYS_NOT_SHOWN[rule]`.
+ */
+export const HUMAN_ONLY_WHO_MAY_CALL: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person:
+    "WHO MAY CALL: the agent's owner or an admin, as a person: a signed-in session or their own user-scoped key. " +
+    HUMAN_ONLY_KEYS_NOT_SHOWN.person,
+  interactive:
+    "WHO MAY CALL: the agent's owner or an admin, from a signed-in session only. " +
+    HUMAN_ONLY_KEYS_NOT_SHOWN.interactive,
+};
+
+/** The `TOOL_ACCESS_POLICY` owner of a tool listed by `humanOnlyToolAccess`. */
+export const HUMAN_ONLY_POLICY_OWNER: Readonly<Record<Exclude<HumanOnlyRule, "admin">, string>> = {
+  person:
+    "backend require_person (abilityai/trinity-enterprise#719): a signed-in session or the person's own " +
+    "user-scoped key; the tool's canAccess lists it to user keys only",
+  interactive:
+    "backend require_interactive (abilityai/trinity-enterprise#719): a signed-in session only; " +
+    "the tool's canAccess lists it to no key",
+};
+
+// ---------------------------------------------------------------------------
 // The policy table
 // ---------------------------------------------------------------------------
 
@@ -205,8 +290,11 @@ export const AGENT_TARGET_PARAMS: ReadonlySet<string> = new Set([
 
 const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
-const CREDENTIAL_HUMAN_ONLY =
-  "backend: get_owned_agent_by_name + reject_agent_principal (trinity-enterprise#69 Part 2) — owner or admin, human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
+const PERSON_ONLY = HUMAN_ONLY_POLICY_OWNER.person;
+const INTERACTIVE_ONLY = HUMAN_ONLY_POLICY_OWNER.interactive;
+const PAT_SET_AND_CLEAR =
+  "backend: setting the PAT takes require_interactive, clearing it require_person (abilityai/trinity-enterprise#719); " +
+  "the tool's canAccess lists it to user keys only, which can clear it";
 const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
@@ -251,23 +339,23 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_agent_info: { kind: "in-tool", how: AGENTS_INLINE },
   get_agent_compatibility_report: { kind: "in-tool", how: AGENTS_INLINE },
   create_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  rename_agent: { kind: "baselined", owner: ADMIN_ONLY },
+  rename_agent: { kind: "baselined", owner: PERSON_ONLY },
   delete_agent: { kind: "enforce", param: "name" },
   start_agent: { kind: "enforce", param: "name" },
   stop_agent: { kind: "enforce", param: "name" },
   list_templates: { kind: "none", why: "no agent target" },
   get_credential_status: { kind: "enforce", param: "name" },
-  inject_credentials: { kind: "baselined", owner: ADMIN_ONLY },
-  export_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
-  import_credentials: { kind: "baselined", owner: CREDENTIAL_HUMAN_ONLY },
+  inject_credentials: { kind: "baselined", owner: INTERACTIVE_ONLY },
+  export_credentials: { kind: "baselined", owner: PERSON_ONLY },
+  import_credentials: { kind: "baselined", owner: INTERACTIVE_ONLY },
   export_agent_data: { kind: "enforce", param: "name" },
   import_agent_data: { kind: "enforce", param: "name" },
   get_credential_encryption_key: { kind: "none", why: "no agent target; " + KEY_ADMIN_ONLY },
   get_agent_ssh_access: { kind: "baselined", owner: ADMIN_ONLY },
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
-  initialize_github_sync: { kind: "enforce", param: "agent_name" },
+  initialize_github_sync: { kind: "baselined", owner: PERSON_ONLY },
   get_agent_github_pat_status: { kind: "enforce", param: "agent_name" },
-  set_agent_github_pat: { kind: "enforce", param: "agent_name" },
+  set_agent_github_pat: { kind: "baselined", owner: PAT_SET_AND_CLEAR },
   // --- chat.ts ---
   chat_with_agent: { kind: "in-tool", how: CHAT_GATE },
   get_chat_history: { kind: "enforce", param: "agent_name" },
@@ -352,8 +440,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- subscriptions.ts ---
   register_subscription: { kind: "none", why: "`name` is the subscription's name, not an agent" },
   list_subscriptions: { kind: "none", why: "no agent target" },
-  assign_subscription: { kind: "enforce", param: "agent_name" },
-  clear_agent_subscription: { kind: "enforce", param: "agent_name" },
+  assign_subscription: { kind: "baselined", owner: INTERACTIVE_ONLY },
+  clear_agent_subscription: { kind: "baselined", owner: PERSON_ONLY },
   get_agent_auth: { kind: "enforce", param: "agent_name" },  // also: the secrets branch is assert_admin
   delete_subscription: { kind: "none", why: "a subscription name, not an agent" },
   // --- monitoring.ts ---
@@ -365,9 +453,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_agent_health: { kind: "enforce", param: "agent_name" },
   trigger_health_check: { kind: "enforce", param: "agent_name" },
   // --- nevermined.ts ---
-  configure_nevermined: { kind: "enforce", param: "agent_name" },
+  configure_nevermined: { kind: "baselined", owner: INTERACTIVE_ONLY },
   get_nevermined_config: { kind: "enforce", param: "agent_name" },
-  toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
+  toggle_nevermined: { kind: "baselined", owner: PERSON_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
   get_agent_spending: { kind: "enforce", param: "agent_name" },
   revoke_agent_delegation: { kind: "enforce", param: "agent_name" },

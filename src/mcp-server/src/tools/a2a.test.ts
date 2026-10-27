@@ -637,3 +637,147 @@ describe("abilityai/trinity#3185 — credential_kind on register_a2a_endpoint", 
     assert.match(text, /inferred/i);
   });
 });
+
+describe("ent#719 — both A2A mappers read the object detail (real client, stubbed backend)", () => {
+  // The PERSON gate (#2996) refuses a machine principal with an OBJECT detail,
+  // `{detail: {code: "person_required", message}}`. Both mappers key on that
+  // code: it is the backend naming its own rule, and it proves the route is
+  // served, so it is never `not_entitled`. The wording is not the contract —
+  // a message that never says "human-only" maps the same way.
+  //
+  // `requireApiKey` on: each tool builds a real TrinityClient from the session's
+  // key, and every ApiError comes from a real Response off a stubbed `fetch`.
+  const BACKEND = "http://backend.test";
+  const PERSON_REQUIRED = {
+    code: "person_required",
+    message: "This operation is human-only; agent- and system-scoped keys cannot perform it",
+  };
+  const SESSION = { scope: "user", userId: "u1", keyName: "k", mcpApiKey: "trinity_mcp_test" };
+  // tool → [args, the request the real client sends]
+  const INBOUND: Record<string, [Record<string, unknown>, string]> = {
+    get_agent_a2a_config: [{ agent_name: "bot" }, "GET /api/enterprise/a2a/bot/config"],
+    set_agent_a2a_exposure: [{ agent_name: "bot", enabled: true }, "PUT /api/enterprise/a2a/bot/exposure"],
+    get_agent_a2a_card: [{ agent_name: "bot" }, "GET /api/agents/bot/a2a/agent-card"],
+    set_a2a_inbound_allowlist: [{ agent_name: "bot", add: ["did:a"] }, "POST /api/enterprise/a2a/bot/inbound-allowlist"],
+  };
+  const OUTBOUND: Record<string, [Record<string, unknown>, string]> = {
+    register_a2a_endpoint: [{ name: "partner", url: "https://x/a2a" }, "PUT /api/settings/a2a-endpoints"],
+    list_a2a_endpoints: [{}, "GET /api/settings/a2a-endpoints"],
+    remove_a2a_endpoint: [{ endpoint_id: "ep1" }, "DELETE /api/settings/a2a-endpoints/ep1"],
+  };
+  const ALL = { ...INBOUND, ...OUTBOUND };
+
+  /** Every A2A tool's envelope for one backend answer, plus the requests sent. */
+  async function refuse(status: number, body: string) {
+    const realFetch = globalThis.fetch;
+    const seen: string[] = [];
+    globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (!url.startsWith(BACKEND)) throw new Error(`unstubbed fetch: ${url}`);
+      seen.push(`${init?.method ?? "GET"} ${url.slice(BACKEND.length)}`);
+      return new Response(body, { status, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    try {
+      const tools = createA2ATools({ getBaseUrl: () => BACKEND } as TrinityClient, true) as unknown as Record<
+        string,
+        { execute: (a: unknown, c: unknown) => Promise<string> }
+      >;
+      const out: Record<string, Record<string, unknown>> = {};
+      for (const [tool, [args]] of Object.entries(ALL)) {
+        out[tool] = JSON.parse(await tools[tool].execute(args, { session: SESSION }));
+      }
+      return { out, seen };
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  it("the real PERSON-gate bytes map to human_only on all seven tools (wire shape)", async () => {
+    // These bytes also say "human-only", which the older text rule matched, so
+    // this case pins the wire shape and stays green without the code branch;
+    // the next two cases pin the code branch itself.
+    const { out, seen } = await refuse(403, JSON.stringify({ detail: PERSON_REQUIRED }));
+    assert.deepEqual(seen, Object.values(ALL).map(([, line]) => line));
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(out[tool].success, false, tool);
+      assert.equal(out[tool].human_only, true, tool);
+      assert.equal(out[tool].not_authorized, undefined, tool);
+      assert.equal(out[tool].not_entitled, undefined, tool);
+    }
+  });
+
+  it("the code decides, not the wording", async () => {
+    const neutral = "Only a person can answer or cancel an ask; agent- and system-scoped keys cannot end one";
+    for (const detail of [{ code: "person_required", message: neutral }, { code: "person_required" }]) {
+      const { out } = await refuse(403, JSON.stringify({ detail }));
+      for (const tool of Object.keys(ALL)) {
+        assert.equal(out[tool].human_only, true, `${tool}: ${JSON.stringify(detail)}`);
+        assert.equal(out[tool].not_authorized, undefined, `${tool}: ${JSON.stringify(detail)}`);
+      }
+    }
+  });
+
+  it("person_required on a status other than 403 is not human_only", async () => {
+    const detail = { code: "person_required", message: "Only a person can change this" };
+    const { out } = await refuse(404, JSON.stringify({ detail }));
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(out[tool].success, false, tool);
+      assert.equal(out[tool].human_only, undefined, tool);
+      assert.equal(out[tool].not_found, true, tool);
+    }
+  });
+
+  it("a served person_required refusal whose message names a2a is never not_entitled", async () => {
+    const message = "Only a person can change a2a settings";
+    const { out } = await refuse(403, JSON.stringify({ detail: { code: "person_required", message } }));
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(out[tool].human_only, true, tool);
+      assert.equal(out[tool].not_entitled, undefined, tool);
+    }
+  });
+
+  it("a string detail maps as today", async () => {
+    const human = await refuse(403, JSON.stringify({ detail: "This operation is human-only; agent-scoped keys cannot perform it" }));
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(human.out[tool].human_only, true, tool);
+      assert.equal(human.out[tool].not_authorized, undefined, tool);
+    }
+    const admin = await refuse(403, JSON.stringify({ detail: "Admin access required" }));
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(admin.out[tool].not_authorized, true, tool);
+      assert.equal(admin.out[tool].human_only, undefined, tool);
+    }
+    // The entitlement sentence is a plain string: an inbound tool still reads it
+    // as not_entitled; an outbound tool never can (ent#761).
+    const licence = await refuse(403, JSON.stringify({ detail: "Enterprise feature 'a2a' is not licensed for this instance." }));
+    for (const tool of Object.keys(INBOUND)) assert.equal(licence.out[tool].not_entitled, true, tool);
+    for (const tool of Object.keys(OUTBOUND)) {
+      assert.equal(licence.out[tool].not_entitled, undefined, tool);
+      assert.equal(licence.out[tool].not_authorized, true, tool);
+    }
+  });
+
+  it("a 403 without a JSON detail maps as today: not_authorized, never human_only", async () => {
+    for (const body of [
+      "<html><body><h1>403 Forbidden</h1><p>person_required</p></body></html>",
+      JSON.stringify({ code: "person_required", message: "top-level, not a detail" }),
+    ]) {
+      const { out } = await refuse(403, body);
+      for (const tool of Object.keys(ALL)) {
+        assert.equal(out[tool].not_authorized, true, `${tool}: ${body}`);
+        assert.equal(out[tool].human_only, undefined, `${tool}: ${body}`);
+      }
+    }
+  });
+
+  it("other shape — a 403 with an empty body is not_authorized, not human_only or not_entitled", async () => {
+    const { out, seen } = await refuse(403, "");
+    assert.equal(seen.length, Object.keys(ALL).length);
+    for (const tool of Object.keys(ALL)) {
+      assert.equal(out[tool].success, false, tool);
+      assert.equal(out[tool].not_authorized, true, tool);
+      assert.equal(out[tool].human_only, undefined, tool);
+      assert.equal(out[tool].not_entitled, undefined, tool);
+    }
+  });
+});

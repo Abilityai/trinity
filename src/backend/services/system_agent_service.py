@@ -4,7 +4,9 @@ System Agent Service - Auto-deployment and management of the Trinity system agen
 The system agent is a privileged platform orchestrator that:
 - Is automatically deployed on platform startup
 - Cannot be deleted (only re-initialized)
-- Has full access to all Trinity MCP tools
+- Holds a system-scoped MCP key: every fleet-operations tool, but not a tool
+  whose route admits only a person or only a signed-in session
+  (trinity-enterprise#719)
 - Can communicate with any agent regardless of permissions
 """
 import os
