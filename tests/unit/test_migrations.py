@@ -8,7 +8,9 @@ These are pure unit tests — no backend or Docker required.
 Uses an in-memory SQLite database.
 """
 
+import ast
 import importlib.util
+import inspect
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -278,6 +280,90 @@ class TestMigrationsConstant:
         """Regression: execution_fan_out_id must be in MIGRATIONS (caused the original outage)."""
         names = [name for name, _ in MIGRATIONS]
         assert "execution_fan_out_id" in names
+
+    def test_every_migrate_function_is_registered_and_vice_versa(self):
+        """The registry is a bijection with the module's `_migrate*` functions (#3395).
+
+        `run_all_migrations` runs only what `MIGRATIONS` lists, so a `_migrate*`
+        function that is written but never registered never runs on an existing
+        install. No schema diff can see the data-only case (an `UPDATE`
+        backfill), and a column the function adds is masked on a fresh install
+        whenever `init_schema` creates the table. This generalises
+        `test_fan_out_id_migration_present` from one name to every name, in both
+        directions: every `_migrate*` function defined in `db/migrations.py` is
+        registered exactly once, and every registered function is one of them.
+
+        Rule: a helper in `db/migrations.py` that is deliberately not a
+        migration must not use the `_migrate` prefix.
+
+        The functions are discovered from the loaded module, never from a
+        hand-written list, and compared by object identity against the
+        `MIGRATIONS` captured at import (other tests `patch.object` the module
+        attribute). The non-vacuity floor keeps the test from passing on an
+        empty or partial discovery, e.g. after `db/migrations.py` is split into
+        a package: the discovered names must be non-empty and equal the
+        top-level `def _migrate*` names parsed from the file's source.
+
+        Other shape: none of the delivery brief's six cases (fresh install,
+        empty data, another origin, flag off, clock ahead, restricted
+        container) applies to a module-introspection test; the second case is
+        the converse direction (a registered function that is not a
+        `_migrate*` function of this module).
+        """
+        module_file = Path(_migrations_mod.__file__).resolve()
+        defined = {
+            fn
+            for name, fn in inspect.getmembers(_migrations_mod, inspect.isfunction)
+            if name.startswith("_migrate")
+            and Path(fn.__code__.co_filename).resolve() == module_file
+        }
+        registered = {fn for _, fn in MIGRATIONS}
+
+        # Non-vacuity: discovery is non-empty and agrees with a second,
+        # independent derivation from the same file, so an empty or partial
+        # discovery cannot make the bijection pass.
+        source_names = {
+            node.name
+            for node in ast.parse(module_file.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("_migrate")
+        }
+        assert defined, f"no _migrate* functions discovered in {module_file}"
+        assert registered, "MIGRATIONS is empty"
+        assert {fn.__name__ for fn in defined} == source_names, (
+            f"introspection of {module_file} disagrees with its source: "
+            f"discovered {len(defined)}, source defines {len(source_names)}"
+        )
+
+        problems = []
+        unregistered = sorted(fn.__name__ for fn in defined - registered)
+        if unregistered:
+            problems.append(
+                "_migrate* functions defined in db/migrations.py but not registered "
+                f"in MIGRATIONS (existing installs never run them): {unregistered}"
+            )
+        foreign = sorted(
+            f"{name} -> {fn.__module__}.{fn.__qualname__}"
+            for name, fn in MIGRATIONS
+            if fn not in defined
+        )
+        if foreign:
+            problems.append(
+                "MIGRATIONS entries whose function is not a _migrate* function "
+                f"defined in db/migrations.py: {foreign}"
+            )
+        entries_by_fn = {}
+        for name, fn in MIGRATIONS:
+            entries_by_fn.setdefault(fn, []).append(name)
+        repeated = sorted(
+            f"{fn.__name__} <- {names}"
+            for fn, names in entries_by_fn.items()
+            if len(names) > 1
+        )
+        if repeated:
+            problems.append(
+                f"functions registered under more than one MIGRATIONS entry: {repeated}"
+            )
+        assert not problems, "\n".join(problems)
 
 
 # --- helpers ---
