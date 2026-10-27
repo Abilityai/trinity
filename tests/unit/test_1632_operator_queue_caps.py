@@ -603,16 +603,22 @@ def _seam_db(monkeypatch):
     """#3254 re-pin (write-observation point): the notifier reports through the
     platform alert seam, which writes with the facade's
     `create_platform_operator_queue_item` on `database.db`, not with
-    `validation_service.db.create_operator_queue_item`. The facade is replaced
-    there; the asserted shape is unchanged."""
+    `validation_service.db.create_operator_queue_item`. The asserted shape is
+    unchanged. The seam's three facade calls are replaced on the singleton
+    itself: rebinding `database.db` would be captured by any module first
+    imported while it is patched (`validation_service`'s own `from database
+    import db`), and outlive the test."""
     import database
-    db = MagicMock()
-    db.find_pending_operator_queue_by_subject.return_value = None
-    db.find_person_ended_operator_queue_by_subject.return_value = None
-    db.create_platform_operator_queue_item.return_value = {
+    seam = MagicMock()
+    seam.find_pending_operator_queue_by_subject.return_value = None
+    seam.find_person_ended_operator_queue_by_subject.return_value = None
+    seam.create_platform_operator_queue_item.return_value = {
         "outcome": "created", "row": None, "changed": False}
-    monkeypatch.setattr(database, "db", db)
-    return db
+    for name in ("find_pending_operator_queue_by_subject",
+                 "find_person_ended_operator_queue_by_subject",
+                 "create_platform_operator_queue_item"):
+        monkeypatch.setattr(database.db, name, getattr(seam, name))
+    return seam
 
 
 class TestValidationServiceDirectCreate:
