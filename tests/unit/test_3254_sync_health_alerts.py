@@ -632,7 +632,7 @@ async def test_a_failed_re_read_under_a_precedence_is_retried_on_the_next_poll(
     (row,) = _rows(db, "sync-diverged-")
 
     real_create = db.create_platform_operator_queue_item
-    fail = {"on": True}
+    fail = {"on": False}
 
     def create(*args, **kwargs):
         if fail["on"]:
@@ -640,13 +640,15 @@ async def test_a_failed_re_read_under_a_precedence_is_retried_on_the_next_poll(
         return real_create(*args, **kwargs)
 
     monkeypatch.setattr(db, "create_platform_operator_queue_item", create)
-    clock.advance(hours=7)
-    await _poll(service, failing)  # the re-read is due and its write fails
-    fail["on"] = False
-    assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == 1
-    clock.advance(**_MIN)
-    await _poll(service, failing)  # retried on the next poll, not in 6 h or never
-    assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == 2
+    for seen in (2, 3):  # twice in one episode: a retry must not depend on a one-off lookup
+        fail["on"] = True
+        clock.advance(hours=7)
+        await _poll(service, failing)  # the re-read is due and its write fails
+        fail["on"] = False
+        assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == seen - 1
+        clock.advance(**_MIN)
+        await _poll(service, failing)  # retried on the next poll, not in 6 h or never
+        assert db.get_operator_queue_item(row["id"])["context"]["seen_count"] == seen
 
 
 @pytest.mark.asyncio
