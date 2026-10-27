@@ -2196,8 +2196,10 @@ APPLY_RETRYABLE_BLOCKERS = frozenset({
 # agent, a shared-with-me agent, a soft-deleted name, a reserved volume base,
 # a container nobody owns). Byte-identical apart from the name, which the
 # caller supplied, so the code and the text never say which of those it is
-# (Invariant #8). Create mode's dry run already discloses existence through
-# its `_2` warning, so the refusal adds no oracle.
+# (Invariant #8). It adds no existence oracle: `POST /api/agents` already
+# answers 409 to any creator for a name that is taken, soft-deleted or
+# volume-reserved (`crud._check_name_availability`), and create mode's dry
+# run warns `_2` for a live one.
 _NAME_UNAVAILABLE_DETAIL = (
     "The agent name '{name}' is in use or reserved by an agent you cannot manage."
 )
