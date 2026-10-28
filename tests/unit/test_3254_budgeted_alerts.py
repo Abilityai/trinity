@@ -620,7 +620,7 @@ def _sync_loop(monkeypatch, *, over_cap=True):
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     svc = oqs.OperatorQueueSyncService()
-    return SimpleNamespace(svc=svc, state=state,
+    return SimpleNamespace(svc=svc, state=state, file=file,
                            cycle=lambda: asyncio.run(svc._sync_agent(AGENT)))
 
 
@@ -827,6 +827,81 @@ def test_a_persisting_flood_a_person_ended_files_again_once_the_snooze_lapses(se
     loop.cycle()                                   # a re-read after it
     (again,) = _flood_rows(seam, status="pending")
     assert again["context"]["episode_started_at"] == first["context"]["episode_started_at"]
+
+
+def test_a_sane_file_after_an_oversized_one_ends_the_alert_through_the_poll(seam, monkeypatch):
+    """I1: the oversize episode ends at `_sync_agent`'s sane-size read, through
+    the real poll, and its alert is ended as the platform."""
+    import json
+
+    from services import operator_queue_service as oqs
+
+    loop = _sync_loop(monkeypatch, over_cap=False)
+    sane = loop.file["content"]
+    monkeypatch.setattr(oqs, "OPERATOR_QUEUE_MAX_FILE_BYTES", len(sane) + 10)
+    loop.file["content"] = json.dumps({"requests": [], "pad": "x" * (len(sane) + 10)})
+    loop.cycle()
+    (row,) = _flood_rows(seam)
+    assert row["subject"] == "queue_flood:oversize_file"
+    loop.file["content"] = sane
+    loop.cycle()
+    ended = seam.db.get_operator_queue_item(row["id"])
+    assert (ended["status"], ended["disposed_by"], ended["disposition_reason"]) == (
+        "cancelled", "platform", "condition_cleared")
+
+
+def test_a_reread_does_not_delay_the_other_reasons_first_alert(seam):
+    """dolho I1: the per-agent cooldown spaces episodes; a 6-hourly re-read of
+    one reason's episode is not an episode, so it must not hold back the other
+    reason's first alert."""
+    from services import operator_queue_service as oqs
+
+    svc = oqs.OperatorQueueSyncService()
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))
+    seam.clock.advance(hours=6, seconds=1)
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))      # the re-read
+    (row,) = _flood_rows(seam)
+    assert row["context"]["seen_count"] == 2
+    seam.clock.advance(seconds=1)
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, reason="oversize_file"))
+    assert sorted(r["subject"] for r in _flood_rows(seam)) == [
+        "queue_flood:ingestion_cap", "queue_flood:oversize_file"]
+
+
+def test_the_reread_spacing_is_one_constant_for_the_gate_and_the_retry(seam, monkeypatch):
+    """I3: the re-read gate and a failed re-read's retry arithmetic read one
+    named spacing, so the two cannot drift: with it set to an hour, the re-read
+    lands after an hour, and a failed one is retried after the cooldown."""
+    from services import operator_queue_service as oqs
+
+    monkeypatch.setattr(oqs, "OPERATOR_QUEUE_FLOOD_REREAD_SECONDS", 60 * 60)
+    real = seam.db.create_platform_operator_queue_item
+    attempts = []
+
+    def _flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 2:
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", _flaky)
+    svc = oqs.OperatorQueueSyncService()
+    emit = lambda: asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))  # noqa: E731
+    emit()
+    seam.clock.advance(minutes=59)
+    emit()
+    assert len(attempts) == 1                      # inside the spacing
+    seam.clock.advance(minutes=1, seconds=1)
+    emit()
+    assert len(attempts) == 2                      # the re-read, which fails
+    seam.clock.advance(seconds=5)
+    emit()
+    assert len(attempts) == 2                      # inside the cooldown: no retry yet
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+    emit()
+    assert len(attempts) == 3
+    (row,) = _flood_rows(seam)
+    assert row["context"]["seen_count"] == 2
 
 
 def test_the_flood_sends_the_thin_sync_trigger_not_its_title(seam, monkeypatch):

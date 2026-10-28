@@ -118,6 +118,9 @@ OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
 )
+# #3254 R9: a persisting flood episode is re-read at most this often, the #3255
+# base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+OPERATOR_QUEUE_FLOOD_REREAD_SECONDS = 6 * 60 * 60
 
 # =========================================================================
 # #1677: budget for agent-INFLUENCEABLE platform alert emitters.
@@ -2751,14 +2754,16 @@ class OperatorQueueSyncService:
         reserved prefix. Softened wording to avoid cry-wolf (C9).
 
         Re-read while it lasts (#3254 R9): an episode that persists is observed
-        again at most every 6 hours, so the kind's 14-day lifetime ends only a
-        row nobody re-read (a lost clear), never one whose condition still
-        holds. The refresh time and the episode start per (agent, reason) live
-        in dicts this method creates on the instance for itself
-        (`_flood_refreshed_at`, `_flood_episode_started_at`).
+        again at most every `OPERATOR_QUEUE_FLOOD_REREAD_SECONDS` (6 hours), so
+        the kind's 14-day lifetime ends only a row nobody re-read (a lost
+        clear), never one whose condition still holds. The refresh time and the
+        episode start per (agent, reason) live in dicts this method creates on
+        the instance for itself (`_flood_refreshed_at`,
+        `_flood_episode_started_at`).
 
-        The cooldown and the episode are stamped BEFORE every reading (a re-read
-        included). Outcomes:
+        The episode and its refresh time are stamped BEFORE every reading; the
+        per-agent cooldown only before an episode's first reading, since it
+        spaces episodes and a re-read is not one. Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
             episode; a snoozed reading is a person's ending of this episode,
             which stands for the snooze window);
@@ -2786,10 +2791,9 @@ class OperatorQueueSyncService:
         started = vars(self).setdefault("_flood_episode_started_at", {})
         rereading = key in self._flood_episodes
         if rereading:
-            # R9: the 6-hour re-read of a persisting episode, the #3255
-            # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+            # R9: the re-read of a persisting episode.
             last_read = refreshed.get(key)
-            if last_read is not None and now - last_read < 6 * 60 * 60:
+            if last_read is not None and now - last_read < OPERATOR_QUEUE_FLOOD_REREAD_SECONDS:
                 return  # this episode already alerted and was read recently
         else:
             # `None` = never alerted for this agent. A `0.0` default would be
@@ -2802,9 +2806,9 @@ class OperatorQueueSyncService:
                 return  # too soon after the last episode — the next cycle retries
             self._flood_episodes.add(key)
             started[key] = utc_now_iso()
-        # Stamped before every reading, a re-read included, so a failed one —
-        # released below — is retried no sooner than the cooldown (I1).
-        self._flood_alert_cooldown[agent_name] = now
+            # Stamped before the first reading, so a failed one — released
+            # below — is retried no sooner than the cooldown (I1).
+            self._flood_alert_cooldown[agent_name] = now
         refreshed[key] = now
 
         if reason == "oversize_file":
@@ -2835,7 +2839,8 @@ class OperatorQueueSyncService:
             if rereading:
                 # keep the episode so its end still clears the alert; retry the
                 # re-read once the cooldown has passed
-                refreshed[key] = now - 6 * 60 * 60 + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS
+                refreshed[key] = (now - OPERATOR_QUEUE_FLOOD_REREAD_SECONDS
+                                  + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
             else:
                 self._flood_episodes.discard(key)  # retry next window (I1)
                 refreshed.pop(key, None)
