@@ -135,8 +135,8 @@ async def enforce(agent_name: str, *, requester, request_text: Optional[str],
         f"({'it was' if one else 'they were'} assigned from the skills library and "
         f"need{'s' if one else ''} a grant). If you only meant to mention "
         f"{'it' if one else 'them'}, write {'its name' if one else 'their names'} without "
-        f"the leading slash and send again. Do not carry out {'its' if one else 'their'} "
-        f"steps another way.",
+        f"the leading slash{'' if one else 'es'} and send again. Do not carry out "
+        f"{'its' if one else 'their'} steps another way.",
         skills=names, caller=caller, agent=agent_name)
 
 

@@ -546,7 +546,7 @@ _TWO = (
     f"Not run, nothing was delivered: this message names the skills pay-invoice, refund, "
     f"which {CALLER} may not run on {CALLEE} (they were assigned from the skills library "
     f"and need a grant). If you only meant to mention them, write their names without the "
-    f"leading slash and send again. Do not carry out their steps another way."
+    f"leading slashes and send again. Do not carry out their steps another way."
 )
 
 
