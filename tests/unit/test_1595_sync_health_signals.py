@@ -54,11 +54,18 @@ _STUBBED_MODULE_NAMES = [
     "database",
     "services.sync_health_service",
     "services.agent_client",
+    # #3254: the poller's alerts go through the platform-alert seam, so a test
+    # here can be the first to import these two, and they bind the `database`
+    # this file's tmp_db re-imports. Left loaded, a later file's clock pins
+    # miss them (an ack read as `expired` in test_3254_skills_alerts.py).
+    "services.ask_service",
+    "services.operator_queue_service",
 ]
 
 
 @pytest.fixture(autouse=True)
 def _restore_sys_modules():
+    from module_split_guard import unbind
     saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
     try:
         yield
@@ -66,6 +73,7 @@ def _restore_sys_modules():
         for name, value in saved.items():
             if value is None:
                 sys.modules.pop(name, None)
+                unbind(name)  # else `from services import X` keeps the popped copy (#3390)
             else:
                 sys.modules[name] = value
 
