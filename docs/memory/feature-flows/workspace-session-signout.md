@@ -249,6 +249,21 @@ completes, and the guard holds that navigation open across `checkSetupStatus()`,
 so a dead token's `/api/users/me` or ws-ticket 401 used to be judged as the
 dashboard: a `/chat/` visitor was pushed to `/login`, and a Workspace client lost
 the AC #5 veto the same way. Until the router settles, the address bar is used.
+The page to come back to is read the same way, query and hash included:
+`returnPath: fullPathForVerdict(router, START_LOCATION, window.location)` (#3444).
+
+**The way to `/login` carries the page (#3444, #3466).** A `logout` verdict pushes
+`loginLocation(returnPath)` — `/login?redirect=<the page>` — and `Login.vue` already
+returns there through `landingAfterSignIn` → `safeRedirect`. No `redirect` for `/`,
+for the sign-in pages themselves (`/login`, `/setup`, `/m`), or for anything
+`safeRedirect` would refuse. The router guard builds a logged-out deep link's
+location with the same function, and a signed-in visit to `/login?redirect=X` now
+lands on X (through `landingAfterSignIn`, so a Workspace-only member asking for an
+operator page still gets its Workspace counterpart) instead of `/`. This applies to
+a platform session that dies on the Workspace as much as on an operator page: an
+operator mid-chat whose token is dead goes to `/login?redirect=/workspace/c/<id>`
+and comes back to the chat. The public token pages are untouched — `logout-in-place`
+and `ignore` never navigate.
 
 **One handler.** `setPlatformUnauthorizedHandler` / `notifyPlatformUnauthorized`
 in `utils/platformSession.js`. The reaction is `reactToPlatformUnauthorized(error,
@@ -283,7 +298,29 @@ event would otherwise each clear it again.
 
 Neither branch navigates. A background tab pushing `/login` is the noise this
 issue reports; the visible tab converges through the router guard and its next
-request, both of which read the state these set.
+request, both of which read the state these set. **Except on the Workspace**,
+which has no guard (its routes carry no `requiresAuth`), and where a request with
+no stored token is `ignore`: there the tab converges on the Workspace sign-in card.
+Since #3466 that card says **"Have a Trinity account? Sign in"** under both steps,
+to `/login?redirect=<this page>` (or to the shared canvas a visitor came from),
+shown only while no platform session is held — so an operator signed out in
+another tab, or back after a reload, has the operator login one click away and
+returns to the chat. Still no automatic navigation, by this section's rule.
+
+**The real-time socket follows the same token (#3445).** `App.vue` watches
+`authStore.token` and hands it to `useWebSocket().followToken`, which decides with
+the pure `socketActionFor({ socketToken, token })`: a token appearing connects
+(every sign-in path, a sibling tab's included — before this the socket opened only
+on a page load that already held a token), a changed token reconnects with a fresh
+ticket, and no token disconnects. That last arm is the other half of the same
+cause: nothing used to close the socket, so after a sign-out it stayed open with
+the scope the server fixed for the previous session at connect (ent#467), and a
+sign-in in the same tab rode it. `disconnect()` is deliberate — it bumps a
+generation that cancels the 5 s retry timer and a ticket still being minted, drops
+the replay cursor (`lastEventId` belongs to the old session), and each socket's
+handlers answer for their own socket only, so a late close event cannot null the
+replacement or schedule a duplicate. A dropped connection and #837's rescope
+(close 4000) still reconnect after 5 s; an auth rejection (4001) still does not.
 
 ## Stated residuals (not hidden)
 
@@ -304,13 +341,17 @@ request, both of which read the state these set.
 ## Files
 
 - `src/frontend/src/stores/clientPortal.js` — `signOutEverywhere()`, `PLATFORM_LOGIN_ROUTE`
-- `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry; #3406: the public token page arms, `isBearerChallenge`, `pathForVerdict`
+- `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry; #3406: the public token page arms, `isBearerChallenge`, `pathForVerdict`; #3444: `loginLocation`, `fullPathForVerdict`
+- `src/frontend/src/router/index.js` — #3444: a logged-out deep link → `loginLocation(to.fullPath)`; a signed-in `/login?redirect=X` → X
+- `src/frontend/src/App.vue`, `src/frontend/src/utils/websocket.js` — #3445: the socket follows `authStore.token` (`followToken`, `socketActionFor`)
 - `src/frontend/src/stores/auth.js` — `logout()` local-clear-before-revoke ordering; `adoptStoredSession` / `applySessionEndedElsewhere`
 - `src/frontend/src/main.js` — global request interceptor, the registered reaction, the `storage` listener
 - `src/frontend/src/api.js` — reports to the shared handler (no private predicate, no hard reload)
-- `src/frontend/src/views/Portal.vue` — `onSignOut`, `signingOut` frame
+- `src/frontend/src/views/Portal.vue` — `onSignOut`, `signingOut` frame; #3466: the sign-in card's "Have a Trinity account? Sign in" line
 - `src/frontend/src/components/portal/PortalSidebar.vue` — footer button + caption
 - `src/frontend/src/components/portal/portalUtils.js` — `signOutLabelFor`
 - `src/frontend/tests/unit/workspaceSession.spec.js`, `workspaceSignOut.spec.js`,
   `platformSessionVerdict.spec.js`, `platformSessionSync.spec.js`,
-  `publicSurfaceRoutes.spec.js` (#3406)
+  `publicSurfaceRoutes.spec.js` (#3406), `loginReturnPath.spec.js` (#3444/#3466, the real
+  router + `Login.vue`, with #3406's visitor path pinned beside it),
+  `workspacePlatformLogin.mount.spec.js` (#3466), `appSocketFollowsToken.mount.spec.js` (#3445)

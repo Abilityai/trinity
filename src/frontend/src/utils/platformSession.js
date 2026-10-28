@@ -19,10 +19,10 @@
  *   5. **how other tabs find out** — `reactToStorageEvent()`, driven by the
  *      `storage` listener `main.js` installs.
  *
- * Everything decidable is a pure function of its arguments, because
- * `vitest.config.js` pins `environment: 'node'` with no mount harness: a rule
- * that lives inside an interceptor closure is a rule no unit test can reach, and
- * this file exists precisely because three copies of one rule drifted. The
+ * Everything decidable is a pure function of its arguments: a rule that lives
+ * inside an interceptor closure in `main.js` is a rule no unit test can reach
+ * (`main.js` mounts the app on import), and this file exists precisely because
+ * three copies of one rule drifted. The
  * first version of this fix kept (3)–(5) inline in `main.js` and pinned them by
  * regex over the source; a mutation battery (restore the reported bug on the
  * `stale` branch, invert the storage listener) stayed fully green. The
@@ -31,8 +31,12 @@
  * and watch what is CALLED, and `main.js` is left with wiring only.
  */
 
+import { safeRedirect } from './safeRedirect'
+
 export const TOKEN_KEY = 'token'
 export const USER_KEY = 'auth0_user'
+
+const LOGIN_ROUTE = '/login'
 
 /** Routes that are already the way out — bouncing from them is a loop. */
 const AUTH_ROUTES = ['/login', '/setup', '/m']
@@ -54,6 +58,26 @@ const SHARED_CANVAS_PREFIX = '/canvas/s/'
 
 export function isAuthRoute(path) {
   return AUTH_ROUTES.includes(path || '')
+}
+
+/**
+ * The way to the login page, carrying the page to come back to (#3444).
+ *
+ * `Login.vue` has honoured `?redirect=` since #3406; the router guard and the
+ * 401 reaction both sent a bare `/login`, so a deep link opened while signed
+ * out, or a page whose session died under it, came back to the dashboard.
+ * Both build the location here now. No `redirect` for the dashboard (that is
+ * where a sign-in lands anyway), for the sign-in pages themselves (a loop), or
+ * for anything `safeRedirect` would refuse on the way back.
+ *
+ * @param {string} returnPath   the full path (path + query + hash) to return to
+ * @returns {{ path: string, query?: { redirect: string } }}
+ */
+export function loginLocation(returnPath) {
+  const target = safeRedirect(returnPath, null)
+  const path = target ? target.split(/[?#]/)[0] : ''
+  if (!target || path === '/' || isAuthRoute(path)) return { path: LOGIN_ROUTE }
+  return { path: LOGIN_ROUTE, query: { redirect: target } }
 }
 
 export function isWorkspacePath(path) {
@@ -334,22 +358,43 @@ export function pathForVerdict(router, startLocation, locationPath = '') {
 }
 
 /**
+ * The page a 401 happened on, query and hash included — the return path a
+ * `logout` verdict sends to `/login` (#3444). The same rule as
+ * `pathForVerdict`: until the first navigation settles, the address bar.
+ *
+ * @param {object} router          the app router
+ * @param {object} startLocation   vue-router's `START_LOCATION`
+ * @param {{pathname?: string, search?: string, hash?: string}} location  `window.location`
+ */
+export function fullPathForVerdict(router, startLocation, location = {}) {
+  const current = router?.currentRoute?.value
+  if (!current || current === startLocation || !current.path) {
+    return `${location.pathname || ''}${location.search || ''}${location.hash || ''}`
+  }
+  return current.fullPath || current.path
+}
+
+/**
  * Act on a 401. The ONE reaction, behind the ONE verdict.
  *
  * @param {object} error         the axios error (only `config` is read)
  * @param {object} deps
  * @param {string} deps.path                  the current route path
+ * @param {string} [deps.returnPath]          the full page to come back to after
+ *                                            signing in (#3444); defaults to `path`
  * @param {boolean} deps.portalTokenPresent   does THIS TAB hold a client session
  * @param {() => string|null} [deps.readToken]
  * @param {() => void} deps.adoptStoredSession   authStore.adoptStoredSession
  * @param {() => unknown} deps.logout             authStore.logout — NOT awaited
- * @param {() => Promise|unknown} deps.goToLogin  router.push('/login')
+ * @param {(location: object) => Promise|unknown} deps.goToLogin
+ *                                            router.push — handed `loginLocation(returnPath)`
  * @returns {{ verdict: 'ignore'|'stale'|'logout'|'logout-in-place', navigation: unknown }}
  *   `navigation` is whatever `goToLogin` returned, so the caller can absorb a
  *   rejected (redundant) navigation — see `notifyPlatformUnauthorized`.
  */
 export function reactToPlatformUnauthorized(error, {
   path = '',
+  returnPath = path,
   portalTokenPresent = false,
   readToken = readStoredToken,
   adoptStoredSession,
@@ -384,7 +429,9 @@ export function reactToPlatformUnauthorized(error, {
   // #3406 — a public token page shows its own sign-in; leaving it would take
   // the visitor away from the link they opened.
   if (verdict === 'logout-in-place') return { verdict, navigation: undefined }
-  return { verdict, navigation: goToLogin() }
+  // #3444 — on an operator page and on the Workspace alike (#3466), the page
+  // the session died on rides along, so signing in comes back to it.
+  return { verdict, navigation: goToLogin(loginLocation(returnPath)) }
 }
 
 /**
