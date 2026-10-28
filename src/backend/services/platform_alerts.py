@@ -564,8 +564,12 @@ def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Ma
     old = _as_context(ended.get("context"))
     # #3254 (D11): a material key the ended row does not carry is not a change.
     # An unknown old value shows nothing moved, and rows filed before the key
-    # existed (pre-seam legacy rows) carry none.
-    return all(k not in old or context.get(k) == old.get(k) for k in kind.material_keys)
+    # existed (pre-seam legacy rows) carry none. Not for a kind whose ending is
+    # final: there it would silence every later value for good, so a keyless
+    # ending re-alerts once and the new row carries the key.
+    lenient = not kind.person_ending_is_final
+    return all((lenient and k not in old) or context.get(k) == old.get(k)
+               for k in kind.material_keys)
 
 
 def _spawn(factory: Callable[[], Any]) -> None:

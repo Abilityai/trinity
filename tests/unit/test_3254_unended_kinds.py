@@ -413,8 +413,12 @@ class TestCollisionEndingIsFinal:
 
 
 class TestCollisionUpgradeSequences:
-    """Both stay snoozed although the legacy rows carry no `claimants_digest`:
-    a material key missing from the ended row is not a change (D11)."""
+    """A legacy row carries no `claimants_digest`, so it cannot say whether a
+    later reading is the claimant set a person ended or a new one. For this
+    final-ending kind a missing key counts as a change (dolho,
+    platform_alerts.py:568): each such collision re-alerts once, as one a
+    person ended before the sweep's window already does, and the new row's
+    ending is final for its set."""
 
     def test_a_legacy_collision_ended_inside_the_sweeps_window(self, db, pa, cps, clock, agent):
         legacy = _legacy_collision(db, agent, clock)
@@ -427,7 +431,9 @@ class TestCollisionUpgradeSequences:
             f"portal_inbox_collision:{LEGACY_DIR}"
         clock.advance(hours=1)
         cps._alert_collided_inbox(agent, LEGACY_DIR, CLAIMANTS)
-        assert _pending(db, agent) == []
+        (again,) = _pending(db, agent)                 # the one re-alert
+        assert again["context"]["claimants_digest"]
+        _acknowledge(again)
         clock.advance(days=30)
         _age_collision_memo(cps)
         cps._alert_collided_inbox(agent, LEGACY_DIR, CLAIMANTS)
@@ -446,7 +452,32 @@ class TestCollisionUpgradeSequences:
         _acknowledge(stamped)
         clock.advance(hours=1)
         cps._alert_collided_inbox(agent, LEGACY_DIR, CLAIMANTS)
-        assert _pending(db, agent) == []
+        (again,) = _pending(db, agent)
+        assert again["id"] != legacy["id"]
+
+    def test_a_legacy_ending_without_a_digest_never_silences_a_new_claimant(
+            self, db, pa, cps, clock, agent):
+        """dolho's scenario: a collision acknowledged before the upgrade and
+        stamped by the sweep; after it, a third share maps to the same folder.
+        The new claimant is alerted."""
+        legacy = _legacy_collision(db, agent, clock)
+        clock.advance(days=1)
+        _acknowledge(legacy)
+        clock.advance(days=2)
+        assert _sweep(agent, clock.now())["snoozed"] == 1
+        clock.advance(days=10)
+        third = CLAIMANTS + ["victim!x@example.com"]
+        cps._alert_collided_inbox(agent, LEGACY_DIR, third)
+        (fresh,) = _pending(db, agent)
+        assert "victim!x@example.com" in fresh["question"]
+
+    def test_a_non_final_kind_still_reads_a_missing_key_as_no_change(self, pa):
+        """The leniency stays for a kind whose ending is a 7-day snooze, where
+        it is bounded by the window."""
+        kind = pa.KINDS["subscription_headroom"]
+        assert not kind.person_ending_is_final and kind.material_keys == ("tier",)
+        ended = {"priority": "high", "context": {}}
+        assert pa._snoozed_by(kind, ended, "high", {"tier": "warn"}) is True
 
 
 # ---------------------------------------------------------------------------
