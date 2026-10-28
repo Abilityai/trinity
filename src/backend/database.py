@@ -1904,6 +1904,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1943,8 +1947,11 @@ class DatabaseManager:
             agent_name, claude_session_id, user_id
         )
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50):
-        return self._schedule_ops.get_schedule_executions(schedule_id, limit)
+    def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
+                                source_user_id=None, include_unattributed=False):
+        return self._schedule_ops.get_schedule_executions(
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1954,7 +1961,7 @@ class DatabaseManager:
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
                                      exclude_triggers=None, scope_to_viewer=False,
-                                     viewer_email=None):
+                                     viewer_email=None, source_user_id=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1964,7 +1971,8 @@ class DatabaseManager:
         """
         return self._schedule_ops.get_agent_executions_summary(
             agent_name, limit, exclude_triggers=exclude_triggers,
-            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email,
+            source_user_id=source_user_id)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -1976,9 +1984,11 @@ class DatabaseManager:
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
-    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200, *,
+                               source_user_id=None):
         """Every execution row of one fan-out batch (#2670)."""
-        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+        return self._schedule_ops.get_fan_out_executions(
+            agent_name, fan_out_id, limit, source_user_id=source_user_id)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -2008,9 +2018,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
@@ -2278,8 +2289,10 @@ class DatabaseManager:
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 
-    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
-        return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
+    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None, *, own_rows_user_id=None, own_rows_exempt_agents=None):
+        return self._activity_ops.get_activities_in_range(
+            start_time, end_time, activity_types, limit, agent_names,
+            own_rows_user_id=own_rows_user_id, own_rows_exempt_agents=own_rows_exempt_agents)
 
     def get_latest_activity_for_agents(self, agent_names: list):
         return self._activity_ops.get_latest_activity_for_agents(agent_names)
