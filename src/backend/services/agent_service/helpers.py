@@ -484,10 +484,17 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
 _SHARED_IN_PREFIX = "/home/developer/shared-in/"
 
 
-async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
+async def check_shared_folder_mounts_match(container, agent_name: str, *, strict: bool = False) -> bool:
     """
     Check if container's shared folder mounts match the current config.
     Returns True if mounts are correct, False if recreation needed.
+
+    ``strict`` (trinity-enterprise#695, keyword-only, default False so the
+    start path is unchanged): re-raise a source-volume inspect that failed
+    for a reason other than NotFound instead of keeping the mount. The start
+    path wants "unknown" to mean "do not recreate"; a caller that REPORTS the
+    answer (system apply's `restart_required`) must not present an unknown
+    as "matches".
     """
     config = db.get_shared_folder_config(agent_name)
     if not config:
@@ -531,6 +538,8 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
                 # Docker unreadable is not "no volume" (#2196): an unknown
                 # answer must not read as drift and recreate a running
                 # container, so keep whatever mount is there.
+                if strict:
+                    raise
                 if mount_path in mount_dests:
                     expected.add(mount_path)
                 continue
