@@ -6663,6 +6663,52 @@
       "description": "Two agent failures no credential can fix never drive SUB-003. The agent's turn-limit 422 at caps 401 and 403 (CLI text and fallback, through the real _finalize_headless_result) no longer trips the bare 401/403 auth indicators; the API's 'Prompt is too long' 503 (current and pre-#3340 images) is not auth. classify_switch_failure returns None for both; execute_task calls the agent once with no walk, no legacy switch, no key fallback and no AUTH code; /chat never switches and codes agent_error; the pull terminal and #1083 callback do not count a prompt-length 503 as auth (the pull sink recodes a worker's `auth` prompt-length/model-rejection terminal to agent_error/model_unsupported, so the AUTH dispatch breaker never sees it and the row is not stored as [auth]); the TES path pins the exact error_code per row (None for the 422s, agent_error for the 503s). Genuine auth (503, 401/403, auth text) and 429 keep their classification; the turn-limit marker is pinned to the agent's source and the scheduler mirror carries both lists. Mutations: dropping the call-site guards turns 8 red; dropping the turn-limit exclusion in is_auth_failure turns 7 red."
     },
     {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent875_workspace_work_own_rows.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
+    },
+    {
       "file": "unit/test_sqlite_upgrade_parity_guard.py",
       "feature": "#3395",
       "added": "2026-10-26",
