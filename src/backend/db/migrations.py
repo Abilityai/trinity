@@ -4921,7 +4921,7 @@ def _migrate_idempotency_claim_token(cursor, conn):
     on the token, so the original request, if it was only slow, cannot overwrite
     or delete the reclaimer's row. Nullable, no backfill: a pre-existing claim
     has no token and is matched by `IS NULL`.
-    PostgreSQL half: Alembic `0104_idempotency_claim_token`.
+    PostgreSQL half: Alembic `0105_idempotency_claim_token`.
     """
     _safe_add_column(
         cursor,
