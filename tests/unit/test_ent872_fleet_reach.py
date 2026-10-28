@@ -814,6 +814,8 @@ _ALLOW = {
         "background cleanup loop: no principal",
     ("services/skills_sync_service.py", "_eligible_agents"):
         "background sweep, or the skills-library route behind require_admin + reject_agent_principal",
+    ("services/turn_tier_service.py", "turn_tier"):
+        "the role compared is the turn starter's user row (a person), never the caller's; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",
     ("services/ws_identity_service.py", "accessible_agents_for"):
@@ -1009,6 +1011,13 @@ _DB_EXEMPT = {
         "takes the deploying username; the deploy route is capability-fenced (agents.manage)",
     ("services/agent_service/crud.py", "reconcile_declared_schedules"):
         "takes the owner's username to seed template schedules at create/recreate",
+    ("services/system_service.py", "_run_op"):
+        "apply executor: creates a schedule as the member's OWNER only after read_apply_snapshot "
+        "classified the member manageable (can_user_share_agent + agent_may_reach(manage=True)); "
+        "the apply route is require_person (trinity-enterprise#695)",
+    ("services/system_service.py", "_apply_created_schedules"):
+        "apply executor: schedules of a member this same run created, as its creator; the apply "
+        "route is require_person, so no agent key reaches it (trinity-enterprise#695)",
 }
 
 
