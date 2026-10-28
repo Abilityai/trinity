@@ -206,6 +206,9 @@ async def prepare_chat_execution(
             # #2806: from admission — None for a non-agent principal (a root).
             chain_depth=chain_depth,
         ),
+        # #3989: the row takes the admission id, which is also the capacity
+        # slot member, so canary S-01 and the slot views resolve to this row.
+        execution_id=chat_execution_id,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -214,8 +217,7 @@ async def prepare_chat_execution(
     )
 
     # trinity-enterprise#752: the self-approval is recorded on THIS row — the
-    # id `build_chat_payload` sends — never on the admission's capacity-slot
-    # id, which no agent ever sees. Such a turn also runs in its own session.
+    # id `build_chat_payload` sends. Such a turn also runs in its own session.
     isolated_session = bool(gate is not None and not gate.ungated and gate.self_approved_by)
     if gate is not None:
         await skill_gate_service.record_self_approval(
@@ -544,8 +546,8 @@ async def _finalize_chat_success(
 
     # Add execution metadata to response
     response_data["execution"] = {
-        "id": execution.id,  # Queue ID (transient)
-        "task_execution_id": task_execution_id,  # Database ID (permanent)
+        "id": execution.id,  # Same as task_execution_id (#3989); kept for clients
+        "task_execution_id": task_execution_id,  # Database ID
         "queue_status": queue_result,
         "was_queued": is_queued,
         # #2958 AC3: None, or {events, trigger, pre_tokens, post_tokens, duration_ms}.
@@ -1854,6 +1856,7 @@ async def run_async_task(
             # backlog drain) is downstream of the /task admission seam's skill gate,
             # and every enqueue into the backlog happens after a gate check.
             gate_checked=True,
+            max_turns=request.max_turns,  # #2328: the caller's per-task turn cap
         )
 
         execution_time_ms = int((datetime.utcnow() - start_time).total_seconds() * 1000)
@@ -2714,6 +2717,7 @@ async def _dispatch_sync_immediate(
         images=image_data,
         dispatch_gate_checked=True,  # #526: router already gated at acquire()
         gate_checked=True,  # ent#751: the /task admission seam ran the skill gate
+        max_turns=request.max_turns,  # #2328: the caller's per-task turn cap
     )
 
     if collaboration_activity_id:
@@ -2892,6 +2896,7 @@ async def dispatch_parallel_task(
                     source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
                     chain_depth=chain_depth,
+                    max_turns=request.max_turns,
                 ),
                 **skill_gate_service.frozen_replay(request.message, request.system_prompt),
             },

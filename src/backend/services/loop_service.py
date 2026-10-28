@@ -43,6 +43,14 @@ next iteration. That is also what makes it safe for `_run_and_advance` to call
 the advance directly on a fast-fail return *and* for the terminal hook to call
 it: whichever gets there first wins, exactly once.
 
+That makes the *close* of run N exactly-once; the *dispatch* of run N+1 has a
+second door. A park (`next_run_at`) also leads to a dispatch, and a booting
+worker's `reconcile_after_restart` can write one while another worker is between
+closing run N and starting run N+1 (#3317). So every dispatch also goes through
+`db.start_loop_run`, which is itself a claim: inserting run K requires
+`runs_completed = K-1` and no row numbered K or above, decided under the loop
+row's lock. Two dispatchers of one iteration produce one run row and one turn.
+
 Stop-condition precedence is preserved from the `for`-loop implementation:
     user_stopped > deadline_exceeded > budget_exhausted   (next-iteration gate)
     stop_signal_matched > no_progress                     (post-run gate)
@@ -60,7 +68,7 @@ import hashlib
 import json
 import logging
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from database import db
@@ -76,6 +84,17 @@ logger = logging.getLogger(__name__)
 
 # Truncate previous_response to its trailing 2000 chars per spec
 PREV_RESPONSE_TRUNCATE_CHARS = 2000
+
+# #3317: how long after a loop's last recorded close a re-armed park falls due.
+# A precedence margin, not a bound and not the correctness guarantee. A live
+# worker that closed run N normally claims run N+1 well inside it (a handful of
+# synchronous DB calls) and its claim spends the park, so the worker that ran
+# run N's post-run gates decides what comes next; a worker that really died is
+# recovered at most this long after its last close. One dispatch per run comes
+# from the claim in `db.start_loop_run` whatever this is. Same order as
+# RETAINED_RESULT_CLAIM_GRACE_SECONDS, for the same reason: a live writer reads
+# as absent for a window.
+LOOP_REARM_GRACE_SECONDS = 180
 
 
 # WebSocket manager injected from main.py
@@ -147,6 +166,68 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(str(value).replace("Z", "").replace("+00:00", ""))
     except (TypeError, ValueError):
         return None
+
+
+def _utc_naive(value: Any) -> Optional[datetime]:
+    """A stored timestamp as naive UTC whatever its suffix or offset.
+
+    None when it cannot be read, the empty string included. Not `_parse_iso`,
+    which keeps a non-UTC offset aware and so cannot be compared with the
+    naive clock.
+    """
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed
+
+
+def _rearm_due_at(loop: dict, runs: list, now: datetime) -> datetime:
+    """When a re-armed loop's park falls due: `max(now, anchor + grace)` (#3317).
+
+    `anchor` is the newest `completed_at` among the loop's closed runs. A loop
+    with no closed run uses its `started_at`, and its `created_at` only when
+    `started_at` is absent (missing or NULL). Conservative on bad input: a stamp
+    that is present but unreadable (the empty string included; any closed run's,
+    or the start or creation stamp it would use), no stamp at all, or an anchor
+    in the future (clock skew) treats the loop as just closed, due at
+    `now + grace`, and logs a WARNING. For any `now` at which `now + grace` is
+    representable the result lies in `[now, now + grace]` and no input raises;
+    at an unrepresentable instant it returns `now`.
+
+    No database access and no await (it may log a WARNING):
+    `rearm_lost_dispatch` calls it while holding the loop row.
+    """
+    grace = timedelta(seconds=LOOP_REARM_GRACE_SECONDS)
+    try:
+        just_closed = now + grace
+    except OverflowError:
+        return now
+    closed = [r for r in runs if r.get("status") != "running"]
+    if closed:
+        source = "last close"
+        stamps = [_utc_naive(r.get("completed_at")) for r in closed]
+        anchor = None if any(s is None for s in stamps) else max(stamps)
+    else:
+        source, raw = "start", loop.get("started_at")
+        if raw is None:
+            source, raw = "creation", loop.get("created_at")
+        anchor = _utc_naive(raw)
+    if anchor is None:
+        logger.warning(
+            "[Loop] %s re-arm: %s timestamp unreadable; due %ds from now",
+            loop.get("id"), source, LOOP_REARM_GRACE_SECONDS,
+        )
+        return just_closed
+    if anchor > now:
+        logger.warning(
+            "[Loop] %s re-arm: %s timestamp %s is in the future; due %ds from now",
+            loop.get("id"), source, anchor.isoformat(), LOOP_REARM_GRACE_SECONDS,
+        )
+        return just_closed
+    return max(now, anchor + grace)
 
 
 class _DerivedState:
@@ -405,8 +486,21 @@ class LoopService:
             it: the event was lost with the restart, and `runs_completed` has
             not moved, so re-arming would dispatch a second row for the same
             `run_number`;
-          * a loop with no open run lost its dispatch and is re-armed by making
-            it due now.
+          * a loop with no open run is re-armed by parking it, due
+            `LOOP_REARM_GRACE_SECONDS` after its last recorded close
+            (`_rearm_due_at`), or at once when that is already past.
+
+        #3317: "no open run" is also what a LIVE advance on another worker looks
+        like between closing run N and claiming run N+1; in the row the two are
+        identical. So the snapshot only pre-filters. The decision is
+        `db.rearm_lost_dispatch`, made under the loop row's lock on what the row
+        and its runs say at that moment, and the claim in `db.start_loop_run`
+        keeps run N+1 to one dispatch whichever worker gets there. The grace on
+        the park gives a live worker the first claim, so the worker that ran
+        run N's post-run gates (stop signal, failure policy, pause) decides
+        what follows it. A closed run numbered past `runs_completed` with
+        nothing in flight is reported (`stuck`), not re-armed: that would
+        dispatch a run number that already exists.
 
         Returns the number of loops this call moved (re-armed or advanced).
         """
@@ -420,14 +514,22 @@ class LoopService:
         for loop in loops:
             try:
                 if loop.get("next_run_at"):
-                    continue  # parked — the sweep owns it
-                open_run = self._open_run(loop["id"])
-                if open_run is None:
-                    # Nothing in flight and nothing parked: the dispatch was
-                    # lost. Make it due now.
-                    db.schedule_loop_next_run(loop["id"], utc_now_iso())
+                    continue  # parked in the snapshot — the sweep owns it
+                outcome, open_run = db.rearm_lost_dispatch(
+                    loop["id"], due_for=self._rearm_due_for
+                )
+                if outcome == "armed":
                     moved += 1
                     continue
+                if outcome == "stuck":
+                    logger.warning(
+                        "[Loop] %s has a closed run numbered past runs_completed "
+                        "and nothing in flight; not re-armed (that would dispatch "
+                        "a run number that already exists)", loop["id"],
+                    )
+                    continue
+                if outcome != "open_run":
+                    continue  # parked, finished or deleted since the snapshot
                 if self._execution_is_live(open_run.get("execution_id")):
                     continue  # its terminal will advance the loop
                 # The run's execution is already terminal (or gone) — the
@@ -445,12 +547,10 @@ class LoopService:
     # ---- Internals ----------------------------------------------------------
 
     @staticmethod
-    def _open_run(loop_id: str) -> Optional[dict]:
-        """The loop's run row still awaiting a terminal, if any."""
-        for run in db.list_loop_runs(loop_id):
-            if run.get("status") == "running":
-                return run
-        return None
+    def _rearm_due_for(loop: dict, runs: list) -> str:
+        """`rearm_lost_dispatch`'s `due_for`: the park, in the sweep's format."""
+        due = _rearm_due_at(loop, runs, datetime.utcnow())
+        return due.isoformat(timespec="microseconds") + "Z"
 
     @staticmethod
     def _execution_is_live(execution_id: Optional[str]) -> bool:
@@ -678,11 +778,10 @@ class LoopService:
                 )
                 return False
 
-        await self._dispatch_run(loop, run_number=next_run_number)
-        return True
+        return await self._dispatch_run(loop, run_number=next_run_number)
 
-    async def _dispatch_run(self, loop: dict, *, run_number: int) -> None:
-        """Create the execution + run rows, then dispatch without awaiting the turn.
+    async def _dispatch_run(self, loop: dict, *, run_number: int) -> bool:
+        """Create the execution row, claim the run, then dispatch without awaiting the turn.
 
         The execution row is created HERE rather than inside `execute_task` so
         `agent_loop_runs.execution_id` is stamped before the turn can produce a
@@ -690,6 +789,14 @@ class LoopService:
         find its iteration (#2523). Under pull the dispatch returns as soon as
         the row is queued; under push it returns when the turn ends. Either way
         this coroutine does not wait for it.
+
+        #3317: inserting the run row is a claim (`db.start_loop_run`), because
+        two dispatchers can reach the same iteration: the worker that closed the
+        previous run, and a sweep that took a park a booting worker's reconcile
+        wrote while the first was mid-advance. Only the claim's winner spawns
+        the turn; the loser closes the execution row it created as `skipped`.
+
+        Returns True when this call dispatched the run.
         """
         loop_id = loop["id"]
         message = _render_template(
@@ -722,10 +829,43 @@ class LoopService:
                 stop_reason="error",
                 error=f"Iteration {run_number}: could not create the execution record",
             )
-            return
+            return False
 
-        db.start_loop_run(loop_id, run_number, execution_id=execution.id)
+        if db.start_loop_run(loop_id, run_number, execution_id=execution.id) is None:
+            await self._abandon_superseded_dispatch(loop_id, run_number, execution.id)
+            return False
         _spawn(self._run_and_advance(loop, run_number, execution.id, message))
+        return True
+
+    @staticmethod
+    async def _abandon_superseded_dispatch(
+        loop_id: str, run_number: int, execution_id: str
+    ) -> None:
+        """Close the execution row of a dispatch whose run claim was lost (#3317).
+
+        The row was created `running` and never handed to `execute_task`, so it
+        is closed `skipped` (not run), not `cancelled` (a user's terminate, #671)
+        and not `failed` (nothing failed). No terminal event is emitted: there
+        is no turn to report, and the loop advances from the winner's run. The
+        activity close keeps execution.md's rule that a terminal writer closes
+        its paired dispatch activity; none was opened here, so it is a no-op.
+        """
+        from models import TaskExecutionStatus
+        from services.activity_service import activity_service
+
+        error = f"superseded: run {run_number} of loop {loop_id} was already dispatched"
+        logger.warning(
+            "[Loop] %s run %d was already dispatched; execution %s not run",
+            loop_id, run_number, execution_id,
+        )
+        db.update_execution_status(
+            execution_id=execution_id,
+            status=TaskExecutionStatus.SKIPPED,
+            result=ExecutionResult(error=error),
+        )
+        await activity_service.close_execution_activity(
+            execution_id, TaskExecutionStatus.SKIPPED, error=error,
+        )
 
     async def _run_and_advance(
         self, loop: dict, run_number: int, execution_id: str, message: str

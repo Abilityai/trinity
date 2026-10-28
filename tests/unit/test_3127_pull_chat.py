@@ -643,6 +643,14 @@ def test_disconnect_does_not_cancel_the_handler():
     async def _b(request: Request, call_next):
         return await call_next(request)
 
+    # trinity-enterprise#873: main.py's client-address resolver, outermost
+    # but for the Host guard. Pure ASGI that never wraps `receive`, so a client
+    # disconnect must still not reach the handler as a cancellation.
+    from utils.client_ip import ClientAddressMiddleware, load_config
+
+    app.add_middleware(ClientAddressMiddleware,
+                       config=load_config({"TRINITY_BUNDLED_PROXY_TRUST": "1"}))
+
     async def main():
         msgs = [{"type": "http.request", "body": b"", "more_body": False}]
 
@@ -676,7 +684,8 @@ def test_main_registers_only_the_checked_http_middleware():
     there must be re-checked against client disconnects."""
     src = (Path(_BACKEND_STR) / "main.py").read_text()
     assert src.count('@app.middleware("http")') == 2
-    assert src.count("app.add_middleware(") == 2  # CORSMiddleware, HostHeaderGuard
+    # CORSMiddleware, ClientAddressMiddleware (ent#873), HostHeaderGuard
+    assert src.count("app.add_middleware(") == 3
 
 
 # ---------------------------------------------------------------------------

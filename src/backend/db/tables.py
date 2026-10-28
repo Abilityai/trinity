@@ -1068,6 +1068,7 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    Column("git_stats_at", Text),  # #4000: when the agent measured the git stats (ISO-Z)
     # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
     # once, cleared on return to 0), the porcelain change count, and the last
     # push that actually landed. All nullable, no backfill.
