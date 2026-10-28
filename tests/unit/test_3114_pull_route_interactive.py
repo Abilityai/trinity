@@ -781,6 +781,9 @@ async def test_stream_holds_while_queued_then_attaches_after_the_claim(seed_agen
     monkeypatch.setattr(sync_waiter, "STREAM_ATTACH_RETRY_INTERVAL", 0.01)
     monkeypatch.setattr(chat, "get_agent_container", lambda n: SimpleNamespace(status="running"))
     monkeypatch.setattr(chat, "agent_httpx_client", client)
+    # ent#875: these tests are about the queued-claim stream, not the viewer tier;
+    # the bare stub caller is not a person, so declare the owner tier (no row scope).
+    monkeypatch.setattr(chat, "viewer_row_scope", lambda u, a: None)
     resp = await chat.stream_execution_log(
         execution_id="e1", name=AGENT, current_user=SimpleNamespace(id=1))
     body = resp.body_iterator
@@ -805,6 +808,9 @@ async def test_stream_off_pilot_is_unchanged(seed_agent, monkeypatch):
 
     monkeypatch.setattr(chat, "get_agent_container", lambda n: SimpleNamespace(status="running"))
     monkeypatch.setattr(chat, "agent_httpx_client", client)
+    # ent#875: these tests are about the queued-claim stream, not the viewer tier;
+    # the bare stub caller is not a person, so declare the owner tier (no row scope).
+    monkeypatch.setattr(chat, "viewer_row_scope", lambda u, a: None)
     resp = await chat.stream_execution_log(
         execution_id="e1", name=AGENT, current_user=SimpleNamespace(id=1))
     chunks = [c async for c in resp.body_iterator]

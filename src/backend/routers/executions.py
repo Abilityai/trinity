@@ -23,7 +23,7 @@ from models import (
     FleetExecutionSummary,
     User,
 )
-from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+from services.agent_service.helpers import accessible_agent_names, narrow_to_agent, viewer_own_rows
 
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
@@ -186,6 +186,12 @@ async def list_fleet_executions(
 ):
     """List executions across all accessible agents with optional filters."""
     agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
+    # trinity-enterprise#875: on every agent the caller does not own, the list
+    # (and the `search` over message text) is the caller's own executions,
+    # narrowed in the WHERE before the LIMIT/OFFSET.
+    own_uid, own_exempt = viewer_own_rows(current_user)
+    own_rows = {} if own_uid is None else {
+        "own_rows_user_id": own_uid, "own_rows_exempt_agents": own_exempt}
     rows = db.get_fleet_executions(
         agent_names,
         status=status if status in _VALID_STATUSES else None,
@@ -194,5 +200,6 @@ async def list_fleet_executions(
         search=search,
         limit=limit,
         offset=offset,
+        **own_rows,
     )
     return [FleetExecutionSummary(**r) for r in rows]

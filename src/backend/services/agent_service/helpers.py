@@ -353,6 +353,49 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     return [a["name"] for a in get_accessible_agents(current_user)]
 
 
+def viewer_own_rows(current_user: User) -> tuple:
+    """`(own_rows_user_id, own_rows_exempt_agents)` for a fleet-level read of
+    executions or activity (trinity-enterprise#875).
+
+    The fleet routes span every agent the caller can reach, and the answer is
+    per agent: on an agent the caller OWNS (or as an admin) every row is theirs
+    to see; on any other agent they can reach, just the rows they started.
+
+    The rule is written as an EXEMPTION list, not a list of the agents to narrow:
+    narrowing is the default and only an agent the caller provably owns escapes
+    it. An agent that is reachable but missing from the owned list (a stale
+    roster, a metadata gap) is therefore narrowed, never shown in full — the
+    failure direction is "too few rows", not "everyone's rows".
+
+    * `(None, None)` — no narrowing: an admin person, and agent/system/ops/
+      connector keys — except an agent key acting in a shared person's turn,
+      which reads `(that person, [])` (ent#926, `acting_turn_user_id`).
+    * `(uid, [owned names])` — narrow every agent except those the caller owns.
+    * `(uid, [])` — narrow on EVERY agent: a principal this module does not list
+      as a key (fails closed, like `viewer_principal_kind`'s "other").
+
+    `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
+    matches no row — a missing id never reads as "no filter"."""
+    from dependencies import (
+        NO_ROWS_USER_ID, acting_turn_user_id, is_fleet_admin, viewer_principal_kind,
+    )
+
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        # ent#926: an agent's key in a shared person's turn reads that person's
+        # rows on every agent; none is exempt (the key owner's agents are not theirs).
+        acting = acting_turn_user_id(current_user)
+        return (None, None) if acting is None else (acting, [])
+    uid = getattr(current_user, "id", None)
+    uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+    if kind == "other":
+        return uid, []
+    if is_fleet_admin(current_user):
+        return None, None
+    owned = [a["name"] for a in get_accessible_agents(current_user) if a.get("is_owner")]
+    return uid, owned
+
+
 def narrow_to_agent(
     agent_names: Optional[List[str]], agent: Optional[str]
 ) -> Optional[List[str]]:
@@ -484,10 +527,17 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
 _SHARED_IN_PREFIX = "/home/developer/shared-in/"
 
 
-async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
+async def check_shared_folder_mounts_match(container, agent_name: str, *, strict: bool = False) -> bool:
     """
     Check if container's shared folder mounts match the current config.
     Returns True if mounts are correct, False if recreation needed.
+
+    ``strict`` (trinity-enterprise#695, keyword-only, default False so the
+    start path is unchanged): re-raise a source-volume inspect that failed
+    for a reason other than NotFound instead of keeping the mount. The start
+    path wants "unknown" to mean "do not recreate"; a caller that REPORTS the
+    answer (system apply's `restart_required`) must not present an unknown
+    as "matches".
     """
     config = db.get_shared_folder_config(agent_name)
     if not config:
@@ -531,6 +581,8 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
                 # Docker unreadable is not "no volume" (#2196): an unknown
                 # answer must not read as drift and recreate a running
                 # container, so keep whatever mount is there.
+                if strict:
+                    raise
                 if mount_path in mount_dests:
                     expected.add(mount_path)
                 continue

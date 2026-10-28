@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, require_person
+from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, require_person, assert_not_share_viewer
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -1030,9 +1030,12 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 async def get_agent_logs_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request,
+    current_user: CurrentUser,
     tail: int = 100
 ):
     """Get agent container logs."""
+    # ent#875: the container's raw output interleaves every user's turns.
+    assert_not_share_viewer(current_user, agent_name)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
