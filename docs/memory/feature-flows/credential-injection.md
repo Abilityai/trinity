@@ -122,7 +122,7 @@ async injectCredentials(name, files) {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_interactive)])  # a signed-in session only (trinity-enterprise#719)
+@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_person)])  # a session or the person's own user key (trinity-enterprise#719)
 async def inject_credentials(
     agent_name: str,
     request_body: CredentialInjectRequest,
@@ -512,8 +512,9 @@ fails if the agent image calls a backend path the app does not register.
 ```bash
 # Via MCP, with the person's own user-scoped key
 export_credentials("my-agent")
-# inject_credentials and import_credentials take a signed-in session: the backend
-# refuses every MCP API key, so run those two from the agent's Settings > Credentials
+inject_credentials("my-agent", {".env": "KEY=value"})
+# import_credentials takes a signed-in session: the backend refuses every MCP API
+# key, so run it from the agent's Settings > Credentials (Import from Git)
 ```
 
 ---

@@ -232,7 +232,7 @@ Trailing slashes are stripped automatically. Defaults target `github.com` and `h
 | `/api/agents/{name}/git/pull` | POST | Pull from remote |
 | `/api/agents/{name}/git/config` | GET | The agent's stored git configuration (repo, mode, branch) |
 | `/api/agents/{name}/git/initialize` | POST | Connect an agent created without a repository to GitHub; it takes a person — a browser session or your own user key; agent keys are refused |
-| `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT). Setting one takes a signed-in session, so every MCP API key is refused; clearing it takes a person |
+| `/api/agents/{name}/github-pat` | GET / PUT / DELETE | Per-agent PAT override: status only, set, or clear (back to the platform PAT). Setting and clearing it take a person — a browser session or your own user key; agent keys are refused |
 | `/api/agents/{name}/git/reset-to-main-preserve-state` | POST | Adopt `origin/main` as the new baseline while keeping the agent's persisted state |
 | `/api/agents/{name}/git/auto-sync` | GET / PUT | The 15-minute auto-sync heartbeat for this agent. A change applies on the agent's next cycle, with no restart; turning it on or off takes a person — a browser session or your own user key; agent keys are refused |
 | `/api/agents/{name}/git/pull-sync` | GET / PUT | Whether the container pulls origin on its own. The agent reads it every cycle; turning it on or off takes a person — a browser session or your own user key; agent keys are refused |

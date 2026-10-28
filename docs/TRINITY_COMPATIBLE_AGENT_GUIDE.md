@@ -1089,9 +1089,10 @@ Credentials are managed as files in the agent workspace:
 ### Injecting Credentials
 
 - **Via UI**: Agent Detail → **Settings › Credentials** → Quick Inject (paste KEY=VALUE text)
-- **Via API**: `POST /api/agents/{name}/credentials/inject`, with a signed-in session
+- **Via API**: `POST /api/agents/{name}/credentials/inject`, signed in or with your own user-scoped key
+- **Via MCP**: `inject_credentials`, with your own user-scoped key (what `/trinity:onboard` does after a deploy)
 
-Injecting takes a signed-in session, so an MCP API key (the `inject_credentials` tool included) is refused.
+Injecting takes a person: a signed-in session or the owner's own user-scoped key. An agent's own key and the system key are refused.
 
 ### Export/Import for Git
 

@@ -169,7 +169,7 @@ Yes. `get_agent_info(name)` returns the agent's template metadata: display name,
 
 ## Can I set an agent's GitHub token over MCP?
 
-You can clear it and read its status over MCP; setting one takes a signed-in session. A per-agent token is a credential, so the owner sets it in the agent's **Settings → Storage → Repository → GitHub authentication**: it is checked against GitHub, encrypted at rest, and pushed into the running agent so git and `gh` use it at once, and the agent must already have Git sync configured. `set_agent_github_pat(agent_name, "")` clears it with your own user-scoped key, and the agent falls back to the platform token; an MCP API key cannot set one. `get_agent_github_pat_status(agent_name)` says whether the agent uses its own token or the global one, and never returns the token. See [GitHub PAT Setup → Per-agent PAT override](../integrations/github-pat-setup.md#per-agent-pat-override).
+Yes, with your own user-scoped key: `set_agent_github_pat(agent_name, pat)` sets it, the same as the agent's **Settings → Storage → Repository → GitHub authentication**. The token is checked against GitHub, encrypted at rest, and pushed into the running agent so git and `gh` use it at once, and the agent must already have Git sync configured. `set_agent_github_pat(agent_name, "")` clears it, and the agent falls back to the platform token. An agent's own key and the system key can neither set nor clear one. `get_agent_github_pat_status(agent_name)` says whether the agent uses its own token or the global one, and never returns the token. See [GitHub PAT Setup → Per-agent PAT override](../integrations/github-pat-setup.md#per-agent-pat-override).
 
 ## Can I turn git auto-sync or pull-sync on through the API?
 

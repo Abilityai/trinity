@@ -175,7 +175,7 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 ### MCP Tools
 
 - `get_credential_status(name)` -- Check credential file status.
-- `inject_credentials(name, credentials)` -- Inject credentials into the agent. Injecting takes a signed-in session, so an MCP API key is refused: inject from the agent's **Settings › Credentials**.
+- `inject_credentials(name, credentials)` -- Inject credentials into the agent. The agent's owner or an admin only, signed in or with their own user-scoped key; an agent's own key and the system key are refused.
 - `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, signed in or with their own user-scoped key.
 - `import_credentials(name)` -- Import credentials from encrypted file. Importing takes a signed-in session, so an MCP API key is refused: use **Import from Git** under Settings › Credentials.
 - `get_credential_encryption_key()` -- Retrieve the encryption key. An administrator only, with a user-scoped or system-scoped key.
