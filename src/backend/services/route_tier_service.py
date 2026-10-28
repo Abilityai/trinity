@@ -51,6 +51,9 @@ OWNER_TIER_UNNAMED = frozenset({
     ("POST", "/api/agents"),
     ("POST", "/api/agents/deploy-local"),
     ("POST", "/api/systems/deploy"),
+    # trinity-enterprise#695 (landed on dev after this census): reconciles a live system to
+    # its manifest, creating and updating members exactly as /deploy does.
+    ("POST", "/api/systems/apply"),
     ("POST", "/api/systems/{system_name}/restart"),
 })
 
