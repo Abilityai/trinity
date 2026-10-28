@@ -4803,7 +4803,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0102_seat_ask_class_state.
+    Mirrored by the Alembic revision 0105_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -5917,7 +5917,6 @@ MIGRATIONS = [
     ("portal_messages_attachments", _migrate_portal_messages_attachments),
     ("platform_alert_responded_heal", _migrate_platform_alert_responded_heal),
     ("agent_skill_gates", _migrate_agent_skill_gates),
-    ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("portal_messages_execution_id", _migrate_portal_messages_execution_id),
     ("a2a_internal_scope", _migrate_a2a_internal_scope),
     ("operator_queue_replace", _migrate_operator_queue_replace),
@@ -5928,4 +5927,5 @@ MIGRATIONS = [
     ("nevermined_delegations", _migrate_nevermined_delegations),
     ("a2a_caller_identity", _migrate_a2a_caller_identity),
     ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
+    ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]
