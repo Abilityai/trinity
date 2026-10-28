@@ -13,6 +13,9 @@ The other writer is a system manifest: its name is applied to every agent it
 creates as a tag, so `services/system_service.py::validate_manifest` refuses a
 system name under a reserved prefix for every caller, with the same named
 message its tag fields already get (a manifest never draws the org chart).
+Both manifest routes are pinned: `POST /api/systems/deploy` and apply mode,
+`POST /api/systems/apply` (trinity-enterprise#695), which validates through the
+same function before any snapshot, lock or write.
 
 Everything else about tags is unchanged. A plain tag still works on the
 agent's own key and on the system key, the PUT still checks only the delta (an
@@ -489,6 +492,50 @@ def test_a_system_name_under_a_reserved_prefix_is_refused_for_everyone(
     assert deploy.created == []
     assert _tags(f"{system_name}-worker") == []
     assert db.get_agents_by_tag(system_name) == holders
+
+
+# Apply mode (trinity-enterprise#695) is the second manifest writer. It builds
+# tag ops from the system name too, and reaches the same `validate_manifest`
+# before any snapshot, lock or write. The route is `require_person`, so its
+# callers are a person's session and the person's own `user` key.
+APPLIERS = [
+    pytest.param(lambda: _jwt(OWNER), id="owner-session"),
+    pytest.param(lambda: _owner_user_key(), id="owner-user-key"),
+]
+
+
+def _apply(world, system_name: str, headers: dict, *, dry_run: bool):
+    body = {"manifest": _manifest(system_name), "dry_run": dry_run}
+    return world.client.post("/api/systems/apply", json=body, headers=headers)
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "apply"])
+@pytest.mark.parametrize("system_name", RESERVED_SYSTEM_NAMES)
+@pytest.mark.parametrize("headers", APPLIERS)
+def test_apply_refuses_a_system_name_under_a_reserved_prefix(
+    deploy, headers, system_name, dry_run
+):
+    """Pinned on apply itself, so an apply-specific validator cannot reopen it."""
+    holders = db.get_agents_by_tag(system_name)  # the seed carries `dept-sales`
+    res = _apply(deploy, system_name, headers(), dry_run=dry_run)
+    assert res.status_code == 400, res.text
+    detail = res.json()["detail"]
+    assert detail.startswith(
+        f"System name uses reserved org-overlay tag '{system_name}'"
+    ), detail
+    assert "carry the org chart" in detail, detail
+    assert deploy.created == []
+    assert _tags(f"{system_name}-worker") == []
+    assert db.get_agents_by_tag(system_name) == holders
+
+
+@pytest.mark.parametrize("headers", APPLIERS)
+def test_apply_dry_run_passes_the_validator_for_a_plain_system_name(deploy, headers):
+    """Control: each applier above reached the validator, not an earlier gate."""
+    res = _apply(deploy, "sales-desk", headers(), dry_run=True)
+    assert res.status_code == 200, res.text
+    assert res.json()["dry_run"] is True, res.json()
+    assert deploy.created == []
 
 
 @pytest.mark.parametrize("headers", DEPLOYERS)

@@ -20,7 +20,7 @@
         "security",
         "unit"
       ],
-      "description": "The org-chart tags (dept-*, reports-to-*) take a person on the three tag-write routes, through the real tags router: the system key, agent keys (own, and on an agent it spawned) and every non-person scope are refused by the guard; a session and a user key pass; plain tags and the PUT delta rule still work on the own key and the system key; an agent with no tags; through the real systems router, a system name under a reserved prefix is refused for a person, the system key and an agent key holding agents.manage alike (dry run and deploy), while a plain system name still deploys and tags its agents."
+      "description": "The org-chart tags (dept-*, reports-to-*) take a person on the three tag-write routes, through the real tags router: the system key, agent keys (own, and on an agent it spawned) and every non-person scope are refused by the guard; a session and a user key pass; plain tags and the PUT delta rule still work on the own key and the system key; an agent with no tags; through the real systems router, a system name under a reserved prefix is refused for a person, the system key and an agent key holding agents.manage alike (dry run and deploy), while a plain system name still deploys and tags its agents; apply mode (POST /api/systems/apply, ent#695) refuses the same reserved system names for a session and a user key with the same named 400 (dry run and apply), nothing created or tagged, and a plain name's dry run passes the validator. Mutation: drop the system-name check -> the 8 apply rows red."
     },
     {
       "file": "unit/test_ent719_workspace_grants_person_only.py",
