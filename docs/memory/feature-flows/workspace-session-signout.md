@@ -354,4 +354,7 @@ replacement or schedule a duplicate. A dropped connection and #837's rescope
   `platformSessionVerdict.spec.js`, `platformSessionSync.spec.js`,
   `publicSurfaceRoutes.spec.js` (#3406), `loginReturnPath.spec.js` (#3444/#3466, the real
   router + `Login.vue`, with #3406's visitor path pinned beside it),
-  `workspacePlatformLogin.mount.spec.js` (#3466), `appSocketFollowsToken.mount.spec.js` (#3445)
+  `workspacePlatformLogin.mount.spec.js` (#3466), `workspacePoll401.mount.spec.js` (#3466 — the
+  Workspace poll through the real `portalHttp` interceptors: a token dead on the server goes to
+  `/login?redirect=`, a session ended in another tab stays on the card),
+  `appSocketFollowsToken.mount.spec.js` (#3445)
