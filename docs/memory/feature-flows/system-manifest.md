@@ -137,6 +137,10 @@ permissions:
 
 ### API Endpoints
 - **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML
+- **Apply** (trinity-enterprise#695): `POST /api/systems/apply` - Reconcile a live system to
+  its manifest (create the absent, update the declared fields of the present, report the
+  undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
+  persons only. See "Phase 4: Apply" below
 - **Management**: `GET /api/systems` - List all deployed systems
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
@@ -613,6 +617,32 @@ async def start_all_agents(agent_names: List[str]) -> Dict[str, str]:
     """
 ```
 
+#### Apply mode (trinity-enterprise#695): `apply_manifest()` and its four parts
+
+`deploy_manifest` is CREATE mode and is untouched. Apply is the sibling verb, built from four
+functions in this file, so the dry run and the real run share one plan (P-D):
+
+| Function | Kind | What it does |
+|---|---|---|
+| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → create |
+| `resolve_apply_plan(manifest, snapshot)` | pure | Per-member `verdict` + `changes[]` + the ordered write-set (`ApplyOp`s); drift (tagged, undeclared; a `<declared>_<N>` is noted as a suffixed copy); every blocker; prompt and view verdicts. Field rules below |
+| `resolve_declared_schedule_actions(declared, live, *, match=schedule_match_policy)` | pure | `create` / `update` (declared fields only) / `in_sync` / `enabled_differs` (report) / `undeclared` (report) / `unlinked` (report) / `ambiguous` + `declared_twice` (blockers). `schedule_match_policy` is the ent#694 / #1198 seam: exact name, unique on both sides, by default |
+| `execute_apply_plan(plan, …, lease)` | writes only | Creates absent members (the `AgentConfig` create builds) and tags each with the system tag at once; filters every other write to members that exist; then tags, edges, folders, resource overrides, schedules, prompt, view, phase by phase; then starts the created members one at a time. Every write's outcome comes from the writer's return value; nothing raises after the first write |
+
+Field rules (existing members): tags `add_agent_tag` (never `set_agent_tags`); edges from
+`resolve_permission_edges` over the full map, self-edges dropped, missing ones `add_agent_permission`
+(never `set_agent_permissions`), extras between declared members reported `permission_extra`;
+folders only the declared keys; resources a declared key that differs from the effective value
+(override → label → default) written with `set_resource_limits`, the omitted key's stored value
+kept; template reported `template_differs`; schedules updated in place through `update_schedule`,
+never `enabled`, created as the agent owner, an update the caller cannot make refused up front
+(`schedule_not_updatable_by_caller`); prompt written only by an admin; view found among the
+caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
+creates get create's semantics; their template-dependent fields (a same-named template schedule,
+a template resource that overrides a declared one) are resolved after the create, against a fresh
+read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
+and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
+
 #### export_manifest() (Lines 414-551)
 ```python
 def export_manifest(system_name: str, agents: List[Dict]) -> str:
@@ -804,6 +834,27 @@ failed after volume creation can 409 on the same name until the orphan-volume
 sweep reclaims it (#1667 guard; the 409 reason carries the `docker volume rm`
 remediation verbatim). Idempotent converge (`on_conflict: skip`) is deferred to
 trinity-enterprise#124.
+
+#### POST /api/systems/apply (trinity-enterprise#695)
+```python
+@router.post("/apply", response_model=SystemApplyResponse, dependencies=[Depends(require_person)])
+async def apply_system(body: SystemApplyRequest, request: Request,
+                       current_user: User = Depends(require_role("creator"))):
+    result = await apply_manifest(body.manifest, current_user, request, dry_run=body.dry_run)
+    if not result.dry_run and result.status in ("applied", "partial", "failed"):
+        await platform_audit_service.log(...)            # CONFIGURATION / system_apply; a failure is a warning
+        for name in result._tags_written:                 # thin trigger, identifiers only (#918)
+            await tags_router._broadcast_tags_changed(name)
+    if result.status == "refused":                       # 503 if every blocker is retryable, else 409
+        return JSONResponse(status_code=503 or 409, content=result.model_dump())
+    if result.status == "failed":
+        return JSONResponse(status_code=500, content=result.model_dump())
+    return result
+```
+- `SystemApplyRequest{manifest, dry_run: bool = True}`, `extra="forbid"`.
+- `require_person`: an agent-scoped key is refused before any read (on existing agents apply
+  reaches permission grants, other agents' schedules and the platform prompt).
+- A refused run writes no audit row (nothing changed).
 
 #### GET /api/systems (Lines 199-244)
 ```python
@@ -1354,6 +1405,32 @@ db.set_agent_permissions(
 Returns: 3 (total permissions configured)
 ```
 
+### Phase 4: Apply (trinity-enterprise#695)
+
+```
+POST /api/systems/apply {manifest, dry_run?=true}       [require_role("creator") + require_person]
+  ├─ parse_manifest + validate_manifest                  create's own; every named 400, `agents: {}` included
+  ├─ read_apply_snapshot → resolve_apply_plan            reads, then pure; a failed read is a retryable blocker
+  ├─ dry_run → 200 valid | invalid                       no fleet-state write, no lock key
+  ├─ blockers → 409 | 503 refused                        no fleet-state write, no lock key
+  ├─ SingleFlightLock("system_apply:<name>", 900 s)      busy → apply_in_progress; no Redis → apply_lock_unavailable
+  │    └─ ApplyLeaseKeeper renews every 300 s (atomic compare-and-expire); any result but owned stops the run
+  ├─ read_apply_snapshot → resolve_apply_plan again      a blocker found only now → refused, lock released
+  ├─ confirm ownership → execute_apply_plan
+  │    create absent members → tag each with the system tag at once
+  │    → tags → edges → folders → resource overrides → schedules (a created member's re-read first)
+  │    → prompt (admin) → view → start the created members one at a time
+  ├─ atomic release
+  └─ 200 applied | partial · 500 failed                  one audit row; `agent_tags_changed` per tagged member
+```
+
+Re-applying an unchanged manifest writes nothing and reports every member `unchanged` (AC1).
+An existing member is never stopped, recreated, renamed or restarted; a member created in the
+same run is started by the platform's own start path, which may recreate it once to take a
+declared resource its template overrode (the same path create mode's start takes for folder
+drift). Weak evidence — any member matched to the system by its name only — is refused by name
+before any write, with a remedy for each kind (AC5).
+
 ## MCP Tools Layer
 
 ### Tool Definitions (`src/mcp-server/src/tools/systems.ts`)
@@ -1712,6 +1789,14 @@ Conflicts: my-system-worker, my-system-worker_2 exist
 Result: my-system-worker_3
 Warning: "Agent 'my-system-worker' already exists, will create 'my-system-worker_3'"
 ```
+
+**Apply never suffixes (trinity-enterprise#695)**: `POST /api/systems/apply` never calls
+`get_next_agent_name`. A declared name that exists and that the caller may manage is reconciled
+in place; one that exists and the caller may not manage (or a soft-deleted or reserved name) is
+refused as `member_name_unavailable`; only a free name is created. Copies left by earlier
+create-mode deploys (`my-system-worker_2`) are tagged and undeclared, so apply reports them as
+drift with the note "suffixed copy from an earlier create-mode deploy; apply never removes it" —
+the recovery story: remove them by hand once the original is reconciled.
 
 ### System Grouping
 
