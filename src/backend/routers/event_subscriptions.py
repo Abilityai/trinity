@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from models import EmitEventRequest
 
 from database import db
-from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, agent_principal_name, assert_agent_owner, assert_agent_access, assert_own_agent, is_person_principal, principal_reach
+from dependencies import get_current_user, AuthorizedAgent, OwnedAgent, agent_principal_name, assert_agent_owner, assert_agent_access, assert_own_agent, is_person_principal, principal_reach, _SCOPE_ABSENT
 from db_models import (
     User,
     EventSubscriptionCreate,
@@ -400,7 +400,6 @@ async def emit_event(
 # handler's first statement (AGENT_CALLABLE_SELF, trinity-enterprise#840).
 _OWN_EMIT = "Agent-scoped key may only emit events as its own agent"
 _EMITTER_REQUIRED = "Only an agent's own key or a person may emit an event for an agent"
-_SCOPE_ABSENT = object()
 
 
 def _assert_may_emit_for_agent(current_user: User) -> None:
