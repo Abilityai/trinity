@@ -104,6 +104,15 @@ There is nothing to build. One command re-pulls the four platform images **and**
 
 Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the agent base image is not a compose service, so that pull skips it and leaves every agent on the old runtime. `start.sh --hosted` also performs Step 4 for you — `docker compose up -d` recreates only the containers whose image changed and leaves the agent network in place — so continue at [Step 5](#step-5-verify).
 
+**Caddy-fronted installs (DigitalOcean 1-Click, the installer script, AWS, Vultr).** On a host that `start.sh --provision` prepared (it finds `/etc/trinity/public-ip` and an installed `caddy` service), the same re-run also brings Caddy in line with the new release — no `--caddy-only` step:
+
+- Before touching `.env` or the stack it takes the provisioning lock the IP-refresh timer uses, so a refresh cannot rewrite the Caddy configuration or recreate a service mid-upgrade. If the web UI's `FRONTEND_BIND_ADDRESS` is empty, it is set to `127.0.0.1` (only Caddy needs that port).
+- Before pulling, it checks that the ingress network's range (`TRINITY_PROXY_PREFIX`, default `172.30.0.0/24`) is free and stops — changing nothing — if another Docker network already uses it, naming that network. Set a free `/24` prefix in `.env` and re-run.
+- After the backend is healthy and the web UI answers on its local port, it re-renders the Caddyfile. Caddy is pointed at the web container's PROXY-protocol listener (`127.0.0.1:${CADDY_PROXY_PORT:-18082}`) only after a live check that the listener answers; that listener is what carries each visitor's address to Trinity, so per-client sign-in limits and audit addresses see real clients. If the running web image is older than the checkout, Caddy keeps the ordinary listener and the run prints a warning that visitors' addresses are not yet passed through — pin the matching `TRINITY_IMAGE_TAG` and re-run.
+- The first switch restarts Caddy once, so open live views (execution logs, chat streams) reconnect. Later re-runs with an unchanged configuration leave Caddy running. A configuration Caddy rejects is never installed; the previous one keeps serving.
+
+`--caddy-only` remains available for deliberate reconfiguration (for example after changing `PRIVATE_NETWORK_CIDRS`); it applies the same listener check.
+
 **Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. Never delete that `DATABASE_URL=` line: on the hosted compose file an *absent* line selects the bundled PostgreSQL — which is empty — and only an *empty* line keeps SQLite. See [Single Server → Database backend](single-server.md#database-backend).
 
 On a Marketplace Droplet whose admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
@@ -289,6 +298,8 @@ docker compose restart backend frontend mcp-server scheduler
 # Hosted install — re-pulls the previous images and starts the stack
 ./scripts/deploy/start.sh --hosted
 ```
+
+On a Caddy-fronted install, rolling back to a release **older than the one that added the PROXY-protocol listener** leaves Caddy pointed at a port the older web image does not have, because older releases do not re-render Caddy on upgrade. Re-render it from the rolled-back checkout, which writes the ordinary listener: `sudo ./scripts/deploy/start.sh --provision --cloud <digitalocean|aws|vultr> --caddy-only`. If that checkout's `start.sh` has no `--caddy-only`, change each `reverse_proxy` in `/etc/caddy/Caddyfile` back to `127.0.0.1:8081` without a `transport` block, run `caddy validate --config /etc/caddy/Caddyfile`, then `sudo systemctl restart caddy`.
 
 ### 5. Run the six-probe verification to confirm rollback succeeded.
 

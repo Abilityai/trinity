@@ -8,9 +8,11 @@ and validates the `X-Twilio-Signature` header using Twilio's `RequestValidator`
 Signature validation handles Twilio's inclusion of empty-value params, which
 a naive inline HMAC would drop — hence the dependency on `twilio>=9`.
 
-URL reconstruction honors `X-Forwarded-Proto` (set by nginx), so uvicorn MUST
-run with `--proxy-headers --forwarded-allow-ips='*'` for signature validation
-to pass behind the Cloudflare Tunnel + nginx stack.
+URL reconstruction honors `X-Forwarded-Proto` (set by nginx) itself:
+uvicorn runs with `--no-proxy-headers` (trinity-enterprise#873), so
+`request.url` keeps the internal `http://` scheme and `_reconstruct_url`
+upgrades it from the header for signature validation behind the Cloudflare
+Tunnel + nginx stack.
 """
 
 import asyncio
@@ -60,11 +62,11 @@ def _reconstruct_url(request: Request) -> str:
 
     Twilio signs using the exact URL it was configured with. Behind nginx,
     `request.url` may reflect the internal http:// URL — so we rebuild from
-    the X-Forwarded-Proto + Host headers when present. Uvicorn `--proxy-headers`
-    will have already applied these to `request.url.scheme`, but we defensively
-    re-check the header in case the flag is missing (gives a clearer error).
+    the X-Forwarded-Proto + Host headers when present. uvicorn does not apply
+    them (it runs with `--no-proxy-headers`, trinity-enterprise#873), so the
+    header check below is what upgrades the scheme.
     """
-    # Prefer request.url directly — uvicorn --proxy-headers will have set scheme.
+    # Start from request.url; the scheme is the raw hop's until upgraded below.
     url = str(request.url)
     # If scheme is still http and X-Forwarded-Proto is https, upgrade.
     fwd_proto = request.headers.get("x-forwarded-proto", "").lower()

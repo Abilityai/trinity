@@ -821,21 +821,23 @@ chat_activity_id = await activity_service.track_activity(
 | ID Type | Format | Storage | TTL | Purpose |
 |---------|--------|---------|-----|---------|
 | **Queue Execution ID** | UUID v4 | Redis | 10 min | Internal queue management, transient |
-| **Database Execution ID** | `token_urlsafe(16)` | SQLite `schedule_executions` | Permanent | API access, UI navigation, activity linkage |
+| **Database Execution ID** | `token_urlsafe(16)`; UUID v4 for `/chat` rows | SQLite `schedule_executions` | Permanent | API access, UI navigation, activity linkage |
+
+A `/chat` turn uses one id for both (#3989): the admission mints a UUID, acquires the capacity slot under it, and `prepare_chat_execution` creates the row with that id. Canary S-01 relies on the slot member and the running row id being equal.
 
 **Usage**:
 - `related_execution_id` in `agent_activities` table links to `schedule_executions.id` (Database ID)
-- `execution.id` in queue operations is the Redis Queue ID (transient)
+- `execution.id` in queue operations is the Redis Queue ID (transient); for `/chat` it equals the Database ID
 - Navigation URLs use Database Execution ID: `/agents/{name}/executions/{database_id}`
 
 ### Execution Metadata in Response
-Chat responses include both IDs for clarity:
+Chat responses carry both fields; for `/chat` they hold the same id:
 ```json
 {
   "response": "...",
   "execution": {
-    "id": "uuid-123",               // Queue ID (transient, 10-min TTL)
-    "task_execution_id": "abc123...", // Database ID (permanent) - use for navigation
+    "id": "uuid-123",                 // Same as task_execution_id
+    "task_execution_id": "uuid-123",  // Database ID - use for navigation
     "queue_status": "running",
     "was_queued": false
   }

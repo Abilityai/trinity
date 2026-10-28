@@ -4558,7 +4558,7 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
     def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
@@ -4580,6 +4580,9 @@ class DatabaseManager:
 
     def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
         return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def rearm_lost_dispatch(self, loop_id: str, *, due_for):
+        return self._loop_ops.rearm_lost_dispatch(loop_id, due_for=due_for)
 
     def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
         return self._loop_ops.claim_due_loop(loop_id, next_run_at)

@@ -337,17 +337,16 @@ def _resolve_portal(
     Delivery is a persisted assistant message, so it renders through the same
     history the client already reads.
 
-    **Durable, but not immediately visible** (review finding). An earlier
-    version of this docstring claimed the Workspace polls its threads. It does
-    not: `PortalConversation.vue` loads history only on mount and on an
-    agent/session prop change, `stores/clientPortal.js` states outright that
-    `refreshThreads()` is event-driven rather than periodic, and the only
-    interval in the Workspace is the 20s asks poll on a different surface. So a
-    client sitting on the thread sees the report at their next reload or thread
-    switch — the row is never lost, but "it appears while they watch" was not
-    true, and AC #7's "degrades to poll" does not hold by construction here. An
-    idle history poll is the obvious follow-up (the asks poll is the precedent);
-    this docstring stops asserting it in the meantime.
+    **Durable, and visible within one tick** (trinity#3439). The Workspace has
+    no history poll of its own; what it has is the shell's 20s tick, which
+    re-reads every thread row (`message_count`, `last_message_at`) for the
+    sidebar. Since #3439 the open conversation watches its own row in that list
+    and, when it moves, reads the thread's newest rows and appends what it has
+    not seen — so a report written here appears to a client sitting on the
+    thread within one tick (or at once when they return to the tab), and the
+    row is marked read because they are looking at it. The `touch_portal_session`
+    below is what makes the row move; a writer that skipped it would still be
+    durable and would wait for the next reload, which is the gap this closes.
 
     **Known limitation — a report landing mid-turn can be read as that turn's
     answer.** `PortalConversation` decides a reply arrived with

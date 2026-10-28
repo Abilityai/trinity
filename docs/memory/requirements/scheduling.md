@@ -391,6 +391,7 @@
   - Backend endpoint: `POST /api/internal/agents/{name}/pre-check` (X-Internal-Secret gated) runs the script via `execute_command_in_container` — the same primitive used by `git_service.py` (persistent-state allowlist, #384 S3), `ssh_service.py`, `agent_service/terminal.py`, `adapters/message_router.py`, `routers/system_agent.py`, `routers/voice.py`.
   - Fail-open: script absent, non-zero exit, timeout, backend 5xx / malformed response → scheduler fires as usual. A broken pre-check never silently suppresses scheduled work.
   - Message override: non-empty stdout replaces `schedule.message` for that one invocation — lets the agent inject real work items (e.g. the PR list) into the chat prompt.
+  - Schedule identity (#3966): the one agent-scoped hook gates every cron schedule on the agent, so the scheduler sends the firing schedule's `schedule_id` / `schedule_name` / `schedule_message` in the pre-check request body and the backend exports them to the hook as `TRINITY_SCHEDULE_ID` / `TRINITY_SCHEDULE_NAME` / `TRINITY_SCHEDULE_MESSAGE` (exec environment, not argv). Without them an agent with two schedules could not gate one without rewriting the other's task (#955). A bodyless request runs the hook as before.
   - Skip record: empty stdout writes a row to `schedule_executions` with `status='skipped'`, reason, and zero cost — visible in the Trinity UI alongside successful runs.
   - Manual triggers bypass pre-check entirely (explicit operator intent always fires).
   - Zero DB schema change (reuses existing `ExecutionStatus.SKIPPED` + `create_skipped_execution`).
@@ -889,6 +890,17 @@ schedules:
    post-#89 it is the second schedule producer for the same agent. It gains the same name-match
    skip; otherwise a manifest declaring `daily-briefing` on a template that also declares it yields
    two rows.
+   **Apply mode (trinity-enterprise#695, roadmap §16.5.4) is the one deliberate exception on this
+   path.** For a member apply creates it re-reads the member's schedules after creation, and a
+   same-named template row is **updated** to the manifest's declared fields (`cron`, `message`, and
+   `timezone` / `description` only when declared) instead of skipped; on an existing member the same
+   rule applies to every live row the manifest names. It never writes `enabled` on a matched row
+   (a difference is reported, `enabled_differs`) and never deletes a row (live rows the manifest does
+   not name are reported, `schedule_undeclared`). Matching is by exact name because no identity
+   column exists — a deliberate departure from trinity#1198's "never adopt an unlinked row": with no
+   identity every row is unlinked, so following it literally would make an in-place update
+   impossible. It fails closed: two live rows with one name refuse the run
+   (`schedule_name_ambiguous`), and a manifest naming one schedule twice is `schedule_declared_twice`.
 - There is **no** `UNIQUE(agent_name, name)` index on `agent_schedules` and none is added: it is a
   schema change (Invariant #3, dual-track) and would fail on installs already holding
   duplicate-named schedules. Known blind spot: `list_agent_schedules` excludes soft-deleted rows, so
@@ -925,7 +937,8 @@ schedules:
 - **Invariant removed, named deliberately:** `config/manifests/default-system.yaml` records as an
   ent#124 decision *"No `schedules:` — a zero-credential fresh install must not accumulate failing
   cron executions."* #89 transfers that control from the manifest author to the template author with
-  no opt-out (a manifest can only add schedules, never suppress a template's).
+  no opt-out (a manifest can only add schedules, never suppress a template's; apply mode, roadmap
+  §16.5.4, may change a template row's declared fields, but never arms, disarms or deletes one).
 - **Amplification to note, not gate:** a schedule `message` carries the same trust level as that
   template's `CLAUDE.md` and skills — no new trust boundary. But an agent-scoped MCP key holding
   `create_agent` can now spawn an agent from an arbitrary `github:` template *and* mint recurring
