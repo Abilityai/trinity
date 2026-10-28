@@ -321,6 +321,16 @@ the replay cursor (`lastEventId` belongs to the old session), and each socket's
 handlers answer for their own socket only, so a late close event cannot null the
 replacement or schedule a duplicate. A dropped connection and #837's rescope
 (close 4000) still reconnect after 5 s; an auth rejection (4001) still does not.
+**The Dashboard's own socket follows the same rule.** The SPA holds two `/ws`
+connections, and the Dashboard's (`stores/network.js`, opened on mount, closed on
+unmount) used to read the token only when it connected, so a Dashboard left mounted
+across a sign-out elsewhere kept the earlier session's socket. `Dashboard.vue` now
+watches `authStore.token` too and hands it to `networkStore.followToken`, with the
+same pure decision (`utils/socketSession.js::socketActionFor`, a leaf, because
+`utils/websocket.js` imports the store) and the same guards: a generation that drops
+a ticket minted for an ended session, one ticket and one socket at a time, handlers
+that answer for their own socket only, and the replay cursor dropped on a new
+session.
 
 ## Stated residuals (not hidden)
 
@@ -343,7 +353,9 @@ replacement or schedule a duplicate. A dropped connection and #837's rescope
 - `src/frontend/src/stores/clientPortal.js` — `signOutEverywhere()`, `PLATFORM_LOGIN_ROUTE`
 - `src/frontend/src/utils/platformSession.js` — #2791: the one reader, the one verdict, the one handler registry; #3406: the public token page arms, `isBearerChallenge`, `pathForVerdict`; #3444: `loginLocation`, `fullPathForVerdict`
 - `src/frontend/src/router/index.js` — #3444: a logged-out deep link → `loginLocation(to.fullPath)`; a signed-in `/login?redirect=X` → X
-- `src/frontend/src/App.vue`, `src/frontend/src/utils/websocket.js` — #3445: the socket follows `authStore.token` (`followToken`, `socketActionFor`)
+- `src/frontend/src/App.vue`, `src/frontend/src/utils/websocket.js` — #3445: the socket follows `authStore.token` (`followToken`)
+- `src/frontend/src/views/Dashboard.vue`, `src/frontend/src/stores/network.js` — #3445: the Dashboard's socket follows it too (`networkStore.followToken`)
+- `src/frontend/src/utils/socketSession.js` — #3445: `socketActionFor`, the one rule both sockets follow
 - `src/frontend/src/stores/auth.js` — `logout()` local-clear-before-revoke ordering; `adoptStoredSession` / `applySessionEndedElsewhere`
 - `src/frontend/src/main.js` — global request interceptor, the registered reaction, the `storage` listener
 - `src/frontend/src/api.js` — reports to the shared handler (no private predicate, no hard reload)
@@ -357,4 +369,4 @@ replacement or schedule a duplicate. A dropped connection and #837's rescope
   `workspacePlatformLogin.mount.spec.js` (#3466), `workspacePoll401.mount.spec.js` (#3466 — the
   Workspace poll through the real `portalHttp` interceptors: a token dead on the server goes to
   `/login?redirect=`, a session ended in another tab stays on the card),
-  `appSocketFollowsToken.mount.spec.js` (#3445)
+  `appSocketFollowsToken.mount.spec.js`, `dashboardSocketFollowsToken.mount.spec.js` (#3445)

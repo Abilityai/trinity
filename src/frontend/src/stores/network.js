@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { readStoredToken } from '@/utils/platformSession'
-import { ref, computed } from 'vue'
+import { socketActionFor } from '@/utils/socketSession'
+import { ref, shallowRef, computed } from 'vue'
 import axios from 'axios'
 import { useAgentsStore } from './agents'
 import { parseUTC, getTimestampMs } from '@/utils/timestamps'
@@ -23,7 +24,9 @@ export const useNetworkStore = defineStore('network', () => {
   const collaborationHistory = ref([])
   const lastEventTime = ref(null)
   const activeCollaborations = ref(0)
-  const websocket = ref(null)
+  // shallowRef: the handlers compare `websocket.value` with their own socket,
+  // and a deep ref hands back a proxy that never equals it (#3445).
+  const websocket = shallowRef(null)
   const isConnected = ref(false)
   const intentionalDisconnect = ref(false) // Prevents reconnection after intentional disconnect
   const historicalCollaborations = ref([]) // Persistent data from Activity Stream
@@ -54,6 +57,13 @@ export const useNetworkStore = defineStore('network', () => {
   // #306 Redis Streams reconnect replay: remember the last event id we saw so
   // a network blip replays missed events instead of dropping them.
   const lastEventId = ref(null)
+  // #3445: this socket follows the platform session like the app-wide one
+  // (`followToken`, from Dashboard.vue). `socketToken` is the token it was
+  // opened for; `socketGeneration` is bumped by every disconnect, so a ticket
+  // still being minted for a session that ended opens nothing.
+  let socketToken = null
+  let socketGeneration = 0
+  let socketMinting = null
 
   // View mode state (timeline | grid | list) — default timeline, persisted.
   // trinity-enterprise#47 added 'grid'; trinity-enterprise#260 added 'list'
@@ -640,13 +650,20 @@ export const useNetworkStore = defineStore('network', () => {
       return
     }
 
-    // Prevent duplicate connections
-    if (websocket.value?.readyState === WebSocket.OPEN) {
+    // Prevent duplicate connections: one open or still connecting, or a
+    // ticket already being minted for this session (#3445).
+    if (websocket.value && websocket.value.readyState <= WebSocket.OPEN) {
       console.log('[Collaboration] WebSocket already connected')
       return
     }
+    if (socketMinting === socketGeneration) return
 
     // #550: mint single-use ticket; JWT never enters the WebSocket URL.
+    const gen = socketGeneration
+    socketMinting = gen
+    // Recorded now, not once the ticket lands: a token change while it is
+    // being minted must read as a change (reconnect), not as a second connect.
+    socketToken = token
     let ticket
     try {
       const { data } = await axios.post('/api/ws/ticket')
@@ -654,7 +671,11 @@ export const useNetworkStore = defineStore('network', () => {
     } catch (err) {
       console.error('[Collaboration] failed to mint WS ticket', err)
       return
+    } finally {
+      if (socketMinting === gen) socketMinting = null
     }
+    // #3445: the session this ticket was minted for ended while it was minted.
+    if (gen !== socketGeneration) return
 
     let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
     if (lastEventId.value) {
@@ -662,9 +683,14 @@ export const useNetworkStore = defineStore('network', () => {
     }
 
     try {
-      websocket.value = new WebSocket(wsUrl)
+      const socket = new WebSocket(wsUrl)
+      websocket.value = socket
 
+      // #3445: each handler answers for its OWN socket only. A socket let go
+      // of (a sign-out, a new session) still delivers its close event later,
+      // and must not flip the new socket's state or stop its heartbeat.
       websocket.value.onopen = () => {
+        if (websocket.value !== socket) return
         console.log('[Collaboration] WebSocket connected')
         isConnected.value = true
 
@@ -673,6 +699,7 @@ export const useNetworkStore = defineStore('network', () => {
       }
 
       websocket.value.onmessage = (event) => {
+        if (websocket.value !== socket) return
         try {
           const data = JSON.parse(event.data)
           if (data._eid) {
@@ -728,11 +755,13 @@ export const useNetworkStore = defineStore('network', () => {
       }
 
       websocket.value.onerror = (error) => {
+        if (websocket.value !== socket) return
         console.error('[Collaboration] WebSocket error:', error)
         isConnected.value = false
       }
 
       websocket.value.onclose = (event) => {
+        if (websocket.value !== socket) return
         console.log('[Collaboration] WebSocket disconnected')
         isConnected.value = false
 
@@ -1195,6 +1224,10 @@ export const useNetworkStore = defineStore('network', () => {
   function disconnectWebSocket() {
     // Set flag BEFORE closing to prevent reconnection
     intentionalDisconnect.value = true
+    // #3445: a ticket still being minted belongs to the socket being let go.
+    socketGeneration += 1
+    socketMinting = null
+    socketToken = null
 
     // Stop heartbeat
     stopWebSocketHeartbeat()
@@ -1204,6 +1237,22 @@ export const useNetworkStore = defineStore('network', () => {
       websocket.value = null
       isConnected.value = false
     }
+  }
+
+  /**
+   * Keep the Dashboard's socket on the platform session `token` (#3445):
+   * `Dashboard.vue` watches the store's token while it is mounted and hands
+   * each value here. The decision is the shared `socketActionFor`. A new
+   * session also drops the replay cursor, which is the old session's.
+   */
+  function followToken(token) {
+    const action = socketActionFor({ socketToken, token })
+    if (action === 'disconnect' || action === 'reconnect') {
+      disconnectWebSocket()
+      lastEventId.value = null
+    }
+    if (action === 'connect' || action === 'reconnect') connectWebSocket()
+    return action
   }
 
   // Fetch context stats from backend
@@ -1988,6 +2037,7 @@ export const useNetworkStore = defineStore('network', () => {
     convertAgentsToNodes,
     connectWebSocket,
     disconnectWebSocket,
+    followToken,
     handleCollaborationEvent,
     handleAgentStatusChange,
     handleAgentDeleted,

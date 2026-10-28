@@ -16,6 +16,7 @@ import { useSkillsStore } from '../stores/skills'
 import { useClientPortalStore } from '../stores/clientPortal'
 import { useAuthStore } from '../stores/auth'
 import { isWorkspaceOnlyRole } from './workspaceOnly'
+import { socketActionFor } from './socketSession'
 
 // shallowRef: the handlers below compare `ws.value` with their own socket, and
 // a deep ref would hand back a reactive proxy that never equals it (#3445).
@@ -25,38 +26,22 @@ const isConnected = ref(false)
 // so a brief disconnect replays missed events rather than dropping them.
 let lastEventId = null
 
-// #3445: the socket follows the platform session. `generation` is bumped by
-// every deliberate `disconnect()`, so a ticket still being minted, a retry
-// timer, and a close event from a socket already let go of all find out they
-// belong to a session that is over. `socketToken` is the platform token the
-// socket was opened for, which is how a changed token is told apart.
+// #3445: the socket follows the platform session (`socketActionFor`, shared
+// with the Dashboard's socket). `generation` is bumped by every deliberate
+// `disconnect()`, so a ticket still being minted and a close event from a
+// socket already let go of both find out they belong to a session that is over;
+// `disconnect()` also cancels a pending retry. `socketToken` is the platform
+// token the socket was opened for, which is how a changed token is told apart.
 let generation = 0
 let minting = null
 let retryTimer = null
 let socketToken = null
 
-/**
- * What a platform token change means for the app-wide socket (#3445).
- *
- * The server fixes a socket's scope when it connects (ent#467), so a socket
- * opened for one session must never carry the next one: a new token
- * reconnects with a fresh ticket, and no token disconnects.
- *
- * @param {{socketToken: string|null, token: string|null}} state
- * @returns {'connect'|'reconnect'|'disconnect'|'none'}
- */
-export function socketActionFor({ socketToken, token }) {
-  if (!token) return socketToken ? 'disconnect' : 'none'
-  if (!socketToken) return 'connect'
-  return socketToken === token ? 'none' : 'reconnect'
-}
-
 function scheduleReconnect(connect) {
   clearTimeout(retryTimer)
-  const gen = generation
   retryTimer = setTimeout(() => {
     retryTimer = null
-    if (gen === generation) connect()
+    connect()
   }, 5000)
 }
 
@@ -118,7 +103,7 @@ export function useWebSocket() {
     }
     if (minting === gen) minting = null
     // #3445: the session this ticket was minted for ended while it was minted.
-    if (gen !== generation || ws.value) return
+    if (gen !== generation) return
 
     let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
     if (lastEventId) {

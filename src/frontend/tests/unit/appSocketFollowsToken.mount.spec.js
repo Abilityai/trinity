@@ -49,7 +49,9 @@ vi.mock('../../src/components/HelpChatWidget.vue', () => ({ default: { render: (
 
 import App from '../../src/App.vue'
 import { useAuthStore } from '../../src/stores/auth'
-import { useWebSocket, reconnectWebSocket, socketActionFor } from '../../src/utils/websocket'
+import { useNetworkStore } from '../../src/stores/network'
+import { useWebSocket, reconnectWebSocket } from '../../src/utils/websocket'
+import { socketActionFor } from '../../src/utils/socketSession'
 
 class FakeSocket {
   static all = []
@@ -207,6 +209,77 @@ describe('#3445 — the socket follows the platform token', () => {
     await login
     await flushPromises()
     expect(FakeSocket.all).toHaveLength(0)
+  })
+})
+
+// /review of #4069 (I1): each of these guards was removable with the suite
+// green. Every socket the module lets go of keeps delivering events to its
+// handlers for a while (or, in a test, whenever the fake says so); only the
+// current socket may touch shared state.
+describe('#3445 — a socket already let go of touches nothing', () => {
+  async function replaced() {
+    const auth = await mountApp()
+    await signIn(auth, 'A')
+    const first = last()
+    localStorage.setItem('token', 'B')
+    auth.adoptStoredSession()
+    await flushPromises()
+    return { auth, first, second: last() }
+  }
+
+  it('a late open from the old socket leaves the dot alone', async () => {
+    const { first } = await replaced()
+    first.onopen()
+    expect(useWebSocket().isConnected.value).toBe(false)
+  })
+
+  it('a late message from the old socket is neither routed nor kept as the replay cursor', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const { first, second } = await replaced()
+    second.onopen()
+    const routed = vi.spyOn(useNetworkStore(), 'handleActivityStatusChange')
+    first.onmessage({ data: JSON.stringify({ _eid: '1700000000000-7', type: 'agent_activity', agent_name: 'scout', activity_state: 'started' }) })
+    expect(routed).not.toHaveBeenCalled()
+
+    second.onclose({ code: 1006 })                         // the current socket drops; the retry reconnects
+    vi.advanceTimersByTime(5_000)
+    await flushPromises()
+    expect(FakeSocket.all).toHaveLength(3)
+    expect(last().url).not.toContain('last-event-id')
+  })
+})
+
+describe('#3445 — one socket, one ticket at a time', () => {
+  it('two connects while a ticket is being minted mint one ticket and open one socket', async () => {
+    let release
+    http.ticket = () => new Promise((resolve) => { release = () => resolve({ data: { ticket: 'only' } }) })
+    localStorage.setItem('token', 'A')
+    const socket = useWebSocket()
+    socket.connect()
+    socket.connect()
+    await flushPromises()
+    expect(http.tickets).toBe(1)
+    release()
+    await flushPromises()
+    expect(FakeSocket.all).toHaveLength(1)
+  })
+
+  it('a retry scheduled in the session that ended never runs in the next one', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const auth = await mountApp()
+    await signIn(auth, 'A')
+    last().onclose({ code: 1006 })                         // a drop: a retry is now 5 s away
+
+    auth.logout()                                          // …and the session ends inside that window
+    await flushPromises()
+    await signIn(auth, 'B')                                // someone signs in again
+    const ticketsForB = http.tickets
+    last().onclose({ code: 4001 })                         // B's socket is refused: it must stay closed
+
+    vi.advanceTimersByTime(15_000)
+    await flushPromises()
+    expect(http.tickets).toBe(ticketsForB)
+    expect(FakeSocket.all).toHaveLength(2)
   })
 })
 
