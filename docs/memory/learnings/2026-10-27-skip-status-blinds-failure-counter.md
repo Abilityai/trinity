@@ -1,0 +1,3 @@
+## 2026-10-27 — pitfall — A failure counter cannot tell "skipped" from "never ran"
+**Context**: #4000, canary RD-05 runbook. `_apply_maintenance_status` leaves `maintenance_failures` untouched on `skipped_low_disk` and `backoff`, and `maintenance_status` has no backend column. The first runbook draft read "failures == 0 ⇒ maintenance never starts, check the lock", which sends the operator to the lock on a host whose disk preflight skips every tick.
+**Lesson**: Before an alert or runbook infers a cause from a failure counter, list every outcome that leaves the counter unchanged. Name where the last outcome itself can be read (here: `sync_state.maintenance_status` on `GET /api/git/status`), or persist it next to the counter.

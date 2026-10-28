@@ -1,6 +1,39 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4000_git_maintenance_every_tick.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "git maintenance + stats on every auto-sync tick, health-only writer, prune instead of gc"
+    },
+    {
+      "file": "unit/test_4000_git_health_canary.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "canary",
+        "unit"
+      ],
+      "description": "canary RD-04 git measurement blindness, RD-05 maintenance not keeping up"
+    },
+    {
+      "file": "unit/test_4000_git_stats_at.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "agent_sync_state.git_stats_at persisted and coerced by the sync-health poller"
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
