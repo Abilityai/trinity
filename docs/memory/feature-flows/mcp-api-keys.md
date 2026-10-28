@@ -82,8 +82,12 @@ row is `role == "admin"`, the (method, `scope["path"]`) full-matches
 stop_agent_endpoint}` and `routers/chat.py::terminate_agent_execution`. Reset
 then runs `require_admin_allowing("ops_write")`; start and stop run
 `enforce_agent_spawn_scope`, which refuses the system agent and ephemeral agents
-for this scope. A start may run the #1854 self-heal on the target's own key;
-nothing of it is returned. A password change with "revoke keys" revokes the key
+for this scope. Start passes `allow_key_mint=False` to `start_agent_internal`,
+which refuses with 409 `ops_write_would_mint_key` before any side effect when
+the start would mint the agent a key: the #1854 drift heal (`reason:
+key_drift`) or the #1559 rebuild of a missing container (`reason:
+container_missing`). A person's start still heals and rebuilds, so a person's
+revocation of the agent's key is never undone by this key. A password change with "revoke keys" revokes the key
 (`services/password_service.PERSON_KEY_SCOPES`), and an `ops_write` key found in
 an agent's `.mcp.json` reports the verify verdict `foreign_ops_write_key`.
 

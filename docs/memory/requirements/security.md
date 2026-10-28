@@ -503,21 +503,35 @@
     agent replaces its container, which is the human-only #1816 restart by
     another spelling; a start with config drift recreates a ghost, which is
     volume-less. Reset and terminate keep every agent the owner reaches.
-  - **Start's self-heal is a use, not a grant**: a start that finds the target's
-    baked-in MCP key missing or revoked runs the #1854 self-heal, which mints
-    *that agent's own* key into its container and prunes that agent's superseded
-    agent keys. No credential reaches the caller. Consequence: an agent stopped
-    and key-revoked for containment can be started again by this key. Taking the
-    agent out of the key owner's reach is not a remedy (the key works only while
-    its owner is an admin, and an admin reaches every agent); to contain an
-    agent, delete it, revoke the `ops_write` keys, or demote their owner.
+  - **A start never mints a key, so it cannot undo a person's containment**:
+    a person contains an agent by stopping it and revoking (or deleting) the
+    platform key baked into its container. A start that would mint the agent a
+    key is refused for this scope with 409 `ops_write_would_mint_key` (body
+    `{code, reason, message}`, the message saying a person has to start the
+    agent), before any side effect: nothing is minted, pruned, recreated,
+    started or cleared. The two minting starts are `reason: key_drift`, the
+    #1854 self-heal (the container's key is revoked, deleted, missing, or not
+    this agent's own `agent` key; refused whether the agent is stopped or
+    running), and `reason: container_missing`, the #1559 rebuild of a missing
+    container. The verdict does not try to tell a person's action from benign
+    drift: a revoke leaves an inactive row, but a person's delete leaves no row,
+    the same state the platform's own prune leaves, so the two cannot be told
+    apart, and treating "no row" as benign would leave delete as a containment
+    a machine could undo. Benign drift (a failed creation-time mint, a stale
+    database) is therefore refused too. That is safe because it costs only
+    availability, never reach: on a healthy agent the key predicate matches, so
+    the start runs as for anyone, and a drifted agent needs one person's start,
+    which heals it as before, after which the key's starts work again. A
+    person's start is unchanged.
   - **Dies with its owner, on every route the resolver protects**: demotion
     below `admin` refuses the key at the fence (`ops_write_owner_not_admin`),
     suspension refuses it one line earlier (401), and a password change with
     "revoke keys" revokes it (`PERSON_KEY_SCOPES` equals the mintable set,
     pinned). It applies to the next request, not to an operation already
-    running. `/api/mcp/validate` keeps reporting the key valid until the key is
-    revoked (introspection; it grants nothing).
+    running. Demotion suspends the key rather than revoking it: the row stays
+    active, and promoting the owner back to admin makes the key work again; to
+    end it, revoke it. `/api/mcp/validate` keeps reporting the key valid until
+    the key is revoked (introspection; it grants nothing).
   - **Mint**: `POST /api/mcp/keys` with `scope: "ops_write"`, from an
     interactive admin session only (the `ops` ladder: `require_interactive`,
     then `reject_non_interactive_principal`, `reject_agent_principal`,
@@ -530,14 +544,13 @@
     nothing.
   - **Attribution**: every audit row written as the caller carries the key's
     `mcp_key_id` and `mcp_scope=ops_write`, derived from the principal (#2389);
-    start and stop already write one. One row the key causes is not written as
-    the caller: the #1854 self-heal a start may run (a key minted, the agent's
-    superseded keys deleted) writes its `agent_key_self_heal` row as `system`,
-    without the key, so a filter on the key's `mcp_key_id` does not find it.
+    start and stop already write one. Since this scope's start never runs the
+    #1854 self-heal, it causes no `agent_key_self_heal` row (that row is written
+    as `system` when a person's start heals).
   - **Survives enforced two-factor** for the same reason `ops` does: key
     validation never passes through the second-factor flow.
-  - Guards: `tests/unit/test_3180_ops_write_scope.py` (pass paths, target policy,
-    owner binding, mint matrix) and `tests/unit/test_3180_ops_write_route_census.py`
+  - Guards: `tests/unit/test_3180_ops_write_scope.py` (pass paths, containment,
+    target policy, owner binding, mint matrix) and `tests/unit/test_3180_ops_write_route_census.py`
     (the mark census, and a sweep of every live OSS route with a real key).
 - **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
   `expires_at`); narrowing the existing `user` scope (would break the fleet). The
