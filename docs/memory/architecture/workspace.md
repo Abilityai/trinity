@@ -28,7 +28,8 @@ person or an `otp`-minted session may self-approve a gated skill — see `featur
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
 every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
-`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal` (which also authenticates
+the `/api/enterprise/rooms/` paths that seat people in a room, ent#701), the Workspace voice start —
 resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
 surface exactly as before, roster included (shared agents plus any they own). The handful of
 operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
