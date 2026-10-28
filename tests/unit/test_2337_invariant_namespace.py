@@ -67,10 +67,10 @@ def _lib():
 # --------------------------------------------------------------------------
 DECLARED_FAMILIES = {
     "AC": 7, "AU": 2, "B": 8, "CH": 4, "E": 9, "EV": 3, "G": 5, "H": 1,
-    "IA": 4, "L": 6, "MCP": 3, "OQ": 4, "P": 5, "PLG": 1, "R": 4, "RD": 3,
+    "IA": 4, "L": 6, "MCP": 3, "OQ": 4, "P": 5, "PLG": 1, "R": 4, "RD": 5,
     "S": 7, "SCH": 5, "SK": 3,
 }
-DECLARED_TOTAL = 84  # 71 pre-#2337 + E-09 + SK×3 + RD×3 + PLG + IA×3 + IA-04 (#2806) + B-08 (#2840)
+DECLARED_TOTAL = 86  # 71 pre-#2337 + E-09 + SK×3 + RD×3 + PLG + IA×3 + IA-04 (#2806) + B-08 (#2840) + RD-04/RD-05 (#4000)
 
 # The catalog's own bar (§Invariant tiering): "each invariant is expressed so
 # it is directly checkable … 'Signal' is the exact query the canary runs". The
