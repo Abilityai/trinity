@@ -55,15 +55,11 @@ _DEFAULT_INTERVAL_SECONDS = 30
 
 # Initial grace period before the first sweep fires.
 #
-# The base image runs `~/.trinity/setup.sh` at container startup —
-# templates use this to install custom packages (apt-get, npm install
-# -g, etc.). Those processes are direct children of PID 1 but are NOT
-# part of the platform essentials — they're user-template owned. The
-# grace period lets setup.sh and its package-manager subprocesses
-# complete before the sweep starts evaluating them as orphans.
-#
-# 90s is comfortable: typical setup.sh completes in <60s even on slow
-# networks. Overridable for tests via TRINITY_ORPHAN_SWEEP_STARTUP_DELAY.
+# #4002: the running `~/.trinity/setup.sh` and its package-manager
+# children are protected by the allowlist itself (platform tree
+# pattern), however long the install takes. The grace only covers other
+# boot-time work started around the agent server. Overridable for tests
+# via TRINITY_ORPHAN_SWEEP_STARTUP_DELAY.
 _DEFAULT_STARTUP_DELAY_SECONDS = 90
 
 

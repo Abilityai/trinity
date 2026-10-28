@@ -118,7 +118,8 @@ class TestSpecConsistency:
         # below still asserts D-006 stays out of the catalog.
         # ent#479: +1 (D-010, metrics.json superseded) -> 91.
         # ent#730: +1 (X-009, dashboard metric:/dims: bindings) -> 92.
-        assert len(spec.CHECKS) == 92, f"expected 92 checks, found {len(spec.CHECKS)}"
+        # #4002: +1 (F-014, last setup.sh exit code) -> 93.
+        assert len(spec.CHECKS) == 93, f"expected 93 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
         """#2137: persisted `checks_json` rows predate the retirement.

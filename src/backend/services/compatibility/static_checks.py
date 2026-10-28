@@ -1699,6 +1699,29 @@ def c_dp004(snap):
     return _with_template(snap, f)
 
 
+def c_f014(snap):
+    """SOFT: did the last `.trinity/setup.sh` run succeed (#4002).
+
+    Reads `.trinity/setup-status.json`, written by startup.sh after the hook.
+    Agent-writable, so only the known keys are read and `exit_code` is coerced.
+    """
+    path = ".trinity/setup-status.json"
+    raw = _content(snap, path)
+    if raw is None:
+        return _skip("setup script outcome not reported",
+                     "no .trinity/setup-status.json — no setup script, or base image predates #4002")
+    try:
+        state = json.loads(raw)
+        code = int(state["exit_code"])
+    except (ValueError, TypeError, KeyError, OverflowError):  # 1e400 → inf
+        return _fail("setup status file is present but unreadable", {"path": path})
+    times = {k: str(state.get(k))[:40] for k in ("started_at", "finished_at")}
+    if code == 0:
+        return _ok(".trinity/setup.sh last run exited 0", times)
+    return _fail(f".trinity/setup.sh last run exited {code} — declared packages may be missing",
+                 {"exit_code": code, **times})
+
+
 PLATFORM_PLUGIN_REF = "trinity@abilityai"
 
 
@@ -1761,7 +1784,7 @@ def c_i006(snap):
 STATIC_CHECKS = {
     "F-001": c_f001, "F-002": c_f002, "F-003": c_f003, "F-004": c_f004,
     "F-005": c_f005, "F-006": c_f006, "F-007": c_f007,
-    "F-009": c_f009, "F-010": c_f010, "F-011": c_f011,
+    "F-009": c_f009, "F-010": c_f010, "F-011": c_f011, "F-014": c_f014,
     "S-001": c_s001, "S-002": c_s002, "S-003": c_s003, "S-004": c_s004,
     "S-005": c_s005, "S-006": c_s006, "S-007": c_s007, "S-008": c_s008,
     "S-009": c_s009, "S-010": c_s010,

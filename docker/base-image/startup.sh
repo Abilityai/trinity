@@ -71,6 +71,21 @@ fi
 AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
 mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
     echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
+# #4002: the default TMPDIR is platform scratch on the persistent volume; build
+# leftovers (pip/npm/CUDA wheels) would otherwise pile up across restarts. Empty
+# it here, before the agent server or setup.sh can use it. A custom TMPDIR is
+# operator-chosen and may hold data, so it is left alone.
+if [ "${AGENT_TMPDIR}" = "/home/developer/.tmp" ]; then
+    _tmp_n=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_tmp_n:-0}" -gt 0 ]; then
+        _tmp_size=$(du -sh "${AGENT_TMPDIR}" 2>/dev/null | cut -f1)
+        find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+        echo "TMPDIR: cleared ${_tmp_n} entries (${_tmp_size:-?}) from ${AGENT_TMPDIR}"
+    fi
+    unset _tmp_n _tmp_size
+else
+    echo "TMPDIR: custom ${AGENT_TMPDIR} not cleared"
+fi
 
 # ent#123: a per-agent PAT configured AFTER creation is live-injected into the
 # workspace .env (#1264) while the baked env stays tokenless until the next
@@ -702,7 +717,21 @@ fi
 if [ -f "/home/developer/.trinity/setup.sh" ]; then
     echo "Running persistent setup script to restore packages..."
     chmod +x /home/developer/.trinity/setup.sh
-    bash /home/developer/.trinity/setup.sh 2>&1 || echo "Warning: setup.sh had errors (continuing startup)"
+    _setup_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # #4002: keep this exact invocation — the orphan-sweep allowlist
+    # (_PLATFORM_TREE_PATTERNS) protects it and its children by cmdline.
+    bash /home/developer/.trinity/setup.sh 2>&1
+    _setup_rc=$?
+    [ "$_setup_rc" -ne 0 ] && echo "Warning: setup.sh had errors (continuing startup)"
+    # #4002: record the outcome for the compatibility report (F-014). Atomic.
+    printf '{"exit_code": %d, "started_at": "%s", "finished_at": "%s"}\n' \
+        "$_setup_rc" "$_setup_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > /home/developer/.trinity/setup-status.json.tmp 2>/dev/null && \
+        mv -f /home/developer/.trinity/setup-status.json.tmp /home/developer/.trinity/setup-status.json 2>/dev/null || true
+    unset _setup_started _setup_rc
+else
+    # #4002: no hook, no run — drop a stale status so the report does not show an old one.
+    rm -f /home/developer/.trinity/setup-status.json 2>/dev/null || true
 fi
 
 # === Encrypted credentials without a .env (#3510) ===

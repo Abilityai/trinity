@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4002_setup_hook_tmpdir.py",
+      "feature": "#4002",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "startup",
+        "compatibility",
+        "unit"
+      ],
+      "description": "setup.sh protected from the orphan sweep, default TMPDIR emptied at boot, F-014 setup outcome check"
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",

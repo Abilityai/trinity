@@ -101,6 +101,15 @@
 - **Tests**: `tests/unit/test_2541_restart_policy_parity.py`, `tests/unit/test_2541_restart_policy_effects.py`, `tests/unit/test_1484_create_agent_characterization.py`, `tests/unit/test_1816_system_agent_adoption.py`
 - **Docs**: [container-capabilities.md](../feature-flows/container-capabilities.md) → Container Restart Policy; [agent-lifecycle.md](../feature-flows/agent-lifecycle.md); [AGENT_RESTART_POLICY_2026-09.md](../../migrations/AGENT_RESTART_POLICY_2026-09.md)
 
+### 8.5e Template Setup Hook and Scratch Space at Boot (#4002)
+- **Status**: ✅ Implemented
+- **Description**: `startup.sh` runs `~/.trinity/setup.sh` after the agent server starts, so the orphan sweep is live during the install.
+- **Key Features**:
+  - The sweep allowlist protects the exact cmdline `bash /home/developer/.trinity/setup.sh` and its descendant tree (`_PLATFORM_TREE_PATTERNS`, `orphan_allowlist.py`), with no user allow file. Leftovers reparent to PID 1 after it exits and are reaped.
+  - The default `TMPDIR` (`/home/developer/.tmp`, #1098) is emptied at every boot, before anything uses it. A custom `TMPDIR` is not touched.
+  - `startup.sh` writes `~/.trinity/setup-status.json` (`exit_code`, `started_at`, `finished_at`) after the hook and removes it when there is no hook. Compatibility check **F-014** (SOFT) fails on a non-zero exit and skips when the file is absent.
+- **Tests**: `tests/unit/test_4002_setup_hook_tmpdir.py`
+
 ### 8.5a SSRF Prevention — Skills Library URL Validation (SEC-179)
 - **Status**: ✅ Implemented (2026-03-27)
 - **GitHub Issue**: #179
