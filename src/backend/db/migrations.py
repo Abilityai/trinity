@@ -5718,6 +5718,20 @@ def _migrate_a2a_caller_identity(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_agent_sync_state_git_stats_at(cursor, conn):
+    """#4000 — `agent_sync_state.git_stats_at`: when the agent last measured
+    git_dir_bytes / pack_count / loose_objects (canary RD-04 ages it). Nullable,
+    no backfill: an old base image never sends it, and RD-04 falls back to
+    `last_sync_at` while it is NULL. Mirrored by Alembic
+    0104_agent_sync_state_git_stats_at."""
+    _safe_add_column(
+        cursor, "agent_sync_state", "git_stats_at",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_stats_at TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5891,5 +5905,6 @@ MIGRATIONS = [
     ("held_gate_turns", _migrate_held_gate_turns),
     ("nevermined_delegations", _migrate_nevermined_delegations),
     ("a2a_caller_identity", _migrate_a2a_caller_identity),
+    ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
 ]

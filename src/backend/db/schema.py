@@ -1247,6 +1247,7 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,  -- #4000: when the agent last measured the three stats above
             diverged_since TEXT,
             dirty_files INTEGER,
             dirty_since TEXT,

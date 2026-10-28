@@ -22,7 +22,8 @@ exactly, or ``*.example.net`` for any name under it).
 Refused entries, and why each one is load-bearing:
 
 * a CIDR overlapping the platform's own Docker networks — agents and the public
-  tunnel (cloudflared) reach the backend from there;
+  tunnel (cloudflared) reach the backend from there; on prod/hosted that
+  includes the ingress network of trinity-enterprise#873, at its active prefix;
 * loopback, link-local (cloud metadata lives at 169.254.169.254), unspecified
   and multicast ranges;
 * anything broader than a /8 (IPv4) or a /32 (IPv6), and a host pattern of a
@@ -68,6 +69,22 @@ _FORBIDDEN = PLATFORM_NETWORKS + (
 
 _MIN_PREFIX = {4: 8, 6: 32}
 
+
+def platform_networks() -> tuple:
+    """The two fixed bridges plus, on prod/hosted, the active ingress network
+    the bundled nginx and cloudflared sit on (trinity-enterprise#873). Its
+    prefix is configurable, so it is read from the leaf configuration accessor
+    rather than written here as a literal."""
+    from utils.client_ip import managed_proxy_subnet
+
+    ingress = managed_proxy_subnet()
+    return PLATFORM_NETWORKS + ((ingress,) if ingress is not None else ())
+
+
+def _forbidden() -> tuple:
+    """`_FORBIDDEN` with the active ingress network included."""
+    return tuple(platform_networks()[len(PLATFORM_NETWORKS):]) + _FORBIDDEN
+
 Network = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
 
 
@@ -90,9 +107,10 @@ def _check_cidr(entry: str, net: Network) -> None:
     if net.prefixlen < _MIN_PREFIX[net.version]:
         raise TrustedNetworkError(
             f"{entry}: too broad — narrower than /{_MIN_PREFIX[net.version]} only")
-    for bad in _FORBIDDEN:
+    platform = platform_networks()
+    for bad in _forbidden():
         if bad.version == net.version and net.overlaps(bad):
-            if bad in PLATFORM_NETWORKS:
+            if bad in platform:
                 raise TrustedNetworkError(
                     f"{entry}: overlaps the platform's own Docker network {bad} — agents "
                     "and the public tunnel reach the backend from there")

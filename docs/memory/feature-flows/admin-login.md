@@ -265,52 +265,23 @@ def get_redis_client():
     return _redis_client
 
 
-# Check rate limit function (lines 44-71)
-def check_login_rate_limit(client_ip: str) -> bool:
-    """
-    Check if login attempts from IP are within rate limit.
-    Returns True if allowed, raises HTTPException if rate limited.
-    """
-    r = get_redis_client()
-    if r is None:
-        # Redis unavailable - allow login but log warning
-        return True
+# Split per-account / per-IP failure counters (#591)
+def _account_key(account): return f"login_attempts_acct:{account.strip().lower()}"
+def _ip_key(client_ip): return f"login_attempts_ip:{client_ip}"
 
-    key = f"login_attempts:{client_ip}"
-    attempts = r.get(key)
-    if attempts and int(attempts) >= LOGIN_RATE_LIMIT:
-        ttl = r.ttl(key)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many login attempts. Try again in {ttl} seconds."
-        )
-    return True
+def check_login_rate_limit(client_ip: str, account: Optional[str] = None) -> bool:
+    """429 when either bucket is exhausted; fail-open when Redis is down."""
+    # per-IP:      LOGIN_IP_LIMIT=30 failures / LOGIN_IP_WINDOW=300s
+    # per-account: LOGIN_ACCOUNT_LIMIT=5 failures / LOGIN_ACCOUNT_WINDOW=900s
 
-
-# Record login attempt function (lines 74-95)
-def record_login_attempt(client_ip: str, success: bool):
-    """
-    Record a login attempt. Failed attempts increment counter.
-    Successful logins clear the counter.
-    """
-    r = get_redis_client()
-    if r is None:
-        return
-
-    key = f"login_attempts:{client_ip}"
-    if success:
-        r.delete(key)  # Clear attempts on successful login
-    else:
-        pipe = r.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, LOGIN_RATE_WINDOW)
-        pipe.execute()
+def record_login_attempt(client_ip: str, success: bool, account: Optional[str] = None):
+    """Failure increments both buckets (with their windows); success deletes both."""
 ```
 
 **Rate Limiting Behavior**:
-- **Redis key**: `login_attempts:{client_ip}`
-- **Threshold**: 5 failed attempts within 10 minutes triggers lockout
-- **Reset**: Successful login clears the attempt counter
+- **Redis keys**: `login_attempts_ip:{ip}` (30 failures / 5 min) and `login_attempts_acct:{account}` (5 failures / 15 min), counted separately per client address and per account (#591)
+- **`{ip}` is the canonical client address** (trinity-enterprise#873): resolved once per request by `utils/client_ip.ClientAddressMiddleware` before the route runs, so behind the bundled nginx or Cloudflare Tunnel it is the visitor's address, not the proxy container's. Forwarded headers count only from a trusted proxy; a direct caller to `:8000`, an agent or the dev Vite proxy is keyed on its own socket address. Details: `architecture/security.md` §1a
+- **Reset**: Successful login clears both counters
 - **Graceful degradation**: If Redis is unavailable, rate limiting is bypassed with warning logged
 
 #### POST /api/token endpoint (lines 127-172)
@@ -323,13 +294,15 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     Used for admin login (username 'admin' with password).
     Regular users should use email authentication.
 
-    Rate limited: 5 attempts per 10 minutes per IP (M-005).
+    Rate limited (#591): per-account 5 / 15 min plus per-IP 30 / 5 min.
     """
-    # Get client IP for rate limiting
+    # The canonical client address (ent#873): the middleware already rewrote
+    # request.client from a trusted proxy's forwarded identity.
     client_ip = request.client.host if request.client else "unknown"
+    account = (form_data.username or "").strip().lower()
 
-    # Check rate limit before processing (M-005)
-    check_login_rate_limit(client_ip)
+    # Check rate limit before processing (#591)
+    check_login_rate_limit(client_ip, account=account)
 
     # Block login if setup is not completed
     if not is_setup_completed():
@@ -342,7 +315,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     user = authenticate_user(form_data.username, form_data.password)
     if not user:
         # Record failed attempt
-        record_login_attempt(client_ip, success=False)
+        record_login_attempt(client_ip, success=False, account=account)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -350,7 +323,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         )
 
     # Record successful login (clears attempt counter)
-    record_login_attempt(client_ip, success=True)
+    record_login_attempt(client_ip, success=True, account=account)
 
     # Update last login timestamp
     db.update_last_login(user["username"])
@@ -721,7 +694,7 @@ JWT token payload for admin login:
 - Login before setup completed: Should redirect to `/setup`
 - Empty password: Submit button should be disabled
 - Token expiry: After 7 days, should redirect to `/login`
-- Rate limited (M-005): After 5 failed attempts, returns 429 with TTL countdown
+- Rate limited (#591): 5 failures per account / 15 min or 30 per client address / 5 min return 429 with TTL countdown; the address is the canonical client (ent#873), not the proxy's
 - Redis unavailable (M-005): Rate limiting bypassed with warning logged
 - Invalid hash format (M-003): Returns 401 same as wrong password (no information leakage)
 

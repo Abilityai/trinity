@@ -453,6 +453,7 @@
           @session-adopted="onSessionAdopted"
           @thread-missing="onThreadMissing"
           @sessions-changed="onConversationTurnDone"
+          @thread-caught-up="onThreadCaughtUp"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -2288,6 +2289,17 @@ async function refreshThreads() {
   store.seedAgentRecency(threads.value)
 }
 
+// #3439: the open conversation appended rows the agent wrote on its own (a
+// report, an approval outcome, a background task's reply) — what the person is
+// looking at is read. Mark-read only: unlike a finished turn this neither
+// re-reads the list (the 20 s tick that surfaced the row already did) nor
+// touches the #2579 title-settle cycle, which an agent-initiated row must not
+// cancel or arm. Same "still here?" question as a turn, for the same reason.
+function onThreadCaughtUp(sessionId) {
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
+}
+
 // A turn finishing in the conversation the user is LOOKING AT is read by
 // definition. Without this, the reply the user just watched arrive would land
 // after the read cursor set at dispatch and badge the chat they are sitting in
@@ -3156,10 +3168,23 @@ function startAsksPoll() {
     // enough to ride here.
     refreshThreads()
   }, ASKS_POLL_MS)
+  // #3439: coming back to the tab is the moment the person wants to know what
+  // happened while they were away — catch up now rather than at the next tick
+  // (up to 20 s of a transcript the badge already contradicts). One tick body,
+  // on the same visibility rule the interval skips on.
+  document.addEventListener('visibilitychange', onTabVisible)
+}
+
+function onTabVisible() {
+  if (document.visibilityState !== 'visible' || !asksTimer) return
+  store.fetchAsks()
+  store.fetchMentions()
+  refreshThreads()
 }
 
 function stopAsksPoll() {
   if (asksTimer) { clearInterval(asksTimer); asksTimer = null }
+  document.removeEventListener('visibilitychange', onTabVisible)
 }
 
 async function bootstrap() {
