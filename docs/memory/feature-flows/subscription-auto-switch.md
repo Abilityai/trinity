@@ -22,6 +22,7 @@ Backend catches the failure in:
     ↓
 Classify:
   - model rejection (is_model_rejection, #3012) → NO switch, error_code MODEL_UNSUPPORTED
+  - turn limit (is_turn_limit, #3984) or prompt too long (is_prompt_too_long, #3849) → NO switch, NO walk, never counted as auth
   - 429 → handle_subscription_failure(..., failure_kind="rate_limit")
   - 503 OR is_auth_failure(error_msg) → handle_subscription_failure(..., failure_kind="auth")
     ↓
