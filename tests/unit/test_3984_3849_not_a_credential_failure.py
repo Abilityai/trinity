@@ -244,8 +244,9 @@ def test_task_path_runs_once_and_never_switches(status, detail_fn, code):
     ctx.switch.assert_not_awaited()
     legacy_switch.assert_not_awaited()
     fallback.assert_not_awaited()
-    assert result.error_code is None or result.error_code.value == code
-    assert result.error_code is None or result.error_code.value != "auth"
+    # Exact per row: a turn-limit 422 is max_turns (#3988); a prompt-length
+    # 503 must be agent_error, never left uncoded or AUTH.
+    assert (result.error_code.value if result.error_code else None) == code
 
 
 @pytest.mark.asyncio
@@ -283,6 +284,46 @@ def test_pull_terminal_does_not_switch():
 
     assert _switch_failure_kind("auth", f"[auth] {_OLD_IMAGE_PROMPT_503}") is None
     assert _switch_failure_kind("auth", "token expired") == "auth"
+
+
+@pytest.mark.parametrize("content,stored_code,breaker_auth", [
+    ("Execution failed: Prompt is too long", "agent_error", False),
+    (_OLD_IMAGE_PROMPT_503, "agent_error", False),
+    ("Model unsupported: claude-x is not available on this CLI", "model_unsupported", False),
+    ("token expired", "auth", True),
+], ids=["prompt-length", "prompt-length-old-image", "model-rejection", "genuine-auth"])
+def test_pull_terminal_does_not_count_a_credential_independent_503_as_auth(
+    content, stored_code, breaker_auth
+):
+    """The worker labels the agent's prompt-length (and pre-#3012 model
+    rejection) 503 ``auth``. The pull sink recodes it from the text, like the
+    #1083 callback, so the AUTH dispatch breaker never counts it and the row is
+    not stored as ``[auth] …``. Genuine auth keeps its code."""
+    from services import pull_coordination_service as pcs
+
+    mock_db = MagicMock()
+    mock_db.get_execution.return_value = SimpleNamespace(
+        id="exec-3849", agent_name="worker-a", status="running", triggered_by="schedule",
+        duration_ms=None, cost=None, fan_out_id=None, loop_id=None,
+        claude_session_id="dispatched_async",
+    )
+    mock_db.update_execution_status.return_value = True
+    with (
+        patch.object(pcs, "db", mock_db),
+        patch.object(pcs, "event_dispatch_service", MagicMock()),
+        patch.object(pcs, "activity_service", MagicMock()),
+        patch.object(pcs, "subscription_auto_switch", MagicMock()),
+        patch.object(pcs, "_spawn_breaker_verdict") as verdict,
+    ):
+        outcome = pcs.apply_task_result(
+            "exec-3849", "tok", status="failed", content=content, error_code="auth",
+        )
+
+    assert outcome.kind == "applied"
+    verdict.assert_called_once()
+    assert verdict.call_args.args[2] is breaker_auth
+    stored = mock_db.update_execution_status.call_args.kwargs["result"].error
+    assert stored.startswith(f"[{stored_code}] ")
 
 
 def test_async_callback_does_not_count_a_prompt_length_503_as_auth():

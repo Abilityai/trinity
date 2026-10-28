@@ -16,6 +16,8 @@
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
 
+**Upgrade parity (#3395):** `test_schema_parity.py` models a fresh install only, so it cannot see a `schema.py` column on a table only `init_schema` creates (`users`, `schedule_executions`, ...) that no registered migration adds — present on every fresh install, absent on every existing one; `scripts/ci/check_sqlite_upgrade_parity.py` (a `schema-parity` step) builds an install with the PR's merge-base, upgrades it with the PR's code, and fails on any table, column, index or trigger `schema.py` declares that did not arrive.
+
 **users:**
 ```sql
 CREATE TABLE users (
@@ -800,6 +802,7 @@ CREATE TABLE agent_sync_state (
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts
+    git_stats_at TEXT,                     -- #4000: when the git stats above were measured (agent-written, coerced)
     diverged_since TEXT,                   -- ent#706: divergence episode start (ISO-Z; set once, cleared at 0/0)
     dirty_files INTEGER,                   -- ent#706: porcelain change count
     dirty_since TEXT,                      -- ent#706: dirt episode start (ISO-Z; cleared at 0)
