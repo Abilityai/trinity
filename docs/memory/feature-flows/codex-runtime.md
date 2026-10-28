@@ -221,4 +221,30 @@ one `/api/task` turn (tools create+read a file; MCP `list_agents`).
 
 Shared subprocess-helper DRY extraction; Session-tab cached-UUID resume for Codex;
 backend reading `ExecutionMetadata.error_code` directly; Codex SSE streaming;
-vision/images; a post-creation runtime-switch endpoint.
+a post-creation runtime-switch endpoint.
+
+
+## Uploaded images
+
+Headless task images are passed to native `codex exec --image` options. Resumed
+turns put these options after `resume`, so images attach to the current turn.
+The prompt still travels on stdin (`-- -`), preserving support for long messages.
+The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
+5 MiB each and 10 MiB combined; violations of these MIME, base64 and size checks return HTTP 400 before spawn.
+Raster decoding is performed by the Codex CLI, not by this validation helper.
+A private, unique mode-0700 temporary directory holds mode-0600 copies. Before
+subprocess handoff, failures remove partial files immediately. If writing or
+closing stdin fails after spawn but before reader handoff, the image execution
+stops its child before removing its inputs. After handoff, the
+reader owns cleanup until subprocess reading and bounded cleanup finish. Canceling the
+HTTP waiter leaves those inputs and the process registry entry available until
+that worker completes; cleanup does not need another executor slot. Native
+process timeouts and explicit operator cancellation retain their existing policy.
+Text-only execution cancellation remains unchanged.
+
+This change adds no persistent upload originals or tool permissions. Existing
+upload authorization, preprocessing, and channel behavior remain in place.
+
+Unit coverage: `test_codex_runtime.py` exercises initial/resumed argv, bounded
+validation, private permissions, spawn/stdio failure, long prompts, concurrent isolation, and
+cancellation with a saturated reader executor.
