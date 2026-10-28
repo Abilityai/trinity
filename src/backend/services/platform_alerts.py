@@ -145,9 +145,12 @@ _BUILTIN_KINDS = (
     Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK),
     Kind("git_bloat_size", "git-bloat-", _N, CLEARS_HOOK),
     Kind("git_bloat_maintenance", "git-bloat-", _N, CLEARS_HOOK),
-    Kind("db_backup_failure", "db-backup-", _D, CLEARS_HOOK),
-    Kind("db_backup_stale", "db-backup-", _D, CLEARS_HOOK),
-    Kind("log_archive_unwritable", "log-archive-", _D, CLEARS_HOOK),
+    # #3254: the episode marker is a material key, so a person's ending snoozes
+    # re-reads of the SAME episode only; one after a recovery differs and files.
+    Kind("db_backup_failure", "db-backup-", _D, CLEARS_HOOK, material_keys=("last_success_at",)),
+    Kind("db_backup_stale", "db-backup-", _D, CLEARS_HOOK, material_keys=("last_success_at",)),
+    Kind("log_archive_unwritable", "log-archive-", _D, CLEARS_HOOK,
+         material_keys=("last_writable_at",)),
     Kind("retention_refused", "retention-guard-", _D, CLEARS_HOOK, material_keys=("reason",)),
     Kind("system_seed", "system-seed-", _N, CLEARS_HOOK),
     Kind("git_token_scrub_refused", "ent615-git-token-scrub-", _D, CLEARS_HOOK),

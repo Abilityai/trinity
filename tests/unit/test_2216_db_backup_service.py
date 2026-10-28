@@ -253,9 +253,10 @@ class TestPreflightAndFailure:
         assert agent == ALARM_AGENT_NAME
         assert item["id"].startswith(ALARM_ID_PREFIX)
         assert item["context"]["alert_type"] == "db_backup_failure"
-        # G-04 rule: context carries status/paths only — never row data.
+        # G-04 rule: context carries status/paths only — never row data
+        # (#3254: plus the last success's timestamp, the episode marker).
         assert set(item["context"]) <= {
-            "alert_type", "status", "trigger", "backup_dir"
+            "alert_type", "status", "trigger", "backup_dir", "last_success_at"
         }
 
     def test_failed_backup_writes_status_and_alarm(self, env, monkeypatch):

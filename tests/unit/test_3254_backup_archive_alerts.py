@@ -282,7 +282,25 @@ class TestBackupFailure:
         rows = _pending(db, backup.host, "db_backup_failure")
         assert len(rows) == 1 and rows[0]["context"]["seen_count"] == 1
 
-    def test_a_persons_ending_stands_and_snoozes_the_next_edge(self, db, backup, clock, outcomes):
+    def test_a_persons_ending_snoozes_a_reread_of_the_same_episode(self, db, backup, clock, outcomes):
+        """The sibling worker reads the same edge again after a person ended
+        the row: the same failure episode (no success between), snoozed."""
+        backup.settings["db_backup_last_success_at"] = _iso(DAY0 - timedelta(days=1))
+        _record(backup, "failed", error="boom")
+        row = _pending(db, backup.host)[0]
+        assert row["context"]["last_success_at"] == _iso(DAY0 - timedelta(days=1))
+        clock.set(DAY0 + timedelta(hours=2))
+        assert _ack(row)["status"] == "acknowledged"
+        backup.settings["db_backup_last_status"] = "ok"
+        clock.set(DAY0 + timedelta(hours=3))
+        _record(backup, "failed", error="boom")
+        assert _pending(db, backup.host) == []
+        assert outcomes[-1] == ("db_backup_failure", pa.OBSERVED_SNOOZED)
+
+    def test_a_persons_ending_stands_and_a_new_episode_files_again(self, db, backup, clock, outcomes):
+        """A success ends the failure episode; the next failure is a new
+        episode and files, inside the 7-day window, while the person's ending
+        of the first stands."""
         _record(backup, "failed", error="boom")
         row = _pending(db, backup.host)[0]
         clock.set(DAY0 + timedelta(hours=2))
@@ -294,11 +312,13 @@ class TestBackupFailure:
         clock.set(DAY0 + timedelta(days=2))
         _record(backup, "failed", error="boom")       # a new edge inside the 7-day window
 
-        assert _pending(db, backup.host) == []
-        assert outcomes[-1] == ("db_backup_failure", pa.OBSERVED_SNOOZED)
+        assert outcomes[-1] == ("db_backup_failure", pa.OBSERVED_CREATED)
+        (fresh,) = _pending(db, backup.host)
+        assert fresh["id"] != row["id"]
+        assert fresh["context"]["last_success_at"] == _iso(DAY0 + timedelta(days=1))
         kept = db.get_operator_queue_item(row["id"])
         assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
-        assert len(_all_rows(db, backup.host)) == 1
+        assert len(_all_rows(db, backup.host)) == 2
 
     def test_the_key_is_the_sweeps_reading_of_a_legacy_row(self, db, backup, clock):
         # The pre-move `_emit_alarm` id and context, byte for byte.
@@ -506,21 +526,36 @@ class TestBackupStale:
         _check(backup)
         assert len(_pending(db, backup.host, "db_backup_stale")) == 1
 
-    def test_a_persons_ending_stands_and_snoozes_the_next_re_alarm(self, db, stale, clock, outcomes):
+    def test_a_persons_ending_stands_and_snoozes_a_re_alarm_of_the_same_staleness(
+            self, db, stale, clock, outcomes):
         _check(stale)
         row = _pending(db, stale.host)[0]
         clock.set(DAY0 + timedelta(hours=1))
         assert _ack(row)["status"] == "acknowledged"
-        clock.set(DAY0 + timedelta(days=1))
-        _ok(stale)
         clock.set(DAY0 + timedelta(days=5))
-        stale.settings["db_backup_last_success_at"] = _iso(DAY0 - timedelta(days=4))
         stale.settings.pop("db_backup_last_staleness_alarm_at")
         _check(stale)
         assert _pending(db, stale.host) == []
         assert outcomes[-1] == ("db_backup_stale", pa.OBSERVED_SNOOZED)
         kept = db.get_operator_queue_item(row["id"])
         assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
+
+    def test_a_new_staleness_after_a_persons_ending_files_again(self, db, stale, clock, outcomes):
+        """A success ends the stale episode; backups stop again and the next
+        re-alarm reads a newer last success: a new episode, which files inside
+        the 7-day window."""
+        _check(stale)
+        row = _pending(db, stale.host)[0]
+        clock.set(DAY0 + timedelta(days=3))
+        assert _ack(row)["status"] == "acknowledged"
+        clock.set(DAY0 + timedelta(days=3, hours=1))
+        _ok(stale)                                    # the clear finds nothing pending
+        clock.set(DAY0 + timedelta(days=7))           # stale again, and the weekly slot
+        _check(stale)
+        assert outcomes[-1] == ("db_backup_stale", pa.OBSERVED_CREATED)
+        (fresh,) = _pending(db, stale.host)
+        assert fresh["id"] != row["id"]
+        assert fresh["context"]["last_success_at"] == _iso(DAY0 + timedelta(days=3, hours=1))
 
     def test_the_key_is_the_sweeps_reading_of_a_legacy_row(self, db, stale, clock):
         legacy_id = f"db-backup-{_iso(DAY0 - timedelta(days=2))}"
@@ -576,8 +611,12 @@ class TestThirtyDaysAhead:
         assert db.get_operator_queue_item(failure_id)["disposed_by"] == "timeout"
         assert len(_all_rows(db, failing.host)) == 2
 
-    def test_a_persons_ending_of_the_stale_row_silences_one_weekly_re_alarm_not_more(
+    def test_a_persons_ending_of_the_stale_row_silences_it_for_the_snooze_window_only(
             self, db, failing, clock, outcomes):
+        """dolho (db_backup_service.py:523): a snoozed re-alarm does not stamp
+        the weekly timer, so the daily check re-reads and the staleness files
+        again on the first run after the snooze lapses (day 15 for an
+        acknowledgement on day 7), not a week after that (day 21)."""
         for d in range(8):
             self._day(failing, db, clock, d)
         row = _pending(db, failing.host, "db_backup_stale")[0]
@@ -585,10 +624,10 @@ class TestThirtyDaysAhead:
         clock.set(DAY0 + timedelta(days=7, hours=9))
         assert _ack(row)["status"] == "acknowledged"
 
-        for d in range(8, 21):
+        for d in range(8, 15):
             self._day(failing, db, clock, d)
             assert _pending(db, failing.host, "db_backup_stale") == [], d
-        self._day(failing, db, clock, 21)
+        self._day(failing, db, clock, 15)
 
         stale_outcomes = [o for k, o in outcomes if k == "db_backup_stale"]
         assert stale_outcomes == [pa.OBSERVED_CREATED, pa.OBSERVED_UPDATED,
@@ -652,6 +691,25 @@ class TestArchiveUnwritable:
         assert outcomes[-1] == ("log_archive_unwritable", pa.OBSERVED_SNOOZED)
         clock.set(DAY0 + timedelta(days=2))
         _probe(archive, writable=True)
+        kept = db.get_operator_queue_item(row["id"])
+        assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
+
+    def test_a_new_unwritable_episode_after_a_persons_ending_files_again(
+            self, db, archive, clock, outcomes):
+        """A successful probe ends the episode; the directory turns unwritable
+        again inside the 7-day window and the new episode files."""
+        _probe(archive, writable=False)
+        row = _pending(db, archive.host)[0]
+        clock.set(DAY0 + timedelta(hours=1))
+        assert _ack(row)["status"] == "acknowledged"
+        clock.set(DAY0 + timedelta(days=1))
+        assert _probe(archive, writable=True) is True  # the clear finds nothing pending
+        clock.set(DAY0 + timedelta(days=2))
+        assert _probe(archive, writable=False) is False
+        assert outcomes[-1] == ("log_archive_unwritable", pa.OBSERVED_CREATED)
+        (fresh,) = _pending(db, archive.host)
+        assert fresh["id"] != row["id"]
+        assert fresh["context"]["last_writable_at"] == _iso(DAY0 + timedelta(days=1))
         kept = db.get_operator_queue_item(row["id"])
         assert (kept["status"], kept["disposed_by"]) == ("acknowledged", "person")
 

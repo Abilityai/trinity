@@ -392,7 +392,10 @@ class DBBackupService:
 
         An ``ok`` is a verified recovery point, so it ends both alarm
         conditions as the platform (#3254). A person's ending is never
-        overwritten: ``clear`` is a compare-and-set on a pending row.
+        overwritten: ``clear`` is a compare-and-set on a pending row. Each
+        reading carries the last success it follows (``last_success_at``, a
+        material key of both kinds), so a person's ending snoozes re-reads of
+        that one episode and the first failure after a new success files.
 
         The status write and the alarm it implies run as one section under
         ``_outcome_lock``, so the other worker's outcome lands wholly before or
@@ -439,6 +442,7 @@ class DBBackupService:
     ) -> None:
         """The alarm transition one recorded outcome implies. Called with the
         outcome lock held, right after the status write it acts on."""
+        from database import db
         from services import platform_alerts
 
         backup_dir = self.backup_dir()  # both alarms' key
@@ -468,6 +472,7 @@ class DBBackupService:
                     "status": status,
                     "trigger": trigger,
                     "backup_dir": backup_dir,
+                    "last_success_at": db.get_setting_value("db_backup_last_success_at", None),
                 },
             )
             logger.warning("[DBBackup] operator alarm %s: %s", outcome, title)
@@ -477,7 +482,13 @@ class DBBackupService:
         most once per 7 days. Never fires while fresh; never raises.
 
         Each re-alarm is a new reading of the one ``db_backup_stale`` row,
-        which moves its lifetime (#3254). A success inside the threshold ends
+        which moves its lifetime (#3254). It carries the last success
+        (``last_success_at``, the episode marker): after a person ends the row,
+        a re-alarm of the same staleness is snoozed and is not stamped, so the
+        daily check files again on the first run after the snooze lapses; a
+        staleness that follows a newer success files at once.
+
+        A success inside the threshold ends
         that row as the platform — the boot pre-migration backup records its
         success in the settings without passing through ``_record_outcome``,
         so this is where it is seen. With no success on record the reference
@@ -520,7 +531,6 @@ class DBBackupService:
                 alarm_age = (now - _parse_iso(last_alarm)).total_seconds() / 86400.0
                 if alarm_age < _STALENESS_REALARM_DAYS:
                     return
-            db.set_setting("db_backup_last_staleness_alarm_at", utc_now_iso())
             outcome = platform_alerts.observe(
                 ALARM_AGENT_NAME, "db_backup_stale", backup_dir,
                 title="Database backups are stale",
@@ -535,8 +545,13 @@ class DBBackupService:
                     "alert_type": "db_backup_stale",
                     "last_success_age_days": round(age_days, 1),
                     "backup_dir": backup_dir,
+                    "last_success_at": state["last_success_at"],
                 },
             )
+            # Only a reading that landed starts the weekly wait: a snoozed one
+            # is re-read daily until the snooze lapses, a failed one retried.
+            if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
+                db.set_setting("db_backup_last_staleness_alarm_at", utc_now_iso())
             logger.warning("[DBBackup] staleness alarm %s", outcome)
 
         def _locked_check() -> None:

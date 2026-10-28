@@ -27,6 +27,18 @@ logger = logging.getLogger(__name__)
 # row into it.
 ALARM_AGENT_NAME = "_log-archive"
 ALARM_ID_PREFIX = "log-archive-"
+# #3254: the last probe that succeeded, the alarm's episode marker.
+_LAST_WRITABLE_KEY = "log_archive_last_writable_at"
+
+
+def _last_writable_at(db) -> Optional[str]:
+    """The episode marker for a failing probe; None when unreadable (logged),
+    which only an episode with no success on record shares."""
+    try:
+        return db.get_setting_value(_LAST_WRITABLE_KEY, None)
+    except Exception:  # noqa: BLE001 — the probe must never raise
+        logger.error("[ArchiveStorage] could not read the last writable probe", exc_info=True)
+        return None
 
 
 def probe_archive_writability() -> bool:
@@ -149,12 +161,19 @@ class LocalArchiveStorage(ArchiveStorage):
         "archival fails on every run and /data/logs grows without bound" — about a
         job that never runs. A false alarm that demands action is worse than none.
 
+        The episode marker is the last probe that succeeded
+        (``log_archive_last_writable_at`` in the settings, ``last_writable_at``
+        in the context, a material key of the kind): after a person ends the
+        row, re-reads of the same unwritable episode are snoozed, and one that
+        follows a successful probe files at once.
+
         Never raises: a broken archive directory must not take the backend down —
         archival is a maintenance job, not a request path. It must simply stop being
         silent. (`observe` and `clear` never raise.)
         """
         if os.getenv("LOG_ARCHIVE_ENABLED", "true").lower() != "true":
             return True
+        from database import db
         from services import platform_alerts
 
         path = str(self.archive_path)
@@ -170,6 +189,11 @@ class LocalArchiveStorage(ArchiveStorage):
                 detail = f"{type(exc).__name__}: {exc}"
             else:
                 # A write that landed: the fault the alarm names is fixed.
+                try:
+                    db.set_setting(_LAST_WRITABLE_KEY, utc_now_iso())
+                except Exception:  # noqa: BLE001 — the probe must never raise
+                    logger.error("[ArchiveStorage] could not record a writable probe",
+                                 exc_info=True)
                 platform_alerts.clear(ALARM_AGENT_NAME, "log_archive_unwritable", path)
                 return True
             logger.error(
@@ -186,7 +210,8 @@ class LocalArchiveStorage(ArchiveStorage):
                 "compose stack this is the `archives-init` one-shot (#2205); "
                 "otherwise chown the directory to 1000:1000. Detail: " + detail
             ),
-            context={"path": path, "detail": detail},
+            context={"path": path, "detail": detail,
+                     "last_writable_at": _last_writable_at(db)},
         )
         logger.warning("[ArchiveStorage] operator alarm %s for %s", outcome, path)
         return False
