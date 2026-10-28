@@ -456,6 +456,22 @@ async def execute_parallel_task(
             _record_deprecated_task_timeout_use()  # durable signal for the soak gate
         request.timeout_seconds = _resolved_timeout
 
+    # #2328: a per-task max_turns now reaches the agent on every push path, and an
+    # agent image that predates the agent-side min() lets the caller's value win
+    # over the owner's guardrail. Clamp it here to the owner's `max_turns_task`, in
+    # place like the timeout above, so the cap never depends on which image the
+    # agent runs. The model already bounds the value to the guardrail's 1-500.
+    # With no owner override the backend cannot see the image's own default, so
+    # the value passes through within that bound.
+    if request.max_turns is not None:
+        _owner_turn_cap = db.get_guardrails_config(name).get("max_turns_task")
+        if _owner_turn_cap is not None and request.max_turns > _owner_turn_cap:
+            logger.warning(
+                "[#2328] agent '%s': max_turns=%s exceeds the owner's max_turns_task=%s; clamping.",
+                name, request.max_turns, _owner_turn_cap,
+            )
+            request.max_turns = _owner_turn_cap
+
     # Derive → idempotency → file upload → create-row → async/sync dispatch all
     # live in chat_execution_service now (Invariant #1). It is HTTP-free: it
     # raises ChatDispatchError (mapped 1:1 here) and returns a response dict OR a

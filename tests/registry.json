@@ -1,6 +1,39 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4000_git_maintenance_every_tick.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "git maintenance + stats on every auto-sync tick, health-only writer, prune instead of gc"
+    },
+    {
+      "file": "unit/test_4000_git_health_canary.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "canary",
+        "unit"
+      ],
+      "description": "canary RD-04 git measurement blindness, RD-05 maintenance not keeping up"
+    },
+    {
+      "file": "unit/test_4000_git_stats_at.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "agent_sync_state.git_stats_at persisted and coerced by the sync-health poller"
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
@@ -273,6 +306,17 @@
         "unit"
       ],
       "description": "Cancelled or timed-out chat/headless waiters retain live subprocess ownership and executor completion closes log streams; queued headless cancellation does not spawn, queued chat readers reap existing children, result finalization ordering is preserved, and unconfirmed termination retains ownership. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
+      "file": "unit/test_3408_codex_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "Codex half of #3307's cleanup: a cancelled or outer-timed-out Codex waiter (chat 1-worker pool and /api/task default pool, running or queued reader) keeps its live child registered and allowlisted, and the shielded reader worker releases it after the child exits: -o result file removed, entry dropped, stream_end delivered, buffer gone. Also an empty-output child with no -o file, a read-only CODEX_HOME whose unlink fails, and the worker finishing before the cancel lands. Runs the real _execute_codex with the real ProcessRegistry and disposable Python children; no model, provider, or live-agent calls."
     },
     {
       "file": "unit/test_ent839_seat_decisions_self_gate.py",
@@ -932,18 +976,6 @@
         "api"
       ],
       "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
-    },
-    {
-      "file": "unit/test_3950_fleet_health_current.py",
-      "feature": "#3950",
-      "added": "2026-10-26",
-      "categories": [
-        "backend",
-        "unit",
-        "monitoring",
-        "api"
-      ],
-      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
     },
     {
       "file": "unit/test_ent706_sync_health_surfaces.py",
@@ -1694,18 +1726,6 @@
         "tools"
       ],
       "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
-    },
-    {
-      "file": "unit/test_ent471_turn_default_parity.py",
-      "feature": "trinity-enterprise#471",
-      "added": "2026-10-26",
-      "categories": [
-        "unit",
-        "guardrails",
-        "agent-server",
-        "frontend"
-      ],
-      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -3655,6 +3675,16 @@
       "description": "#2433: Gemini registers/unregisters its subprocess with the process registry (it never did)."
     },
     {
+      "file": "unit/test_3408_gemini_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#3408: a cancelled Gemini chat or headless waiter keeps a live child owned and on the sweep allowlist (AC 3), and its shielded reader (running or still queued on the shared worker) releases the entry and sends stream_end once the child exits; worker-finishes-first ordering and an empty-output child covered; own-group signals refused. Disposable Python children only; no Gemini CLI, model or live-agent calls."
+    },
+    {
       "file": "unit/test_2433_limiter_inflight.py",
       "feature": "#2433",
       "added": "2026-08-28",
@@ -3733,6 +3763,17 @@
       "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
     },
     {
+      "file": "unit/test_3408_failed_handoff.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "A prompt handoff that fails after register() (a lone-surrogate prompt makes the text-mode stdin write raise with the child alive) kills the child and observes its exit before releasing it, at all five sites: Claude chat and Codex kill their own group, both Gemini paths kill the pid only (the Gemini pgid is the agent server's own group; a refusing guard records every signal), Claude headless kills and drains in its worker and leaves the release to its caller. The async teardown runs off the event loop, and a cancel mid-teardown still releases once the child is dead. Fault injection: a kill that raises, an executor that refuses the teardown, or a headless drain that cannot start never replaces the handoff error or skips the rest of the teardown, and a still-live child stays registered. Other shape: an empty prompt hands off cleanly and the normal path releases. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_2467_turn_integrity.py",
       "feature": "#2467",
       "added": "2026-09-01",
@@ -3790,7 +3831,7 @@
         "pull-migration",
         "scheduler"
       ],
-      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here."
+      "description": "Scheduled work reaches the durable pull queue (#2391 - the Option 2 deferred by #2048). task_execution_service - the producer behind the scheduler, i.e. ALL cron plus webhooks, reminders, loops and fan-out - dispatched with overflow_policy='reject' unconditionally, and capacity_manager only offers a row to the durable queue when its producer passed 'queue_persistent', so PULL_MODE_PILOT_AGENTS was structurally inert for the fleet's dominant traffic class. It now passes 'queue_persistent' when - and only when - pull_owns_dispatch says a pilot owns the trigger, which widens PULL_REACHABLE_TRIGGERS from {agent, event} to {agent, event, schedule, webhook, reminder}. Tests pin the whole risk surface: with the flag OFF (the fleet default) the real acquire call still receives 'reject' with no payload for every trigger and a CapacityFull still writes the same 'Agent at capacity (N/N parallel tasks running)' FAILED terminal - verified against the call, not assumed; with the flag ON a schedule/webhook/reminder row returns TaskExecutionStatus.QUEUED without calling the agent, releasing a slot or writing the dispatch marker, and the payload carries the row's model/allowed_tools/timeout/resume_session_id plus the CALLER's uncomposed system_prompt (the claim path rebuilds the platform prompt around it, #1629); a full backlog names max_backlog_depth rather than parallel slots, because the pull branch never asks for a slot; loop/fan_out/a2a/operator_response stay pushed (each has a caller that reads the returned TaskExecutionResult - the first three structurally, operator_response by choice since it records result.status as the ent#329 dispatch receipt); interactive triggers are untouched (Open Question 7's scope cut); the payload builder refuses without an execution_id (the enqueue is a CAS RUNNING->QUEUED on an existing row) and when slot_already_held (queueing under a held slot leaks it for the lease TTL); #1083 fire-and-forget does not stack - pull wins by construction because a queued row is never dispatched, so no 202 can arrive, while a non-pilot's async_result dispatch is unchanged. An end-to-end class drives the REAL CapacityManager + BacklogService + _build_claim_response so 'it enqueued' is not mistaken for 'a worker can run it' (the #2317 failure mode). Scheduler side: 'queued' is NOT a terminal - _poll_execution_completion treated anything but 'running' as an outcome, so a queued row would have published schedule_execution_completed(status=queued), been classified a failure and handed to _maybe_schedule_retry, duplicating work that was queued and about to run; ExecutionStatus.QUEUED and _NON_TERMINAL_POLL_STATES fix that and are pinned here. trinity#2328: the queued payload also carries the caller's per-task max_turns, which the claim reads into task_overrides."
     },
     {
       "file": "unit/test_ent437_telemetry_consent.py",
@@ -4619,6 +4660,19 @@
       "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport — an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
+      "file": "mcp-server/src/tools/systems.apply.test.ts",
+      "feature": "abilityai/trinity-enterprise#695",
+      "added": "2026-10-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "systems",
+        "transport"
+      ],
+      "description": "apply_system, the reconcile sibling of deploy_system, always through the REGISTERED audit-wrapped tool: a real createServer in key mode, a real MCP client presenting a person's user-scoped key over streamable HTTP, and a stub backend on a non-default origin that records every request and every audit row. Pins dry_run ?? true (default and explicit true/false send exactly {manifest, dry_run}), 404 / 405 / a proxy's HTML 404 -> not_available with no fallback to /api/systems/deploy, every other JSON OBJECT body (400, 401, 409, 422, 503, 500) returned AS the result with http_status and success:false and NOT audited as a denial, a JSON string/array/null or a non-JSON body -> {success:false, http_status, detail}, 403 -> not_permitted through accessDenied (audited denied:true) and a 403-then-409 on one session leaving no stale marker, a dropped connection returned not thrown (a real run's adds a may-have-applied note; a dry run's or a keyless call's never does), the access.ts row (none) and the advertised {manifest, dry_run?} schema; person-only visibility: a user key lists the tool, an agent key and a system key neither list nor can call it, and nothing reaches the backend. deploy_system unchanged (AC6): its request body and defaults and its throw-on-500. Two cases go through the same registered tools in-process via FastMCP's server.connect: a session with no API key, which the HTTP transport cannot produce (a returned refusal, no backend request), and, by choice so no network is needed, the other shape's second hostname (a server configured for https://trinity-b.example.test:8443 forwards there with the caller's own key; fetch stubbed). The first other-shape case: each call reaches the configured origin with THAT session's key."
+    },
+    {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
       "feature": "abilityai/trinity#2915",
       "added": "2026-09-23",
@@ -5097,6 +5151,17 @@
       "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
     },
     {
+      "file": "unit/test_3408_gemini_reader_exit.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "unit"
+      ],
+      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. A child whose exit is never observed stays registered and the reader's own 504 survives. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_ent751_skill_invocation.py",
       "feature": "ent#751",
       "added": "2026-10-02",
@@ -5205,7 +5270,7 @@
         "security",
         "unit"
       ],
-      "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch."
+      "description": "trinity-enterprise#751: discovery guards — every function that posts to an agent is behind the gate (structural checks per site), every producer passes the requester's own words or is named unwrapped, and every execute_task keyword is classified in the frozen dispatch. trinity#2328: every FREEZE field is both recorded by the execute_task backstop (fields=dict(...)) and replayed by _dispatch_approved (frozen.get), so a FREEZE label nothing honours fails."
     },
     {
       "file": "unit/test_ent752_skill_gate_hook.py",
@@ -5547,7 +5612,7 @@
         "security",
         "unit"
       ],
-      "description": "trinity#3274 item 5: an approved /task or fan-out run is sent the caller's message as the message and its system prompt as the system prompt (frozen_replay), never their concatenation; a record frozen before the split replays its request text. Driven through the /task seam, the fan-out runner and the backstop into the real _dispatch_approved over the real row writer. Mutation-proven."
+      "description": "trinity#3274 item 5: an approved /task or fan-out run is sent the caller's message as the message and its system prompt as the system prompt (frozen_replay), never their concatenation; a record frozen before the split replays its request text. Driven through the /task seam, the fan-out runner and the backstop into the real _dispatch_approved over the real row writer. Mutation-proven. trinity#2328: the caller's per-task max_turns is frozen and reaches the approved run — admitted, queued (the overflow payload's request) and from a backstop producer."
     },
     {
       "file": "unit/test_3274_gate_notice.py",
@@ -6548,18 +6613,6 @@
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
     },
     {
-      "file": "unit/test_ent830_idempotency_caller_scope.py",
-      "feature": "trinity-enterprise#830",
-      "added": "2026-10-23",
-      "categories": [
-        "backend",
-        "security",
-        "idempotency",
-        "unit"
-      ],
-      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
-    },
-    {
       "file": "unit/test_3651_recovery_companion_close.py",
       "feature": "#3651",
       "added": "2026-10-22",
@@ -6715,6 +6768,162 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_sqlite_upgrade_parity_guard.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "ci",
+        "guard"
+      ],
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor. A PR branched inside the broken range is told, on an exhausted walk, to merge the repaired base branch in, and passes once it has."
+    },
+    {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
+      "file": "unit/test_181_ip_rate_limit_spoofing.py",
+      "feature": "Issue #181, trinity-enterprise#873",
+      "added": "2026-03-27",
+      "categories": [
+        "backend",
+        "security",
+        "rate-limiting",
+        "unit"
+      ],
+      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+    },
+    {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
+    },
+    {
+      "file": "unit/test_migrations.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "guard"
+      ],
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
+    },
+    {
+      "file": "unit/test_schema_parity.py",
+      "feature": "#713, #3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "unit",
+        "guard"
+      ],
+      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadTail.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "The open Workspace thread's catch-up read, pure half: the watcher's signature is a string over message_count|last_message_at (stable across the tick's re-stamped objects, blind to unread/stars/drafts); the read limit is unread + the reply-poll depth capped at the server's 50; the person's own id-less local question adopts the server row's id in place; fresh rows are the unseen ids in server order; a full-length read that is entirely unseen reports overflow."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalOpenThreadRefresh.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "PortalConversation mounted: when its own thread row in `threads` gains a message it reads the tail with {limit: unread+8}, appends the new row once and emits thread-caught-up; a re-stamp with the same values does not read; a moved time with nothing new appends and emits nothing; the local just-sent question is not duplicated (takes the server id); an all-fresh read at the cap merges the window read; another thread's row is ignored; a failed read is swallowed and never thread-missing."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalThreadCaughtUpShell.mount.spec.js",
+      "feature": "#3439",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "Portal shell mounted: thread-caught-up marks the OPEN thread read once (markChatReadStrict) and re-reads no list, leaves another thread's badge alone; visibilitychange to visible runs the 20 s tick body at once (asks + thread list), hidden does nothing, and the listener is removed with the view."
+    },
+    {
+      "file": "unit/test_2328_per_task_max_turns_wire.py",
+      "feature": "#2328",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability"
+      ],
+      "description": "trinity#2328: a per-task max_turns (POST /task) reaches the agent on the push path, measured at the wire (the payload the real execute_task hands to agent_post_with_retry), one hop past where #2317's guard stubbed: the async run_async_task, the sync _dispatch_sync_immediate, a backlog row written by the real enqueue and drained by the real _spawn_drain, and both retries (#678 reader race, SUB-003 switch). A parity case parametrized over pull_coordination_service._TASK_OVERRIDE_KEYS compares the push wire with the pull claim envelope from one producer-built row, so the next per-task key is wire-checked automatically. Other shape (empty data): no value, a backlog row without the key and a gate record frozen without it all send None and nothing raises. Mutation-proven per call site. Backend bound, independent of the agent image: ParallelTaskRequest.max_turns is limited to the owner guardrail's own range (pinned to routers/agent_config._GUARDRAILS_NUMBER_BOUNDS), so 0, negatives and values above it are a 422 at the HTTP boundary; and the real POST /{name}/task handler clamps the value to the owner's max_turns_task when one is set, before dispatch."
+    },
+    {
+      "file": "unit/test_2328_turn_cap_tighten_only.py",
+      "feature": "#2328",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "agent-server",
+        "headless-executor",
+        "guardrails",
+        "security"
+      ],
+      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. Pins as CURRENT behaviour (known exposure, backend follow-up) that a turn-limit 422 at a cap of 401/403, per-task or guardrail, reads as auth on push through the real classify_switch_failure."
+    },
+    {
+      "file": "unit/test_3966_pre_check_schedule_context.py",
+      "feature": "#3966",
+      "added": "2026-10-26",
+      "categories": [
+        "scheduler",
+        "reliability",
+        "unit"
+      ],
+      "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
     }
   ]
 }

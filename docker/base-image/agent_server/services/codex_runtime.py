@@ -1282,7 +1282,51 @@ class CodexRuntime(AgentRuntime):
             process.stdin.write(composed_prompt)
             process.stdin.close()
         except BaseException:
-            registry.unregister(execution_id)
+            # #3408: since #3307 `unregister()` keeps a live child, so a write
+            # that fails while the child lives must end it first (no reader
+            # yet, stdin still open). Off the event loop: the kill waits up to
+            # ~2s, and `loop` is assigned only below.
+            # Best-effort and logged, never raised: the caller must see the
+            # handoff error, and the pipes close even if the kill fails.
+            def _abort_handoff() -> None:
+                try:
+                    _terminate_process_group(
+                        process, graceful_timeout=0, pgid=process_pgid,
+                        execution_tag=execution_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[Codex] killing %s after its failed handoff raised", execution_id,
+                    )
+                finally:
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(
+                                "[Codex] pipe close after failed handoff of %s raised",
+                                execution_id, exc_info=True,
+                            )
+
+            try:
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            except Exception:
+                # The executor refused (shut down, or no thread to start): log it,
+                # keep the live child owned, and still re-raise the handoff error.
+                logger.exception("[Codex] could not start the teardown of %s after its failed handoff", execution_id)
+                teardown = None
+            if teardown is None:
+                registry.unregister(execution_id)
+            else:
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this await
+                    # was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        registry.unregister(execution_id)
+                    else:
+                        teardown.add_done_callback(lambda _: registry.unregister(execution_id))
             raise
 
         import threading
@@ -1361,13 +1405,43 @@ class CodexRuntime(AgentRuntime):
         reader_executor = None if concurrent_reader else _executor
 
         loop = asyncio.get_event_loop()
+        # #3408, the Codex half of #3307: the child is spawned and has its
+        # prompt, so even a reader still queued in its pool must run to reap
+        # it (hence the shield). A waiter that stops waiting (cancelled, or
+        # past its outer timeout with the stop unconfirmed) hands release to
+        # that worker, which runs it once the child's exit is observed: the -o
+        # file first (Codex writes it at turn end, after the waiter's own
+        # unlink below), then the registry entry, on the loop.
+        waiter_abandoned = threading.Event()
+
+        def read_owned_subprocess_output():
+            try:
+                return read_subprocess_output()
+            finally:
+                if waiter_abandoned.is_set():
+                    try:
+                        _safe_unlink(result_file, codex_home)
+                    finally:
+                        loop.call_soon_threadsafe(
+                            lambda: registry.unregister(execution_id)
+                        )
+
+        worker = loop.run_in_executor(reader_executor, read_owned_subprocess_output)
+        # Consume the worker's eventual exception once no waiter awaits it.
+        worker.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
         try:
             try:
                 stderr_output, return_code = await asyncio.wait_for(
-                    loop.run_in_executor(reader_executor, read_subprocess_output),
+                    asyncio.shield(worker),
                     timeout=timeout_seconds + 60,
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 logger.error(
                     "[Codex] outer timeout on %s — killing group as last resort",
                     execution_id,
