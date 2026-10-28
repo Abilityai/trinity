@@ -837,13 +837,13 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
         "MCP share_file: a download link for a file in the agent's OWN publish dir (FILES-001); the owner gate "
         "follows. Listed as today's behaviour, not a ruling: whether minting a public link is a grant (person-only, "
         "like the canvas share, trinity-enterprise#554) is open in trinity-enterprise#719's sharing cluster"),
+    "routers/reports.py::create_report": (
+        "POST /api/agents/{name}/reports", "MCP report: structured output an agent publishes about itself (#918)"),
     "routers/event_subscriptions.py::emit_event_for_agent": (
         "POST /api/agents/{name}/emit-event",
         "an agent emits an event as ITS OWN source; delivery authorises each subscriber against the recorded "
         "source (trinity-enterprise#739), so the source is the caller (trinity-enterprise#719). MCP emit_event "
         "takes the source from the key (POST /api/events); a person may emit for an agent they can access"),
-    "routers/reports.py::create_report": (
-        "POST /api/agents/{name}/reports", "MCP report: structured output an agent publishes about itself (#918)"),
     "routers/metric_points.py::record_metric_points": (
         "POST /api/agents/{name}/metrics/points",
         "MCP record_metrics: points for metrics the agent declared itself (trinity-enterprise#478)"),
@@ -1185,6 +1185,14 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
 
 # Check lives in services/. key -> ("METHOD /full/path", service function, behavioural test id)
 DELEGATED: Dict[str, Tuple[str, str, str]] = {
+    # trinity-enterprise#631: the people picker of a room. Its principal is
+    # `get_room_principal` (a platform user OR a Workspace client), so no
+    # dependency gate fits; the refusal of agents, system keys and external
+    # clients is `person_mention_service.tagger_for`, reached first.
+    "shared_sessions/router.py::room_people": (
+        "GET /api/rooms/{room_id}/people",
+        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
+        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
     # trinity-enterprise#719: three room uses. Agents read and post in a room as
     # themselves (ent#169); `get_room_principal` fits no census gate, and the
     # service keeps each room to its members. Creating a room stays in the
@@ -1203,14 +1211,6 @@ DELEGATED: Dict[str, Tuple[str, str, str]] = {
         "shared_sessions.service.rename_room -> _require_membership, then refuses an agent key (a member agent "
         "gets 403 not_a_person)",
         "tests/unit/test_ent719_room_uses_delegated.py::test_a_non_member_agent_gets_the_uniform_404_on_rename"),
-    # trinity-enterprise#631: the people picker of a room. Its principal is
-    # `get_room_principal` (a platform user OR a Workspace client), so no
-    # dependency gate fits; the refusal of agents, system keys and external
-    # clients is `person_mention_service.tagger_for`, reached first.
-    "shared_sessions/router.py::room_people": (
-        "GET /api/rooms/{room_id}/people",
-        "shared_sessions.service.room_people -> person_mention_service.tagger_for",
-        "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
 }
 
 # WebSocket routes — out of the HTTP census, pinned so a new one is a visible edit.
