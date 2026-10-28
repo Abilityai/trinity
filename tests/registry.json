@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4064_gemini_process_group.py",
+      "feature": "#4064",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
       "file": "unit/test_ent719_channel_bindings_human_only.py",
       "feature": "abilityai/trinity-enterprise#719",
       "added": "2026-10-27",
@@ -52,6 +62,153 @@
         "unit"
       ],
       "description": "Who may reach an agent and who outside the platform sees it is a person's decision, through each route's real router over a real schema: sharing and access-request approval take a signed-in session (require_interactive); revoking a share, access policy, public prompt, permission edges, folders and file sharing, and logging out, blocking and unblocking a Workspace client take a person (require_person; block and unblock keep assert_admin), as do the five public-link routes (the agent's own key creating a link: 403, no row written) and the canvas share create/list/revoke and pin routes. Every machine principal (own key, an agent in reach, system, connector, ops, portal_delegate, unknown scope, no mcp_scope, vouched loopback) gets the rule's 403 before any db call, for a missing agent and a schema-invalid body too; a real unvouched loopback JWT is refused at the entry fence; a person (and the user key on PERSON routes) still succeeds; share_file still mints once a person turns file sharing on, and the own key still writes and clears its own canvas; fresh install refuses the same way and lists []."
+    },
+    {
+      "file": "unit/test_4000_git_maintenance_every_tick.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "git maintenance + stats on every auto-sync tick, health-only writer, prune instead of gc"
+    },
+    {
+      "file": "unit/test_4000_git_health_canary.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "canary",
+        "unit"
+      ],
+      "description": "canary RD-04 git measurement blindness, RD-05 maintenance not keeping up"
+    },
+    {
+      "file": "unit/test_4000_git_stats_at.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "agent_sync_state.git_stats_at persisted and coerced by the sync-health poller"
+    },
+    {
+      "file": "unit/test_3408_codex_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "Codex half of #3307's cleanup: a cancelled or outer-timed-out Codex waiter (chat 1-worker pool and /api/task default pool, running or queued reader) keeps its live child registered and allowlisted, and the shielded reader worker releases it after the child exits: -o result file removed, entry dropped, stream_end delivered, buffer gone. Also an empty-output child with no -o file, a read-only CODEX_HOME whose unlink fails, and the worker finishing before the cancel lands. Runs the real _execute_codex with the real ProcessRegistry and disposable Python children; no model, provider, or live-agent calls."
+    },
+    {
+      "file": "unit/test_3254_skills_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "skills",
+        "unit"
+      ],
+      "description": "#3254 S1: the two `_skills-sync` host alarms report through the #3246 platform alert seam, on a fresh full schema per test (db_harness; PostgreSQL when TEST_POSTGRES_URL is set) with the clock pinned and every pass starting after the last reading. Reconcile refusal (skills_reconcile_refused:<agent>): two refusals with different orphan counts are one pending row (subject, seen_count 2, moved last_seen_at and 30-day net deadline, counts never skill names); a clean or reconciled pass ends it as the platform; an inventory-unavailable, busy or erroring pass leaves it (R10), including the REAL agent-side inventory script run locally against a skills path that is a file, a mode-000 dir, a listable-but-unsearchable dir, or a dir with inaccessible children (anything it cannot inspect is an unknown inventory), while an absent skills dir is a clean pass that ends it and entries whose names can never be skills (a looping symlink, an inaccessible .cache) are ignored. Fleet sweep (skills_fleet_reinject:fleet): two bad sweeps are one row; a sweep that reached every agent (injected, or no skills) ends it; a Docker-error empty enumeration, a busy agent or a missing result leaves it (R10). Overlapping passes (event-controlled): an older reconcile pass or fleet sweep that finishes last never ends a row a newer one filed; the evidence floor finds its row behind 1,001 higher-priority pending rows. A person's ending through ask_service.answer lands acknowledged, is never re-ended, and snoozes the next reading. R1 legacy-id parity for both kinds. Other shape: on a fresh install the clear sites end nothing, write nothing and schedule nothing, and the first refusal files one row. A sweep that never reached an agent the fleet row names (it failed, then stopped) ends nothing; an inventory the agent could not inspect skips the pass with a WARNING naming the agent. The fleet row names every failed agent, not the report's 25, capped by count and by serialised size (long names cannot push the alarm past the 64 KiB context belt); a capped or malformed list is never evidence, so that row is left to its lifetime."
+    },
+    {
+      "file": "unit/test_3408_gemini_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#3408: a cancelled Gemini chat or headless waiter keeps a live child owned and on the sweep allowlist (AC 3), and its shielded reader (running or still queued on the shared worker) releases the entry and sends stream_end once the child exits; worker-finishes-first ordering and an empty-output child covered; own-group signals refused. Disposable Python children only; no Gemini CLI, model or live-agent calls."
+    },
+    {
+      "file": "unit/test_3408_failed_handoff.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "A prompt handoff that fails after register() (a lone-surrogate prompt makes the text-mode stdin write raise with the child alive) kills the child and observes its exit before releasing it, at all five sites: Claude chat and Codex kill their own group, both Gemini paths kill the pid only (the Gemini pgid is the agent server's own group; a refusing guard records every signal), Claude headless kills and drains in its worker and leaves the release to its caller. The async teardown runs off the event loop, and a cancel mid-teardown still releases once the child is dead. Fault injection: a kill that raises, an executor that refuses the teardown, or a headless drain that cannot start never replaces the handoff error or skips the rest of the teardown, and a still-live child stays registered. Other shape: an empty prompt hands off cleanly and the normal path releases. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
+      "file": "mcp-server/src/tools/systems.apply.test.ts",
+      "feature": "abilityai/trinity-enterprise#695",
+      "added": "2026-10-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "systems",
+        "transport"
+      ],
+      "description": "apply_system, the reconcile sibling of deploy_system, always through the REGISTERED audit-wrapped tool: a real createServer in key mode, a real MCP client presenting a person's user-scoped key over streamable HTTP, and a stub backend on a non-default origin that records every request and every audit row. Pins dry_run ?? true (default and explicit true/false send exactly {manifest, dry_run}), 404 / 405 / a proxy's HTML 404 -> not_available with no fallback to /api/systems/deploy, every other JSON OBJECT body (400, 401, 409, 422, 503, 500) returned AS the result with http_status and success:false and NOT audited as a denial, a JSON string/array/null or a non-JSON body -> {success:false, http_status, detail}, 403 -> not_permitted through accessDenied (audited denied:true) and a 403-then-409 on one session leaving no stale marker, a dropped connection returned not thrown (a real run's adds a may-have-applied note; a dry run's or a keyless call's never does), the access.ts row (none) and the advertised {manifest, dry_run?} schema; person-only visibility: a user key lists the tool, an agent key and a system key neither list nor can call it, and nothing reaches the backend. deploy_system unchanged (AC6): its request body and defaults and its throw-on-500. Two cases go through the same registered tools in-process via FastMCP's server.connect: a session with no API key, which the HTTP transport cannot produce (a returned refusal, no backend request), and, by choice so no network is needed, the other shape's second hostname (a server configured for https://trinity-b.example.test:8443 forwards there with the caller's own key; fetch stubbed). The first other-shape case: each call reaches the configured origin with THAT session's key."
+    },
+    {
+      "file": "unit/test_3408_gemini_reader_exit.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "unit"
+      ],
+      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. A child whose exit is never observed stays registered and the reader's own 504 survives. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
+    },
+    {
+      "file": "unit/test_ent875_workspace_work_own_rows.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
+    },
+    {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
     },
     {
       "file": "unit/test_ent966_agent_env_patch.py",
@@ -6626,7 +6783,7 @@
         "ci",
         "guard"
       ],
-      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor."
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor. A PR branched inside the broken range is told, on an exhausted walk, to merge the repaired base branch in, and passes once it has."
     },
     {
       "file": "unit/test_3950_fleet_health_current.py",

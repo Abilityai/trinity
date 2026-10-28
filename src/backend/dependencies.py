@@ -939,7 +939,7 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
                 _enforce_ops_key_fence(request)
-            return User(
+            principal = User(
                 id=user["id"],
                 username=user["username"],
                 email=user.get("email"),
@@ -965,6 +965,8 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_id=mcp_key_info.get("key_id"),
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
+            record_acting_turn(request, principal)
+            return principal
 
     # Both JWT and MCP key failed
     raise credentials_exception
@@ -2778,6 +2780,199 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     if not (db.can_user_share_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name, manage=True)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+# ---------------------------------------------------------------------------
+# Viewer tier on an agent's executions (trinity-enterprise#875)
+#
+# `can_user_access_agent` (admin | owner | shared) means "may chat with this
+# agent". The execution and control routes read it as "may read and steer
+# everyone's turns". These helpers name the three callers those routes have to
+# tell apart, so each route asks one question instead of re-spelling it:
+#
+#   owner  a PERSON who owns the agent, or an admin: sees every row.
+#   share  any other PERSON with access (a JWT, or their own user-scope key):
+#          sees only the executions they started.
+#   key    an agent, system, ops or connector key: unchanged (ent#875 ruling —
+#          an agent reading its own executions stays full; that residual and
+#          the fleet-wide default are ent#926).
+#
+# An ALLOWlist both ways, for the reason `is_person_principal` is one:
+# `mcp_api_keys.scope` is free text, so every scope this module has not heard
+# of (portal_delegate, a sixth one a future PR invents) resolves to SHARE and is
+# filtered — it never inherits the unfiltered `key` view by default.
+# ---------------------------------------------------------------------------
+
+VIEWER_OWNER = "owner"
+VIEWER_SHARE = "share"
+VIEWER_KEY = "key"
+
+_VIEWER_KEY_SCOPES = frozenset({"agent", "system"})
+
+
+def viewer_principal_kind(current_user: User) -> str:
+    """"person" | "key" | "other" — which kind of caller this is, before any
+    agent is named. "other" is every non-person principal this module does not
+    list as a key (fail closed: it is filtered like a share holder)."""
+    if is_person_principal(current_user) and not getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        return "person"
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    connector = getattr(current_user, "connector_agent", None)
+    if (
+        (isinstance(agent, str) and agent)
+        or (isinstance(connector, str) and connector)
+        or scope in _VIEWER_KEY_SCOPES
+        or scope == OPS_SCOPE
+    ):
+        return "key"
+    return "other"
+
+
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
+_MANUAL_EXECUTION_ID = "manual"
+_MAX_EXECUTION_ID_LEN = 128
+
+
+def record_acting_turn(request, principal: User) -> None:
+    """Note which turn an AGENT-scoped key is acting in (trinity-enterprise#926).
+
+    The MCP server forwards the spawning process's `TRINITY_EXECUTION_ID` as
+    `X-Trinity-Execution-Id` (#2392). Only an agent key's request is read: no
+    other principal acts for anyone else's turn."""
+    if getattr(principal, "mcp_scope", None) != "agent" or not principal.agent_name:
+        return
+    raw = request.headers.get(EXECUTION_ID_HEADER) if request is not None else None
+    if isinstance(raw, str) and raw and len(raw) <= _MAX_EXECUTION_ID_LEN:
+        principal._acting_execution_id = raw
+
+
+def acting_turn_user_id(current_user: User) -> Optional[int]:
+    """The person an agent key's reads are narrowed to, or None for the full view.
+
+    trinity-enterprise#875 left an agent's key at the full view; an agent acts
+    for whoever chats with it, so while it runs a turn for a person the agent is
+    merely shared with, its own reads are that person's (ent#926).
+
+    The `X-Trinity-Execution-Id` header is NOT proof of which turn a request
+    comes from: nothing on this side stops a running turn from calling the API
+    with the agent's key and omitting the header, sending `manual`, or naming
+    another turn. So the decision starts from the LEDGER — the people of the
+    agent's running `share`-tier turns (`turn_tier_service.running_share_people`)
+    — and the header can only narrow further, never widen:
+
+      * not an agent key                                   -> None;
+      * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`;
+      * the header names a `share` turn -> that turn's person, provided no other
+        person's share turn is running (otherwise `NO_ROWS_USER_ID`);
+      * otherwise (no header, `manual`, an `owner`-tier turn): no share turn
+        running -> None (the full view); exactly one person's -> that person;
+        several, or one with no platform user (a public link, a channel)
+        -> `NO_ROWS_USER_ID`.
+
+    Fails closed: a ledger that cannot be read returns `NO_ROWS_USER_ID`. The
+    turn is the KEY's agent's, whatever agent the route names."""
+    agent = getattr(current_user, "agent_name", None)
+    if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return None
+    from services import turn_tier_service
+    try:
+        people = turn_tier_service.running_share_people(db, agent)
+        run = getattr(current_user, "_acting_execution_id", None)
+        if run and run != _MANUAL_EXECUTION_ID:
+            execution = db.get_execution(run)
+            tier = turn_tier_service.turn_tier(db, agent, execution=execution)
+            if tier == turn_tier_service.UNKNOWN:
+                return NO_ROWS_USER_ID
+            if tier == turn_tier_service.SHARE:
+                person = turn_tier_service.turn_person(db, agent, execution)
+                if person is None or people - {person}:
+                    return NO_ROWS_USER_ID
+                return person
+            # An owner-tier header widens nothing: fall through to the ledger.
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable ledger narrows to nothing
+        logger.warning("[ent#926] acting-turn read failed", exc_info=True)
+        return NO_ROWS_USER_ID
+    if not people:
+        return None
+    if len(people) == 1:
+        (person,) = people
+        if isinstance(person, int) and person > 0:
+            return person
+    return NO_ROWS_USER_ID
+
+
+def agent_viewer_tier(current_user: User, agent_name: str) -> str:
+    """The caller's tier on `agent_name`'s executions: owner, share or key.
+
+    OWNER is the `assert_agent_owner` predicate (the owner or an admin, with
+    the ent#629 reach bound), evaluated here without raising."""
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        # ent#926: an agent's key in a shared person's turn reads as that person.
+        return VIEWER_SHARE if acting_turn_user_id(current_user) is not None else VIEWER_KEY
+    if kind == "person" and db.can_user_share_agent(
+        current_user.username, agent_name
+    ) and agent_may_reach(current_user, agent_name, manage=True):
+        return VIEWER_OWNER
+    return VIEWER_SHARE
+
+
+# What a share holder is told when a route returns the container's SINGLE shared
+# state (its in-memory conversation, live tool activity, raw log): it holds every
+# user's turns together, so it cannot be narrowed to one person's. Fixed text, no
+# names or ids, so the refusal discloses nothing (Invariant #8).
+SHARED_STATE_OWNER_TIER_DETAIL = {
+    "code": "owner_tier_path",
+    "message": (
+        "This shows every user's activity on the agent, so only the agent's "
+        "owner or an admin can open it. Your own conversations are under "
+        "chat history."
+    ),
+}
+
+
+def assert_not_share_viewer(current_user: User, agent_name: str) -> None:
+    """403 a SHARE-tier caller on a route that returns the container's shared
+    state; owner, admin and key tiers pass unchanged (trinity-enterprise#875)."""
+    if agent_viewer_tier(current_user, agent_name) == VIEWER_SHARE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(SHARED_STATE_OWNER_TIER_DETAIL),
+        )
+
+
+# Matches no row: every real `users.id` is positive. Returned for a share-tier
+# caller whose principal carries no usable id, so a missing id fails CLOSED
+# instead of reading as "no filter".
+NO_ROWS_USER_ID = -1
+
+
+def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
+    """The user id whose executions the caller may see on `agent_name`, or None
+    when they may see every row (owner, admin, key tier)."""
+    acting = acting_turn_user_id(current_user)
+    if acting is not None:
+        return acting
+    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+        return None
+    uid = getattr(current_user, "id", None)
+    return uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+
+
+def row_is_viewers(scope_user_id: Optional[int], source_user_id) -> bool:
+    """Whether a row whose `source_user_id` is given is visible under
+    `viewer_row_scope`. The column is INTEGER but the in-memory queue carries
+    the id as a string, so both sides are compared as integers; a NULL or
+    unparseable owner never matches (fail closed)."""
+    if scope_user_id is None:
+        return True
+    try:
+        return source_user_id is not None and int(source_user_id) == scope_user_id
+    except (TypeError, ValueError):
+        return False
 
 
 def assert_owns_or_admin(current_user: User, owner_id: int, *, detail: str = "Not authorized") -> None:

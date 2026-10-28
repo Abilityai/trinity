@@ -967,6 +967,9 @@ _ROW_READERS = {
         "ruled", "consumes a gate ask's ending; a denial's `response_text` reason is quoted to the "
                  "requester (trinity-enterprise#755); never who decided (#715)"),
     (_GATE, "sweep"): ("internal", "the gate's reconcile pass"),
+    ("services/skill_service.py", "skills_alarm_last_read_before"): (
+        "internal", "the skills alarm's own pending row on `_skills-sync`: its `last_seen_at`, "
+                    "compared with a pass's start (#3254); a boolean, nothing leaves"),
     ("services/task_execution_service.py", "_alert_skill_not_found"): (
         "internal", "dedupe: is a skill_not_found alert already pending"),
 }

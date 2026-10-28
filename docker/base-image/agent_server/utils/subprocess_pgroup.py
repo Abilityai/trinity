@@ -95,8 +95,23 @@ def _signal_group_or_process(
     pgid: Optional[int],
     sig: int,
 ) -> None:
-    """Send ``sig`` to the process group if ``pgid`` is known, otherwise
-    fall back to signaling the single process. Silent on ESRCH / EPERM."""
+    """Send ``sig`` to the process group if ``process`` leads it, otherwise
+    fall back to signaling the single process. Silent on ESRCH / EPERM.
+
+    #4064: a group is signalled only when ``pgid == process.pid`` (the child
+    was spawned with ``start_new_session=True`` and leads its own group), it is
+    positive, and it is not this process's own group. A child that shares the
+    agent server's group resolves to the server's group, which in a container
+    is the PID-1 shell's, so a ``killpg`` on it stops the container. Any other
+    pgid (stale after a pid reuse, 0, negative, foreign) is refused and the
+    single pid is signalled instead; the cgroup sweep reaps descendants."""
+    if pgid is not None and (pgid <= 0 or pgid != process.pid or pgid == os.getpgrp()):
+        logger.warning(
+            "[Subprocess] refusing killpg(%s) for pid=%s: not a group it leads "
+            "(own group %s); signalling the pid only",
+            pgid, process.pid, os.getpgrp(),
+        )
+        pgid = None
     if pgid is not None:
         try:
             os.killpg(pgid, sig)
@@ -431,7 +446,8 @@ def signal_process_tree(
     pgid: Optional[int] = None,
 ) -> None:
     """Send ``sig`` to the subprocess's process group if it is a group
-    leader; otherwise fall back to signaling the single process.
+    leader; otherwise fall back to signaling the single process. The rule
+    is enforced in :func:`_signal_group_or_process` (#4064).
 
     Used by ProcessRegistry.terminate() to propagate SIGINT/SIGKILL to
     the full tree instead of just the subprocess parent.
