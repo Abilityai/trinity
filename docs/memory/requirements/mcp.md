@@ -227,6 +227,22 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
 
 - **Flow**: `docs/memory/feature-flows/mcp-connector.md`
 
+### 7.7 System apply over MCP (trinity-enterprise#695)
+
+- **Status**: ✅ Implemented (MCP tool). The backend route it proxies, `POST /api/systems/apply` (requirements: `roadmap.md` §16.5, apply mode), ships on its own; until it is on the build the tool answers `not_available`.
+- **GitHub Issue**: trinity-enterprise#695
+- **Description**: `apply_system({manifest, dry_run?})` reconciles a live instance to a system manifest over MCP: it posts `{manifest, dry_run}` to `POST /api/systems/apply` and returns the plan or the apply report. It is a NEW tool, not a `mode` argument on `deploy_system`: a caller (a controller agent) drives several instances that can run different builds, and a released `deploy_system` has no `mode` in its schema, so `mode: "apply"` sent to an older instance would be dropped and run CREATE, suffixing the fleet. An unknown tool name fails closed. `deploy_system` is unchanged (create mode stays byte-identical, AC6).
+- **Rules**:
+  - **`dry_run` defaults to `true`** (`dry_run ?? true`), the opposite of `deploy_system`: an unwanted preview costs a round trip, an unwanted apply writes to existing agents. Only an explicit `dry_run: false` applies.
+  - **Never throws.** Client resolution happens inside the same `try` as the request, so a missing API key comes back as `{success: false, error}`, not as an opaque transport failure. A real run (`dry_run: false`) whose request went out but got no answer adds a `note` that some writes may already have been applied and that a dry run shows where the system stands (apply is idempotent); a missing key or a dry run never carries it.
+  - **Thin mapping**, so a status-code change in the backend contract cannot silently break the tool: a 2xx body is returned verbatim; **404 and 405** (a build without the route) → `{success: false, not_available: true, http_status, error, detail}`, whose message says not to fall back to `deploy_system` (create-only: it would add `_2` copies of members that exist); **403** → `{success: false, not_permitted: true, http_status: 403, error, detail}` with the hint "apply is human-only: run it with a person's credential"; **any other non-2xx with a JSON object body** (the 409 / 503 / 500 apply reports, a 400, 401 or 422) → that body AS the result, with `http_status` and `success: false` added, so `status`, `blockers[]` and `failed[]` reach the caller intact; **anything else** (a JSON scalar, array or null, or a non-JSON body) → `{success: false, http_status, detail}` with the raw value as `detail`.
+  - **Audit honesty.** A 403 is serialised through `access.ts::accessDenied`, so its tool-call audit row says `denied: true` (#2807). No other refusal (409 blockers, 503 retryables, 500, 400, 401, 422, 404/405) is an authorization denial, so none is stamped as one: each is returned as a result and audited the way every returned operational failure on the surface is audited today (`success: true` on the row, no `denied`), because `ToolOutcome` has only the `denied` kind; a non-denial kind is the registered follow-up (`types.ts`).
+  - **Access policy row** `none` (`access.ts`): the tool takes a manifest, not an agent; the backend enforces the per-member manage checks and refuses every non-person key.
+  - **Shown to person sessions only.** Its own `canAccess` allow-lists the `user` scope, what the backend's `require_person` admits over MCP, so an agent, connector or system session neither lists it nor can call it by name (the #3435 shape; a null or unknown scope fails closed).
+  - **Forwards to the configured backend with the caller's key**: with API-key auth on, each call builds a client on the server's configured backend URL carrying the calling session's own key, whatever that origin is.
+- **Tests**: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered, audit-wrapped tool: over the real MCP transport; a session with no API key (which that transport's authentication refuses before any tool runs) in-process through FastMCP's own session; and the other-hostname case in-process too, by choice, so an https DNS origin needs no network (`fetch` stubbed).
+- **Flow**: `docs/memory/feature-flows/system-manifest.md`
+
 ---
 
 ## 32. A2A Agent Discoverability (#737)
