@@ -13,9 +13,12 @@ start, stop, recreate, the in-container HTTP calls after a start), and Redis
 
 What is pinned, by section:
 
-* pass paths for the four routes, start through the real `start_agent_internal`
-  including the #1854 self-heal of a revoked baked-in key (no credential reaches
-  the caller, its reach is unchanged), and the audit attribution;
+* pass paths for the four routes, start through the real `start_agent_internal`,
+  and the audit attribution;
+* containment: a start that would mint the agent a key (the #1854 drift heal of
+  a revoked, deleted, missing or foreign baked key; the #1559 rebuild of a
+  missing container) is refused 409 `ops_write_would_mint_key` and changes
+  nothing, while a person's start of the same agent still heals and rebuilds;
 * the target policy on start/stop (system agent, `is_system` flag, ghost, a
   ghost lookup that fails), and that reset/terminate keep every agent;
 * dies with its owner: demoted (creator, operator) → 403 on all four, suspended
@@ -194,7 +197,7 @@ def _fake_docker_for_start(monkeypatch, container):
     lookup of the container's key), `heal_agent_mcp_key_env` (mint, reconcile,
     prune, audit — DB), the read-only sync decision and the audit log."""
     lc = _AGENTS.start_agent_internal
-    seen = {"recreate": [], "started": []}
+    seen = {"recreate": [], "started": [], "breakers": [], "rebuilt": []}
 
     async def _reload(c):
         return None
@@ -212,11 +215,20 @@ def _fake_docker_for_start(monkeypatch, container):
     async def _ok(*a, **k):
         return {"status": "success"}
 
-    _patch(monkeypatch, lc, "get_agent_container", lambda name: container)
+    box = [container]  # what Docker reports for the agent; None = no container
+
+    async def _rebuild(agent_name):
+        # The #1559 rebuild-from-persisted-config path (it mints a key itself).
+        seen["rebuilt"].append(agent_name)
+        box[0] = _Container({})
+        return box[0]
+
+    _patch(monkeypatch, lc, "get_agent_container", lambda name: box[0])
+    _patch(monkeypatch, lc, "recreate_missing_container", _rebuild)
     _patch(monkeypatch, lc, "container_reload", _reload)
     _patch(monkeypatch, lc, "container_start", _start)
     _patch(monkeypatch, lc, "recreate_container_with_updated_config", _recreate)
-    _patch(monkeypatch, lc, "clear_agent_breakers", lambda name: None)  # Redis
+    _patch(monkeypatch, lc, "clear_agent_breakers", seen["breakers"].append)  # Redis
     # Comparisons of the container's Docker config (mounts, limits, image, env
     # derived from settings) against the DB: the container is a fake, so they
     # are pinned to "matches". The MCP-key predicate is NOT on this list.
@@ -301,48 +313,139 @@ class TestPassPaths:
         assert res.json() == {"status": "cancelled_while_queued", "execution_id": eid}
         assert db.get_execution(eid).status == "cancelled"
 
-    def test_start_self_heals_a_revoked_baked_key_and_hands_the_caller_nothing(self, world, monkeypatch):
-        """The #1854 heal is authorized as a USE (plan D3): it mints the TARGET's
-        own key into the target's container and prunes its superseded keys. No
-        credential reaches the caller, and the caller's own reach is unchanged."""
+    def test_start_of_a_healthy_agent_is_attributed_to_the_key(self, world, monkeypatch):
+        """The agent's baked key is its live key: nothing to mint, so the start
+        runs as for anyone, and the audit row names the ops_write key."""
         key = world.mint("ops_write")
         baked = db.create_agent_mcp_api_key(TARGET, OWNER)
-        _hrun("UPDATE mcp_api_keys SET is_active = 0 WHERE id = :i", i=baked.id)  # revoked for containment
-        # A second, still-active agent key the container does not hold — what
-        # the heal captures as superseded and prunes.
-        stale = db.create_agent_mcp_api_key(TARGET, OWNER)
-        container = _Container({"TRINITY_MCP_API_KEY": baked.api_key,
-                                "TRINITY_MCP_URL": "http://mcp-server:8080/mcp"})
+        seen = _fake_docker_for_start(monkeypatch, _baked_container(baked))
+
+        res = world.client.post(f"/api/agents/{TARGET}/start", headers=key.headers)
+        assert res.status_code == 200, res.text
+        assert res.json()["recreated"] is False
+        assert len(seen["started"]) == 1 and seen["recreate"] == []
+        assert _key_row(baked.id)["is_active"] == 1
+        rows = _audit("start")
+        assert rows and rows[-1]["mcp_key_id"] == key.id and rows[-1]["mcp_scope"] == "ops_write"
+        assert rows[-1]["target_id"] == TARGET and rows[-1]["actor_email"] == OWNER_EMAIL
+
+
+def _baked_container(key_row, status="exited"):
+    """A container carrying `key_row`'s plaintext as its platform key."""
+    return _Container({"TRINITY_MCP_API_KEY": key_row.api_key,
+                       "TRINITY_MCP_URL": "http://mcp-server:8080/mcp"}, status=status)
+
+
+def _contain(target=TARGET):
+    """What a person does to contain an agent: revoke the key baked into its
+    container. A second, still-active agent key the container does not hold is
+    what the #1854 heal would capture as superseded and prune."""
+    baked = db.create_agent_mcp_api_key(target, OWNER)
+    _hrun("UPDATE mcp_api_keys SET is_active = 0 WHERE id = :i", i=baked.id)
+    stale = db.create_agent_mcp_api_key(target, OWNER)
+    return baked, stale
+
+
+def _agent_keys(agent=TARGET):
+    return _q("SELECT id, is_active FROM mcp_api_keys WHERE agent_name = :a AND scope = 'agent' "
+              "ORDER BY id", a=agent)
+
+
+# =========================================================================== #
+# Containment — an ops_write start never mints a key (#3180 I1)
+# =========================================================================== #
+
+class TestContainment:
+    """A start that would mint the agent a key is refused for `ops_write`: the
+    #1854 drift heal (its baked key revoked, deleted, missing or foreign) and the
+    #1559 rebuild of a missing container. A person's start is unchanged."""
+
+    @pytest.mark.parametrize("status", ["exited", "running"])
+    def test_a_revoked_key_is_not_re_minted(self, world, monkeypatch, status):
+        key = world.mint("ops_write")
+        baked, stale = _contain()
+        before = _agent_keys()
+        seen = _fake_docker_for_start(monkeypatch, _baked_container(baked, status=status))
+
+        res = world.client.post(f"/api/agents/{TARGET}/start", headers=key.headers)
+        assert res.status_code == 409, res.text
+        detail = res.json()["detail"]
+        assert detail["code"] == "ops_write_would_mint_key"
+        assert detail["reason"] == "key_drift"
+        assert "a person" in detail["message"].lower()
+
+        # Nothing moved: no mint, no prune, no recreate, no start, no breaker
+        # clear, no start row.
+        assert _agent_keys() == before
+        assert _key_row(baked.id)["is_active"] == 0 and _key_row(stale.id)["is_active"] == 1
+        assert seen["recreate"] == [] and seen["started"] == [] and seen["breakers"] == []
+        assert _audit("start") == [] and _audit("agent_key_self_heal") == []
+
+    @pytest.mark.parametrize("env", ["deleted", "no-key", "no-url", "foreign"])
+    def test_every_other_mint_drift_is_refused(self, world, monkeypatch, env):
+        """A person's DELETE of the key leaves no row, the state the platform's
+        own prune leaves; the two cannot be told apart, so neither heals."""
+        key = world.mint("ops_write")
+        baked = db.create_agent_mcp_api_key(TARGET, OWNER)
+        if env == "deleted":
+            _hrun("DELETE FROM mcp_api_keys WHERE id = :i", i=baked.id)
+            container = _baked_container(baked)
+        elif env == "no-key":
+            container = _Container({"TRINITY_MCP_URL": "http://mcp-server:8080/mcp"})
+        elif env == "no-url":
+            container = _Container({"TRINITY_MCP_API_KEY": baked.api_key})
+        else:  # the container holds the ops_write key's own plaintext
+            container = _Container({"TRINITY_MCP_API_KEY": key.secret,
+                                    "TRINITY_MCP_URL": "http://mcp-server:8080/mcp"})
+        before = _agent_keys()
         seen = _fake_docker_for_start(monkeypatch, container)
 
         res = world.client.post(f"/api/agents/{TARGET}/start", headers=key.headers)
+        assert res.status_code == 409 and _detail_code(res) == "ops_write_would_mint_key", res.text
+        assert _agent_keys() == before
+        assert seen["recreate"] == [] and seen["started"] == []
+
+    def test_a_missing_container_is_not_rebuilt(self, world, monkeypatch):
+        """The #1559 rebuild mints a fresh key and deactivates the old ones."""
+        key = world.mint("ops_write")
+        baked, stale = _contain()
+        before = _agent_keys()
+        seen = _fake_docker_for_start(monkeypatch, None)
+
+        res = world.client.post(f"/api/agents/{TARGET}/start", headers=key.headers)
+        assert res.status_code == 409, res.text
+        detail = res.json()["detail"]
+        assert detail["code"] == "ops_write_would_mint_key" and detail["reason"] == "container_missing"
+        assert seen["rebuilt"] == [] and seen["started"] == []
+        assert _agent_keys() == before
+
+    def test_a_persons_start_of_a_contained_agent_still_heals(self, world, monkeypatch):
+        """Unchanged for a person: the #1854 heal mints the target's own key
+        into its container and prunes its superseded keys."""
+        baked, stale = _contain()
+        seen = _fake_docker_for_start(monkeypatch, _baked_container(baked))
+
+        res = world.client.post(f"/api/agents/{TARGET}/start", headers=world.jwt())
         assert res.status_code == 200, res.text
         body = res.json()
         assert body["recreated"] is True and body["recreate_reason"] == "config_drift"
 
-        # The heal ran for real: one recreate, carrying a freshly minted key whose
-        # hash is an ACTIVE agent-scoped row bound to TARGET.
-        assert len(seen["recreate"]) == 1
-        overrides = seen["recreate"][0]["env_overrides"]
-        fresh = overrides["TRINITY_MCP_API_KEY"]
+        assert len(seen["recreate"]) == 1 and len(seen["started"]) == 1
+        fresh = seen["recreate"][0]["env_overrides"]["TRINITY_MCP_API_KEY"]
         digest = hashlib.sha256(fresh.encode()).hexdigest()
         row = _q("SELECT scope, agent_name, is_active FROM mcp_api_keys WHERE key_hash = :h", h=digest)
         assert row == [{"scope": "agent", "agent_name": TARGET, "is_active": 1}]
         assert _key_row(stale.id) is None, "the superseded active key is pruned"
         assert _key_row(baked.id)["is_active"] == 0, "the revoked key stays revoked"
-        active = _q("SELECT key_hash FROM mcp_api_keys WHERE agent_name = :a AND scope = 'agent' "
-                    "AND is_active = 1", a=TARGET)
-        assert active == [{"key_hash": digest}], "the target holds exactly its new key"
-
-        # ...and nothing of it reached the caller.
         assert "trinity_mcp_" not in res.text and fresh not in res.text
-        assert _key_row(key.id) == {"scope": "ops_write", "agent_name": None, "is_active": 1,
-                                    "user_id": db.get_user_by_username(OWNER)["id"]}
-        still = world.client.get("/api/mcp/keys", headers=key.headers)
-        assert still.status_code == 403 and _detail_code(still) == "ops_write_route_not_listed"
-
         rows = _audit("start")
-        assert rows and rows[-1]["mcp_key_id"] == key.id and rows[-1]["mcp_scope"] == "ops_write"
+        assert rows and rows[-1]["mcp_key_id"] is None and rows[-1]["actor_email"] == OWNER_EMAIL
+
+    def test_a_persons_start_of_a_missing_container_still_rebuilds(self, world, monkeypatch):
+        seen = _fake_docker_for_start(monkeypatch, None)
+        res = world.client.post(f"/api/agents/{TARGET}/start", headers=world.jwt())
+        assert res.status_code == 200, res.text
+        assert seen["rebuilt"] == [TARGET] and len(seen["started"]) == 1
 
 
 # =========================================================================== #

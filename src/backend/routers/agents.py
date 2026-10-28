@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -886,7 +886,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 @router.post("/{agent_name}/start")
 @ops_write_route(
     "#3180: starts one agent; the target policy refuses the system agent and "
-    "ephemeral agents, and no credential reaches the caller"
+    "ephemeral agents, and a start that would mint the agent a key is refused"
 )
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
@@ -894,7 +894,14 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
     # they spawned (interim until #948 capability tokens).
     enforce_agent_spawn_scope(current_user, agent_name)
     try:
-        result = await start_agent_internal(agent_name)
+        # #3180: an ops_write key may not undo a person's containment, so its
+        # start never mints the agent a key (409 ops_write_would_mint_key).
+        # `getattr(..., None)` as in `enforce_agent_spawn_scope`: the default can
+        # only mean "not an ops_write key", and the resolver always sets it.
+        result = await start_agent_internal(
+            agent_name,
+            allow_key_mint=getattr(current_user, "mcp_scope", None) != OPS_WRITE_SCOPE,
+        )
         invalidate_context_stats_cache()  # PERF-269
         credentials_status = result.get("credentials_injection", "unknown")
         credentials_result = result.get("credentials_result", {})
