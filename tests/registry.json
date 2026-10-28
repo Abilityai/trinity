@@ -5141,6 +5141,17 @@
       "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
     },
     {
+      "file": "unit/test_3408_gemini_reader_exit.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "unit"
+      ],
+      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. A child whose exit is never observed stays registered and the reader's own 504 survives. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_ent751_skill_invocation.py",
       "feature": "ent#751",
       "added": "2026-10-02",
