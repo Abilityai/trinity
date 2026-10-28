@@ -391,6 +391,9 @@ filed through the #1677 **budget** (`platform_alerts.observe`, kind
 `gitignore_untracked`), unlike its unbudgeted `git_bloat`/`sync_failing` siblings, because those fire
 on the 60-second platform poller's cadence while this one fires from
 `sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
+Each Push's entry carries its own `push_id` (a material key): a repeat of the
+same change set collapses onto a pending row, and after a person ends the row
+the next untracking Push, the same set included, files a new row at once.
 The last surface is the point: both field incidents were unattended
 15-minute cycles and surfaced two months late, and every other surface is read
 only by whoever ran the Push. The commit-message half is explicitly

@@ -678,7 +678,7 @@
     siblings: their cadence is the 60-second platform poller's, while this one fires from
     `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself
     — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time,
-    and each set is its own subject (a digest of the direction-tagged change set; it never expires). Its `gitignore-untracked-` prefix is reserved
+    and each set is its own subject (a digest of the direction-tagged change set; it never expires). A repeat of the same set collapses onto a pending row; each reading carries its own `push_id` (a material key), so after a person ends the row the next untracking Push, the same set included, files a new row at once. Its `gitignore-untracked-` prefix is reserved
     so an agent cannot pre-create the id and suppress its own alert through the sink's
     `on_conflict_do_nothing`. The commit-message half is
     explicitly **best-effort**: `git rm --cached` only *stages*, and if the in-container
