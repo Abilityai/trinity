@@ -308,6 +308,17 @@
       "description": "Cancelled or timed-out chat/headless waiters retain live subprocess ownership and executor completion closes log streams; queued headless cancellation does not spawn, queued chat readers reap existing children, result finalization ordering is preserved, and unconfirmed termination retains ownership. Disposable Python children only; no model, provider, or live-agent calls."
     },
     {
+      "file": "unit/test_3408_codex_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "Codex half of #3307's cleanup: a cancelled or outer-timed-out Codex waiter (chat 1-worker pool and /api/task default pool, running or queued reader) keeps its live child registered and allowlisted, and the shielded reader worker releases it after the child exits: -o result file removed, entry dropped, stream_end delivered, buffer gone. Also an empty-output child with no -o file, a read-only CODEX_HOME whose unlink fails, and the worker finishing before the cancel lands. Runs the real _execute_codex with the real ProcessRegistry and disposable Python children; no model, provider, or live-agent calls."
+    },
+    {
       "file": "unit/test_ent839_seat_decisions_self_gate.py",
       "feature": "trinity-enterprise#839",
       "added": "2026-10-08",
