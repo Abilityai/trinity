@@ -313,7 +313,7 @@ async def list_oauth_providers(current_user: User = Depends(get_current_user)):
 # New Credential System (CRED-002: Simplified Encrypted File Storage)
 # ============================================================================
 
-@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_interactive)])
+@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_person)])
 async def inject_credentials(
     request_body: CredentialInjectRequest,
     request: Request,
@@ -326,8 +326,13 @@ async def inject_credentials(
     This is the new simplified credential injection that writes files
     directly to the agent's workspace without Redis or template processing.
 
-    trinity-enterprise#69 Part 2: credential ops are human-only — an
-    agent-scoped key (which resolves to the owner) is rejected below.
+    A person (`require_person` in the decorator, trinity-enterprise#719): a
+    signed-in session or the person's own `user`-scoped key. The caller supplies
+    the files, so the key holder already holds what it writes. The public
+    abilities toolkit's `/trinity:onboard` delivers a deployed agent's `.env`
+    this way on the person's own key (ruled 2026-10-28). Every agent key and the
+    system key are refused; the inline `reject_agent_principal` below stays as a
+    second layer (trinity-enterprise#69 Part 2).
 
     Args:
         agent_name: Name of the agent

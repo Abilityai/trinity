@@ -6,14 +6,22 @@ route DECORATOR, so the gate runs before the path's ownership lookup and its
 refusal says nothing about whether the agent exists (Invariant #8, #186):
 
 * PERSON (`Depends(require_person)`: a signed-in session or the person's own
-  `user`-scoped key) — the settings and identity routes; the PAT clear, a
-  revoke; the two git switches on unattended behaviour; and initialize, which
-  takes no credential from the caller (it seeds the token already configured
-  for the agent);
+  `user`-scoped key) — the settings and identity routes; the per-agent GitHub
+  PAT set, which binds a token the caller supplies; the PAT clear, a revoke; the
+  two git switches on unattended behaviour; and initialize, which takes no
+  credential from the caller (it seeds the token already configured for the
+  agent);
 * INTERACTIVE (`Depends(require_interactive)`: a signed-in session only) — the
-  routes that mint or bind a credential: the Brain Orb voice token, the
-  per-agent GitHub PAT set, and the repository binding, which stores the
-  caller's GitHub token (supplied or saved) as the agent's per-agent PAT.
+  Brain Orb voice token, which the platform mints and hands back, and the
+  repository binding, which can store the caller's SAVED GitHub token (one the
+  request does not carry, and which only a session can set) as the agent's
+  per-agent PAT, and can create a repository on the caller's GitHub account.
+
+The PAT set is PERSON by the 2026-10-28 ruling on trinity-enterprise#719: the
+public abilities toolkit's `/trinity:onboard` binds a per-agent token with
+`set_agent_github_pat` on the person's own user-scoped key ("Option 2: tier-1
+per-agent token"), and that flow must keep working. Every agent key and the
+system key stay refused.
 
 Matrix M, through the real routers mounted in `main.py`'s order:
 
@@ -568,7 +576,7 @@ def _arm_bind(w):
 S5B = {
     "github-pat-set": Spec(
         "S5b",
-        INTERACTIVE,
+        PERSON,
         "PUT",
         "github-pat",
         _arm_pat_set,
@@ -615,8 +623,10 @@ S5B = {
         },
         bad_json={"repo_name": "s5-agent"},
     ),
-    # Binds the caller's GitHub token (supplied, or their saved one) as the
-    # agent's per-agent PAT (`repo_binding.py`), so it is INTERACTIVE like the PAT set.
+    # Can bind the caller's SAVED GitHub token (session-only to set, ent#711) as
+    # the agent's per-agent PAT (`repo_binding.py`), a token the request does not
+    # carry, and can create a repository on the caller's account: INTERACTIVE. The
+    # PAT set binds only the token in its body, so it is PERSON (ent#719 ruling).
     "git-bind-to-own-repo": Spec(
         "S5b",
         INTERACTIVE,
@@ -910,10 +920,9 @@ def test_reading_auto_sync_still_admits_the_agents_own_key(world):
     assert res.json() == {"agent_name": AGENT, "auto_sync_enabled": False}
 
 
-@pytest.mark.parametrize("name", ["brain-orb-voice-token", "github-pat-set"])
-def test_the_user_key_is_refused_on_the_voice_token_and_the_pat_set(world, name):
-    """Named for the ruling: a key may not mint or bind a credential."""
-    spec, observe, before = _armed(world, name)
+def test_the_user_key_is_refused_the_voice_token(world):
+    """Named for the ruling: a key may not mint a credential."""
+    spec, observe, before = _armed(world, "brain-orb-voice-token")
     res = _call(world, spec, headers=world.keys["owner-user-key"]())
     assert res.status_code == 403, res.text
     assert res.json()["detail"] == INTERACTIVE_DETAIL
@@ -928,14 +937,27 @@ def test_the_user_key_is_refused_on_the_voice_token_and_the_pat_set(world, name)
     ],
 )
 def test_the_user_key_cannot_bind_a_token_through_the_repository_binding(world, body):
-    """The binding persists a GitHub token as the agent's own, whether the body
-    carries one or the caller's saved token is used, so a key may not do it."""
+    """The route is INTERACTIVE as a whole: it can persist the caller's saved
+    token, which the request does not carry, and it can create a repository on the
+    caller's account. A key is refused whether or not the body carries a token,
+    and no token is stored."""
     spec, observe, before = _armed(world, "git-bind-to-own-repo")
     res = _call(world, spec, headers=world.keys["owner-user-key"](), json=body)
     assert res.status_code == 403, res.text
     assert res.json()["detail"] == INTERACTIVE_DETAIL
     assert observe() == before
     assert not db.has_agent_github_pat(AGENT)
+
+
+def test_the_user_key_sets_the_pat_as_onboarding_does(world):
+    """`/trinity:onboard` "Option 2: tier-1 per-agent token":
+    `set_agent_github_pat(agent_name, pat)` on the person's own user-scoped key.
+    It is admitted and the token is stored (trinity-enterprise#719 ruling,
+    2026-10-28)."""
+    spec, observe, _before = _armed(world, "github-pat-set")
+    res = _call(world, spec, headers=world.keys["owner-user-key"]())
+    assert res.status_code == 200, res.text
+    assert observe() is True
 
 
 def test_the_user_key_still_clears_the_pat(world):

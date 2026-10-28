@@ -2,16 +2,23 @@
 
 The rules these routes follow (#2996; Invariant #8, grant vs use):
 
-* **INTERACTIVE** (a signed-in session only) for a route that binds, mints or
-  restores a credential;
+* **INTERACTIVE** (a signed-in session only) for a route that mints a
+  credential and hands it back, restores a whole credential archive, or binds a
+  paid account to one agent;
 * **PERSON** (a signed-in session, or the person's own `user` key) for a route
-  that revokes or backs up a credential, names an agent's credentials, or changes
-  what outside callers may reach. A revoke stays open to the `user` key, so a
-  person's own key is still a kill switch.
+  that revokes or backs up a credential, names an agent's credentials, changes
+  what outside callers may reach, or writes credential files the caller supplies
+  into the agent (inject). A revoke stays open to the `user` key, so a person's
+  own key is still a kill switch.
+
+Inject is PERSON by the 2026-10-28 ruling on trinity-enterprise#719: the public
+abilities toolkit's `/trinity:onboard` delivers a deployed agent's `.env` with
+`inject_credentials` on the person's own user-scoped key (its Step 5e), and that
+flow must keep working. Every agent key and the system key stay refused.
 
 By family:
 
-* agent credentials — inject and import are INTERACTIVE; export, env-drift and
+* agent credentials — import is INTERACTIVE; inject, export, env-drift and
   requirements are PERSON;
 * paid accounts bound to one agent — subscription assign and Nevermined configure
   are INTERACTIVE; subscription clear and Nevermined delete and toggle are PERSON;
@@ -422,7 +429,7 @@ def _calls(env, target):
 S6A_ROUTES = [
     Route(
         "routers/credentials.py::inject_credentials",
-        "interactive",
+        "person",
         "POST",
         "/api/agents/{target}/credentials/inject",
         {"json": {"files": {".env": "EXAMPLE_KEY=placeholder"}}},
@@ -828,6 +835,18 @@ def test_the_persons_user_key(env, route):
         assert r.json()["detail"] == INTERACTIVE_DETAIL
         assert route.effect(env, target) == before
         assert env.lookups["n"] == 0
+
+
+@pytest.mark.parametrize("owner_role", OWNER_ROLES)
+def test_the_persons_user_key_injects_the_env_as_onboarding_does(env):
+    """`/trinity:onboard` Step 5e: `inject_credentials(name, files: {".env": ...})`
+    on the person's own user-scoped key, straight after deploy. It is admitted
+    and the file reaches the agent (trinity-enterprise#719 ruling, 2026-10-28)."""
+    route = next(r for r in ROUTES if r.key.endswith("::inject_credentials"))
+    target = route.seed(env)
+    before = route.effect(env, target)
+    r = _send(env, route, target, USER_KEY(env.owner_role))
+    _assert_person_succeeded(env, route, target, before, r)
 
 
 @pytest.mark.parametrize(
