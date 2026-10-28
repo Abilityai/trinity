@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4064_gemini_process_group.py",
+      "feature": "#4064",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",

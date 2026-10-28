@@ -7,10 +7,11 @@ buffer and its subscribers stayed registered with nothing left to release them.
 
 Drives the real ``GeminiRuntime.execute_headless`` with the real
 ``ProcessRegistry`` and disposable local Python children; never a model CLI or
-a running agent. A Gemini child is spawned without ``start_new_session``, so
-its captured pgid is this test session's own process group. Every test runs
-under a guard that refuses (raises and records, never forwards) a signal to
-that group, because the conftest signal guard is a pass-through where
+a running agent. Since #4064 a Gemini child is spawned with
+``start_new_session`` and leads its own group; before that its captured pgid
+was this test session's own process group. Every test still runs under a guard
+that refuses (raises and records, never forwards) a signal to that group,
+because the conftest signal guard is a pass-through where
 ``/proc/self/cgroup`` is unreadable (macOS).
 """
 from __future__ import annotations
@@ -208,8 +209,9 @@ def gemini(monkeypatch, registry, refused_signals):
 
 
 def _assert_child_was_gemini_shaped(gemini):
-    assert gemini.child_pgids == [os.getpgrp()], (
-        "control: the child shares this session's group, as a Gemini child shares the agent server's"
+    [child] = gemini.children
+    assert gemini.child_pgids == [child.pid], (
+        "control: the child leads its own group (#4064), never this session's"
     )
 
 
