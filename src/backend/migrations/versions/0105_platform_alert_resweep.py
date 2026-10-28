@@ -13,15 +13,15 @@ Agent-raised and gate rows, and the gitignore and problem-report rows (no
 subject, no lifetime), are never touched; a git-bloat row gets a lifetime
 only. A fresh database has no rows and plans nothing.
 
-Revision ID: 0104_platform_alert_resweep
-Revises: 0103_a2a_caller_identity
+Revision ID: 0105_platform_alert_resweep
+Revises: 0104_agent_sync_state_git_stats_at
 """
 from alembic import op
 from sqlalchemy import text
 
 
-revision = "0104_platform_alert_resweep"
-down_revision = "0103_a2a_caller_identity"
+revision = "0105_platform_alert_resweep"
+down_revision = "0104_agent_sync_state_git_stats_at"
 branch_labels = None
 depends_on = None
 

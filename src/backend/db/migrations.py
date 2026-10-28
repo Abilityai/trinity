@@ -5731,7 +5731,7 @@ def _migrate_platform_alert_subjects_resweep(cursor, conn):
     a lifetime only. A fresh install has no rows and plans nothing; a second
     run plans nothing. Runs at import, before any emitter starts.
 
-    Mirrored by the Alembic revision 0104_platform_alert_resweep.
+    Mirrored by the Alembic revision 0105_platform_alert_resweep.
     """
     def _run(sql, params, fetch=False):
         cursor.execute(sql, params)
