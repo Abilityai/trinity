@@ -94,6 +94,10 @@ PROTECTED_KEYS = frozenset({
     # `GIT_ASKPASS`/`GIT_PROXY_COMMAND` are the other two git-executes-this
     # names.
     "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
+    # trinity-enterprise#986: these relocate the Gemini CLI's settings (and its
+    # extensions/commands dirs) away from the ~/.gemini/settings.json that the
+    # platform keeps the usage-statistics opt-out in.
+    "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
 })
 
 # Prefix-matched companions to PROTECTED_KEYS: `GIT_CONFIG_KEY_<n>` /

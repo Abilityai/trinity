@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent986_gemini_usage_statistics.py",
+      "feature": "trinity-enterprise#986",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "git"
+      ],
+      "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",
