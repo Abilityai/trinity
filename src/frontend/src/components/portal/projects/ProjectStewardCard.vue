@@ -37,15 +37,16 @@
         {{ waitsOnMe ? 'Waiting on you' : `Waiting on ${waitingOn}` }}
       </p>
       <p class="mt-1 text-sm text-gray-700 dark:text-gray-300">
-        {{ proposal.proposed_by }} proposed changes to people and task owners {{ '' }}<span v-if="proposal.proposed_at" :title="absolute(proposal.proposed_at)">{{ relative(proposal.proposed_at) }}</span>.
+        {{ proposal.proposed_by }} proposed changes to this project {{ '' }}<span v-if="proposal.proposed_at" :title="absolute(proposal.proposed_at)">{{ relative(proposal.proposed_at) }}</span>.
         {{ waitsOnMe ? 'Nothing changes until you approve it.' : 'Nothing changes until they approve it.' }}
       </p>
-      <a
-        v-if="waitsOnMe && inboxHref"
-        :href="inboxHref"
-        class="mt-2 inline-flex items-center text-sm font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
+      <router-link
+        v-if="waitsOnMe && inboxRoute"
+        :to="inboxRoute"
+        :class="INBOX_LINK_CLASS"
+        class="mt-2 text-sm font-medium"
         data-testid="project-steward-proposal-review"
-      >Review in Inbox</a>
+      >Review in Inbox</router-link>
     </div>
     <p v-if="!steward" class="mt-2 text-sm text-gray-600 dark:text-gray-300">The creator stewards it until someone is named.</p>
 
@@ -87,6 +88,8 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import PortalAvatar from '@/components/portal/PortalAvatar.vue'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
+import { askInboxRoute } from '../portalRailAsks'
+import { INBOX_LINK_CLASS } from '../portalUtils'
 import { HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine } from './projectsUtils'
 
 const props = defineProps({
@@ -108,12 +111,11 @@ const who = computed(() => {
 const proposal = computed(() => props.project.proposal || null)
 const waitsOnMe = computed(() => Boolean(props.myEmail) && proposal.value?.waiting_on === props.myEmail)
 const waitingOn = computed(() => (waitsOnMe.value ? 'you' : proposal.value?.waiting_on || 'the creator'))
-// The Needs you row's link shape: straight to this decision in the Inbox.
-const inboxHref = computed(() => {
+// The Needs you row's link: straight to this decision in the Inbox, routed in
+// the app (no Workspace reload).
+const inboxRoute = computed(() => {
   const p = proposal.value
-  if (!p?.ask_id) return null
-  const q = new URLSearchParams({ tab: 'action', from: p.proposed_by || '', item: `ask:${p.ask_id}` })
-  return `/workspace/inbox?${q.toString()}`
+  return p ? askInboxRoute({ id: p.ask_id, agent_name: p.proposed_by }) : null
 })
 const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule))
 const scheduleAt = computed(() => (steward.value?.schedule?.state === 'scheduled' ? steward.value.schedule.next_run_at : null))

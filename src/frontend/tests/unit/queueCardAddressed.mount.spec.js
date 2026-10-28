@@ -30,7 +30,7 @@ import QueueCard from '@/components/operator/QueueCard.vue'
 import { useOperatorQueueStore } from '@/stores/operatorQueue'
 
 const row = (over = {}) => ({
-  id: 'p1', agent_name: 'compliance-steward', request_id: 'gate-owner-only-project-proposal-ppr_1',
+  id: 'p1', agent_name: 'compliance-steward', request_id: 'gate-addressee-only-project-proposal-ppr_1',
   type: 'approval', status: 'pending', priority: 'medium', raised_by: 'gate',
   title: "Approve compliance-steward's changes to “SOC 2 compliance”", question: 'The steward proposes the changes below.',
   options: ['Approve', 'Decline'], decided_by_options: true, context: {},

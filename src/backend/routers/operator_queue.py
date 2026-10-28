@@ -13,7 +13,7 @@ gate and map errors. Only a person ends an ask (`reject_non_person_principal`).
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, NamedTuple, Optional, Set
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
 from models import (
     BulkCancelRequest,
@@ -80,32 +80,62 @@ def _accessible_set(current_user: User) -> Optional[Set[str]]:
     return set(db.get_accessible_agent_names(current_user.email or "", is_admin=False))
 
 
-def _owned_set(current_user: User) -> Optional[Set[str]]:
-    """The agents this caller OWNS, for the owner-only rows
-    (trinity-enterprise#866), or None when that rule does not apply: an admin
-    sees every row. A machine key never reaches an owner-only row at all — it is
-    about a person (#715) — so its set is irrelevant and it gets None too."""
+class _Fence(NamedTuple):
+    """Who this caller is, for the rows readable by only some of the people who
+    can use the agent: `owned`, the agents they OWN (a client's complaint,
+    trinity-enterprise#866), and `email`, for the rows addressed to them alone
+    (a steward's proposal, trinity-enterprise#980)."""
+    owned: Set[str]
+    email: str
+
+
+def _fence(current_user: User) -> Optional[_Fence]:
+    """This caller's `_Fence`, or None when neither rule applies: an admin sees
+    every row. A machine key never reaches such a row at all — both are about a
+    person (#715) — so it gets None too."""
     if current_user.role == "admin" or not is_person_principal(current_user):
         return None
-    return set(db.get_agents_by_owner(current_user.username))
+    return _Fence(set(db.get_agents_by_owner(current_user.username)),
+                  (current_user.email or "").strip().lower())
 
 
-def _hidden_from(item: Dict[str, Any], owned: Optional[Set[str]]) -> bool:
+def _fenced(item: Dict[str, Any]) -> bool:
+    return (operator_queue_service.is_owner_only(item)
+            or operator_queue_service.is_addressee_only(item))
+
+
+def _hidden_from(item: Dict[str, Any], fence: Optional[_Fence]) -> bool:
     """An owner-only row (a client's complaint) on an agent this caller does not
-    own (trinity-enterprise#866). To them it reads like a row that is not there."""
-    return (owned is not None and operator_queue_service.is_owner_only(item)
-            and item.get("agent_name") not in owned)
+    own (trinity-enterprise#866), or an addressee-only row (a steward's proposal)
+    not addressed to them (trinity-enterprise#980). To them it reads like a row
+    that is not there."""
+    if fence is None:
+        return False
+    if operator_queue_service.is_owner_only(item) and item.get("agent_name") not in fence.owned:
+        return True
+    return (operator_queue_service.is_addressee_only(item)
+            and not operator_queue_service.is_addressed_to(item, fence.email))
 
 
-def _drop_hidden(items: List[Dict[str, Any]], owned: Optional[Set[str]]) -> List[Dict[str, Any]]:
-    return [item for item in items if not _hidden_from(item, owned)]
+def _drop_hidden(items: List[Dict[str, Any]], fence: Optional[_Fence]) -> List[Dict[str, Any]]:
+    return [item for item in items if not _hidden_from(item, fence)]
 
 
 def _hidden_for(item: Dict[str, Any], current_user: User) -> bool:
     """`_hidden_from` for one row, resolving the caller's agents only when the
-    row is owner-only — every other row costs no lookup."""
-    return (operator_queue_service.is_owner_only(item)
-            and _hidden_from(item, _owned_set(current_user)))
+    row is fenced — every other row costs no lookup."""
+    return _fenced(item) and _hidden_from(item, _fence(current_user))
+
+
+def _fence_filters(fence: Optional[_Fence]) -> Dict[str, Any]:
+    """The SQL twin of `_hidden_from`, for `list_operator_queue_items` — before
+    the limit, so a fenced row never empties a page and `total` stays exact."""
+    if fence is None:
+        return {}
+    return dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
+                owner_agent_names=fence.owned,
+                addressee_only_request_id_prefixes=operator_queue_service.ADDRESSEE_ONLY_ID_PREFIXES,
+                addressee_email=fence.email)
 
 
 def _assert_agent_accessible(agent_name: str, accessible: Optional[Set[str]]) -> None:
@@ -230,21 +260,23 @@ async def list_queue_items(
     agent-scoped key is narrowed to `{self} ∪ permitted` before the cut;
     `agent_names` narrows any caller further.
     """
-    owned = _owned_set(current_user)
+    fence = _fence(current_user)
     try:
         return operator_queue_service.list_for_principal(
             current_user,
             accessible=_accessible_set(current_user),
             exclude_about_a_person=not is_person_principal(current_user),
             # trinity-enterprise#866: a client's complaint is the agent owner's.
-            owned_agents=owned,
+            owned_agents=None if fence is None else fence.owned,
+            # trinity-enterprise#980: a steward's proposal is its addressee's.
+            addressee_email=None if fence is None else fence.email,
             # #2915: aging is computed once, here, from the operator's bound —
             # the frontend renders `aging`/`aged_since`, it never recomputes
             # them. The two flag counts are the visible escalation (undelivered
             # answers, items the agent closed on its side) the Operations header
             # shows instead of minting queue items about queue items.
             project=lambda rows: _for_principal(
-                operator_queue_service.annotate_aging(_drop_hidden(rows, owned)), current_user),
+                operator_queue_service.annotate_aging(_drop_hidden(rows, fence)), current_user),
             filters=dict(status=status, type=type, priority=priority,
                          agent_name=agent_name, since=since),
             limit=limit,
@@ -541,10 +573,7 @@ async def get_agent_queue_items(
     """Get queue items for a specific agent."""
     accessible = _accessible_set(current_user)
     _assert_agent_accessible(agent_name, accessible)
-    owned = _owned_set(current_user)
-    owner_only = ({} if owned is None else
-                  dict(owner_only_request_id_prefixes=operator_queue_service.OWNER_ONLY_ID_PREFIXES,
-                       owner_agent_names=owned))
+    fence = _fence(current_user)
     items = db.list_operator_queue_items(
         agent_name=agent_name,
         status=status,
@@ -554,10 +583,11 @@ async def get_agent_queue_items(
         exclude_request_id_prefixes=(
             None if is_person_principal(current_user)
             else operator_queue_service.ABOUT_A_PERSON_ID_PREFIXES),
-        **owner_only,  # trinity-enterprise#866: before the limit, like the line above
+        # trinity-enterprise#866/#980: before the limit, like the line above
+        **_fence_filters(fence),
     )
     items = _for_principal(
-        operator_queue_service.annotate_aging(_drop_hidden(items, owned)), current_user)
+        operator_queue_service.annotate_aging(_drop_hidden(items, fence)), current_user)
     return {"agent_name": agent_name, "items": items, "count": len(items)}
 
 
