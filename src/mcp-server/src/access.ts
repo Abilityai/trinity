@@ -211,7 +211,7 @@ const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
-const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
+const REMINDER_SELF_GATE = "backend self-gate: reminders.py assert_own_agent refuses an agent key naming another agent (abilityai/trinity-enterprise#840)";
 const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const SKILL_GATE_FENCE =
@@ -285,6 +285,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
+  apply_system: {
+    kind: "none",
+    why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
+  },
   // --- docs.ts ---
   get_agent_requirements: { kind: "none", why: "no agent target" },
   ask_trinity: { kind: "none", why: "no agent target" },
@@ -369,6 +373,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_nevermined_config: { kind: "enforce", param: "agent_name" },
   toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
+  get_agent_spending: { kind: "enforce", param: "agent_name" },
+  revoke_agent_delegation: { kind: "enforce", param: "agent_name" },
   // --- executions.ts ---
   list_recent_executions: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_execution_result: { kind: "in-tool", how: EXECUTIONS_GATE },

@@ -100,7 +100,8 @@ async def fan_out(
     # fan-out replays the original aggregated result instead of re-dispatching
     # all N subtasks. Optional header; absent → no dedup.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
     if idem.replay:
         await platform_audit_service.log(

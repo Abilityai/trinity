@@ -320,20 +320,21 @@ def test_the_portal_writes_do_not_run_on_the_event_loop():
     assert "asyncio.to_thread(_write)" in inspect.getsource(mod._resolve_portal)
 
 
-def test_the_docstring_no_longer_claims_the_workspace_polls():
-    """It does not: history loads on mount and prop change, `refreshThreads()`
-    is documented as event-driven, and the only interval is the asks poll on a
-    different surface. A false claim here is what stops anyone building the
-    poll that would make it true."""
+def test_the_docstring_states_how_the_report_reaches_an_open_thread():
+    """The docstring must describe the path that actually delivers the report
+    to a client sitting on the thread. Since #3439 that is the shell's 20s
+    tick re-reading the thread row, which `touch_portal_session` moves, and the
+    open conversation reconciling its tail when it does. An earlier version
+    claimed a history poll that did not exist; a false claim here is what stops
+    anyone noticing the hand-off it depends on."""
     import inspect
     from services import channel_completion_report as mod
     doc = inspect.getdoc(mod._resolve_portal) or ""
-    # Asserted as the CORRECTED claim, not as the absence of a phrase: the old
-    # wording legitimately appears in the sentence that retracts it, and a
-    # substring ban would forbid explaining the fix.
-    assert "not immediately visible" in doc.lower()
-    assert "event-driven" in doc
-    assert "does not hold by construction here" in doc
+    assert "visible within one tick" in doc
+    assert "no history poll of its own" in doc
+    # The write that makes the row move is named, so removing it reads as a
+    # regression rather than a cleanup.
+    assert "touch_portal_session" in doc
     # And the known limitation is written down where the next reader will hit it.
     assert "answer" in doc and "Known limitation" in doc
 
@@ -395,7 +396,13 @@ def _drive(ccr, monkeypatch, row, *, status="success", summary_or_error="done",
 
     # `_resolve_portal` does `from client_portal import db as portal_db` at call
     # time, so the stub has to be installed on the package attribute.
+    #
+    # #3691: import the real modules FIRST. The report path imports
+    # `client_portal.service` lazily; a first import under the stub binds its
+    # module-level `from . import db` to `_PortalDb` for the rest of the
+    # session, and every later portal test then writes to the stub.
     import client_portal
+    import client_portal.service  # noqa: F401 — binds service.db to the real module
     monkeypatch.setattr(client_portal, "db", _PortalDb, raising=False)
     monkeypatch.setitem(
         __import__("sys").modules, "client_portal.db", _PortalDb,

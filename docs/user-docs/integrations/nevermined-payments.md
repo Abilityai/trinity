@@ -37,7 +37,7 @@ Client -> POST /api/paid/{agent}/chat (payment-signature header)
 | 3 | Client purchases credits via the Nevermined checkout page |
 | 4 | Client retries the request with `payment-signature` header containing the access token |
 | 5 | Trinity verifies payment, deducts the configured credits, routes to agent |
-| 6 | Trinity settles the transaction with Nevermined |
+| 6 | Trinity asks Nevermined to settle the transaction; Nevermined settles it |
 
 ### Payment Info (Public)
 
@@ -81,13 +81,64 @@ The same paywall guards an agent's A2A door (`POST /a2a/{agent_name}`) once the 
 
 For a duration plan, set **Credits per Request** to `0`. The plan charges by time, so Trinity sends no per-call amount and the A2A card advertises the cost as plan-defined. A negative value is rejected.
 
+### Fund an agent with a card
+
+The sections above are the **seller** side: an agent charging its callers. An
+agent can also be a **buyer** — funded with a card so it can pay for things
+itself. Nevermined holds the card and the spending mandate and settles every
+purchase; Trinity never sees or stores the card. Trinity keeps only the
+delegation id Nevermined hands back, gives it to the agent, shows what is left
+to spend (read live from Nevermined) and revokes the mandate at Nevermined when
+you ask.
+
+**Once per instance (admin).** Connect the instance's Nevermined organization:
+`PUT /api/nevermined/organization` with the `org_id`, the `environment`
+(`sandbox` or `live` — start with `sandbox`), the organization's widget secret
+and its agent API key. Both secrets are write-only: no read ever returns them.
+Give that `agent_api_key` the least privilege Nevermined allows — every funded
+agent receives it. While any agent holds an active mandate you cannot change
+the environment, rotate the key or remove the organization; revoke the mandates
+first.
+
+**Per agent (owner).** The agent must be running.
+
+1. Open the Nevermined card widget for the agent
+   (`POST /api/nevermined/agents/{agent_name}/widget-session`). Nevermined enrols
+   the card and creates the spending mandate in the widget.
+2. Trinity binds the mandate (`POST /api/nevermined/agents/{agent_name}/delegation`),
+   after checking with Nevermined that it exists and is active, and writes
+   `NVM_DELEGATION_ID`, `NVM_API_KEY` and `NVM_ENVIRONMENT` into the agent's
+   `.env`. `NVM_ENVIRONMENT` tells the agent which Nevermined environment
+   (`sandbox` or `live`) the key and mandate belong to. The keys take effect at
+   the agent's **next execution**.
+3. An agent holds one mandate at a time. To change it, revoke the current one first.
+
+**What is left to spend.** `GET /api/nevermined/agents/{agent_name}/delegation`
+(or the `get_agent_spending` MCP tool) returns the remaining budget, the limit,
+purchases used and the expiry — every number straight from Nevermined. If
+Nevermined cannot be reached the status reads `unknown` and the numbers are
+empty; Trinity never estimates them. An agent can read its own budget and no
+other agent's.
+
+**Revoke.** `DELETE /api/nevermined/agents/{agent_name}/delegation` (or the
+`revoke_agent_delegation` MCP tool, human keys only) revokes the mandate at
+Nevermined — Nevermined refuses the agent's next paid call — and removes the
+keys from the agent. If the agent is stopped, the delegation id left in its
+`.env` is inert, but the organization's agent key stays until the next bind
+rewrites it or you remove it. Trinity never overwrites or removes an
+`NVM_API_KEY` you set by hand: while the agent holds one that is not the
+organization's key, bind is refused (409 `agent_key_present`) — remove it from
+the agent's credentials first. The same refusal covers a stale organization key
+left behind from before the key was rotated; remove it and bind again.
+
 ### Operator settings
 
-Every payment verify and settle is a call to the Nevermined facilitator. Two optional environment variables bound those calls across the whole platform; both need a backend restart:
+Every payment verify and settle is a call to the Nevermined facilitator, and every card-mandate check or revoke is a call to Nevermined too. Three optional environment variables bound those calls across the whole platform; all need a backend restart:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `NEVERMINED_MAX_INFLIGHT` | `8` | The most facilitator calls in flight at once, across all agents |
+| `NEVERMINED_DELEGATION_MAX_INFLIGHT` | `4` | The most card-mandate verify and revoke calls in flight at once, across all agents — its own gate, so a polling spending panel never takes a facilitator slot |
 | `NEVERMINED_FACILITATOR_WAIT_SECONDS` | `5.0` | How long a call waits for a free slot before answering "busy, retry". A refused call never reaches the facilitator and burns nothing |
 
 ## For Agents
@@ -106,6 +157,9 @@ Every payment verify and settle is a call to the Nevermined facilitator. Two opt
 | `/api/nevermined/agents/{name}/payments` | GET | Payment history |
 | `/api/nevermined/settlement-failures` | GET | Failed settlements (admin) |
 | `/api/nevermined/retry-settlement/{log_id}` | POST | Retry failed settlement (admin) |
+| `/api/nevermined/organization` | GET / PUT / DELETE | The instance's Nevermined organization (admin) |
+| `/api/nevermined/agents/{agent_name}/widget-session` | POST | Open the Nevermined card widget (owner) |
+| `/api/nevermined/agents/{agent_name}/delegation` | POST / GET / DELETE | Bind, read (live from Nevermined) or revoke the agent's card mandate |
 
 ### MCP Tools
 
@@ -115,6 +169,8 @@ Every payment verify and settle is a call to the Nevermined facilitator. Two opt
 | `get_nevermined_config` | Retrieve current payment configuration |
 | `toggle_nevermined` | Enable or disable payments |
 | `get_nevermined_payments` | View payment history |
+| `get_agent_spending` | What the agent can still spend from its Nevermined card mandate |
+| `revoke_agent_delegation` | Revoke the agent's Nevermined card mandate (owner or admin, human keys only) |
 
 ## Limitations
 

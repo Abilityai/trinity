@@ -170,8 +170,8 @@ Compute/Auth, Git sync.
 
 | Lines | Element | Notes |
 |-------|---------|-------|
-| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `50 (default)`; blank = inherit baseline |
-| 77-91 | Props/consts | `agentName`, `notify` (toast callback); `MIN_TURNS=1`, `MAX_TURNS=500`, `DEFAULT_TURNS=50` |
+| 16-68 | Form | Two number inputs: Max turns (chat), Max turns (task); placeholder `200 (default)`; blank = inherit baseline |
+| 77-91 | Props/consts | `agentName`, `notify` (toast callback); `MIN_TURNS=1`, `MAX_TURNS=500`, `DEFAULT_TURNS=200` |
 | 100-101, 116-117 | `otherKeys` | **Preserves out-of-scope overrides** — `load()` splits off `execution_timeout_sec` / `*_deny` / `disallowed_tools` so the whole-config PUT doesn't wipe API-set values |
 | 126-132 | `validateField` | Client-side mirror of backend bounds (whole number 1–500) |
 | 134-167 | `save()` | Merges managed keys over `otherKeys`; blank field `delete`s the key (clears); toast "restart agent to apply"; reloads |
@@ -228,9 +228,9 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 
 Loads config → compiles `bash_deny` (baseline regex) → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
 
-### File deny — `hooks/file-guardrail.py` (77 lines)
+### File deny — `hooks/file-guardrail.py` (89 lines)
 
-`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). `deny` with `tool`, `path`, `pattern`.
+`_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). A basename on `path_allow` (`.env.example`, #3868 — names only, required by compat check K-001) skips the slash-free `path_deny` patterns (`.env.*` and the other basename rules); absolute patterns, `extra_path_deny` and a symlinked `.env.example` still deny. `deny` with `tool`, `path`, `pattern`.
 
 ### Credential scanner — `hooks/output-scanner.py` (58 lines, PostToolUse)
 
@@ -242,12 +242,12 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 
 ### CLI budget/scope — `agent_server/services/_runtime_config.py` (33 lines) + consumers
 
-`_load_guardrails()` (runtime → baseline → `{}`) is read on **every** Claude invocation, so backend-driven changes (via container recreation) apply without restarting the agent-server process. Defaults: `_DEFAULT_MAX_TURNS_CHAT=50`, `_DEFAULT_MAX_TURNS_TASK=50`, `_DEFAULT_EXECUTION_TIMEOUT_SEC=1800` (30 min).
+`_load_guardrails()` (runtime → baseline → `{}`) is read on **every** Claude invocation, so backend-driven changes (via container recreation) apply without restarting the agent-server process. Defaults: `_DEFAULT_MAX_TURNS_CHAT=200`, `_DEFAULT_MAX_TURNS_TASK=200` (equal to the baseline JSON, pinned by `test_ent471_turn_default_parity.py`), `_DEFAULT_EXECUTION_TIMEOUT_SEC=1800` (30 min).
 
 | Consumer | Lines | Applies |
 |----------|-------|---------|
 | `claude_code.py` (chat) | 209-222 | `--max-turns max_turns_chat`, `--disallowedTools`, wall-clock `execution_timeout_sec` |
-| `headless_executor.py` (task) | 323-344, 647 | `--disallowedTools`, `--max-turns max_turns_task`; turn-limit error suggests raising `max_turns_task` |
+| `headless_executor.py` (task) | `_setup_headless_command`, `_finalize_headless_result` | `--disallowedTools`, `--max-turns` = `max_turns_task`, or a lower per-task `max_turns` (a per-task value may only tighten it, #2328); the turn-limit 422 suggests raising `max_turns_task` only when the guardrail bound |
 
 ### Platform tool denials — `PLATFORM_DENIED_TOOLS` (#2454 → #2468)
 
@@ -267,9 +267,10 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 Immutable, root-owned `0444`. Contents:
 
 - **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
-- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row.
+- **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row and a `.env.local` deny / `.env.example` allow pair.
+- **`path_allow`** (`[".env.example"]`, #3868): not overridable from `AGENT_GUARDRAILS`; mirrored into the platform prompt as `_GUARDRAIL_PATH_ALLOW`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
-- **Budgets**: `max_turns_chat: 50`, `max_turns_task: 50`, `execution_timeout_sec: 1800`.
+- **Budgets**: `max_turns_chat: 200`, `max_turns_task: 200` (raised from 50 in trinity-enterprise#471), `execution_timeout_sec: 1800`. The baseline is baked into the agent image, so a deployed agent adopts a new default only after `./scripts/deploy/build-base-image.sh` and a **cold start** (stop → start; image drift is evaluated only when the agent was not already running, #1809). No recreate is needed, and a per-agent override (`AGENT_GUARDRAILS`) is unaffected.
 - **Override slots** (empty by default): `extra_bash_deny: []`, `extra_path_deny: []`, `disallowed_tools: []`.
 
 ### Config file locations (inside container)
@@ -336,7 +337,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |
-| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-77 |
+| File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
 | Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-58 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |
 | CLI loader | `docker/base-image/agent_server/services/_runtime_config.py` | 1-33 |

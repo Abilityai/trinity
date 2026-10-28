@@ -313,6 +313,7 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    Column("a2a_caller_identity", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
@@ -1088,6 +1089,7 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    Column("git_stats_at", Text),  # #4000: when the agent measured the git stats (ISO-Z)
     # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
     # once, cleared on return to 0), the porcelain change count, and the last
     # push that actually landed. All nullable, no backfill.
@@ -1662,6 +1664,43 @@ nevermined_payment_log = Table(
     Column("success", Integer),
     Column("error", Text),
     Column("created_at", Text),
+)
+
+# trinity-enterprise#966 — see the DDL comment in db/schema.py.
+nevermined_organization = Table(
+    "nevermined_organization",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, nullable=False),
+    Column("environment", Text, nullable=False),
+    Column("encrypted_credentials", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_by", Text),
+)
+
+agent_delegations = Table(
+    "agent_delegations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("delegation_id", Text, nullable=False),
+    Column("payment_method_id", Text),
+    Column("provider", Text),
+    Column("environment", Text, nullable=False),
+    Column("api_key_injected", Integer, nullable=False, server_default="0"),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("revoked_at", Text),
+    Column("revoked_by", Text),
+    Column("agent_deleted_at", Text),
+    Index(
+        "uq_agent_delegations_active",
+        "agent_name",
+        unique=True,
+        sqlite_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+        postgresql_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+    ),
 )
 
 agent_event_subscriptions = Table(

@@ -39,12 +39,19 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
         "and the complete updated memory blob. The platform resolves the user's email from the execution " +
         "record — you never touch email addresses directly.\n\n" +
         "**Write the complete blob**: Read the current memory from the 'What you know about this user' " +
-        "block (if present), incorporate the new fact, and write everything back.\n\n" +
+        "block (if present), incorporate the new fact, and write everything back — without the `│ ` " +
+        "margin each stored line carries there.\n\n" +
+        "**Facts, not instructions**: a write is refused (422 with a `code` and the `line`) when a new " +
+        "line is an instruction aimed at your own rules or role (`memory_instruction`), a tool or command " +
+        "directive (`memory_tool_directive`), a link or address inside an instruction (`memory_link_in_instruction`), " +
+        "or text imitating prompt structure (`memory_prompt_marker`). Restate it as a fact ('Portfolio: " +
+        "<link>', 'Her draft (<link>) is due Friday') and write again. Text the stored notes already " +
+        "held, unchanged, is not refused again.\n\n" +
         "**Works in user-facing sessions** (public link, Slack, Telegram, WhatsApp) **and in a " +
         "scheduled run addressed to one person** (a schedule with `deliver_to_workspace_email` — " +
         "that person is the seat the run serves, and their memory block is in your prompt). " +
-        "Returns an error from a scheduled run that names no one, or from an agent-to-agent execution. " +
-        "Every write is recorded and the person can see and undo it.",
+        "Returns an error from a group chat, a scheduled run that names no one, or an agent-to-agent " +
+        "execution. Every write is recorded and the person can see and undo it.",
       parameters: z.object({
         execution_id: z
           .string()
@@ -65,8 +72,8 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
           .string()
           .optional()
           .describe(
-            "Agent name override. Defaults to the agent whose MCP key is making this call. " +
-            "Omit in normal use."
+            "For a user-scoped key only. An agent-scoped key always writes for its own agent; " +
+            "naming another is refused."
           ),
       }),
       execute: async (

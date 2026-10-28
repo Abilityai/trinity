@@ -162,6 +162,31 @@ if [ -d /home/developer/.git ]; then
     fi
 fi
 
+# === npx cache vs the image's Node major (#3886) ===
+# The Node runtime is in the image, but the npx cache (~/.npm/_npx) is on the
+# persistent home volume. A recreate onto a new Node major keeps every package
+# npx cached under the old one, and npx reuses a cached tree without
+# rebuilding it — so an MCP server with a native addon (better-sqlite3 and the
+# like) dies with "compiled against a different Node.js version
+# (NODE_MODULE_VERSION ...)" on its first launch. The cache is re-fetchable by
+# definition, so on a major change it is dropped and npx rebuilds for this
+# runtime. A volume with a cache but no stamp predates the stamp, i.e. it was
+# populated under an unknown (pre-#3886: Node 20) major, and is treated as a
+# change. Project node_modules are the agent's own files and are left alone.
+# >>> node-major-npx-cache
+_node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if [ -n "${_node_major}" ]; then
+    _node_stamp=/home/developer/.trinity/node-major
+    _prev_major="$(cat "${_node_stamp}" 2>/dev/null || true)"
+    if [ "${_prev_major}" != "${_node_major}" ] && [ -d /home/developer/.npm/_npx ]; then
+        rm -rf /home/developer/.npm/_npx 2>/dev/null || true
+        echo "[startup] Node major changed (${_prev_major:-unknown} -> ${_node_major}): cleared the npx cache so npx-launched MCP servers rebuild native addons; run 'npm rebuild' in any project node_modules that has them"
+    fi
+    mkdir -p /home/developer/.trinity 2>/dev/null || true
+    printf '%s\n' "${_node_major}" > "${_node_stamp}" 2>/dev/null || true
+fi
+# <<< node-major-npx-cache
+
 # Initialize from GitHub repository if specified.
 # ent#123: the gate is REPO-only — a tokenless agent (anonymous public
 # template) clones without credentials, mirroring the credential-less

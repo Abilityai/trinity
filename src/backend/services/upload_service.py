@@ -15,6 +15,7 @@ import tarfile
 import unicodedata
 from typing import List, Optional, Tuple
 
+from config import ALLOW_PDF_UPLOADS
 from services.docker_utils import container_put_archive, container_exec_run
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.zip_signature import is_zip_container
@@ -44,7 +45,7 @@ WEB_MAX_TOTAL_IMAGE_SIZE = 10 * 1024 * 1024      # 10 MB total images
 WEB_MAX_FILES = 3
 
 UNSUPPORTED_MIMES = {
-    "application/pdf", "application/x-tar",
+    "application/x-tar",
     "application/gzip", "application/x-rar-compressed",
     "video/", "audio/",
 }
@@ -171,6 +172,17 @@ async def process_file_uploads(
             continue
 
         is_image = mimetype.startswith("image/")
+        has_pdf_header = bool(re.match(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data))
+        # PDF readers can tolerate a preamble. The disabled policy checks a
+        # bounded prefix even when libmagic is missing or cannot identify it.
+        if not ALLOW_PDF_UPLOADS and (
+            mimetype == "application/pdf"
+            or re.search(rb"%PDF-[0-9]\.[0-9](?:\r\n?|\n)", data[:1024])
+        ):
+            safe_name = sanitize_filename(name, file_id, used_names)
+            used_names.add(safe_name)
+            descriptions.append(f"{safe_name} — PDF uploads are disabled by the operator")
+            continue
 
         # Reject unsupported binary formats
         if any(
@@ -181,7 +193,7 @@ async def process_file_uploads(
             used_names.add(safe_name)
             descriptions.append(
                 f"{safe_name} — unsupported format ({mimetype}). "
-                f"Text, CSV, JSON, ZIP, and image files are supported."
+                f"Text, CSV, JSON, {'PDF, ' if ALLOW_PDF_UPLOADS else ''}ZIP, and image files are supported."
             )
             continue
 
@@ -200,6 +212,7 @@ async def process_file_uploads(
 
         # Magic-byte MIME validation
         actual_mime = mimetype
+        detected_mime = None
         if mimetype == "application/zip" and is_zip_container(data):
             # libmagic 5.46 (Debian trixie) detects ZIPs as application/octet-stream
             # from a buffer, so trust the container signature for a declared ZIP (#3046).
@@ -211,7 +224,11 @@ async def process_file_uploads(
                 detected_is_image = detected_mime.startswith("image/")
 
                 if detected_mime != mimetype:
-                    if declared_is_image and detected_is_image:
+                    if mimetype == "application/octet-stream" and detected_mime == "application/pdf":
+                        # Channels may deliver PDF documents with a generic MIME.
+                        # Do not extend this exception to other detected formats.
+                        actual_mime = detected_mime
+                    elif declared_is_image and detected_is_image:
                         # JPEG vs PNG mislabel — both images, accept with detected MIME
                         logger.debug(
                             f"[UPLOAD] Image MIME mismatch {safe_name}: "
@@ -231,6 +248,20 @@ async def process_file_uploads(
                         continue
             except Exception as e:
                 logger.warning(f"[UPLOAD] MIME detection failed for {safe_name}: {e}")
+
+        if detected_mime is None and mimetype in {"application/pdf", "application/octet-stream"}:
+            # Without libmagic, require the standard PDF header before trusting
+            # a PDF declaration or upgrading a generic MIME. This identifies the
+            # container only; parsing/extraction remains the receiving agent's job.
+            if has_pdf_header:
+                actual_mime = "application/pdf"
+            elif mimetype == "application/pdf":
+                descriptions.append(f"{safe_name} — rejected (file type mismatch)")
+                continue
+
+        if actual_mime == "application/pdf" and not ALLOW_PDF_UPLOADS:
+            descriptions.append(f"{safe_name} — PDF uploads are disabled by the operator")
+            continue
 
         size_str = format_file_size(actual_size)
 

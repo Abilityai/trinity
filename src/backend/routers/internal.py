@@ -18,6 +18,7 @@ import logging
 from database import db
 from models import (
     InternalAuditRequest,
+    InternalPreCheckRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
     TaskExecutionStatus,
@@ -156,6 +157,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     if claim is None:
         # §3.2 — no work available.
         return {"envelope": None}
+    await pull_coordination_service.open_claim_activity(claim["execution_id"])
     return claim
 
 
@@ -209,7 +211,7 @@ async def internal_task_result(
 
     from services import pull_coordination_service
 
-    outcome = pull_coordination_service.apply_task_result(
+    outcome = await pull_coordination_service.handle_task_result(
         execution_id,
         payload.claim_token,
         status=payload.status,
@@ -222,6 +224,10 @@ async def internal_task_result(
         metadata=payload.metadata,
     )
 
+    if outcome.kind == "retry":
+        # #3487: the turn was refused on a credential and the pool has another
+        # one — run it again under the same claim (the new token is in here).
+        return {"applied": False, "retry": outcome.retry}
     if outcome.kind == "applied":
         return {"applied": True, "status": outcome.status}
     if outcome.kind == "replayed":
@@ -241,17 +247,21 @@ async def internal_task_result(
 
 
 @router.post("/agents/{agent_name}/pre-check")
-async def internal_agent_pre_check(agent_name: str):
+async def internal_agent_pre_check(
+    agent_name: str, body: Optional[InternalPreCheckRequest] = None
+):
     """Run the agent's optional pre-check hook (SCHED-COND-001 / #454).
 
     Thin passthrough — all logic lives in
     ``services/pre_check_service.py`` (Invariant #1: Router → Service
-    → DB). See that module for the full contract.
+    → DB). See that module for the full contract. The optional body names
+    the schedule being gated (#3966); without it the hook runs as before.
     """
     from services.pre_check_service import run_pre_check, AgentNotFound
 
+    schedule = body.model_dump(exclude_none=True) if body else {}
     try:
-        return await run_pre_check(agent_name)
+        return await run_pre_check(agent_name, **schedule)
     except AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found")
 

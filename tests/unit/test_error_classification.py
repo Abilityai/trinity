@@ -142,8 +142,8 @@ class TestMaxTurnsErrorClassification:
         # The fix: max_turns is detected BEFORE this path is reached,
         # so metadata.error_type == "max_turns" and we return HTTP 422 early
 
-    def test_default_max_turns_task_is_50(self):
-        """Test that the default max_turns_task is 50 (raised from 20 in Issue #361)."""
+    def test_default_max_turns_task_is_200(self):
+        """The default turn cap: 20 -> 50 (#361) -> 200 (trinity-enterprise#471)."""
         import json
         from pathlib import Path
 
@@ -153,7 +153,7 @@ class TestMaxTurnsErrorClassification:
         with open(baseline_path) as f:
             baseline = json.load(f)
 
-        assert baseline["max_turns_task"] == 50, \
-            f"max_turns_task should be 50 (Issue #361), got {baseline['max_turns_task']}"
-        assert baseline["max_turns_chat"] == 50, \
-            f"max_turns_chat should be 50, got {baseline['max_turns_chat']}"
+        assert baseline["max_turns_task"] == 200, \
+            f"max_turns_task should be 200 (trinity-enterprise#471), got {baseline['max_turns_task']}"
+        assert baseline["max_turns_chat"] == 200, \
+            f"max_turns_chat should be 200 (trinity-enterprise#471), got {baseline['max_turns_chat']}"

@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)
@@ -109,14 +110,14 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
-### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353)
-- **Status**: 🚧 In Dev — General, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
+### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
+- **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
-- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials`/`folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
-- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, credentials, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
+- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials → credentials` (trinity-enterprise#951), `folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
+- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. Credentials (trinity-enterprise#951, directly after General) is the former Credentials tab — guided setup, credential files, Quick Inject, upload, export/import; its file list never reports "not present" for an agent it could not read (stopped, or a failed read), and an agent with no `.env` gets a next action. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
 - **FR-3 — One restart banner**: every change waiting for a restart (file sharing, shared folders, memory/CPU, guardrail rules, GitHub token, funding) is named in ONE banner at the top of Settings with one Restart (or Start, when stopped) button. It keeps its footprint when nothing waits. Memory/CPU is saved and applied on the next restart — no longer an immediate restart.
 - **FR-4 — Execution timeout (ent#353)**: minutes, 1–120, default 60; out-of-range input gets a named error before any request; #929's `agent_timeout_below_active_schedules` refusal is rendered as a sentence naming the longest schedule and an "Open Schedules" button.
-- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Guardrails and Integrations. At phone width the rail becomes a pane select; no horizontal page scroll.
+- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Credentials, Guardrails and Integrations (Credentials since trinity-enterprise#951 — it always had the Credentials tab). At phone width the rail becomes a pane select; no horizontal page scroll.
 - **Open decision**: ent#891 asks that People hide when user management is unentitled. It is shown to every owner for now, because the pane holds OSS sharing (adding a person by email) that the Access tab offered to every owner; its entitled sections gate themselves.
 
 ---
@@ -912,11 +913,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the
