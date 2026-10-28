@@ -123,8 +123,9 @@ The fence covers the platform routes listed above, and nothing else:
   home-level `.claude.json`, a symlink inside the target workspace, and the
   DB-stored voice prompt (`PUT /{name}/voice/prompt`).
 - **Other owner-tier writes** stay agent-reachable without a grant:
-  `circuit-breaker`, `mcp-exposed`, `git/auto-sync`, `github-pat`, and
-  `git/freeze-schedules-if-failing`.
+  those the route census lists as agent-callable or still holds in its frozen
+  baseline (`tests/unit/_route_census.py`). A route that takes a person
+  (trinity-enterprise#719) is lifted by no grant, `agents.manage` included.
 - **Calibration** is checked at grant time, for the holder only: a ready
   holder can still rewrite a calibrating sibling's `CLAUDE.md`, and a grant
   made before the calibrating stamp persists.
