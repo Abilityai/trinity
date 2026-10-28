@@ -23,8 +23,8 @@ from database import db
 from dependencies import (
     assert_agent_access,
     assert_agent_owner,
+    assert_person,
     get_current_user,
-    reject_agent_principal,
     require_person,
 )
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
@@ -695,8 +695,8 @@ async def set_slack_channel_proactive(
     # its own consent on — self-granting the very control ent#223 adds. Granting
     # consent is a human decision; SENDING under it stays agent-callable. The
     # route gate is require_person (trinity-enterprise#719): only a person
-    # passes. This inline check stays for direct callers.
-    reject_agent_principal(current_user)
+    # passes. The inline check is the same allowlist, for direct callers.
+    assert_person(current_user)
     assert_agent_owner(current_user, name, detail="Only owners can change channel settings")
 
     target = next(

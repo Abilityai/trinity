@@ -849,14 +849,17 @@ def test_slack_proactive_toggle_rejects_agent_principal(seeded):
     Over HTTP the route's own gate is now `Depends(require_person)` in its
     decorator (trinity-enterprise#719), which runs first and admits only a person
     (test_223_slack_channel_proactive_consent.py); this direct call pins
-    the inline reject_agent_principal the handler keeps for direct callers."""
+    the inline second layer the handler keeps for direct callers, which is the
+    same PERSON allowlist (`assert_person`), so it answers with that rule's
+    detail (test_ent719_inline_layer_matches_route_rule.py covers the rest)."""
+    from dependencies import HUMAN_ONLY_DETAIL  # noqa: PLC0415
     from models import SlackChannelProactiveRequest  # noqa: PLC0415
 
     agent_key = _user(_OWNER, uid=_OWNER_ID, agent_name=_AGENT)  # the agent's own key
     exc = _raised(slack.set_slack_channel_proactive(
         name=_AGENT, channel_id=_SLACK_CHANNEL,
         request=SlackChannelProactiveRequest(allow_proactive=True), current_user=agent_key))
-    _assert_403(exc, _HUMAN_ONLY)
+    _assert_403(exc, dict(HUMAN_ONLY_DETAIL))
 
 
 def test_slack_send_message_allows_agent_principal(seeded):

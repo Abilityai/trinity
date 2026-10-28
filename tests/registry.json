@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent719_inline_layer_matches_route_rule.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "The inline second layer of seven human-only handlers (share, unshare, the Telegram progress-indicator toggle, the Slack proactive-consent toggle, Workspace client log out, block and unblock) is the same allowlist as the route decorator, not the reject_agent_principal denylist. Each handler is called directly, as a direct caller would, with its first side effect replaced by a sentinel: the system, ops, portal_delegate and an unknown-scope key and a principal with no mcp_scope each get the rule's own 403 (the interactive detail on share, HUMAN_ONLY_DETAIL on the six PERSON routes) and never reach the sentinel; the person's user key is refused on share and passes on the PERSON routes; a signed-in session passes every check and reaches the sentinel (the control). Mutation: restore reject_agent_principal -> 36 rows red (the 35 machine-principal rows and the share user-key row)."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",

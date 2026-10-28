@@ -30,9 +30,9 @@ from dependencies import (
     CurrentUser,
     OwnedAgentByName,
     assert_admin,
+    assert_person,
     get_current_user,
     oauth2_scheme,
-    reject_agent_principal,
     require_admin,
     require_person,
     resolve_platform_user_unfloored,
@@ -492,9 +492,10 @@ async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
 
     Human-only: ending a person's access is an operator decision, so the route
     takes a person (`require_person`, trinity-enterprise#719) before the
-    ownership lookup. The inline check below stays for direct callers.
+    ownership lookup. The inline check below is the same allowlist, for direct
+    callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     try:
         result = service.logout_client(email)
     except ClientPortalError as e:
@@ -516,9 +517,9 @@ async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: Por
 
     The route takes a person (`require_person`, trinity-enterprise#719) before
     the ownership lookup, and `assert_admin` then requires that person to be an
-    admin.
+    admin. The inline `assert_person` is the same allowlist, for direct callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Blocking a client requires admin access")
     try:
         result = service.block_client(
@@ -547,7 +548,7 @@ async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
     again and gets a fresh one), and no data was ever removed — block is not
     delete.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Unblocking a client requires admin access")
     try:
         result = service.unblock_client(email)

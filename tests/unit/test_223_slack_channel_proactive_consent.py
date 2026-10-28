@@ -241,13 +241,15 @@ class TestConsentToggleIsHumanOnly:
     def test_toggle_rejects_agent_principal_at_runtime(self, monkeypatch):
         """Direct call (#1710): an agent-scoped principal calling the handler gets
         403 + the human-only detail BEFORE the owner check or any channel
-        mutation. ``reject_agent_principal`` is the first statement, so making
-        every post-gate db call loud proves the ordering. Over HTTP the route's
+        mutation. ``assert_person`` is the first statement, so making every
+        post-gate db call loud proves the ordering. Over HTTP the route's
         ``require_person`` gate answers first (the two tests above); this pins the
-        inline line the handler keeps for direct callers. ``assert_agent_owner``
-        is agent-permissive, so it must not be the only check."""
+        inline line the handler keeps for direct callers, which is the same PERSON
+        allowlist (trinity-enterprise#719). ``assert_agent_owner`` is
+        agent-permissive, so it must not be the only check."""
         import asyncio
         from fastapi import HTTPException
+        from dependencies import HUMAN_ONLY_DETAIL
         from routers import slack as slack_router
         from models import User, SlackChannelProactiveRequest
 
@@ -266,6 +268,4 @@ class TestConsentToggleIsHumanOnly:
                 request=SlackChannelProactiveRequest(allow_proactive=True),
                 current_user=agent_key))
         assert ei.value.status_code == 403
-        assert ei.value.detail == (
-            "This operation is human-only; agent-scoped keys cannot perform it"
-        )
+        assert ei.value.detail == dict(HUMAN_ONLY_DETAIL)

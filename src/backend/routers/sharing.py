@@ -15,8 +15,8 @@ from models import (
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import (
-    get_current_user, OwnedAgentByName, CurrentUser, reject_agent_principal,
-    require_interactive, require_person,
+    get_current_user, OwnedAgentByName, CurrentUser, assert_person,
+    reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
 from services.client_roster_service import get_client_roster
@@ -93,9 +93,9 @@ async def share_agent_endpoint(
 
     INTERACTIVE (trinity-enterprise#719): the share row is a Workspace sign-in
     by emailed code, so writing one takes a signed-in session, never a key.
+    The inline check is the same session-only allowlist, for direct callers.
     """
-    # trinity-enterprise#69 Part 2: sharing is a human-only decision.
-    reject_agent_principal(current_user)
+    reject_non_interactive_principal(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -145,9 +145,12 @@ async def unshare_agent_endpoint(
     request: Request,
     current_user: CurrentUser
 ):
-    """Remove sharing access for a user."""
-    # trinity-enterprise#69 Part 2: sharing is a human-only decision.
-    reject_agent_principal(current_user)
+    """Remove sharing access for a user.
+
+    PERSON (trinity-enterprise#719), in the decorator and, for direct callers,
+    inline: the same allowlist both times.
+    """
+    assert_person(current_user)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

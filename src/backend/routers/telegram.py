@@ -32,7 +32,6 @@ from dependencies import (
     OwnedAgentByName,
     assert_person,
     get_current_user,
-    reject_agent_principal,
     require_interactive,
     require_person,
 )
@@ -152,9 +151,9 @@ async def set_telegram_progress_indicator(
     OWNER on REST, so ownership checks alone would let an agent flip its own
     user-facing behavior toggle (ent#223 lesson). The route gate is
     ``require_person`` (trinity-enterprise#719): only a person passes. The
-    inline ``reject_agent_principal`` stays for direct callers of the handler.
+    inline ``assert_person`` is the same allowlist, for direct callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
 
     binding = db.get_telegram_binding(agent_name)
     if not binding:
