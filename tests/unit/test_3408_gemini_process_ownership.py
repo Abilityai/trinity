@@ -16,8 +16,9 @@ Drives the real ``_execute_chat_once`` and ``execute_headless`` with a real
 model or a running agent. ``kill_cgroup_orphans`` is stubbed in
 ``process_registry``, ``subprocess_pgroup`` and ``gemini_runtime``.
 
-A Gemini child is not a process-group leader, so its captured pgid is the
-spawning process's own group: here, pytest's. ``tests/signal_guard.py`` is a
+Before #4064 a Gemini child was not a process-group leader, so its captured
+pgid was the spawning process's own group: here, pytest's. It now leads its own
+group; the guard stays as the regression net. ``tests/signal_guard.py`` is a
 pass-through where ``/proc/self/cgroup`` is unreadable (macOS), so every case
 here also refuses, never forwards, any signal aimed at this session's group,
 and asserts that nothing was refused.

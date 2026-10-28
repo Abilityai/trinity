@@ -55,6 +55,13 @@ def world(db_backend, monkeypatch):
         return None
 
     monkeypatch.setattr(skill_gate_service, "audit_self_approved", _no_audit)
+    # ent#875: these tests are about the self-approval flags, not the viewer tier.
+    # Their viewers hold no ownership row and the seeded runs carry no
+    # source_user_id, so as share holders they would see none of them: read the
+    # list and detail as the agent's owner. (The tier itself is pinned in
+    # test_ent875_exec_control_routes.py.)
+    import dependencies
+    monkeypatch.setattr(dependencies.db, "can_user_share_agent", lambda u, a: True)
 
     mine = seed_execution("__manual__", AGENT, exec_id="exec-self", triggered_by="manual",
                           started_at="2026-10-08T10:00:00.000000Z")
