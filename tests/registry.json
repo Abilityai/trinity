@@ -6344,52 +6344,6 @@
       "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
     },
     {
-      "file": "unit/test_ent875_viewer_tier.py",
-      "feature": "trinity-enterprise#875",
-      "added": "2026-10-16",
-      "categories": [
-        "backend",
-        "auth",
-        "unit"
-      ],
-      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
-    },
-    {
-      "file": "unit/test_ent875_own_rows_sql.py",
-      "feature": "trinity-enterprise#875",
-      "added": "2026-10-16",
-      "categories": [
-        "backend",
-        "db",
-        "unit"
-      ],
-      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
-    },
-    {
-      "file": "unit/test_ent875_exec_control_routes.py",
-      "feature": "trinity-enterprise#875",
-      "added": "2026-10-16",
-      "categories": [
-        "backend",
-        "auth",
-        "executions",
-        "unit"
-      ],
-      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
-    },
-    {
-      "file": "unit/test_ent875_workspace_work_own_rows.py",
-      "feature": "trinity-enterprise#875",
-      "added": "2026-10-22",
-      "categories": [
-        "backend",
-        "auth",
-        "executions",
-        "unit"
-      ],
-      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
-    },
-    {
       "file": "unit/test_ent820_files_tier_census.py",
       "feature": "trinity-enterprise#820",
       "added": "2026-10-16",
@@ -6435,79 +6389,6 @@
         "unit"
       ],
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
-    },
-    {
-      "file": "unit/test_ent926_agent_route_census.py",
-      "feature": "abilityai/trinity-enterprise#926",
-      "added": "2026-10-16",
-      "categories": [
-        "backend",
-        "security"
-      ],
-      "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against src/backend/services/agent_route_tiers.json (also read at runtime by services/route_tier_service.py): an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
-    },
-    {
-      "file": "unit/test_ent926_workspace_turn_tier.py",
-      "feature": "trinity-enterprise#926",
-      "added": "2026-10-22",
-      "categories": [
-        "backend",
-        "auth",
-        "unit"
-      ],
-      "description": "Found testing PR #3778 live: a Workspace turn (triggered_by=public, source_channel=portal, the signed-in email, no source_user_id) is rated as that person — owner/admin owner tier, a shared account a person (no shell even with visitor_shell on), an email-only client a person with no account — while a public-link or channel email never lifts a visitor and a schedule row keeps the creator rule; the route fence (restricted_agent_turn) meets the ledger, so a key with no header or naming an owner turn is fenced while a shared person's turn runs, only-owner or visitor-shell-on turns leave it open, an unreadable ledger fences, non-agent principals never are; the real SQLite ledger read carries source_channel/source_user_email. Mutations: dropping the Workspace rule turns 8 red; a header-only fence turns 3 red."
-    },
-    {
-      "file": "unit/test_ent926_turn_tier.py",
-      "feature": "abilityai/trinity-enterprise#926",
-      "added": "2026-10-16",
-      "categories": [
-        "backend",
-        "security"
-      ],
-      "description": "Which tier a running turn acts for and who may ask (ent#926). turn_tier_service decides from the execution row: owner or admin and owner-configured turns (schedule, reminder, loop, webhook, event) act at owner tier; a shared person, a missing user row, a garbage user id and outside callers with no user (public link, paid, voice, another agent) act at share tier; an unknown execution or another agent's is unknown. The turn-tier route answers only the agent's own key (user, system, sibling-agent and missing keys 403 before any lookup) and 404s an unknown execution. Mutations: promoting a shared person, trusting a missing user row, counting a public trigger as owner configured and accepting any key each turn it red."
-    },
-    {
-      "file": "unit/test_ent926_turn_tier_hook.py",
-      "feature": "abilityai/trinity-enterprise#926",
-      "added": "2026-10-16",
-      "categories": [
-        "agent",
-        "security"
-      ],
-      "description": "The in-container guard holds a shared person's turn to the Files API's paths (ent#926). Driven as Claude Code drives a hook: an ordinary path is allowed with no lookup; instruction files, skills, shell startup files, the Python user-site, transcripts and credentials are refused for share, unknown and unreachable and allowed for owner; project memory stays readable; Grep/Glob aimed at owner-only paths are refused; tilde, dotdot and double-slash spellings and a link into an owner-only path are judged by where they land; no execution id means no platform turn. The lookup is exercised over real HTTP (key, route, percent-encoded ids, 404/403/500/garbage/unknown tier/unreachable). Hook policy copy byte-identical to the backend's; drop-in registers the guard in exec form; the image ships hook, policy and drop-in root-owned. Mutations: policy check skipped, fail-open on unreachable, fail-open on share/unknown, links not followed, no-run-id denied and policy copy drift each turn it red."
-    },
-    {
-      "file": "unit/test_ent926_runtime_turn_scope.py",
-      "feature": "abilityai/trinity-enterprise#926",
-      "added": "2026-10-19",
-      "categories": [
-        "agent",
-        "security"
-      ],
-      "description": "Gemini CLI and Codex refuse a shared person's turn before the CLI starts (ent#926, ruling 2026-10-19): agent_server/services/turn_scope.require_owner_tier lets an owner turn and a call with no execution id through, refuses share and unknown with a 403 naming the runtime, and refuses an unanswered lookup with a 503. The lookup is exercised over real HTTP (agent key, percent-encoded ids, 404 unknown, 500 and garbage unreachable, no key, refused connection). Wired at the top of GeminiRuntime and CodexRuntime execute and execute_headless: a share turn never reaches subprocess.Popen."
-    },
-    {
-      "file": "unit/test_ent926_agent_key_turn_scope.py",
-      "feature": "abilityai/trinity-enterprise#926",
-      "added": "2026-10-19",
-      "categories": [
-        "backend",
-        "auth",
-        "security"
-      ],
-      "description": "An agent's own key reads executions for the person whose turn it is (ent#926): the auth dependency records an agent key's X-Trinity-Execution-Id privately (never for a person, never serialized); an owner-tier turn, a scheduled turn, manual and no header keep the full view; a shared person's turn reads as share tier with that person's rows on every agent (fleet reads exempt none); a share turn with no platform user, another agent's execution and an unknown id read no rows; shared-state routes refuse it; system, ops and connector keys and persons are untouched."
-    },
-    {
-      "file": "unit/test_3825_password_change.py",
-      "feature": "#3825",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "auth",
-        "unit"
-      ],
-      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
     },
     {
       "file": "unit/test_3751_a2a_bearer_task_scope.py",
@@ -6770,6 +6651,52 @@
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
     },
     {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent875_workspace_work_own_rows.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
+    },
+    {
       "file": "unit/test_sqlite_upgrade_parity_guard.py",
       "feature": "#3395",
       "added": "2026-10-26",
@@ -6844,6 +6771,17 @@
         "guard"
       ],
       "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
+      "file": "unit/test_3825_password_change.py",
+      "feature": "#3825",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
     },
     {
       "file": "unit/test_ent830_idempotency_caller_scope.py",
@@ -6924,6 +6862,68 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_ent926_agent_route_census.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against src/backend/services/agent_route_tiers.json (also read at runtime by services/route_tier_service.py): an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_workspace_turn_tier.py",
+      "feature": "trinity-enterprise#926",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "Found testing PR #3778 live: a Workspace turn (triggered_by=public, source_channel=portal, the signed-in email, no source_user_id) is rated as that person — owner/admin owner tier, a shared account a person (no shell even with visitor_shell on), an email-only client a person with no account — while a public-link or channel email never lifts a visitor and a schedule row keeps the creator rule; the route fence (restricted_agent_turn) meets the ledger, so a key with no header or naming an owner turn is fenced while a shared person's turn runs, only-owner or visitor-shell-on turns leave it open, an unreadable ledger fences, non-agent principals never are; the real SQLite ledger read carries source_channel/source_user_email. Mutations: dropping the Workspace rule turns 8 red; a header-only fence turns 3 red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Which tier a running turn acts for and who may ask (ent#926). turn_tier_service decides from the execution row: owner or admin and owner-configured turns (schedule, reminder, loop, webhook, event) act at owner tier; a shared person, a missing user row, a garbage user id and outside callers with no user (public link, paid, voice, another agent) act at share tier; an unknown execution or another agent's is unknown. The turn-tier route answers only the agent's own key (user, system, sibling-agent and missing keys 403 before any lookup) and 404s an unknown execution. Mutations: promoting a shared person, trusting a missing user row, counting a public trigger as owner configured and accepting any key each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier_hook.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "The in-container guard holds a shared person's turn to the Files API's paths (ent#926). Driven as Claude Code drives a hook: an ordinary path is allowed with no lookup; instruction files, skills, shell startup files, the Python user-site, transcripts and credentials are refused for share, unknown and unreachable and allowed for owner; project memory stays readable; Grep/Glob aimed at owner-only paths are refused; tilde, dotdot and double-slash spellings and a link into an owner-only path are judged by where they land; no execution id means no platform turn. The lookup is exercised over real HTTP (key, route, percent-encoded ids, 404/403/500/garbage/unknown tier/unreachable). Hook policy copy byte-identical to the backend's; drop-in registers the guard in exec form; the image ships hook, policy and drop-in root-owned. Mutations: policy check skipped, fail-open on unreachable, fail-open on share/unknown, links not followed, no-run-id denied and policy copy drift each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_runtime_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "Gemini CLI and Codex refuse a shared person's turn before the CLI starts (ent#926, ruling 2026-10-19): agent_server/services/turn_scope.require_owner_tier lets an owner turn and a call with no execution id through, refuses share and unknown with a 403 naming the runtime, and refuses an unanswered lookup with a 503. The lookup is exercised over real HTTP (agent key, percent-encoded ids, 404 unknown, 500 and garbage unreachable, no key, refused connection). Wired at the top of GeminiRuntime and CodexRuntime execute and execute_headless: a share turn never reaches subprocess.Popen."
+    },
+    {
+      "file": "unit/test_ent926_agent_key_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "auth",
+        "security"
+      ],
+      "description": "An agent's own key reads executions for the person whose turn it is (ent#926): the auth dependency records an agent key's X-Trinity-Execution-Id privately (never for a person, never serialized); an owner-tier turn, a scheduled turn, manual and no header keep the full view; a shared person's turn reads as share tier with that person's rows on every agent (fleet reads exempt none); a share turn with no platform user, another agent's execution and an unknown id read no rows; shared-state routes refuse it; system, ops and connector keys and persons are untouched."
     }
   ]
 }
