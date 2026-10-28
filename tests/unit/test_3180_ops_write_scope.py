@@ -525,6 +525,20 @@ class TestDiesWithItsOwner:
             assert res.status_code == 403 and _detail_code(res) == "ops_write_owner_not_admin", (name, res.text)
         assert stopped == [] and db.get_execution("ow3180-exec").status == "queued"
 
+    def test_demotion_suspends_the_key_and_re_promotion_restores_it(self, world, monkeypatch):
+        """Demotion is not revocation: the row stays active, so promoting the
+        owner back makes the key work again (the docs say: revoke to end it)."""
+        key = world.mint("ops_write")
+        _fake_breakers(monkeypatch)
+        _, path = FOUR["reset"]
+        db.update_user_role(OWNER, "operator")
+        res = world.client.post(path, headers=key.headers)
+        assert res.status_code == 403 and _detail_code(res) == "ops_write_owner_not_admin", res.text
+        assert _key_row(key.id)["is_active"] == 1
+        db.update_user_role(OWNER, "admin")
+        res = world.client.post(path, headers=key.headers)
+        assert res.status_code == 200, res.text
+
     def test_a_suspended_owners_key_is_refused_on_all_four(self, world):
         key = world.mint("ops_write")
         _hrun("UPDATE users SET suspended_at = '2026-10-01T00:00:00Z' WHERE username = :u", u=OWNER)
