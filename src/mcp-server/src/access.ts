@@ -285,6 +285,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
+  apply_system: {
+    kind: "none",
+    why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
+  },
   // --- docs.ts ---
   get_agent_requirements: { kind: "none", why: "no agent target" },
   ask_trinity: { kind: "none", why: "no agent target" },

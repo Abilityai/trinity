@@ -6,6 +6,7 @@
 
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
+import { accessDenied, type DenyCallContext } from "../access.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
@@ -76,6 +77,116 @@ function teardownFailure(error: unknown): string {
   }
 
   return JSON.stringify({ success: false, error: message, detail: raw, ...flags }, null, 2);
+}
+
+/**
+ * trinity-enterprise#695: the scopes that may see `apply_system`. An
+ * ALLOW-list (#848: a null or unknown scope fails closed) of what the
+ * backend's `require_person` admits over MCP, a person's own user-scoped key.
+ * It refuses agent, connector and system keys, so those sessions are never
+ * shown a tool they cannot call (the #3435 / ent#966 shape).
+ */
+const APPLY_SYSTEM_SCOPES: ReadonlySet<string> = new Set(["user"]);
+export const applySystemAccess = (auth: any): boolean =>
+  APPLY_SYSTEM_SCOPES.has(auth?.scope ?? "");
+
+/**
+ * Map an apply failure onto the result the caller reads (ent#695).
+ *
+ * Deliberately THIN, so a status-code change in the backend apply contract
+ * cannot silently break this tool. Two situations are named here, no more:
+ *
+ *   404/405  the route is absent: a build that predates apply mode (there,
+ *            `POST /api/systems/apply` matches `GET /{system_name}` by path
+ *            only, hence 405)
+ *   403      an authorization refusal, serialised through `accessDenied` so
+ *            the tool-call audit row records a denial (#2807)
+ *
+ * Every other non-2xx with a JSON OBJECT body (the 409 / 503 / 500 apply
+ * reports, a 400, 401 or 422) IS the result: the body comes back with
+ * `http_status` and `success: false` added, so `status`, `blockers[]` and
+ * `failed[]` reach the caller intact. Those are not authorization denials and
+ * are NOT stamped as such: `ToolOutcome` has no non-denial kind yet
+ * (types.ts). Anything else (a JSON scalar, array or null, or a non-JSON body)
+ * comes back as `{success: false, http_status, detail}`.
+ */
+function applyFailure(
+  error: unknown,
+  context: DenyCallContext | undefined,
+  sentRealRun = false
+): string {
+  if (!(error instanceof ApiError)) {
+    // No HTTP status at all: a missing API key (client resolution) or a
+    // transport failure. Still an object, never a throw. A REAL run whose
+    // request went out may have applied some writes before the answer was
+    // lost; apply is idempotent, so the honest next step is a dry run.
+    const message = error instanceof Error ? error.message : String(error);
+    const result: Record<string, unknown> = { success: false, error: message };
+    if (sentRealRun) {
+      result.note =
+        "No answer arrived for a real run: some writes may already have been applied. "
+        + "Apply is idempotent: run apply_system with dry_run: true to see where the "
+        + "system stands, then re-apply.";
+    }
+    return JSON.stringify(result, null, 2);
+  }
+
+  const status = error.status;
+  let body: unknown;
+  let isJson = true;
+  try {
+    body = JSON.parse(error.body);
+  } catch {
+    isJson = false;
+  }
+  const isObject = isJson && body !== null && typeof body === "object" && !Array.isArray(body);
+  // FastAPI's own refusals are `{detail}`: surface that, else the whole body.
+  const detail = !isJson
+    ? error.body
+    : isObject && "detail" in (body as Record<string, unknown>)
+      ? (body as Record<string, unknown>).detail
+      : body;
+
+  if (status === 404 || status === 405) {
+    return JSON.stringify(
+      {
+        success: false,
+        not_available: true,
+        http_status: status,
+        error:
+          `System apply is not available on this Trinity build: POST /api/systems/apply answered ${status}, `
+          + "so the backend predates apply mode. Nothing was planned or written, and do NOT fall back to "
+          + "deploy_system: it is create-only and would create suffixed copies (`<name>_2`) of members "
+          + "that already exist. Upgrade the instance to a build with apply mode, or change existing "
+          + "members one at a time with the per-agent tools.",
+        detail,
+      },
+      null,
+      2
+    );
+  }
+
+  if (status === 403) {
+    return accessDenied(context, {
+      success: false,
+      not_permitted: true,
+      http_status: 403,
+      error:
+        "Refused (403): apply is human-only: run it with a person's credential (an interactive session "
+        + "or an operator's own user-scoped key) holding the 'creator' role. Agent, connector and system "
+        + "keys are refused, because apply writes to existing agents. `detail` names the gate that refused.",
+      detail,
+    });
+  }
+
+  if (isObject) {
+    return JSON.stringify(
+      { ...(body as Record<string, unknown>), http_status: status, success: false },
+      null,
+      2
+    );
+  }
+  return JSON.stringify({ success: false, http_status: status, detail }, null, 2);
 }
 
 /**
@@ -409,6 +520,78 @@ export function createSystemTools(
           return JSON.stringify(response, null, 2);
         } catch (error) {
           return teardownFailure(error);
+        }
+      },
+    },
+
+    // ========================================================================
+    // apply_system - Reconcile a live instance to a manifest (ent#695)
+    //
+    // A NEW tool rather than a `mode` on deploy_system: a released
+    // deploy_system has no `mode` in its schema, so `mode: "apply"` sent to an
+    // older instance would be dropped and run CREATE (suffixing the fleet),
+    // while an unknown tool name fails closed. deploy_system is untouched.
+    // ========================================================================
+    applySystem: {
+      name: "apply_system",
+      canAccess: applySystemAccess,
+      description:
+        "Reconcile a live instance to a system manifest: the idempotent sibling of deploy_system, "
+        + "same manifest format. Per declared member: absent → created; existing → its declared fields "
+        + "updated in place; an agent carrying the system's tag but not declared → reported as drift. "
+        + "It never deletes, stops, restarts, renames or suffixes an existing agent, so applying an "
+        + "unchanged manifest twice changes nothing. "
+        + "dry_run defaults to TRUE, unlike deploy_system: a call without it returns the plan "
+        + "(per-member verdicts create | update | unchanged | blocked, drift, blockers) and writes "
+        + "nothing; pass dry_run: false only to apply a plan a human has reviewed. "
+        + "Switch on `status`, never the HTTP code: 'valid' | 'invalid' on a dry run; 'applied' | "
+        + "'partial' | 'failed' | 'refused' on a real run (a refused run wrote nothing). A result "
+        + "without `status` (a 400/422 manifest error, a 401, an unexpected 500) has `success: false` "
+        + "and a `detail`: read those. Every entry in "
+        + "`blockers[]` names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
+        + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
+        + "remedy says which tag to add (tag_agent). "
+        + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
+        + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
+        + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
+        + "do NOT fall back to deploy_system there, it is create-only and would create suffixed "
+        + "copies (`_2`) of members that already exist.",
+      parameters: z.object({
+        manifest: z
+          .string()
+          .describe(
+            "The system manifest as a YAML string, in the format deploy_system takes (name, "
+            + "description, prompt, agents, permissions). Members are named '{name}-{agent}'."
+          ),
+        dry_run: z
+          .boolean()
+          .optional()
+          .describe(
+            "Defaults to TRUE: returns the plan and writes nothing. Pass false only to apply a "
+            + "plan a human has reviewed."
+          ),
+      }),
+      execute: async (
+        { manifest, dry_run }: { manifest: string; dry_run?: boolean },
+        context?: DenyCallContext
+      ) => {
+        // Preview-first unless the caller explicitly says otherwise (the
+        // teardown_system precedent): an unwanted preview costs a round trip,
+        // an unwanted apply writes to existing agents.
+        const preview = dry_run ?? true;
+        let sent = false;
+        try {
+          // Inside the try: getClient throws on a missing API key, and this
+          // tool never throws.
+          const apiClient = getClient(context?.session);
+          sent = true;
+          const response = await apiClient.request<unknown>("POST", "/api/systems/apply", {
+            manifest,
+            dry_run: preview,
+          });
+          return JSON.stringify(response, null, 2);
+        } catch (error) {
+          return applyFailure(error, context, sent && !preview);
         }
       },
     },

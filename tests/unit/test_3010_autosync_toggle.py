@@ -83,7 +83,8 @@ def _cycle(platform, home):
 
     async def go():
         async with platform.client() as client:
-            return await auto_sync.run_one_cycle(client, home, run_once)
+            return await auto_sync.run_one_cycle(
+                client, home, run_once, lambda h: {"status": "done"})
 
     result = _run(go())
     return result, ran
@@ -167,19 +168,8 @@ class TestFallbacks:
 
 
 class TestLoopStart:
-    def test_starts_without_a_baked_env_when_it_can_ask(self):
-        assert auto_sync.should_run_auto_sync() is False
-        assert auto_sync.should_start_loop() is True
-
-    def test_does_not_start_when_it_can_neither_ask_nor_was_baked(self, monkeypatch):
-        monkeypatch.delenv("TRINITY_BACKEND_URL")
-        assert auto_sync.should_start_loop() is False
-
-    def test_starts_on_a_baked_env_alone(self, monkeypatch):
-        monkeypatch.delenv("TRINITY_BACKEND_URL")
-        monkeypatch.setenv("GIT_SYNC_AUTO", "true")
-        assert auto_sync.should_start_loop() is True
-
+    # #4000: the loop now always starts (it runs git maintenance every tick);
+    # test_4000_git_maintenance_every_tick.py pins the scheduling.
     def test_before_the_first_cycle_the_running_value_is_the_env(self, monkeypatch):
         monkeypatch.setenv("GIT_SYNC_AUTO", "true")
         assert auto_sync.current_auto_sync_enabled() is True

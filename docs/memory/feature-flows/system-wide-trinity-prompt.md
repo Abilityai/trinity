@@ -127,15 +127,20 @@ Platform instructions are injected at runtime on every Claude Code invocation �
 - **"Repeating Work and Deferred Ticks"** (#2454, always-tier): routes repetition to `run_agent_loop`/`set_reminder`; its negative rule names the harness `/loop` skill + `ScheduleWakeup`, and — since #2468 — the whole denied family, phrased as a **capability fact** ("dies with this process") never a policy fact, so the sentence stays true on fleet images the deny has not reached yet (mixed-fleet window: the prompt ships on backend deploy, the deny on the image cut). Forward vocabulary coupling (every denied name appears here) pinned by `test_2454_loop_routing.py`; reverse (every name this paragraph claims removed is actually denied) by `test_2468_headless_tool_audit.py`.
 - **"Nothing survives the end of your turn"** (#2468, always-tier): the counterweight for the one promise Trinity cannot deny — Bash's own *"You will be notified when it completes"* (verbatim on 2.1.235; its text also blocks long leading sleeps and routes polling to the denied `Monitor`). Claims are truth-scoped: the kill-claim covers **commands** (subagents are `local_agent` = CLI-waited, said explicitly), no "no second turn" absolutism (false on `--resume` surfaces), and it names the working wait idiom (foreground until-loop under `timeout`) plus the split-persist-`set_reminder` alternative. Cost: ≈ +390 input tokens on every execution, every tier — accepted as the fix's backend-reachable half. Deny mechanism + audit: [agent-guardrails.md](agent-guardrails.md) § Platform tool denials.
 - **"Your environment"** (trinity-enterprise#945, always-tier, directly before Package Persistence): the container facts an agent cannot infer from tool signatures — runs as `developer` (UID 1000), `/home/developer` is a durable volume, `/tmp` is a small noexec RAM tmpfs so scratch goes to `$TMPDIR` (`~/.tmp`), UTC clock, what a reset to main keeps (`.trinity/persistent-state.yaml`, else the agent server's default set; untracked files untouched) and that a force-replace pull is the exception (it deletes untracked files that are not gitignored), the platform-owned folders in home, `template.yaml` is read once, and the protected paths (`__PATH_DENY_SENTENCE__`, filled per runtime: Claude Code (`claude-code`, `claude` or empty) names its hook and gap, other runtimes are told nothing blocks). Each fact is pinned to its owner, not its own text, by `tests/unit/test_ent945_environment_block.py` (folder constants, `guardrails-baseline.json` `path_deny` and `path_allow` (`.env.example` named writable beside `.env.*`, #3868), `_DEFAULT_PERSISTENT_STATE`, `AGENT_DEFAULT_TMPDIR`, `startup.sh`), with a ≤ 2,600-char budget.
+- **"Stay inside Trinity's execution ledger"** (trinity-enterprise#643, always-tier, directly before "Nothing survives the end of your turn"): do not run `claude`, `codex`, `gemini` or any other coding-agent CLI as a subprocess, directly or through scripts or wrappers, even if a credential is visible or authentication succeeds, because a nested run escapes the execution ledger (cost attribution, autonomy gates, permission enforcement, audit trail). "Turn-scoped by design" is stated as authorization for the coding-agent turns Trinity runs, never as a claim about where credentials live or that a nested CLI fails. The in-turn alternative is the `__CLI_IN_TURN_ALTERNATIVE__` marker, filled per runtime by `_adapt_instructions_for_runtime` from `_CLAUDE_SUBAGENT_RUNTIMES` (`claude-code`, `claude` or empty): Claude Code is offered its `Agent` subagent tool (also named `Task`) where it has it, other runtimes their own tools. Delegation: `chat_with_agent` with `parallel=true` to target itself or pick a `model` (`async=true` for long work), or `fan_out`. Advisory only; hard-coded until the trinity-enterprise#140 registry exists. Pinned by `tests/unit/test_ent643_platform_cli_boundary.py`, ≤ 1,000 chars including the heading.
 
 ### Chat Path (Interactive)
-- `src/backend/routers/chat.py`
-  - `POST /api/agents/{name}/chat` — calls `get_platform_system_prompt()`, adds `system_prompt` to payload sent to agent `/api/chat`
+- `src/backend/services/chat_execution_service.py`
+  - `run_chat_turn()` → `build_chat_payload()` — composes `system_prompt` with `compose_system_prompt(runtime=…)` (platform instructions + execution context) and adds it to the payload sent to agent `/api/chat`. If building the context raises, it falls back to `get_platform_system_prompt(runtime=…, model=…)`, so the turn still carries the platform instructions; a failure inside that fallback raises rather than dispatching a bare turn
 
 ### Task Path (Headless)
 - `src/backend/services/task_execution_service.py`
-  - `execute_task()` — calls `get_platform_system_prompt()`, prepends to any caller-provided `system_prompt`
+  - `execute_task()` → `_compose_effective_system_prompt()` — `compose_system_prompt(caller_prompt=…, runtime=…)`; on a context-build error it falls back to `get_platform_system_prompt()` + the caller-provided `system_prompt`
   - All callers (scheduled tasks, MCP delegation, manual tasks) flow through here
+
+### Pull Path (pull-claimed turns)
+- `src/backend/services/pull_coordination_service.py`
+  - `claim_next_task()` → `_compose_pull_system_prompt()` — the same `compose_system_prompt` composition, so a successful claim carries the full platform instructions. If composition raises, the claim runs with the **caller prompt only** (#1629's deliberate fail-open, pinned by `tests/unit/test_1081_pull_endpoints.py`), so that turn carries no platform section at all, the trinity-enterprise#643 boundary included. That fallback is unchanged by trinity-enterprise#643. Pull dispatch is opt-in and off by default (the `PULL_MODE_PILOT_AGENTS` allowlist, and `MCP_AGENT_CHAT_PULL_ENABLED` for agent-to-agent chat)
 
 ### Agent Server — Pass-Through
 - `docker/base-image/agent_server/models.py`
@@ -281,6 +286,15 @@ This feature does not broadcast changes via WebSocket. Changes take effect immed
 | `TestTrinityPromptInjection` | 241-415 | 3 | Agent injection verification (may need update for runtime injection) |
 | `TestSettingsValidation` | 418-454 | 3 | Input validation |
 
+**Prompt-content suites** (unit, no live backend):
+
+| File | Covers |
+|------|--------|
+| `tests/unit/test_ent643_platform_cli_boundary.py` | trinity-enterprise#643 execution-ledger section: once per render at VERBOSE and a forced MINIMAL tier across ten runtime spellings; composer with custom instructions, caller prompt and execution context on/off; reason and credential-honesty wording; runtime-conditional `Agent`/`Task` offer; `chat_with_agent` / `fan_out` arguments read from `chat.ts`; launcher names and Claude runtime set read by AST from their owners; ≤ 1,000-char budget; the chat payload, push-task and pull-claim prompt helpers with the real composer, including the chat and task context-error fallbacks |
+| `tests/unit/test_ent945_environment_block.py` | trinity-enterprise#945 "Your environment" block |
+| `tests/unit/test_ent243_prompt_tier.py` | Section registry and tier rendering |
+| `tests/unit/test_ent568_delegation_contract.py` | Delegation contract parity with the MCP copy |
+
 ## Known Issues / Bug Fixes
 
 ### Refactor: Runtime injection via --append-system-prompt (2026-03-15, Issue #136)
@@ -321,3 +335,4 @@ This feature does not broadcast changes via WebSocket. Changes take effect immed
 | 2026-03-14 | claude | Platform instructions moved from CLAUDE.md to CLAUDE.local.md |
 | 2026-03-15 | claude | Major rewrite: Runtime injection via --append-system-prompt (Issue #136). Removed file-based injection entirely. |
 | 2026-09-01 | claude | #2454/#2468: section/tier machinery documented; "Repeating Work" family paragraph (capability-first) + always-tier "Nothing survives the end of your turn" counterweight |
+| 2026-10-22 | claude | trinity-enterprise#643: always-tier "Stay inside Trinity's execution ledger" section; chat/task composition anchors moved to their current service functions; pull path and its unchanged caller-only fallback documented; prompt-content test table |
