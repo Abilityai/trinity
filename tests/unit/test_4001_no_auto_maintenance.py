@@ -48,6 +48,25 @@ if _existing is None or not any(
 from agent_server.utils.registered_run import run_registered  # noqa: E402
 from agent_server.routers import git as git_mod  # noqa: E402
 
+# Restore whatever this module installed after each test — same pattern as
+# test_1595_git_maintenance.py (tests/lint_sys_modules.py).
+_STUBBED_MODULE_NAMES = [
+    name for name in sys.modules if name == "agent_server" or name.startswith("agent_server.")
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
 # Commands that call git's `run_auto_maintenance`.
 _AUTO_MAINTENANCE_VERBS = {"fetch", "pull", "commit", "merge", "rebase"}
 
@@ -127,7 +146,10 @@ def test_git_helper_child_starts_no_maintenance(repo, monkeypatch):
 
 class _Recorder:
     """Stands in for `subprocess.run` inside the operator endpoints: records
-    every git argv and answers just enough for each strategy to proceed."""
+    every git argv and answers just enough for each strategy to proceed.
+
+    Every `pull` conflicts, so the `rebase --abort` recovery branches run —
+    `rebase --abort` starts auto-maintenance like a completed rebase."""
 
     def __init__(self):
         self.calls = []
@@ -143,7 +165,10 @@ class _Recorder:
         elif "rev-parse" in argv:
             out = "0" * 40 + "\n"
         elif "rev-list" in argv:
-            out = "0\n"
+            out = "1\n"  # behind, so the clean / pull_first paths pull
+        if "pull" in argv:
+            return subprocess.CompletedProcess(argv, 1, stdout="",
+                                               stderr="CONFLICT (content): file.txt")
         return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
 
     def maintenance_capable(self):
@@ -204,7 +229,7 @@ def test_operator_endpoints_flag_every_maintenance_capable_call(operator_home):
 
     found = operator_home.maintenance_capable()
     verbs = {verb for verb, _ in found}
-    assert {"fetch", "pull", "commit"} <= verbs, verbs
+    assert {"fetch", "pull", "commit", "rebase"} <= verbs, verbs
     unflagged = [argv for _, argv in found if not _flagged(argv)]
     assert unflagged == []
 

@@ -2297,7 +2297,7 @@ async def sync_to_github(request: GitSyncRequest):
                 )
 
                 if pull_result.returncode != 0:
-                    subprocess.run(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
+                    subprocess.run(["git", *GIT_NO_AUTO_MAINTENANCE, "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
                     if stash_created:
                         subprocess.run(["git", "stash", "pop"], cwd=str(home_dir), timeout=30, capture_output=True)
                     return _conflict_response(
@@ -2673,7 +2673,7 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
 
             if pull_result.returncode != 0:
                 # Abort rebase if it failed
-                subprocess.run(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
+                subprocess.run(["git", *GIT_NO_AUTO_MAINTENANCE, "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
 
                 # Try to restore stash if we created one
                 if stash_created:
@@ -2739,7 +2739,7 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
 
             if pull_result.returncode != 0:
                 # Abort rebase
-                subprocess.run(["git", "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
+                subprocess.run(["git", *GIT_NO_AUTO_MAINTENANCE, "rebase", "--abort"], cwd=str(home_dir), timeout=10, capture_output=True)
 
                 # Determine conflict type
                 conflict_type = "local_uncommitted" if has_local_changes else "merge_conflict"

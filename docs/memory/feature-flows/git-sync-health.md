@@ -314,7 +314,9 @@ run_one_cycle (every tick, #4000)
   silently). `run_registered` splices `GIT_NO_AUTO_MAINTENANCE`
   (`-c maintenance.auto=false`) after `git` for every git child, the raw
   `subprocess.run` sites in the sync/pull/reset endpoints prepend it, and
-  `_reap_stale_git_litter` removes a `maintenance.lock` older than 1 h.
+  `_reap_stale_git_litter` removes a `maintenance.lock` older than 1 h. That
+  reap runs from `_run_git_maintenance_once` on every auto-sync tick (#4000),
+  so an agent with auto-sync off is covered too.
 - **Prune grace:** Claude executions run git concurrently by design;
   `--prune=now` would delete their just-written, not-yet-referenced
   objects (repo corruption). 1h grace > any single git op and still
