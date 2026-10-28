@@ -2945,9 +2945,11 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
 #   owner  a PERSON who owns the agent, or an admin: sees every row.
 #   share  any other PERSON with access (a JWT, or their own user-scope key):
 #          sees only the executions they started.
-#   key    an agent, system, ops or connector key: unchanged (ent#875 ruling —
-#          an agent reading its own executions stays full; that residual and
-#          the fleet-wide default are ent#926).
+#   key    an agent, system, ops, ops_write or connector key: unchanged
+#          (ent#875 ruling — an agent reading its own executions stays full;
+#          that residual and the fleet-wide default are ent#926). `ops_write`
+#          (#3180) is listed because its one execution route, terminate, is for
+#          ending any stuck turn on an agent its admin owner reaches.
 #
 # An ALLOWlist both ways, for the reason `is_person_principal` is one:
 # `mcp_api_keys.scope` is free text, so every scope this module has not heard
@@ -2977,7 +2979,7 @@ def viewer_principal_kind(current_user: User) -> str:
         (isinstance(agent, str) and agent)
         or (isinstance(connector, str) and connector)
         or scope in _VIEWER_KEY_SCOPES
-        or scope == OPS_SCOPE
+        or scope in (OPS_SCOPE, OPS_WRITE_SCOPE)
     ):
         return "key"
     return "other"
