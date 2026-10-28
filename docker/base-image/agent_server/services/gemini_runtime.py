@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import subprocess
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -425,11 +426,37 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
+            # #3408: the child is spawned and its prompt written before the
+            # reader is submitted, so the reader, even one still queued behind
+            # the single shared worker, must run to drain and reap it. A
+            # cancelled waiter shields the worker and hands it the release
+            # (#3307's chat shape in claude_code.py). There is no outer
+            # timeout here, and none is added.
+            waiter_abandoned = threading.Event()
+
+            def read_owned_subprocess_output():
+                try:
+                    return read_subprocess_output()
+                finally:
+                    if waiter_abandoned.is_set():
+                        loop.call_soon_threadsafe(
+                            lambda: get_process_registry().unregister(_registered_id)
+                        )
+
+            worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+            # The waiter can end before this worker. Consume its eventual
+            # exception without changing what an active await sees.
+            worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             try:
-                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+                stderr_output, return_code = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             finally:
                 # #2433: always unregister — a timeout/pipe error above must not
                 # leave a dead handle that /api/executions/running keeps reporting.
+                # #3307: retained (a no-op) while the child lives; the worker
+                # above then releases it once the exit is observed.
                 get_process_registry().unregister(_registered_id)
 
             # Check for errors
@@ -932,11 +959,37 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
+            # #3408: the child is spawned and its prompt written before the
+            # reader is submitted, so the reader, even one still queued behind
+            # the single shared worker, must run to drain and reap it. A
+            # cancelled waiter shields the worker and hands it the release
+            # (#3307's chat shape in claude_code.py). There is no outer
+            # timeout here, and none is added.
+            waiter_abandoned = threading.Event()
+
+            def read_owned_subprocess_output():
+                try:
+                    return read_subprocess_output()
+                finally:
+                    if waiter_abandoned.is_set():
+                        loop.call_soon_threadsafe(
+                            lambda: get_process_registry().unregister(_registered_id)
+                        )
+
+            worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+            # The waiter can end before this worker. Consume its eventual
+            # exception without changing what an active await sees.
+            worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             try:
-                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+                stderr_output, return_code = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             finally:
                 # #2433: always unregister — a timeout/pipe error above must not
                 # leave a dead handle that /api/executions/running keeps reporting.
+                # #3307: retained (a no-op) while the child lives; the worker
+                # above then releases it once the exit is observed.
                 get_process_registry().unregister(_registered_id)
 
             # Check for errors
