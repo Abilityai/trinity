@@ -41,8 +41,14 @@ from services.execution_envelope import TaskExecutionErrorCode
 pytestmark = pytest.mark.unit
 
 
-def _turn_limit_detail(cap: int = 2, cli_text: str | None = None) -> str:
-    """The agent's own 422 detail, produced by the real executor."""
+def _turn_limit_detail(
+    cap: int = 2, cli_text: str | None = None, source: str = "guardrail"
+) -> str:
+    """The agent's own 422 detail, produced by the real executor.
+
+    ``source`` is the cap that stopped the turn: the agent words the remedy
+    differently when the caller's per-task ``max_turns`` bound (#2328).
+    """
     errors = [cli_text or f"Reached maximum number of turns ({cap})"]
     metadata = ExecutionMetadata()
     process_stream_line(json.dumps({
@@ -53,7 +59,7 @@ def _turn_limit_detail(cap: int = 2, cli_text: str | None = None) -> str:
     ctx = HeadlessRunContext(
         cmd=["claude", "--print"], task_session_id="task-3988",
         task_start_iso="2026-10-27T11:00:00Z", effective_timeout=900,
-        images=None, prompt="hi",
+        images=None, prompt="hi", max_turns_source=source,
     )
     ctx.return_code = 1
     ctx.metadata = metadata
@@ -121,9 +127,20 @@ def _run_task(status: int, detail):
     return result, ctx, legacy
 
 
+_SOURCES = pytest.mark.parametrize("source", ["guardrail", "per_task"])
+
+
+def _assert_wording(detail: str, source: str) -> None:
+    """The parametrize really produced the wording it names."""
+    assert ("The caller's per-task max_turns" in detail) is (source == "per_task")
+
+
+@_SOURCES
 @pytest.mark.parametrize("cap", [2, 401])
-def test_execute_task_codes_the_agents_turn_limit(cap):
-    result, ctx, legacy = _run_task(422, _turn_limit_detail(cap))
+def test_execute_task_codes_the_agents_turn_limit(cap, source):
+    detail = _turn_limit_detail(cap, source=source)
+    _assert_wording(detail, source)
+    result, ctx, legacy = _run_task(422, detail)
     assert result.error_code is not None and result.error_code.value == "max_turns"
     assert ctx.agent_call_count == 1
     ctx.switch.assert_not_awaited()
@@ -152,10 +169,12 @@ def _mapped(result):
     return exc.value
 
 
-def test_a_turn_limit_answers_422_with_the_code():
+@_SOURCES
+def test_a_turn_limit_answers_422_with_the_code(source):
     from services.chat_execution_service import ERROR_CODE_HEADER
 
-    detail = _turn_limit_detail()
+    detail = _turn_limit_detail(source=source)
+    _assert_wording(detail, source)
     err = _mapped(_result(detail, TaskExecutionErrorCode.MAX_TURNS))
     assert err.status_code == 422
     assert err.headers[ERROR_CODE_HEADER] == "max_turns"
