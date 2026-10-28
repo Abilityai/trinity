@@ -1,6 +1,49 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4064_gemini_process_group.py",
+      "feature": "#4064",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
+      "file": "unit/test_4000_git_maintenance_every_tick.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "git maintenance + stats on every auto-sync tick, health-only writer, prune instead of gc"
+    },
+    {
+      "file": "unit/test_4000_git_health_canary.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "canary",
+        "unit"
+      ],
+      "description": "canary RD-04 git measurement blindness, RD-05 maintenance not keeping up"
+    },
+    {
+      "file": "unit/test_4000_git_stats_at.py",
+      "feature": "#4000",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "agent_sync_state.git_stats_at persisted and coerced by the sync-health poller"
+    },
+    {
       "file": "unit/test_ent966_agent_env_patch.py",
       "feature": "abilityai/trinity-enterprise#966",
       "added": "2026-10-23",
@@ -273,6 +316,17 @@
         "unit"
       ],
       "description": "Cancelled or timed-out chat/headless waiters retain live subprocess ownership and executor completion closes log streams; queued headless cancellation does not spawn, queued chat readers reap existing children, result finalization ordering is preserved, and unconfirmed termination retains ownership. Disposable Python children only; no model, provider, or live-agent calls."
+    },
+    {
+      "file": "unit/test_3408_codex_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "Codex half of #3307's cleanup: a cancelled or outer-timed-out Codex waiter (chat 1-worker pool and /api/task default pool, running or queued reader) keeps its live child registered and allowlisted, and the shielded reader worker releases it after the child exits: -o result file removed, entry dropped, stream_end delivered, buffer gone. Also an empty-output child with no -o file, a read-only CODEX_HOME whose unlink fails, and the worker finishing before the cancel lands. Runs the real _execute_codex with the real ProcessRegistry and disposable Python children; no model, provider, or live-agent calls."
     },
     {
       "file": "unit/test_ent839_seat_decisions_self_gate.py",
@@ -934,18 +988,6 @@
       "description": "GET /api/monitoring/status carries each agent's git sync health (trinity-enterprise#707); real DB via db_harness, handler called directly with Docker/Redis/accessibility stubbed on the module the handler resolves them from. Each git-bound agent has a sync block (binding, auto_sync_enabled, ahead, behind, dirty_files, last_successful_push_at, divergence_age_s, state, reason, recommendation, frozen) — a work agent diverged 7 ahead for 26 h is red + frozen with the policy's reason; an agent with no git binding reports sync null (null in the JSON, not absent); a bound agent never observed is unknown with null counts. sync_summary totals {git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow} over a seeded mixed fleet. A red agent gains exactly one issues[] entry 'sync: <reason> — <recommendation>'; a yellow one none. Sync never moves status or the health counts. A non-admin sees only accessible agents and their totals. No raw git error text anywhere in the payload (seeded marker), while the recommendation still reads the error. A sync-reader fault degrades to sync null / sync_summary null and leaves the health summary intact (not the aggregation-failed branch). The view layer (sync_view) keeps git stderr out of reason and freeze_reason for every surface; a denied push still recommends 'credential is read-only'."
     },
     {
-      "file": "unit/test_3950_fleet_health_current.py",
-      "feature": "#3950",
-      "added": "2026-10-26",
-      "categories": [
-        "backend",
-        "unit",
-        "monitoring",
-        "api"
-      ],
-      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
-    },
-    {
       "file": "unit/test_ent706_sync_health_surfaces.py",
       "feature": "ent#706",
       "added": "2026-09-27",
@@ -1475,8 +1517,8 @@
       "description": "Tests for SSRF prevention in skills library URL: github.com hostname enforcement, internal IP rejection, scheme validation, bypass attempts (28 tests)"
     },
     {
-      "file": "unit/test_181_ip_rate_limit_spoofing.py",
-      "feature": "Issue #181, trinity-enterprise#873",
+      "file": "test_ip_rate_limit_fix.py",
+      "feature": "Issue #181",
       "added": "2026-03-27",
       "categories": [
         "backend",
@@ -1484,7 +1526,7 @@
         "rate-limiting",
         "unit"
       ],
-      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+      "description": "Tests for X-Forwarded-For rate limit bypass fix: trusted-proxy validation, spoofed header rejection, per-token secondary rate limit, pentest 3.2.4 PoC scenario"
     },
     {
       "file": "test_subscription_usage.py",
@@ -1694,18 +1736,6 @@
         "tools"
       ],
       "description": "Unit tests for voice tool call support (#581): _execute_tool (success, empty prompt, truncation to 2000 chars, agent not reachable, task error), _execute_and_respond (success path with callbacks, timeout → error response, inactive session skips send), tool declaration (_RUN_TASK_TOOL name + required prompt), end_session cancels pending tool tasks (12 tests)"
-    },
-    {
-      "file": "unit/test_ent471_turn_default_parity.py",
-      "feature": "trinity-enterprise#471",
-      "added": "2026-10-26",
-      "categories": [
-        "unit",
-        "guardrails",
-        "agent-server",
-        "frontend"
-      ],
-      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
     },
     {
       "file": "test_files_guardrail_bypass.py",
@@ -2299,6 +2329,18 @@
         "unit"
       ],
       "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse — alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting — REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
+    },
+    {
+      "file": "unit/test_3254_skills_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "skills",
+        "unit"
+      ],
+      "description": "#3254 S1: the two `_skills-sync` host alarms report through the #3246 platform alert seam, on a fresh full schema per test (db_harness; PostgreSQL when TEST_POSTGRES_URL is set) with the clock pinned and every pass starting after the last reading. Reconcile refusal (skills_reconcile_refused:<agent>): two refusals with different orphan counts are one pending row (subject, seen_count 2, moved last_seen_at and 30-day net deadline, counts never skill names); a clean or reconciled pass ends it as the platform; an inventory-unavailable, busy or erroring pass leaves it (R10), including the REAL agent-side inventory script run locally against a skills path that is a file, a mode-000 dir, a listable-but-unsearchable dir, or a dir with inaccessible children (anything it cannot inspect is an unknown inventory), while an absent skills dir is a clean pass that ends it and entries whose names can never be skills (a looping symlink, an inaccessible .cache) are ignored. Fleet sweep (skills_fleet_reinject:fleet): two bad sweeps are one row; a sweep that reached every agent (injected, or no skills) ends it; a Docker-error empty enumeration, a busy agent or a missing result leaves it (R10). Overlapping passes (event-controlled): an older reconcile pass or fleet sweep that finishes last never ends a row a newer one filed; the evidence floor finds its row behind 1,001 higher-priority pending rows. A person's ending through ask_service.answer lands acknowledged, is never re-ended, and snoozes the next reading. R1 legacy-id parity for both kinds. Other shape: on a fresh install the clear sites end nothing, write nothing and schedule nothing, and the first refusal files one row. A sweep that never reached an agent the fleet row names (it failed, then stopped) ends nothing; an inventory the agent could not inspect skips the pass with a WARNING naming the agent. The fleet row names every failed agent, not the report's 25, capped by count and by serialised size (long names cannot push the alarm past the 64 KiB context belt); a capped or malformed list is never evidence, so that row is left to its lifetime."
     },
     {
       "file": "unit/test_ent123_tokenless_clone.py",
@@ -3667,6 +3709,16 @@
       "description": "#2433: Gemini registers/unregisters its subprocess with the process registry (it never did)."
     },
     {
+      "file": "unit/test_3408_gemini_process_ownership.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#3408: a cancelled Gemini chat or headless waiter keeps a live child owned and on the sweep allowlist (AC 3), and its shielded reader (running or still queued on the shared worker) releases the entry and sends stream_end once the child exits; worker-finishes-first ordering and an empty-output child covered; own-group signals refused. Disposable Python children only; no Gemini CLI, model or live-agent calls."
+    },
+    {
       "file": "unit/test_2433_limiter_inflight.py",
       "feature": "#2433",
       "added": "2026-08-28",
@@ -3743,6 +3795,17 @@
         "static-guard"
       ],
       "description": "PR #2435 review + re-review: the cross-worker cancel may not act on a marker phase that predates its own cancel write (parked->calling is published in the same round-trip that reads the cancel key; the Redis-error residual is recorded, not claimed closed); the exited-but-registered set is TTL-bounded from first observation of the exit; a DISCOVERING guard walks every agent_server module that drives the process registry and requires each stdin.write to be paired with unregister either locally or at its caller (an enumerating list missed the live headless_executor site); the dispatch re-stamp runs off the event loop; /api/chat discards its pending entry on a cancelled lock wait; Phase 3 batches its verdict read."
+    },
+    {
+      "file": "unit/test_3408_failed_handoff.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "execution",
+        "unit"
+      ],
+      "description": "A prompt handoff that fails after register() (a lone-surrogate prompt makes the text-mode stdin write raise with the child alive) kills the child and observes its exit before releasing it, at all five sites: Claude chat and Codex kill their own group, both Gemini paths kill the pid only (the Gemini pgid is the agent server's own group; a refusing guard records every signal), Claude headless kills and drains in its worker and leaves the release to its caller. The async teardown runs off the event loop, and a cancel mid-teardown still releases once the child is dead. Fault injection: a kill that raises, an executor that refuses the teardown, or a headless drain that cannot start never replaces the handoff error or skips the rest of the teardown, and a still-live child stays registered. Other shape: an empty prompt hands off cleanly and the normal path releases. Disposable Python children only; no model, provider, or live-agent calls."
     },
     {
       "file": "unit/test_2467_turn_integrity.py",
@@ -4631,6 +4694,19 @@
       "description": "The loop-tool gate is WIRED where server.ts registers it, proved the way an agent reaches it: a real createServer in key mode, a real MCP client presenting an agent-scoped key over streamable HTTP, and a stub backend that answers key validation + the permission-edge read and COUNTS every POST /api/agents/<target>/loops (ent#628 -- no edge: refusal and zero loop starts; edge: the loop starts; self loop: no edge and no permission read). The stub also RECORDS every fire-and-forget POST /api/internal/audit, so the two #2807 cases prove the denial label over the wire: a refused start's row says success:false/denied:true with the reason and target, and deny-then-allow on ONE session leaves no stale marker on the permitted call. #2952: every call through asAgent().call drains ITS OWN audit row before returning and checks it for position (a call counter) AND identity (a per-session bearer the stub echoes back as key_name) -- the previous finder matched `(tool, index-after-length)` and read the prior test's late row on a busy host. A change to withAudit's one-row-per-call breaks this file on purpose (loud precondition); subtests must stay sequential (node:test default). trinity-enterprise#611: a second suite drives get_my_ask over the same real transport against a stub that answers key validation by bearer and records every readback — an agent key is served its OWN agent and no other, a person's user-scoped key is refused before the backend is asked anything, and the orchestrator's system key reads as trinity-system. trinity-enterprise#611 PR B: ask_operator over the same real transport — an agent key raises as its own agent with exactly the declared fields in the body, an agent_name argument neither aims the raise at a sibling nor reaches the backend, a person's user-scoped key is refused before any backend call, the system key raises as trinity-system, and a named 422 reaches the caller with its code and extras."
     },
     {
+      "file": "mcp-server/src/tools/systems.apply.test.ts",
+      "feature": "abilityai/trinity-enterprise#695",
+      "added": "2026-10-27",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "audit",
+        "systems",
+        "transport"
+      ],
+      "description": "apply_system, the reconcile sibling of deploy_system, always through the REGISTERED audit-wrapped tool: a real createServer in key mode, a real MCP client presenting a person's user-scoped key over streamable HTTP, and a stub backend on a non-default origin that records every request and every audit row. Pins dry_run ?? true (default and explicit true/false send exactly {manifest, dry_run}), 404 / 405 / a proxy's HTML 404 -> not_available with no fallback to /api/systems/deploy, every other JSON OBJECT body (400, 401, 409, 422, 503, 500) returned AS the result with http_status and success:false and NOT audited as a denial, a JSON string/array/null or a non-JSON body -> {success:false, http_status, detail}, 403 -> not_permitted through accessDenied (audited denied:true) and a 403-then-409 on one session leaving no stale marker, a dropped connection returned not thrown (a real run's adds a may-have-applied note; a dry run's or a keyless call's never does), the access.ts row (none) and the advertised {manifest, dry_run?} schema; person-only visibility: a user key lists the tool, an agent key and a system key neither list nor can call it, and nothing reaches the backend. deploy_system unchanged (AC6): its request body and defaults and its throw-on-500. Two cases go through the same registered tools in-process via FastMCP's server.connect: a session with no API key, which the HTTP transport cannot produce (a returned refusal, no backend request), and, by choice so no network is needed, the other shape's second hostname (a server configured for https://trinity-b.example.test:8443 forwards there with the caller's own key; fetch stubbed). The first other-shape case: each call reaches the configured origin with THAT session's key."
+    },
+    {
       "file": "unit/test_2915_operator_queue_sync_honesty.py",
       "feature": "abilityai/trinity#2915",
       "added": "2026-09-23",
@@ -5107,6 +5183,17 @@
         "gemini-runtime"
       ],
       "description": "#2971: the Gemini runtime runs a turn on the pinned gemini-cli (0.62.0). Real execute/execute_headless with a captured Popen: argv carries only flags the pinned CLI accepts (no --system-prompt/--max-turns), the system prompt is prepended to the turn input, --skip-trust is always passed, and chat resumes only its own captured session id (never bare --resume; model change/reset start fresh; failed turns don't move it; a missing session gets one cold retry unless cancelled). The build-time smoke harness is exercised against a fake gemini emulating 0.62.0's strict parser, and the Dockerfile pin/smoke placement are asserted. No Docker, no network."
+    },
+    {
+      "file": "unit/test_3408_gemini_reader_exit.py",
+      "feature": "#3408",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "unit"
+      ],
+      "description": "#3408: a failing Gemini headless reader (the inner per-line timeout, or a non-object JSON line) kills its child by pid and observes its exit before it raises, so the waiter's finally releases the entry (no entry, stream_end delivered) instead of retaining a live child. The timeout case holds the child's SIGKILL until the reader is inside wait(), so a missing wait is red deterministically. A child whose exit is never observed stays registered and the reader's own 504 survives. Empty output takes the normal path and never kills. Real execute_headless, real ProcessRegistry, disposable Python children; a guard refuses any signal to the session's own process group (a Gemini child's captured pgid). No model, provider, or live-agent calls."
     },
     {
       "file": "unit/test_ent751_skill_invocation.py",
@@ -6338,17 +6425,6 @@
       "description": "The agent server's PUT/mkdir/DELETE/list refuse a link that changes a path's class, keep same-class links, never write through a final link, delete a link as itself, never descend a link in the list (node cap), use resolved-path containment (#3032), CAS without following links, survive a crashed tmp file, keep file mode, refuse nested/bare git metadata, report the link count on reads, and still serve every platform writer."
     },
     {
-      "file": "unit/test_3825_password_change.py",
-      "feature": "#3825",
-      "added": "2026-10-20",
-      "categories": [
-        "backend",
-        "auth",
-        "unit"
-      ],
-      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
-    },
-    {
       "file": "unit/test_3751_a2a_bearer_task_scope.py",
       "feature": "#3751",
       "added": "2026-10-20",
@@ -6450,18 +6526,6 @@
         "reliability"
       ],
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
-    },
-    {
-      "file": "unit/test_ent830_idempotency_caller_scope.py",
-      "feature": "trinity-enterprise#830",
-      "added": "2026-10-23",
-      "categories": [
-        "backend",
-        "security",
-        "idempotency",
-        "unit"
-      ],
-      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
     },
     {
       "file": "unit/test_3651_recovery_companion_close.py",
@@ -6619,6 +6683,151 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent875_workspace_work_own_rows.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
+    },
+    {
+      "file": "unit/test_sqlite_upgrade_parity_guard.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "ci",
+        "guard"
+      ],
+      "description": "Self-test for scripts/ci/check_sqlite_upgrade_parity.py, the schema-parity CI step that builds an install with the PR's merge-base code, upgrades it with the checkout's lifecycle, and requires every schema.py table, column, index and trigger to arrive with migration_health at (n, n, None). Drives the comparison core over synthetic two-file backends (db/schema.py + db/migrations.py in tmp_path, no git, no backend deps): a registered migration passes; a migration written but not registered, and a schema.py column with no migration at all, are each a gap naming t.b (the existing-install shape no fresh-install comparison sees, because init_schema creates the table with the column on a fresh DB); a brand-new init_schema-only table is no false red; an unbuildable base fails closed (exit 2, never a pass). Also: a head lifecycle raising on the upgraded install (an index on a column no migration adds); an index, trigger or table a migration drops after init_schema; a registered migration left unrecorded, a renamed migration and a duplicate registration are gaps. The restated lifecycle is pinned (migrations before init_schema, the second pass, a sqlite3.Row connection as production opens it). A head that does not import, a usage error, no base/head, no repository and an unresolvable merge-base fail closed (exit 2); main() end to end over a throwaway git repository. A broken merge-base (a broken dev) is walked back over first-parent ancestors to the newest that builds, with a warning naming the skipped commit, so the PR that repairs dev passes; a gap over that longer range is still a gap; the walk is bounded by MAX_BASE_WALKBACK and exits 2 when exhausted, as does a broken root with no ancestor. A PR branched inside the broken range is told, on an exhausted walk, to merge the repaired base branch in, and passes once it has."
+    },
+    {
+      "file": "unit/test_3950_fleet_health_current.py",
+      "feature": "#3950",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "monitoring",
+        "api"
+      ],
+      "description": "GET /api/monitoring/status counts every agent and never serves an old verdict as current (#3950); real DB via db_harness, handlers called directly. The buckets are counted from the per-agent list, so they total total_agents and an agent with no health row is unknown in both halves (a mixed fleet of healthy/degraded/unhealthy/critical/expired/odd-status/no-row agents sums exactly). A reading older than stale_after_seconds (3x docker_check_interval; 90 at the default, 1800 at a 600s interval) reads unknown and leads its issues with 'Last health check <age> ago (reported <status>) — not a current reading', suffixed '; monitoring is off' when the loop is stopped, keeping the older issues behind it; a fresh reading, including a fresh fault, is untouched; an unreadable timestamp fails closed. GET /api/monitoring/agents/{name} expires aggregate_status the same way and carries stale_after_seconds."
+    },
+    {
+      "file": "unit/test_181_ip_rate_limit_spoofing.py",
+      "feature": "Issue #181, trinity-enterprise#873",
+      "added": "2026-03-27",
+      "categories": [
+        "backend",
+        "security",
+        "rate-limiting",
+        "unit"
+      ],
+      "description": "X-Forwarded-For rate-limit bypass (pentest 3.2.4) through the real client-address middleware: rotating spoofed headers from a public or private peer keep one key, only the trusted proxy's suffix is read, non-address entries are refused, per-token limit constants (moved from the tests/ root by ent#873)"
+    },
+    {
+      "file": "unit/test_ent471_turn_default_parity.py",
+      "feature": "trinity-enterprise#471",
+      "added": "2026-10-26",
+      "categories": [
+        "unit",
+        "guardrails",
+        "agent-server",
+        "frontend"
+      ],
+      "description": "The default turn cap is one value in four places (trinity-enterprise#471): guardrails-baseline.json reads 200 for both max_turns_chat and max_turns_task; the agent server's hand-maintained fallbacks (_DEFAULT_MAX_TURNS_CHAT/_TASK in _runtime_config.py, read by AST) equal the baseline; the Settings -> Guardrails placeholder (GuardrailsPanel.vue DEFAULT_TURNS) equals it; the 1-500 bounds are unchanged and hold the default."
+    },
+    {
+      "file": "unit/test_migrations.py",
+      "feature": "#3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "database",
+        "migrations",
+        "guard"
+      ],
+      "description": "Migration runner unit tests (#236): schema_migrations tracking, idempotency and resume, failure propagation (only `no such table` is a fresh-install skip), and MIGRATIONS sanity. #3395 adds the registry bijection: the `_migrate*` functions defined in db/migrations.py, discovered from the file's parsed source (top-level `def` or `async def`, decorated or not) and cross-checked against the callables the loaded module binds (non-vacuity), equal the functions registered in MIGRATIONS, compared by identity, each registered exactly once. An unregistered function (including a data-only backfill no schema diff can see, and a decorated or `async def` one) is named; so is a registered function that is not a `_migrate*` of the module, and an `async def` migration, which the runner would record as applied without running. A deliberately unregistered helper must not use the `_migrate` prefix."
+    },
+    {
+      "file": "unit/test_schema_parity.py",
+      "feature": "#713, #3395",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "unit",
+        "guard"
+      ],
+      "description": "schema.py vs the fresh-install init_database() lifecycle (migrations, init_schema, migrations) on in-memory SQLite, in both directions. Forward (#713): nothing a migration creates is missing from schema.py, with column-type drift. Reverse (#3395): every table, column, index and trigger schema.py declares exists after a fresh install, so a creating migration's CREATE TABLE losing a column, or a second-pass _atomic_rebuild dropping indexes or triggers, goes red. Blind to a column missing only on existing installs (an unregistered migration on a table only init_schema creates); names and types only, not index/trigger SQL or column constraints."
+    },
+    {
+      "file": "unit/test_3825_password_change.py",
+      "feature": "#3825",
+      "added": "2026-10-20",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
+    },
+    {
+      "file": "unit/test_ent830_idempotency_caller_scope.py",
+      "feature": "trinity-enterprise#830",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "security",
+        "idempotency",
+        "unit"
+      ],
+      "description": "A client-chosen Idempotency-Key is scoped to its caller: make_caller_scope separates two people on one agent and two agent keys of one owner, keeps one person one principal across browser and user key, gives a machine credential its own principal, and never equals the platform agent scope. On real SQLite two principals with the same key get two claims and the second never sees the first's snapshot, the same principal still replays, a header key cannot pre-claim a platform-derived key, and /task admission (begin_task_idempotency) dispatches twice for two principals. An AST guard pins make_caller_scope at every header-key boundary (/chat, /task, fan_out, voip, reminders, brain-orb, agent-data import, git bind). All seventeen fail on the pre-fix code."
     },
     {
       "file": "../src/frontend/tests/unit/portalThreadTail.spec.js",

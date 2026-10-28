@@ -570,6 +570,10 @@ class SyncHealthService:
         maintenance_failures = _coerce_nonneg_int(
             sync_state.get("maintenance_failures")
         )
+        # #4000: when the agent measured the three stats above. Agent-authored,
+        # so it crosses the timestamp boundary; None (absent on an old base
+        # image, or rejected) keeps the stored value.
+        git_stats_at = _coerce_agent_timestamp(sync_state.get("git_stats_at"))
 
         # trinity-enterprise#706: the divergence and dirt episode clocks. The
         # decision reads the RAW values, so an uncomputable count (None) is
@@ -621,6 +625,7 @@ class SyncHealthService:
             pack_count=pack_count,  # #1595
             loose_objects=loose_objects,  # #1595
             maintenance_failures=maintenance_failures,  # #1595
+            git_stats_at=to_utc_iso(git_stats_at) if git_stats_at else None,  # #4000
             # trinity-enterprise#703: the container's pull cycle. Agent-written
             # JSON, so the status is bounded to the vocabulary and the counter
             # coerced like its neighbours.

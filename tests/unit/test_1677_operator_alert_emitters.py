@@ -103,11 +103,6 @@ _ALLOWED_CALLERS = {
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
     ("services/retention_guard.py", "announce_refusal"):
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
-    ("services/skills_sync_service.py",
-     "SkillsLibrarySyncService._announce_fleet_failures"):
-        "platform-only: leader-locked, one per sync run (ent#236)",
     ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
         "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):

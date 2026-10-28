@@ -44,10 +44,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
     # -- PR 2 ---------------------------------------------------------------
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        ("skills-reconcile-", _PR2),
-    ("services/skills_sync_service.py", "SkillsLibrarySyncService._announce_fleet_failures"):
-        ("skills-fleet-reinject-", _PR2),
     ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
     ("services/retention_guard.py", "announce_refusal"): ("retention-guard-", _PR2),
