@@ -6,7 +6,7 @@ existing row reading the whole transcript. PostgreSQL half of the dual-track
 pair; the SQLite half is ``db/migrations.py::room_participant_visible_from``.
 
 Revision ID: 0106_room_participant_visible_from
-Revises: 0103_a2a_caller_identity
+Revises: 0104_agent_sync_state_git_stats_at
 Create Date: 2026-10-26
 """
 from alembic import op
@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "0106_room_participant_visible_from"
-down_revision = "0103_a2a_caller_identity"
+down_revision = "0104_agent_sync_state_git_stats_at"
 branch_labels = None
 depends_on = None
 
