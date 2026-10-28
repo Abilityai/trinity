@@ -1532,6 +1532,14 @@ async def _maybe_emit_alert_budget_episode(
     registry test). Two workers' readings land on the one subject row, which is
     what the old time-bucketed id approximated.
 
+    The episode is the set of pending rows that fill the budget: each reading
+    carries a digest of their ids (``filled_by``, a material key of the kind).
+    After a person ends the episode alert, a reading of the same full budget is
+    snoozed for the snooze window; once a slot frees and a new row fills it,
+    the condition cleared and came back, the digest differs and the reading
+    files. A failed read of the set logs an ERROR and leaves ``filled_by``
+    None, which no digest equals, so the reading files.
+
     The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
     BEFORE the reading, so a persistently failing write backs off for the
     window instead of retrying on every refusal (#1632 shape). The kind is
@@ -1563,10 +1571,21 @@ async def _maybe_emit_alert_budget_episode(
         f"compromised agent — review its recent activity before acting on its "
         f"requests."
     )
+    try:
+        filling = db.list_operator_queue_items(
+            agent_name=agent_name, status="pending", type=item_type, limit=1000)
+        filled_by = hashlib.sha256(
+            "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — the alarm still files, as a new episode
+        logger.error("[#1677 budget] could not read the rows filling %s/%s's budget",
+                     agent_name, item_type, exc_info=True)
+        filled_by = None
     context = {
         "reason": "platform_alert_budget",
         "alert_type": item_type,
         "cap": OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "filled_by": filled_by,
     }
     # Triage aid for the cross-agent budget-fill scenario (a permitted peer
     # spraying at the victim): the platform trigger enum only, shape-guarded.
@@ -2708,7 +2727,13 @@ class OperatorQueueSyncService:
         Edge-triggered (#3130): an episode alerts once, however many cycles or
         cooldown windows it lasts, and the next alert needs the condition to
         have cleared first (`_sync_agent` ends the episode through
-        `_end_flood_episode`, which ends its alert too). It used to be one
+        `_end_flood_episode`, which ends its alert too). That holds after a
+        person acknowledges the alert too: each reading carries the episode's
+        start (`episode_started_at`, a material key of the kind), so the
+        snooze silences re-reads of the acknowledged episode for the snooze
+        window and a NEW episode files at once. A leader failover or restart
+        loses the in-memory episode, so a persisting flood counts as a new
+        episode there and may file once more. It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
@@ -2728,13 +2753,15 @@ class OperatorQueueSyncService:
         Re-read while it lasts (#3254 R9): an episode that persists is observed
         again at most every 6 hours, so the kind's 14-day lifetime ends only a
         row nobody re-read (a lost clear), never one whose condition still
-        holds. The refresh time per (agent, reason) lives in a dict this method
-        creates on the instance for itself (`_flood_refreshed_at`).
+        holds. The refresh time and the episode start per (agent, reason) live
+        in dicts this method creates on the instance for itself
+        (`_flood_refreshed_at`, `_flood_episode_started_at`).
 
         The cooldown and the episode are stamped BEFORE every reading (a re-read
         included). Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
-            episode; a snoozed reading is a person's ending, which stands);
+            episode; a snoozed reading is a person's ending of this episode,
+            which stands for the snooze window);
           * failed on the episode's first reading → the episode is RELEASED so
             the alarm is retried, and the cooldown stamp spaces those retries to
             at most one per window (review I1: holding the episode on a failure
@@ -2756,6 +2783,7 @@ class OperatorQueueSyncService:
         key = (agent_name, reason)
         now = time.monotonic()
         refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        started = vars(self).setdefault("_flood_episode_started_at", {})
         rereading = key in self._flood_episodes
         if rereading:
             # R9: the 6-hour re-read of a persisting episode, the #3255
@@ -2773,6 +2801,7 @@ class OperatorQueueSyncService:
             if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
                 return  # too soon after the last episode — the next cycle retries
             self._flood_episodes.add(key)
+            started[key] = utc_now_iso()
         # Stamped before every reading, a re-read included, so a failed one —
         # released below — is retried no sooner than the cooldown (I1).
         self._flood_alert_cooldown[agent_name] = now
@@ -2800,7 +2829,7 @@ class OperatorQueueSyncService:
         outcome = platform_alerts.observe(
             agent_name, "queue_flood", reason,
             title=title, question=question, priority="high",
-            context={"held": held, "reason": reason},
+            context={"held": held, "reason": reason, "episode_started_at": started.get(key)},
         )
         if outcome == platform_alerts.OBSERVED_FAILED:
             if rereading:

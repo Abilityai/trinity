@@ -937,6 +937,9 @@ _ROW_READERS = {
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
+    (_OQS, "_maybe_emit_alert_budget_episode"): (
+        "internal", "the ids of the rows filling an agent's alert budget, digested into the "
+                    "episode marker (#3254); no row leaves"),
     (_OQS, "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),

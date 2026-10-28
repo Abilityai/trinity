@@ -152,8 +152,11 @@ _BUILTIN_KINDS = (
     Kind("system_seed", "system-seed-", _N, CLEARS_HOOK),
     Kind("git_token_scrub_refused", "ent615-git-token-scrub-", _D, CLEARS_HOOK),
     Kind("git_token_scrub_unreadable", "ent615-git-token-scrub-unreadable-", _D, CLEARS_HOOK),
-    Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood"),
-    Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK),
+    # #3254: an episode marker is a material key, so a person's ending snoozes
+    # re-reads of the SAME episode only; a new episode differs and files.
+    Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood",
+         material_keys=("episode_started_at",)),
+    Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,
          budgeted_type="effect_unguarded"),
@@ -162,7 +165,7 @@ _BUILTIN_KINDS = (
     Kind("poison", "poison-", None, CLEARS_PERSON),
     Kind("portal_inbox_collision", "portal-inbox-collision-", None, CLEARS_PERSON),
     Kind("gitignore_untracked", "gitignore-untracked-", None, CLEARS_PERSON,
-         budgeted_type="gitignore_untracked"),
+         budgeted_type="gitignore_untracked", material_keys=("push_id",)),
     Kind("workspace_problem_report", "workspace-problem-", None, CLEARS_PERSON,
          budgeted_type="workspace_problem_report"),
 )
