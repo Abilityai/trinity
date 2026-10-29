@@ -53,6 +53,7 @@ CREATE TABLE idempotency_keys (
     response_snapshot TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,
     PRIMARY KEY (scope, idempotency_key)
 )
 """
@@ -132,7 +133,8 @@ def _seed(ops, scope, key, status, created_at, snapshot=None, execution_id=None)
     c = sqlite3.connect(ops._path)
     try:
         c.execute(
-            "INSERT INTO idempotency_keys VALUES (?,?,?,?,?,?,?)",
+            "INSERT INTO idempotency_keys (scope, idempotency_key, execution_id, status, "
+            "response_snapshot, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
             (scope, key, execution_id, status, snapshot, created_at, created_at),
         )
         c.commit()
