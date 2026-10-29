@@ -71,18 +71,6 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        "platform-only: the ent#615 sweep refused to strip a credential URL it "
-        "could not replace. Raised from a start hook / boot one-shot, so the "
-        "cadence is the platform's, and the id is bucketed per agent per UTC "
-        "day so a restart loop is <=1 row/agent/day; no agent input reaches it",
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        "platform-only: the ent#615 sweep could not READ the tree it swept, so "
-        "its all-zero report is not evidence of a clean agent. Same emitters as "
-        "its refusal sibling (start hook / boot one-shot), same per-agent-per-UTC-"
-        "day bucketed id, no agent input reaches it — a SEPARATE id family "
-        "because the two need different operator action and sharing one would "
-        "let whichever fired first suppress the other all day",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",
@@ -94,11 +82,6 @@ _ALLOWED_CALLERS = {
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
     ("services/retention_guard.py", "announce_refusal"):
         "platform-only: edge-gated (fresh) + idempotent id (#1644)",
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        "platform-only: assignment-driven, quasi-idempotent id (ent#236)",
-    ("services/skills_sync_service.py",
-     "SkillsLibrarySyncService._announce_fleet_failures"):
-        "platform-only: leader-locked, one per sync run (ent#236)",
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
         "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
@@ -107,8 +90,6 @@ _ALLOWED_CALLERS = {
         "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
         "{diverged_since}), and an episode must last > 24 h before it can raise "
         "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"):
-        "platform-only: deterministic id ⇒ ≤1 open row per seed kind (ent#124)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         "platform-only: fires only for schedules the operator enabled validation "
         "on; cadence operator-bound (#1632 classification)",

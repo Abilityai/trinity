@@ -84,6 +84,7 @@ git_dir_bytes BIGINT                     -- #1596: .git on-disk size (BIGINT sin
 pack_count INTEGER                       -- #1595: packs (count-objects -v)
 loose_objects INTEGER                    -- #1595: loose objects
 maintenance_failures INTEGER DEFAULT 0   -- #1595: failed maintenance streak
+git_stats_at TEXT                        -- #4000: when the git stats were measured
 diverged_since TEXT                      -- ent#706: divergence episode start (set once, cleared at 0/0)
 dirty_files INTEGER                      -- ent#706: porcelain change count (changes_count)
 dirty_since TEXT                         -- ent#706: dirt episode start (cleared at 0)
@@ -253,22 +254,41 @@ merge_gitignore_after_clone(name)   monotonic deadline _MERGE_READY_TIMEOUT_SECO
 ### 1a. Survivable maintenance pass (#1596, hardened by #1595)
 
 ```
-_run_auto_sync_once (worker thread, repo lock held)
-    ├── _reap_stale_git_litter          gc.pid / index.lock >1h;
-    │                                   tmp_pack_* > repack budget + 300s
-    ├── _collect_git_object_stats       one `git count-objects -v`
-    ├── _git_dir_bytes                  `du -sb .git`
-    ├── add / status / commit / push    ALL via run_registered(...)
-    ├── _maybe_run_git_maintenance(stats)
-    │     ├── trigger: packs ≥ 20 OR loose ≥ 6700
-    │     ├── guards: backoff gate → disk preflight (free < 1.1× pack bytes)
-    │     ├── git -c pack.threads=1 -c pack.windowMemory=128m \
-    │     │     repack -A -d -l -q --unpack-unreachable=1.hour.ago
-    │     └── git gc --quiet --prune=1.hour.ago
-    └── _write_sync_state_file          atomic (tmp + os.replace); metrics on
-                                        EVERY terminal path; maintenance
-                                        backoff bookkeeping (1h→24h)
+run_one_cycle (every tick, #4000)
+    ├── auto_sync_enabled on?
+    │     └── _run_auto_sync_once (worker thread, repo lock held)
+    │           ├── _reap_stale_git_litter    gc.pid / index.lock >1h;
+    │           │                             tmp_pack_* > repack budget + 300s
+    │           ├── add / status / commit / push   ALL via run_registered(...)
+    │           └── _write_sync_state_file    atomic (tmp + os.replace)
+    └── _run_git_maintenance_once (worker thread, repo lock held — ALWAYS,
+          │                        flag on or off, push ok or failed)
+          ├── _reap_stale_git_litter
+          ├── _collect_git_object_stats       one `git count-objects -v`
+          ├── _git_dir_bytes                  `du -sb .git`
+          ├── _maybe_run_git_maintenance(stats)
+          │     ├── trigger: packs ≥ 20 OR loose ≥ 6700
+          │     ├── guards: backoff gate → disk preflight
+          │     │     (free < 1.1× (pack + loose bytes))
+          │     ├── git -c pack.threads=1 -c pack.windowMemory=128m \
+          │     │     repack -A -d -l -q --unpack-unreachable=1.hour.ago
+          │     ├── git reflog expire --all
+          │     └── git prune --expire=1.hour.ago
+          └── _record_git_health              git stats + git_stats_at +
+                                              maintenance backoff (1h→24h);
+                                              never touches last_sync_*
 ```
+
+- **Every tick, not only after a push (#4000).** Self-pushing agents run
+  with `auto_sync_enabled=0` and a failing push used to skip maintenance
+  too, so neither group was ever measured or repacked. The loops are
+  scheduled on every agent, and the first tick carries random jitter of up
+  to one interval so a fleet recreate does not start every repack in the
+  same minute. `_record_git_health` re-reads sync-state at write time: a
+  repack can outlast a pull-cycle write.
+- **No `git gc` after the repack (#4000).** A non-auto `gc` runs a second
+  full `repack -A -d` without the threads/window-memory bound. Reflog expiry
+  and `prune` are the two `gc` steps the repack does not already cover.
 
 - **Why registered:** any bare agent-server child is indistinguishable from
   a leaked orphan — the sweep's hard-protect walk goes UP to PID 1, never
@@ -286,6 +306,17 @@ _run_auto_sync_once (worker thread, repo lock held)
   `/etc/gitconfig`; `git_service.setup_git_in_container` mirrors them into
   `~/.gitconfig` for older images. With auto-gc off, garbage accumulates
   as LOOSE objects — hence the loose-count trigger condition.
+- **Platform git children never start auto-maintenance (#4001).** A
+  repo-local config can re-enable it, and then `fetch`/`pull`/`commit`/
+  `merge`/`rebase` wait on `maintenance run --auto → gc → repack`; the
+  child's timeout kills it mid-repack and strands `objects/maintenance.lock`,
+  which git never expires (auto-maintenance then stays off for that repo,
+  silently). `run_registered` splices `GIT_NO_AUTO_MAINTENANCE`
+  (`-c maintenance.auto=false`) after `git` for every git child, the raw
+  `subprocess.run` sites in the sync/pull/reset endpoints prepend it, and
+  `_reap_stale_git_litter` removes a `maintenance.lock` older than 1 h. That
+  reap runs from `_run_git_maintenance_once` on every auto-sync tick (#4000),
+  so an agent with auto-sync off is covered too.
 - **Prune grace:** Claude executions run git concurrently by design;
   `--prune=now` would delete their just-written, not-yet-referenced
   objects (repo corruption). 1h grace > any single git op and still
@@ -458,8 +489,9 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
 
 - **Loop:** `auto_sync.run_pull_loop`, beside the push loop, every
   `GIT_SYNC_PULL_INTERVAL_SECONDS` (defaults to the push interval, 900 s). Its
-  first tick is half an interval after the push loop's, so the two do not reach
-  the repo lock together.
+  first tick is 1.5 intervals after start. The push loop's first tick is
+  jittered between 1 and 2 intervals (#4000), so the two can meet at the repo
+  lock; a pull that waits out a long repack skips as `repo_busy`.
 - **Lock:** both background cycles wait up to `GIT_SYNC_LOCK_WAIT_SECONDS`
   (default 120 s; `0` = skip at once) for `_REPO_LOCK` instead of skipping on
   sight. Skipping made two loops on one interval collide every tick and halve
@@ -979,10 +1011,9 @@ defects live in git's own last-match-wins and dir-descent semantics):
   cloned into a subdirectory has auto-gc off with no replacement. Not a
   regression (its detached auto-gc was always sweep-killed too), but the
   blind spot is now by design — revisit if sub-repo bloat surfaces.
-- **Agents with auto-sync OFF get no maintenance (#1595)**. Deliberate:
-  they previously had zero *effective* maintenance anyway (auto-gc never
-  completed), and `gc.auto=0` at least stops their tmp_pack garbage
-  ratchet.
+- **Maintenance holds the repo lock for up to `GIT_MAINTENANCE_TIMEOUT_SECONDS`
+  (#4000).** During a long repack the operator git endpoints return 409
+  `agent_busy` and the pull cycle skips its tick.
 - **Maintenance bounds garbage, not history (#1595)**. Every repack still
   rewrites full history, whose size grows without bound under auto-commit
   churn — the opt-in history-squash policy and/or geometric repack

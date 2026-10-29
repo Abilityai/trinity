@@ -44,10 +44,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
     # -- PR 2 ---------------------------------------------------------------
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        ("skills-reconcile-", _PR2),
-    ("services/skills_sync_service.py", "SkillsLibrarySyncService._announce_fleet_failures"):
-        ("skills-fleet-reinject-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
         ("sync-failing-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
@@ -55,11 +51,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
         ("git-bloat-", _PR2),
     ("services/retention_guard.py", "announce_refusal"): ("retention-guard-", _PR2),
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"): ("system-seed-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        ("ent615-git-token-scrub-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        ("ent615-git-token-scrub-unreadable-", _PR2),
     ("services/lease_reaper_service.py", "_create_park_item"): ("poison-", _PR2),
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
