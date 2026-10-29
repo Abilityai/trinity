@@ -25,9 +25,10 @@ Lifetimes (T4): a kind declares one of three classes —
 
 Snooze (T5, operator ruling 2026-10-05): after a person ends an alert, a new
 reading of the same subject files nothing for 7 days (env
-``OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS``) unless it raises the priority or
-changes one of the kind's ``material_keys``. The window is read here so the
-sweep and the seam agree on it.
+``OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS``) unless it raises the priority,
+changes one of the kind's ``material_keys``, or is worse by the kind's
+``escalates`` rule. The window is read here so the sweep and the seam agree
+on it.
 """
 import hashlib
 import json
@@ -102,6 +103,10 @@ class Kind:
     so an agent cannot mint a row into it. Kinds may share a prefix (two
     conditions under one family) — they then share a lifetime class. ``event``
     kinds have no subject: every observation is its own row.
+
+    ``escalates(new_context, ended_context)`` (#4048) is a kind's own "this
+    reading is worse" rule: True breaks a person's snooze. Unlike a material
+    key it is one-directional, so a same-or-better reading stays snoozed.
     """
 
     name: str
@@ -111,6 +116,7 @@ class Kind:
     budgeted_type: Optional[str] = None
     material_keys: Tuple[str, ...] = ()
     event: bool = False
+    escalates: Optional[Callable[[Mapping, Mapping], bool]] = None
 
     def __post_init__(self):
         if not re.fullmatch(r"[a-z][a-z0-9_]*", self.name or ""):
@@ -121,6 +127,27 @@ class Kind:
             raise ValueError(f"kind {self.name}: unknown lifetime class {self.lifetime!r}")
         if self.clears not in _CLEARS:
             raise ValueError(f"kind {self.name}: unknown clears {self.clears!r}")
+
+
+def _count(context: Mapping, key: str) -> int:
+    value = context.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def _orphans_at_least_doubled(new: Mapping, old: Mapping) -> bool:
+    """#4048: a reconcile refusal is worse once its orphan count at least
+    doubles. Any rise would re-file on every small change and defeat the
+    snooze; a refusal that grew from 25 to 400 orphans must not."""
+    return _count(new, "orphan_count") >= 2 * max(_count(old, "orphan_count"), 1)
+
+
+def _a_new_agent_failed(new: Mapping, old: Mapping) -> bool:
+    """#4048: a fleet re-inject is worse when an agent fails that the ended
+    reading did not name. The same agents still failing, or fewer, is not."""
+    def agents(context):
+        value = context.get("agents")
+        return {a for a in value if isinstance(a, str)} if isinstance(value, list) else set()
+    return bool(agents(new) - agents(old))
 
 
 # Prefixes whose emitter lives outside this repository (the enterprise
@@ -139,8 +166,10 @@ _BUILTIN_KINDS = (
     Kind("system_agent_pull_drift", "base-image-stale-pull-", _N, CLEARS_HOOK),  # #3814
     Kind("circuit_dormant", "cb-dormant-", _N, CLEARS_HOOK),
     # -- every other in-repo platform emitter -----------------------------
-    Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK),
-    Kind("skills_fleet_reinject", "skills-fleet-reinject-", _D, CLEARS_HOOK),
+    Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK,
+         escalates=_orphans_at_least_doubled),
+    Kind("skills_fleet_reinject", "skills-fleet-reinject-", _D, CLEARS_HOOK,
+         escalates=_a_new_agent_failed),
     Kind("sync_failing", "sync-failing-", _N, CLEARS_HOOK),
     Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK),
     Kind("git_bloat_size", "git-bloat-", _N, CLEARS_HOOK),
@@ -549,12 +578,15 @@ _PRIORITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
 def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Mapping) -> bool:
     """A person ended this subject's row inside the snooze window, and the new
-    reading is neither a priority increase nor a material change."""
+    reading is neither a priority increase, a material change, nor worse by
+    the kind's ``escalates`` rule."""
     if not ended:
         return False
     if _PRIORITY_RANK.get(priority, 0) > _PRIORITY_RANK.get(ended.get("priority"), 0):
         return False
     old = _as_context(ended.get("context"))
+    if kind.escalates is not None and kind.escalates(context, old):
+        return False
     return all(context.get(k) == old.get(k) for k in kind.material_keys)
 
 
@@ -598,7 +630,8 @@ def observe(
     The subject's pending row is updated in place (one row per subject, the
     latest reading); with no pending row, a reading a person ended inside the
     snooze window (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`, default 7) files
-    nothing unless its priority rose or a `material_keys` value changed; else
+    nothing unless its priority rose, a `material_keys` value changed or the
+    kind's `escalates` rule calls it worse; else
     a fresh row is filed with the kind's lifetime as `expires_at`, measured
     from this reading. Returns one of the ``OBSERVED_*`` outcomes.
     """
