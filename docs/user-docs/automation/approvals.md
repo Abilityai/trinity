@@ -58,7 +58,7 @@ Some heads-ups describe a *condition* rather than an event — for example a sub
 - A row that nobody acts on expires 14 days after its last reading (`OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS`). An expired heads-up reads **Expired — nobody acted on it**.
 - After a person ends one, the same reading files nothing for 7 days (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`), unless its priority rises (for example a headroom warning turning critical).
 
-Other platform heads-ups still file one row per event; they move onto the same model in a later release.
+Every platform heads-up now follows this model. Four need a person and never expire: a poisoned execution, a collided Workspace inbox, a gitignore change notice and a Workspace problem report. The platform never ends them; only a person does. See [Operating Room](../operations/operating-room.md).
 
 **Permission requests.** An agent refused for lacking a permission an admin grants (such as changing another agent's schedules) is told to raise a question whose title includes the permission id, for example `schedules.manage`. Answering it grants nothing: an admin grants the permission on the agent's Settings tab, where the open requests are listed. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 
