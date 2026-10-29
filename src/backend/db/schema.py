@@ -305,6 +305,9 @@ TABLES = {
             -- ent#862: AAuth peer identity that triggered this execution,
             -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
             a2a_caller_identity TEXT,
+            -- #3380: the /chat thread this turn answers, so a watchdog-claimed
+            -- result can still write its reply there. NULL = not a /chat turn.
+            chat_session_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

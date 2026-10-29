@@ -4931,6 +4931,24 @@ def _migrate_idempotency_claim_token(cursor, conn):
     )
     conn.commit()
 
+
+def _migrate_execution_chat_session_id(cursor, conn):
+    """#3380 — a /chat turn names the thread it answers.
+
+    One nullable column on `schedule_executions`. The #2944 watchdog claims a
+    finished turn whose waiting connection a restart destroyed; without the
+    thread it could finalize the row but not write the reply into it.
+    Nullable, no backfill: old rows stay NULL and recover as before.
+    PostgreSQL half: Alembic `0105_execution_chat_session_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "chat_session_id",
+        "ALTER TABLE schedule_executions ADD COLUMN chat_session_id TEXT",
+    )
+    conn.commit()
+
 def _migrate_metric_points_restatement(cursor, conn):
     """trinity-enterprise#729 — a corrected value restates its row (R45).
 
@@ -5909,4 +5927,5 @@ MIGRATIONS = [
     ("a2a_caller_identity", _migrate_a2a_caller_identity),
     ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
+    ("execution_chat_session_id", _migrate_execution_chat_session_id),
 ]

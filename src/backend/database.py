@@ -1940,6 +1940,14 @@ class DatabaseManager:
         """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
         return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
 
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """#3380 — name the /chat thread this turn answers."""
+        return self._schedule_ops.set_execution_chat_session(execution_id, chat_session_id)
+
+    def get_execution_chat_session_id(self, execution_id: str):
+        """#3380 — the /chat thread a turn answers, or None."""
+        return self._schedule_ops.get_execution_chat_session_id(execution_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
