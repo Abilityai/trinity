@@ -114,8 +114,8 @@ def route(live, monkeypatch):
         return {"state": "new"}
     monkeypatch.setattr(idem.db, "idempotency_claim", _claim, raising=False)
     monkeypatch.setattr(idem.db, "idempotency_complete",
-                        lambda scope, key, execution_id, snapshot: store.__setitem__(key, snapshot), raising=False)
-    monkeypatch.setattr(idem.db, "idempotency_release", lambda scope, key: store.pop(key, None), raising=False)
+                        lambda scope, key, execution_id, snapshot, **_: store.__setitem__(key, snapshot), raising=False)
+    monkeypatch.setattr(idem.db, "idempotency_release", lambda scope, key, **_: store.pop(key, None), raising=False)
     monkeypatch.setattr(idem, "resolve_and_validate_execution", lambda eid, agent: {"id": eid} if eid else None)
 
     app = FastAPI()
