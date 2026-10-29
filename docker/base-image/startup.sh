@@ -724,10 +724,11 @@ if [ -f "/home/developer/.trinity/setup.sh" ]; then
     _setup_rc=$?
     [ "$_setup_rc" -ne 0 ] && echo "Warning: setup.sh had errors (continuing startup)"
     # #4002: record the outcome for the compatibility report (F-014). Atomic.
-    printf '{"exit_code": %d, "started_at": "%s", "finished_at": "%s"}\n' \
+    if printf '{"exit_code": %d, "started_at": "%s", "finished_at": "%s"}\n' \
         "$_setup_rc" "$_setup_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        > /home/developer/.trinity/setup-status.json.tmp 2>/dev/null && \
+        > /home/developer/.trinity/setup-status.json.tmp 2>/dev/null; then
         mv -f /home/developer/.trinity/setup-status.json.tmp /home/developer/.trinity/setup-status.json 2>/dev/null || true
+    fi
     unset _setup_started _setup_rc
 else
     # #4002: no hook, no run — drop a stale status so the report does not show an old one.
