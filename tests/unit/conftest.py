@@ -117,6 +117,23 @@ _BASE_IMAGE_STR = str(_BASE_IMAGE_DIR)
 if _BASE_IMAGE_STR not in sys.path:
     sys.path.insert(0, _BASE_IMAGE_STR)
 
+# #4052: unit files share `tests/conftest.py` helpers through a bare
+# `from conftest import ensure_schema_tables` / `stubbed_modules`, which
+# resolves by sys.path order. ~60 unit files insert `tests/unit` at
+# `sys.path[0]` (for `_route_census`, `_gate_world`, ...), and once one of
+# them runs first, `conftest` resolved to THIS file: it was executed a second
+# time as a top-level module (signal guard, sys.modules baselines and all) and
+# the import failed. Pin the name to `tests/conftest.py` by path instead. The
+# loader is lazy, so the file still runs only on first use, as before; a run
+# where pytest already loaded `tests/conftest.py` as `conftest` keeps it.
+if "conftest" not in sys.modules:
+    _parent_conftest_spec = importlib.util.spec_from_file_location(
+        "conftest", Path(__file__).resolve().parent.parent / "conftest.py"
+    )
+    _parent_conftest_spec.loader = importlib.util.LazyLoader(_parent_conftest_spec.loader)
+    sys.modules["conftest"] = importlib.util.module_from_spec(_parent_conftest_spec)
+    _parent_conftest_spec.loader.exec_module(sys.modules["conftest"])
+
 
 def _preload_backend_utils():
     """Install src/backend/utils as the canonical `utils` package for unit

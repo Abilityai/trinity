@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4052_conftest_name_pinned.py",
+      "feature": "#4052",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4052: a bare `from conftest import ...` in a unit file resolves to tests/conftest.py even with tests/unit at sys.path[0], and tests/unit/conftest.py is never executed a second time as top-level `conftest`."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
