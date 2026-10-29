@@ -723,7 +723,7 @@ def add_participant(current_user, room_id: str, agent_name: str,
         if active_agents >= MAX_PARTICIPANTS:
             raise RoomError(422, "participant_cap",
                             f"At most {MAX_PARTICIPANTS} agent participants")
-    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso())
+    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso(), rejoin=True)
     _post_system(room_id, f"{agent_name} joined the room.")
     return {"room_id": room_id, "agent": agent_name, "added": True}
 

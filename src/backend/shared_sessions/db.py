@@ -148,21 +148,36 @@ def close_room(room_id: str, stop_reason: str, now: str) -> bool:
 
 # --- participants ------------------------------------------------------------
 
-def add_participant(room_id: str, kind: str, identity: str, role: str, now: str) -> None:
-    """Idempotent — re-adding an existing participant is a no-op (the UNIQUE
-    triple is the claim), so a retried create doesn't 500."""
+def add_participant(room_id: str, kind: str, identity: str, role: str, now: str,
+                    *, rejoin: bool = False) -> None:
+    """Idempotent — re-adding an ACTIVE participant is a no-op (the UNIQUE
+    triple is the claim), so a retried create doesn't 500.
+
+    A participant who LEFT holds that triple too. ``rejoin=True`` (the
+    moderator's explicit add only) clears `left_at` and takes the new role and
+    join time, keeping the row; without it they stay out, so an @mention cannot
+    undo a moderator's removal (ent#959)."""
     from sqlalchemy.exc import IntegrityError
     stmt = text(
         "INSERT INTO enterprise_room_participants "
         "(room_id, kind, identity, role, joined_at, last_read_seq) "
         "VALUES (:room, :kind, :identity, :role, :now, 0)"
     )
+    reactivate = text(
+        "UPDATE enterprise_room_participants "
+        "SET left_at = NULL, role = :role, joined_at = :now "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity "
+        "AND left_at IS NOT NULL"
+    )
+    params = {"room": room_id, "kind": kind, "identity": identity,
+              "role": role, "now": now}
     try:
         with get_engine().begin() as conn:
-            conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
-                                "role": role, "now": now})
+            conn.execute(stmt, params)
     except IntegrityError:
-        pass
+        if rejoin:
+            with get_engine().begin() as conn:
+                conn.execute(reactivate, params)
 
 
 def list_participants(room_id: str) -> list[dict]:

@@ -541,6 +541,28 @@ def test_departed_agent_is_not_woken(rooms_db, allow_all, fake_execute):
     assert out["woke"] == [] and calls == []
 
 
+def test_a_removed_agent_that_is_added_back_is_a_member_again(rooms_db, allow_all, fake_execute):
+    """trinity-enterprise#959 sign-off: a re-add answered `added` and posted
+    "joined the room" while the INSERT hit the participant row's UNIQUE triple
+    and changed nothing, so `left_at` stayed set. Once membership honoured
+    `left_at`, the agent it said had rejoined got the uniform 404 on fetch and
+    post, and was never woken. Only the moderator's add rejoins: an @mention of
+    a removed agent still never wakes it (`test_departed_agent_is_not_woken`)."""
+    from shared_sessions import service, db as rdb
+    calls, _ = fake_execute
+    room = _mk_room()
+    agent_a = _user(agent_name="agent-a")
+    service.remove_participant(_user(), room["id"], "agent-a")
+
+    assert service.add_participant(_user(), room["id"], "agent-a", role="scribe")["added"] is True
+
+    p = rdb.get_participant(room["id"], "agent", "agent-a")
+    assert p["left_at"] is None and p["role"] == "scribe"
+    _run(service.post_message(agent_a, room["id"], "back again"))  # 404s while it is out
+    out = _run(service.post_message(_user(), room["id"], "@agent-a welcome back"))
+    assert out["woke"] == ["agent-a"] and len(calls) == 1
+
+
 def test_a_reply_already_running_lands_after_its_waker_is_removed(rooms_db, allow_all, fake_execute,
                                                                    monkeypatch):
     """trinity-enterprise#959 round 2 (Codex re-review): agent-a posts `@agent-b`
