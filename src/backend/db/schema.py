@@ -2040,6 +2040,9 @@ TABLES = {
             response_snapshot TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            -- #3298: the claimer's owner token; attach/complete/release are
+            -- compare-and-set on it, so a reclaimed claim's late writer is a no-op.
+            claim_token TEXT,
             PRIMARY KEY (scope, idempotency_key)
         )
     """,

@@ -893,6 +893,7 @@ CREATE TABLE idempotency_keys (
     response_snapshot TEXT,          -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,                 -- #3298: in_flight owner token; writes are CAS on it
     PRIMARY KEY (scope, idempotency_key)
 );
 CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);

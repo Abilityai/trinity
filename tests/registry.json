@@ -6516,6 +6516,18 @@
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
     },
     {
+      "file": "unit/test_3298_stale_claim_reclaim.py",
+      "feature": "#3298",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "idempotency",
+        "unit"
+      ],
+      "description": "An in_flight idempotency claim left by a dead process, on real SQLite. Store: a claim returns its owner token and a duplicate sees the holder's; after a reclaim the original's late attach/complete/release changes nothing and the owner's own writes still land; a stale-token or completed-row reclaim matches nothing; a pre-#3298 token-less claim is still reclaimable. Admission through the real begin_task_idempotency/_reclaim_stale_claim: inside the lease (timeout + slot buffer) a retry is still 409; past it a claim with no run or an ended run is reclaimed and the retry dispatches; a running or succeeded run keeps its claim; the lease follows the agent's timeout; an unreadable timeout and a sched: key hold; two racing retries start one run; the slow original cannot complete over the reclaimer. Eleven of the seventeen fail on the pre-fix code."
+    },
+    {
       "file": "unit/test_3651_recovery_companion_close.py",
       "feature": "#3651",
       "added": "2026-10-22",
