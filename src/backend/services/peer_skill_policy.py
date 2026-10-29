@@ -121,16 +121,22 @@ async def enforce(agent_name: str, *, requester, request_text: Optional[str],
     await _audit_refusal(caller=caller, callee=agent_name, skills=names,
                          mcp_key_id=getattr(requester, "mcp_key_id", None),
                          reason=REFUSED_CODE, execution_id=execution_id)
-    noun = "the skill" if len(names) == 1 else "the skills"
+    one = len(names) == 1
+    noun = "the skill" if one else "the skills"
     # No slash before a name: this text is echoed into rows and replies and
-    # must never read as a request to run a skill (the gate's own rule).
+    # must never read as a request to run a skill (the gate's own rule). The
+    # matcher reads a name anywhere, so a mere mention lands here too: the text
+    # says how to send one, and never sends the caller to widen a standing
+    # permission — the calling model is told to do what it says (trinity#3949).
     raise SkillGateRefused(
         403, REFUSED_CODE,
-        f"Not run: {caller} may not run {noun} {', '.join(names)} on {agent_name}. "
-        f"A peer may run the skills an agent declares itself; {noun} "
-        f"{'was' if len(names) == 1 else 'were'} assigned from the skills library and "
-        f"need{'s' if len(names) == 1 else ''} a grant. An instance admin can grant it "
-        f"in {caller}'s Permissions panel.",
+        f"Not run, nothing was delivered: this message names {noun} {', '.join(names)}, "
+        f"which {caller} may not run on {agent_name} "
+        f"({'it was' if one else 'they were'} assigned from the skills library and "
+        f"need{'s' if one else ''} a grant). If you only meant to mention "
+        f"{'it' if one else 'them'}, write {'its name' if one else 'their names'} without "
+        f"the leading slash{'' if one else 'es'} and send again. Do not carry out "
+        f"{'its' if one else 'their'} steps another way.",
         skills=names, caller=caller, agent=agent_name)
 
 
