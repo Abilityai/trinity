@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4051_per_worker_unit_db.py",
+      "feature": "#4051",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4051: each unit-test process, every xdist worker included, defaults TRINITY_DB_PATH / TRINITY_RETAINED_RESULTS_DIR / TRINITY_CHAT_SESSION_FILE to its own pid, not the xdist controller's (bites under CI's -n auto)."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",

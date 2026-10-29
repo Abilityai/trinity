@@ -63,9 +63,26 @@ import tempfile as _tempfile  # noqa: E402
 # Per-process tmp path so two concurrent `pytest unit/` invocations on the
 # same dev machine don't race on the same SQLite file. The DB is initialized
 # eagerly at conftest load (via the `import database` preload below), so the
-# race window without this PID suffix would be measurable. CI runs one
-# process per matrix job and is unaffected either way.
-os.environ.setdefault(
+# race window without this PID suffix would be measurable.
+#
+# #4051: per PROCESS, including each xdist worker. The xdist controller loads
+# this conftest first, so a plain `setdefault` stamped the CONTROLLER's pid and
+# every worker inherited it: under `-n auto` all workers shared one SQLite file.
+# A value this conftest defaulted is recorded in `_DEFAULTED_ENV`, and any
+# process that inherits it re-derives the value from its own pid. A value set
+# from outside (a developer's own TRINITY_DB_PATH) is still left alone.
+_DEFAULTED_ENV = "TRINITY_UNIT_TESTS_DEFAULTED_ENV"
+_defaulted_by_us = set(filter(None, os.environ.get(_DEFAULTED_ENV, "").split(",")))
+
+
+def _pin_per_process(name: str, value: str) -> None:
+    if name in os.environ and name not in _defaulted_by_us:
+        return
+    os.environ[name] = value
+    _defaulted_by_us.add(name)
+
+
+_pin_per_process(
     "TRINITY_DB_PATH",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-tests-{os.getpid()}.db"),
 )
@@ -73,17 +90,18 @@ os.environ.setdefault(
 # `~/.trinity/retained-results`; the `/api/task` and `/api/chat` handlers write
 # there on every terminal, so a handler test would otherwise leave files in the
 # developer's real home. Same per-process isolation as the DB path.
-os.environ.setdefault(
+_pin_per_process(
     "TRINITY_RETAINED_RESULTS_DIR",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-retained-{os.getpid()}"),
 )
 # #2958: `reset_session()` and a successful chat turn write/clear the chat
 # session keep-set marker (default `/home/developer/.trinity/chat-session.json`).
 # Same per-process isolation; tests that assert on it point it at tmp_path.
-os.environ.setdefault(
+_pin_per_process(
     "TRINITY_CHAT_SESSION_FILE",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-chat-session-{os.getpid()}.json"),
 )
+os.environ[_DEFAULTED_ENV] = ",".join(sorted(_defaulted_by_us))
 
 # Ensure src/backend is importable before test modules are collected.
 #
