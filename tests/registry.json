@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4085_scheduler_subscription_id.py",
+      "feature": "#4085",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "subscriptions"
+      ],
+      "description": "#4085: scheduler-created executions (cron, reminder, retry, skipped) snapshot the agent's live subscription assignment into schedule_executions.subscription_id and count toward SUB-004 window_5h/window_7d; no live assignment records NULL."
+    },
+    {
       "file": "unit/test_4001_no_auto_maintenance.py",
       "feature": "#4001",
       "added": "2026-10-27",
