@@ -988,6 +988,8 @@ _TABLE_MODULES = {
     "db/operator_queue.py": "OperatorQueueOperations, behind the accessors above",
     "db/queue_mentions.py": "QueueMentionOperations: person tags are queue rows, behind the accessors above",
     "db/skill_gate_requests.py": "exists() subqueries joining the gate's own ask rows; returns none of their columns",
+    "db/schedules/executions.py": "get_execution_receipts (trinity-enterprise#935 Tier-0): the ask ids and count one "
+    "execution raised, by execution_id; returns no other column of the row",
 }
 #: Every observer the ask sink hands the ended rows to (`ask_service._ended`).
 _ENDING_OBSERVERS = {

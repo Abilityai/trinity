@@ -928,9 +928,41 @@ _SIB_READ = (
     "a non-sensitive read a sibling may make only inside its reach: an edge target or an agent "
     "it spawned (agent_may_reach, trinity-enterprise#629)")
 
+_SIB_EVAL = (
+    "a sibling reads only inside its reach (agent_may_reach on a path agent), and the read scope "
+    "then narrows any agent key to its own rows and the pairs it is a side of "
+    "(evaluation_read_service.scope_for / sees_row, trinity-enterprise#937)")
+_EVAL_READ_937 = (
+    "a READ of evaluation rows (trinity-enterprise#937); an agent key is narrowed to its own "
+    "rows and the pairs it is a side of (evaluation_read_service.scope_for, test_937_routes), "
+    "never sees a judge's score, and read != write (test_935_write_fence)")
+
 # Reviewed uses an agent key may make WITHOUT a recognised self-gate.
 # key -> ("METHOD /full/path", reason, sibling)
 AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
+    # Evaluation reads (trinity-enterprise#935, #937, #938).
+    "routers/evaluations.py::get_execution_evaluation": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/evaluation",
+        "a READ of the agent's own Tier-0 grade (trinity-enterprise#935); the same "
+        "uniform-404 rule as its other evaluation reads, and read != write — the "
+        "Tier-0 writer is the sweep, reachable by no route (test_935_write_fence)",
+        _SIB_EVAL),
+    "routers/evaluations.py::get_execution_evaluations": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/evaluations",
+        "a READ of the agent's own Tier-0, judge and pair rows for one run "
+        "(trinity-enterprise#938); the singular route's gate and projection — an agent "
+        "key reads findings and reason codes, never a score (test_938_run_evaluations)",
+        _SIB_EVAL),
+    "routers/evaluations.py::aggregate_evaluations": (
+        "GET /api/evaluations/aggregate", _EVAL_READ_937, _SIB_EVAL),
+    "routers/evaluations.py::failed_evaluations": (
+        "GET /api/evaluations/failed", _EVAL_READ_937, _SIB_EVAL),
+    "routers/evaluations.py::evaluation_trend": (
+        "GET /api/evaluations/trend", _EVAL_READ_937, _SIB_EVAL),
+    "routers/evaluations.py::evaluation_chain": (
+        "GET /api/evaluations/chain/{execution_id}", _EVAL_READ_937, _SIB_EVAL),
+    "routers/evaluations.py::agent_evaluation_summary": (
+        "GET /api/agents/{agent_name}/evaluations/summary", _EVAL_READ_937, _SIB_EVAL),
     # The agent's own runtime surface (#2996 §3.4 regression set).
     "routers/agents.py::agent_heartbeat": (
         "POST /api/agents/{agent_name}/heartbeat",

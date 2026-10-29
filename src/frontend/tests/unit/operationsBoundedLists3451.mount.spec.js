@@ -23,6 +23,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import { ref, nextTick } from 'vue'
 
 const route = { query: { tab: 'needs-response' } }
+// Operations mounts the Evaluations and Outcomes tabs, whose charts load uPlot,
+// which reads matchMedia at import (jsdom has none).
+vi.mock('../../src/components/TrendLineChart.vue', () => ({ default: { render: () => null } }))
 vi.mock('vue-router', () => ({
   useRoute: () => route,
   useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),

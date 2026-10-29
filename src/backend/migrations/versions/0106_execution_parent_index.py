@@ -7,14 +7,14 @@ The evaluation chain read walks descendants by
 ``schedule_executions.parent_execution_id IN (...)`` one level at a time.
 Index only: no column, no backfill.
 
-Revision ID: 0101_execution_parent_index
-Revises: 0100_delegation_link
+Revision ID: 0106_execution_parent_index
+Revises: 0105_delegation_link
 """
 from alembic import op
 
 
-revision = "0101_execution_parent_index"
-down_revision = "0100_delegation_link"
+revision = "0106_execution_parent_index"
+down_revision = "0105_delegation_link"
 branch_labels = None
 depends_on = None
 
