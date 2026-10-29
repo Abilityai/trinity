@@ -659,11 +659,26 @@ def _end(rows: Iterable[Mapping], reason: Optional[str]) -> int:
     return len(ask_service.clear_platform(ids, reason=reason or ask_service.CONDITION_CLEARED).rows)
 
 
+def _refuses_person_kind(agent_name: str, kind: str, verb: str) -> bool:
+    """#4053: a must-act kind (`clears="person"`) is ended by a person only.
+    Refused here, at runtime, whatever the call site looks like: the AST scan
+    in `test_no_clear_site_names_a_person_kind` sees only a literal kind."""
+    k = KINDS.get(kind)
+    if k is None or k.clears != CLEARS_PERSON:
+        return False
+    logger.error("[platform-alerts] refusing to %s %s/%s: a person must act on this kind",
+                 verb, agent_name, kind)
+    return True
+
+
 def clear(agent_name: str, kind: str, key: Any = None, *, reason: Optional[str] = None) -> int:
     """The condition behind `(agent, kind, key)` cleared: the platform ends its
     pending row (ent#611 ledger, `disposed_by = 'platform'`). A row a person
-    ended first is untouched. Returns the number ended; never raises."""
+    ended first is untouched. A `clears="person"` kind is never ended (#4053).
+    Returns the number ended; never raises."""
     try:
+        if _refuses_person_kind(agent_name, kind, "clear"):
+            return 0
         subject = subject_for(kind, key)
         if subject is None:
             return 0
@@ -677,9 +692,12 @@ def clear(agent_name: str, kind: str, key: Any = None, *, reason: Optional[str] 
 def reconcile(agent_name: str, kind: str, live_keys: Iterable[Any]) -> int:
     """End every pending row of `kind` for `agent_name` whose key is not in
     `live_keys` — for an emitter that knows the full current set rather than
-    each clear. Returns the number ended; never raises."""
+    each clear. A `clears="person"` kind is never ended (#4053). Returns the
+    number ended; never raises."""
     try:
         _kind(kind)
+        if _refuses_person_kind(agent_name, kind, "reconcile"):
+            return 0
         live = {subject_for(kind, key) for key in live_keys}
         from database import db
         rows = db.list_operator_queue_items(agent_name=agent_name, status="pending", limit=1000)

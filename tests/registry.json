@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4053_person_kind_never_platform_ended.py",
+      "feature": "#4053",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4053: platform_alerts.clear/reconcile refuse every clears=\"person\" kind at runtime (ends nothing, returns 0, logs ERROR), however the kind is passed; the row stays pending; a hook kind still clears."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
