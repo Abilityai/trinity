@@ -253,7 +253,9 @@ def test_finish_cannot_address_a_tier0_row(db_backend):
 
 def test_an_invalid_judge_json_never_reaches_the_table(db_backend):
     from database import db
-    from db.evaluations import JudgeJsonError
+    # The class the facade's own module raises: another file may have reloaded
+    # `db.evaluations`, and the facade keeps the module it was built with.
+    JudgeJsonError = type(db._evaluation_ops).finish_tier1_row.__globals__["JudgeJsonError"]
     seed_exec("ex-1")
     tier0("ex-1")
     claim = db.claim_tier1_row("ex-1", model=MODEL)

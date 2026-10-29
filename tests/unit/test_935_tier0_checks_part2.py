@@ -342,7 +342,11 @@ def test_a_signal_failure_never_moves_the_headline(db_backend, stub_world):
 def test_the_skill_lookup_failing_is_a_skip_and_the_row_is_written(db_backend, monkeypatch):
     monkeypatch.setattr(t0, "_staged_values", lambda: [])
 
-    import services.skill_service as ss
+    # The evaluator imports `skill_service` from sys.modules at call time;
+    # `import a.b as c` can hand back a stale package attribute after another
+    # file reloaded the module, so patch the copy the evaluator will read.
+    import importlib
+    ss = importlib.import_module("services.skill_service")
 
     def broken(name):
         raise OSError("clone gone")

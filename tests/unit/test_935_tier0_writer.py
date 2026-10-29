@@ -106,7 +106,10 @@ def test_a_racing_duplicate_insert_becomes_the_update(db_backend, monkeypatch):
     (a second one deadlocks SQLite against itself, the ent#366 finding)."""
     from sqlalchemy import insert
     from db.tables import agent_evaluations
-    from db.evaluations import EvaluationOperations
+    from database import db
+    # Patch the class the facade actually holds: another file may have
+    # reloaded `db.evaluations`, and the facade keeps the module it was built with.
+    EvaluationOperations = type(db._evaluation_ops)
 
     seed_exec("ex-3")
     real = EvaluationOperations._tier0_update
