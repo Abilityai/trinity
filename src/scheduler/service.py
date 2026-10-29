@@ -14,7 +14,6 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
 from apscheduler.jobstores.memory import MemoryJobStore
 from apscheduler.events import EVENT_JOB_MAX_INSTANCES, JobExecutionEvent
 from croniter import croniter
@@ -36,6 +35,9 @@ from .locking import get_lock_manager, LockManager
 # unchanged. Source of truth: src/backend/services/failure_classifier.py,
 # mirrored byte-identically at src/scheduler/failure_classifier.py.
 from .failure_classifier import is_auth_failure as _is_auth_failure
+# #3940: every user schedule registers a trigger whose next fire time never
+# goes backwards, whatever APScheduler answers at a DST transition.
+from .cron_trigger import MonotonicCronTrigger
 from .utils import to_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -399,7 +401,7 @@ class SchedulerService:
 
             # Create timezone-aware trigger
             timezone = pytz.timezone(schedule.timezone) if schedule.timezone else pytz.UTC
-            trigger = CronTrigger(timezone=timezone, **trigger_kwargs)
+            trigger = MonotonicCronTrigger(timezone=timezone, **trigger_kwargs)
 
             # Add the job
             self.scheduler.add_job(
@@ -947,7 +949,7 @@ class SchedulerService:
         if triggered_by != "schedule":
             return True, effective_message
 
-        decision = await self._run_pre_check(schedule.agent_name)
+        decision = await self._run_pre_check(schedule.agent_name, schedule)
         if decision is None:
             return True, effective_message
 
@@ -1169,7 +1171,7 @@ class SchedulerService:
                 "error": error_msg if actual_status == ExecutionStatus.FAILED else None
             })
 
-    async def _run_pre_check(self, agent_name: str) -> Optional[dict]:
+    async def _run_pre_check(self, agent_name: str, schedule=None) -> Optional[dict]:
         """Run the agent's optional pre-check hook (#454, SCHED-COND-001).
 
         Calls the backend's internal endpoint, which `docker exec`s the
@@ -1179,6 +1181,13 @@ class SchedulerService:
         Trinity execs the path directly, so the interpreter is chosen
         by the file's shebang. The scheduler never opens its own HTTP
         edge to agents — backend remains the orchestrator.
+
+        #3966: ``schedule`` is the schedule that is firing. Its id, name and
+        message go in the request body, and the backend exports them to the
+        hook as ``TRINITY_SCHEDULE_ID`` / ``_NAME`` / ``_MESSAGE``. One hook
+        gates every cron schedule on the agent, so without them it cannot
+        tell which one it is gating. Without a schedule the request carries
+        no body, exactly as before.
 
         Contract translation (backend → caller):
           - ``hook_present == False``               → return ``None`` (fire as usual)
@@ -1194,11 +1203,20 @@ class SchedulerService:
         if config.internal_api_secret:
             headers["X-Internal-Secret"] = config.internal_api_secret
 
+        body = None
+        if schedule is not None:
+            body = {
+                "schedule_id": schedule.id,
+                "schedule_name": schedule.name,
+                "schedule_message": schedule.message,
+            }
+
         try:
             async with httpx.AsyncClient() as client:
                 response = await client.post(
                     f"{config.backend_url}/api/internal/agents/{agent_name}/pre-check",
                     headers=headers,
+                    json=body,
                     # #1022: configurable (agent-side hook is 60s; default 70s headroom)
                     timeout=config.pre_check_timeout,
                 )

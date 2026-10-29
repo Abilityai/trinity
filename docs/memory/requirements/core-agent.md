@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)
@@ -915,11 +916,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the

@@ -44,7 +44,13 @@ with the code. Inside the Workspace such a member keeps the **team view**: signe
 (`agent_page.canvas_audience_for`), the agent's whole activity, loop runs included
 (`agent_page._client_scope`), voice and model choice — the narrower client view is for people
 without an account (decided at #837; nothing new is exposed, a `user` saw all of it on Agent Detail
-before). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
+before). **The code page is not a second door for a platform account (#3922).** An address with a
+platform account that `/login` can sign in (`service.platform_login_admits`: a `users` row, and
+either a password or the email login would admit it — email login on, the policy allows codes,
+allow-listed; an allow-list row alone is not an account) gets no portal session: after its code verifies, `/auth/verify` answers
+409 `platform_login_required`, and the Workspace sends it to `/login` with a return path. Every
+platform login (`auth._finalizeLogin`) ends a leftover Workspace client sign-in, since `authHeader`
+prefers a held portal token. Detail: [workspace-only-role.md](../feature-flows/workspace-only-role.md). Their `/ws` socket carries only the kinds the Workspace reads, each cut to the fields it
 reads (`WORKSPACE_WS_EVENT_TYPES` / `_FIELDS`, `architecture/integrations.md`). An agent whose owner
 is Workspace-only is refused at the rooms door.
 
@@ -98,6 +104,25 @@ the **per-tab** portal token from the store, not shared `localStorage`, so a cli
 signing in in another tab cannot strand an operator's Workspace tab on an expired JWT.
 Full model and the verdict table:
 [workspace-session-signout.md](../feature-flows/workspace-session-signout.md).
+
+**The open thread catches up on the 20 s tick; the sidebar is not the only reader of
+the list (#3439).** `PortalConversation.loadThread` runs on mount and on a thread switch,
+and the Workspace has no history poll — so a row the agent wrote after the person's turn
+ended (a completion report, an approval outcome #3709, a recovered lost turn #2319, a
+background task's reply) used to badge the open chat on the shell's 20 s tick while the
+transcript stayed stale until a reload. The conversation now watches its OWN row in the
+`threads` prop the shell already hands it, compared as the string
+`` `${message_count}|${last_message_at}` `` (`portalThreadTail.tailSignature`) — never the
+object, which `decorate()` re-creates every tick, and never `unread`, which counts assistant
+rows only and is reset by the turn-end mark-read. When it moves and no turn or call is in
+flight it reads the newest rows (`unread + 8`, capped at the server's 50), adopts the server
+id onto its own id-less local question (or that question renders twice), appends the unseen
+ids through `historyRow` as an arrival (#2624), and emits `thread-caught-up` — a distinct
+event, because `sessions-changed` also drives the #2579 title-settle cycle — which the shell
+answers with mark-read only if the thread is the one on screen. The ent#747 ask-result poll
+rides the same `reconcileTail`. `startAsksPoll` also runs the tick body on
+`visibilitychange` → visible. See
+[workspace-open-thread-catch-up.md](../feature-flows/workspace-open-thread-catch-up.md).
 
 **Membership is a DB fact; container state is a projection onto the card (#2196).** The
 roster is built from `agent_ownership` / `agent_sharing` and is **never** filtered by
@@ -535,6 +560,10 @@ renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it*
 never a send — the ruled lesser control) and for `PortalWork`, the tab body (Now · Earlier; since the ent#610 2026-09-30 ruling Work draws no ask — one `PortalAsksWaitingLine` ("N ask(s) waiting on you · Open in Inbox", counted from `openAsks`, to `asksHomeRoute(agent)`), which Info also mounts for every principal; the ask row itself renders in the Inbox, in its raising chat's thread as a tile when `raised_in_turn` (placed by server time; the chat also reads its own chat-turn asks, `GET …/asks?chat_id=`, with no ended window, merged under the store's fresher rows), and in a project's Needs you — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule (in the Workspace through `workspaceAskBadge`, which drops the operator-only "Unconfirmed" since ent#610 PR A2), and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — since trinity-enterprise#816 (the 2026-10-07 ruling) an ask to a role several people fill is ONE row delivered to each of them: "addressed to the viewer" is `addressed_to_email = viewer` OR `viewer ∈ resolved_to`, in SQL for the list and its count (`db/operator_queue._resolved_to_contains`) and in `_is_addressed_to` for every per-ask door (answer, dismiss, discuss, context — a non-addressee keeps the uniform 404); the projection carries `shared`, the first answer wins (a later one is `already_resolved`), the others read `ended_by = someone_else` + `answered_by` (that co-addressee's name, else address; never an operator's), and Dismiss/Discuss are refused 422 `shared_ask` and hidden in `PortalAsks` until they are per person; a shared ask has no single addressee, so it attaches to no chat and lives in the Inbox only — `pending-only` keeps a project's Needs you to what is still open; a chat's ended chat-turn asks are its own read, not this window — and the answer is person-only; since PR B the projection also names `proposal`, the exact action an approval asks the person to approve (rendered read-only by `QueueProposal`), while `context` stays off; since trinity-enterprise#610 PR A2 (§3g L7) a selected ask's context is its own lazy read, `GET …/asks/{id}/context` → `asks/service.get_ask_context` (the run only after the agent / live-window / audience checks on the agent-written `execution_id`; an origin excerpt only from a chat TURN's thread (`triggered_by = public`) verified as the viewer's, else the ask's own chat only for an in-turn ask — a background ask has no chat origin; no `cost` or `execution_id` — stricter than Work's projection by decision), rendered by `PortalAskContext` below the pane's card;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
+**Own rows on a shared agent (ent#875):** the roster unions owned and shared agents, so the Work
+read (`work/service.get_work`, and the `/activity` lines) narrows every agent the viewer does not
+own to their own rows — by user id, or by email as requester or spawned-for client — in the WHERE
+before each LIMIT (`_own_rows`; owner of the rule: `security.md` §5d).
 
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal

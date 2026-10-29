@@ -439,7 +439,8 @@ async def import_agent_data(
                 ),
             )
 
-        scope = idempotency_service.make_agent_scope(agent_name)
+        # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+        scope = idempotency_service.make_caller_scope(agent_name, current_user)
         decision = idempotency_service.begin(scope, idempotency_key)
         if decision.replay:
             if decision.in_flight:

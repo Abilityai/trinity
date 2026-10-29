@@ -54,7 +54,7 @@ class TestSqliteMigration:
         from db import migrations
 
         names = [name for name, _ in migrations.MIGRATIONS]
-        assert names[-1] == "nevermined_delegations"
+        assert names.count("nevermined_delegations") == 1
 
     def test_second_active_row_for_one_agent_is_rejected(self, tmp_path):
         conn = _migrated(tmp_path)

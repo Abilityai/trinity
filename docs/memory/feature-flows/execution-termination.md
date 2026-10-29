@@ -497,6 +497,8 @@ Claude Code handles SIGINT gracefully, finishing its current operation before ex
 
 The pgid is captured at spawn time (before `process.wait()` reaps the parent — after that, `os.getpgid(pid)` raises) and stored in the registry entry metadata so termination can signal the full tree even after the parent has exited. See `docker/base-image/agent_server/utils/subprocess_pgroup.py` for the helper functions (`capture_pgid`, `terminate_process_group`, `signal_process_tree`, `drain_reader_threads`).
 
+**Only a group the child leads (#4064)**: every registered runtime child (Claude, Codex, Gemini, headless) is spawned with `start_new_session=True` and registered with its spawn-captured `pgid`, pinned by an AST guard in `tests/unit/test_4064_gemini_process_group.py`. Gemini was the exception until #4064: its child shared the agent server's group, so `terminate()` resolved the pgid lazily to the server's own group — the container's PID-1 shell group, so a cancel could stop the whole container. As a backstop, `_signal_group_or_process` calls `os.killpg` only when `pgid == process.pid`, `pgid > 0` and `pgid != os.getpgrp()`; any other pgid (the caller's own group, 0, negative, or stale after a pid reuse) is refused with a WARNING and only the pid is signalled, leaving descendants to the cgroup sweep.
+
 ### Slow-path drain observability (#586)
 
 `drain_reader_threads` emits a structured `[METRIC] drain_outcome` log line once per call **only on the slow path** — when reader threads are still alive after the initial grace window and the post-kill grace is engaged. The fast path (reader exits during initial grace) emits **no** metric: silence is the success signal, so any emission is operationally meaningful.
@@ -555,6 +557,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 
 | Date | Changes |
 |------|---------|
+| 2026-10-16 | **Below the owner tier a caller ends only their own turn** (trinity-enterprise#875): `POST /api/agents/{name}/executions/{id}/terminate` resolves BOTH `execution_id` and `task_execution_id` before the service is called; for a share holder each must be a row of this agent whose `source_user_id` is theirs, and a missing row is a refusal, not a pass (uniform 404 `Execution not found in agent`). Owner, admin and agent keys are unchanged. See [security.md §5d](../architecture/security.md). |
 | 2026-03-22 | Fix: `/api/chat` path now passes `execution_id` to agent (was only `/api/task`). Added `execution_id` to `ChatRequest` model, `execute()` runtime interface, and backend chat payload. Terminate endpoint defaults `task_execution_id` to `execution_id` for DB update. |
 | 2026-01-13 | Added "Live" button entry point (lines 213-232) - green badge with pulsing dot for running tasks, navigates to Execution Detail page for real-time monitoring |
 | 2026-01-13 | Updated: Unified execution ID flow (backend passes to agent), status preservation in error handlers, frontend polling improvements, cancelled status styling |

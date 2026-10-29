@@ -100,7 +100,7 @@ const emit = defineEmits(['saved'])
 
 const MIN_TURNS = 1
 const MAX_TURNS = 500
-const DEFAULT_TURNS = 50
+const DEFAULT_TURNS = 200
 
 const agentsStore = useAgentsStore()
 

@@ -326,6 +326,30 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   agent may optimise for, and client free text handed verbatim to the agent being
   criticised is a prompt-injection path into it. See
   [workspace-ratings.md](../feature-flows/workspace-ratings.md).
+- **Grader identity is an allowlist projection (ent#781)**: every read — the three GETs
+  and the POST echo — goes through one router projection, `_to_response` →
+  `_redact_for_agent_principal`, which serves the row as stored only to a **human who
+  operates the row's agent** (`_is_machine_principal` is false AND the agent is in
+  `_operator_for`: owner or admin per `can_user_share_agent`, ANDed with
+  `agent_may_reach(manage=True)`). Everyone else gets `evaluator` from
+  `services/evaluation_read_service.redact_evaluator`, a pure function (no SQL, no
+  HTTP): the exact names `platform:tier0` / `platform:tier0:pair` pass,
+  `platform:tier1:<model>` reads `platform:tier1`, any other `kind:rest` reads `kind`
+  when the kind is an identity-free token (`[a-z0-9_-]+`), and a value with no kind or
+  a malformed kind (`grader@example.com:admin`) reads `unknown`. That kind-grammar check
+  is a deliberate dev-only addition to the function copied from the evaluation
+  integration branch; a merge of that branch must keep it. It replaced a two-prefix denylist
+  (`workspace:` / `operator:`) that let the admin route's `admin:<username>` — an email
+  for an email-login admin — reach the graded agent, other machine keys and shared
+  non-owners verbatim. Fail-closed both ways: an unrecognised scope is a machine, a
+  failed operator lookup is "not an operator", and the projection's default operator set
+  is empty. The SQL and the stored rows are unchanged (no migration); the policy lives
+  above persistence. Scope is the `evaluator` field — the free-form `judge`/`checks`
+  an admin submits are returned as before. Tests: `test_937_projection.py` (the issue's
+  regression, adopted verbatim), `test_937_ent781_census.py` (an AST census of every
+  statically named call to the three writer APIs, each driven through the real writer
+  and read back as a machine) and `test_ent781_read_routes.py` (the output contract,
+  operator/non-operator/machine readers, all three GETs over HTTP).
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.

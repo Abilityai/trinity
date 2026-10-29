@@ -4,6 +4,7 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-10-20 | **#3825 — change the password in the app**: `PUT /api/users/me/password`, the boot fingerprint that stops a restart reverting it, the per-user session cutoff, `has_password` on `/api/users/me`, and the Settings → General panel. See "Changing the Password" below. |
 | 2026-02-23 | **Security Fixes M-003 and M-005**: (1) Removed plaintext password fallback - all passwords must be bcrypt hashed (dependencies.py:24-34). (2) Added Redis-based rate limiting to `/token` endpoint - 5 attempts per 10 minutes per IP, returns HTTP 429 when exceeded (auth.py:24-95, 127-161). Updated error handling table. |
 | 2026-01-23 | Initial documentation |
 
@@ -264,52 +265,23 @@ def get_redis_client():
     return _redis_client
 
 
-# Check rate limit function (lines 44-71)
-def check_login_rate_limit(client_ip: str) -> bool:
-    """
-    Check if login attempts from IP are within rate limit.
-    Returns True if allowed, raises HTTPException if rate limited.
-    """
-    r = get_redis_client()
-    if r is None:
-        # Redis unavailable - allow login but log warning
-        return True
+# Split per-account / per-IP failure counters (#591)
+def _account_key(account): return f"login_attempts_acct:{account.strip().lower()}"
+def _ip_key(client_ip): return f"login_attempts_ip:{client_ip}"
 
-    key = f"login_attempts:{client_ip}"
-    attempts = r.get(key)
-    if attempts and int(attempts) >= LOGIN_RATE_LIMIT:
-        ttl = r.ttl(key)
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Too many login attempts. Try again in {ttl} seconds."
-        )
-    return True
+def check_login_rate_limit(client_ip: str, account: Optional[str] = None) -> bool:
+    """429 when either bucket is exhausted; fail-open when Redis is down."""
+    # per-IP:      LOGIN_IP_LIMIT=30 failures / LOGIN_IP_WINDOW=300s
+    # per-account: LOGIN_ACCOUNT_LIMIT=5 failures / LOGIN_ACCOUNT_WINDOW=900s
 
-
-# Record login attempt function (lines 74-95)
-def record_login_attempt(client_ip: str, success: bool):
-    """
-    Record a login attempt. Failed attempts increment counter.
-    Successful logins clear the counter.
-    """
-    r = get_redis_client()
-    if r is None:
-        return
-
-    key = f"login_attempts:{client_ip}"
-    if success:
-        r.delete(key)  # Clear attempts on successful login
-    else:
-        pipe = r.pipeline()
-        pipe.incr(key)
-        pipe.expire(key, LOGIN_RATE_WINDOW)
-        pipe.execute()
+def record_login_attempt(client_ip: str, success: bool, account: Optional[str] = None):
+    """Failure increments both buckets (with their windows); success deletes both."""
 ```
 
 **Rate Limiting Behavior**:
-- **Redis key**: `login_attempts:{client_ip}`
-- **Threshold**: 5 failed attempts within 10 minutes triggers lockout
-- **Reset**: Successful login clears the attempt counter
+- **Redis keys**: `login_attempts_ip:{ip}` (30 failures / 5 min) and `login_attempts_acct:{account}` (5 failures / 15 min), counted separately per client address and per account (#591)
+- **`{ip}` is the canonical client address** (trinity-enterprise#873): resolved once per request by `utils/client_ip.ClientAddressMiddleware` before the route runs, so behind the bundled nginx or Cloudflare Tunnel it is the visitor's address, not the proxy container's. Forwarded headers count only from a trusted proxy; a direct caller to `:8000`, an agent or the dev Vite proxy is keyed on its own socket address. Details: `architecture/security.md` §1a
+- **Reset**: Successful login clears both counters
 - **Graceful degradation**: If Redis is unavailable, rate limiting is bypassed with warning logged
 
 #### POST /api/token endpoint (lines 127-172)
@@ -322,13 +294,15 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     Used for admin login (username 'admin' with password).
     Regular users should use email authentication.
 
-    Rate limited: 5 attempts per 10 minutes per IP (M-005).
+    Rate limited (#591): per-account 5 / 15 min plus per-IP 30 / 5 min.
     """
-    # Get client IP for rate limiting
+    # The canonical client address (ent#873): the middleware already rewrote
+    # request.client from a trusted proxy's forwarded identity.
     client_ip = request.client.host if request.client else "unknown"
+    account = (form_data.username or "").strip().lower()
 
-    # Check rate limit before processing (M-005)
-    check_login_rate_limit(client_ip)
+    # Check rate limit before processing (#591)
+    check_login_rate_limit(client_ip, account=account)
 
     # Block login if setup is not completed
     if not is_setup_completed():
@@ -341,7 +315,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
     user = authenticate_user(form_data.username, form_data.password)
     if not user:
         # Record failed attempt
-        record_login_attempt(client_ip, success=False)
+        record_login_attempt(client_ip, success=False, account=account)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -349,7 +323,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
         )
 
     # Record successful login (clears attempt counter)
-    record_login_attempt(client_ip, success=True)
+    record_login_attempt(client_ip, success=True, account=account)
 
     # Update last login timestamp
     db.update_last_login(user["username"])
@@ -602,6 +576,25 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 10080  # 7 days
                     └─────────────┘
 ```
 
+## Changing the Password (#3825)
+
+**Frontend**: `components/settings/ChangePasswordPanel.vue` on Settings → General, rendered when `/api/users/me` returns `has_password: true` (a boolean only). `stores/auth.js::changePassword` calls the route and swaps the returned token in for ours.
+
+**Backend**: `routers/users.py::change_my_password` (`PUT /api/users/me/password`, `require_interactive`) → `services/password_service.py::change_own_password`:
+
+| Step | Refusal |
+|------|---------|
+| Account has a usable hash | 409 `no_password` (email-only account; it never gains one) |
+| Hash is bcrypt | 409 `password_not_changeable` (legacy plaintext; restart with `ADMIN_PASSWORD` to migrate) |
+| Under 5 wrong current passwords / 15 min (`pwchange:fail:{username}`, its own bucket) | 429 `too_many_attempts` |
+| Current password verifies | 400 `invalid_current_password` (counted) |
+| `validate_password_strength` | 422 `weak_password` + `errors` |
+| New ≠ current | 422 `password_unchanged` |
+
+Then `db.update_user_password`, a fresh token, and `dependencies.revoke_user_sessions(username, keep_jti=<fresh jti>)`: Redis `trinity:user_sessions_revoked:{username}` = `{"at", "at_ms", "keep"}`, TTL = token lifetime + 60 s. `get_current_user`, `decode_token` (WS) and `/api/auth/validate` refuse a token whose `iat_ms` ≤ `at_ms` (or, lacking `iat_ms`, whose `iat` falls in or before the cutoff second) unless its `jti` is `keep`; a token with no `iat` is refused only for a user with a cutoff. Event-loopback tokens are exempt (not sessions). Wrong current passwords: the attempt is reserved with an atomic Redis `INCR` before the password is checked and given back when it is right, so racing workers cannot exceed the cap. The response reports `other_sessions_signed_out` (False when Redis was down) and `admin_env_stale` (`.env` still holds the old `ADMIN_PASSWORD`: the MCP server's legacy password login and scripts that read it keep the old value). **MCP API keys are not sessions** — the cutoff does not reach them. With `revoke_api_keys: true` the change also revokes the keys the person minted (`user` / `ops` / `portal_delegate`, never an agent's, the system or a connector key; ids taken from the caller's own list); the response carries `api_keys_revoked` and `api_keys_active`, and the panel names the keys still working with a link to Settings → MCP Keys. Audit: `password_changed` (details: `other_sessions_signed_out`, revoked key ids, active count) / `password_change_failed`; details carry no password.
+
+**Boot** (`database._ensure_admin_user` / `_ensure_admin_user_engine` → `utils/admin_identity.env_apply_decision`): `system_settings['admin_env_fingerprint']` holds `{"username", "hash": bcrypt(ADMIN_PASSWORD)}` for the value boot last applied or found in force. Boot re-applies `ADMIN_PASSWORD` only when it does not verify against that fingerprint; when the stored hash differs but the fingerprint matches, it prints that the value was not re-applied and leaves the password alone. A missing or corrupt fingerprint re-applies, as before #3825. **Recovery**: put a NEW value in `.env` and restart — putting back the value already applied does nothing. The key is reserved: `GET /api/settings` omits it, `GET /api/settings/{key}` reads it as absent, and `PUT`/`DELETE` refuse it (422).
+
 ## Token Structure
 
 JWT token payload for admin login:
@@ -609,13 +602,17 @@ JWT token payload for admin login:
 {
   "sub": "admin",
   "exp": 1735689600,
-  "mode": "admin"
+  "mode": "admin",
+  "jti": "<random>",
+  "iat": 1735084800
 }
 ```
 
 - `sub`: Username (always "admin" for admin login)
 - `exp`: Expiration timestamp (7 days from creation)
 - `mode`: Authentication mode ("admin", "email", or "prod")
+- `jti`: per-token id for logout revocation (#187)
+- `iat`: issue time, read by the per-user session cutoff (#3825)
 
 ## Storage Locations
 
@@ -697,7 +694,7 @@ JWT token payload for admin login:
 - Login before setup completed: Should redirect to `/setup`
 - Empty password: Submit button should be disabled
 - Token expiry: After 7 days, should redirect to `/login`
-- Rate limited (M-005): After 5 failed attempts, returns 429 with TTL countdown
+- Rate limited (#591): 5 failures per account / 15 min or 30 per client address / 5 min return 429 with TTL countdown; the address is the canonical client (ent#873), not the proxy's
 - Redis unavailable (M-005): Rate limiting bypassed with warning logged
 - Invalid hash format (M-003): Returns 401 same as wrong password (no information leakage)
 

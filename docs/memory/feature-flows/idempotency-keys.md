@@ -17,13 +17,13 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 
 | Boundary | Scope | Key source | File |
 |----------|-------|-----------|------|
-| `POST /api/agents/{name}/chat` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:148` |
-| `POST /api/agents/{name}/task` | `agent:{name}` | optional `Idempotency-Key` header | `routers/chat.py:1259` |
+| `POST /api/agents/{name}/chat` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/chat.py:148` |
+| `POST /api/agents/{name}/task` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/chat.py:1259` |
 | `POST /api/internal/execute-task` | `agent:{name}` | header (set by scheduler) | `routers/internal.py:251` |
 | `POST /api/webhooks/{token}` | `webhook:{token}` | header **or auto-derived** `(token, body_hash)` | `routers/webhooks.py:248` |
-| `POST /api/agents/{name}/fan-out` | `agent:{name}` | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
+| `POST /api/agents/{name}/fan-out` | `agent:{name}:caller:{principal}` (ent#830) | optional `Idempotency-Key` header | `routers/fan_out.py:134` |
 | Scheduler dispatch | `agent:{name}` | `sched:{execution_id}` (deterministic) | `src/scheduler/service.py:1042` |
-| MCP `chat_with_agent` / `fan_out` | `agent:{name}` | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:284,746` |
+| MCP `chat_with_agent` / `fan_out` | `agent:{name}:caller:{principal}` (sent as the header) | `mcp:{sha256(args)}` (deterministic) | `src/mcp-server/src/tools/chat.ts:284,746` |
 
 **Invariant #18 contract:** *Any new trigger type must accept an idempotency key before merge.* The dedup layer is fail-open, so the cost of wiring it is one `begin`/`complete`/`fail` triple.
 
@@ -33,7 +33,7 @@ Enforcement lives at the **router** layer, not solely in `TaskExecutionService`,
 - **DB layer**: `db/idempotency.py` — `IdempotencyOperations` (no HTTP, no key-derivation logic).
 - **Service layer**: `services/idempotency_service.py` — key derivation + `begin`/`complete`/`fail` orchestration over the DB layer.
 - **Router layer**: each boundary calls `begin()` → dispatch → `complete()` or `fail()`.
-- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:4231-4257`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:1045`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check).
+- **Facade**: `database.py` exposes `idempotency_claim` / `idempotency_attach_execution` / `idempotency_complete` / `idempotency_release` / `idempotency_purge_expired` (`database.py:4231-4257`), backed by `IdempotencyOperations` constructed in `__init__` (`database.py:1045`). #3245 adds `idempotency_discard_completed_if_execution` (the compare-and-delete below) and `get_execution_failure_stamp` (a `(status, error, completed_at)` read on `schedule_executions`, used by the replay-liveness check). #3298 adds `idempotency_reclaim_in_flight` and an optional `claim_token=` on attach/complete/release.
 
 ### DB layer — `db/idempotency.py`
 The table's `PRIMARY KEY (scope, idempotency_key)` **is** the atomic claim. Atomicity relies on SQLite database-level write locking, which holds across processes (multiple uvicorn workers + the standalone scheduler share one DB file).
@@ -49,6 +49,7 @@ Time math uses `iso_cutoff(hours)` and `utc_now_iso()` from `utils/helpers.py` (
 
 ### Service layer — `services/idempotency_service.py`
 - **Scope derivation**: `make_agent_scope(agent_name)` → `agent:{name}` (`idempotency_service.py:45`); `make_webhook_scope(token)` → `webhook:{token}` (`idempotency_service.py:50`).
+- **Caller scope (trinity-enterprise#830)**: a CLIENT-chosen `Idempotency-Key` is claimed under `make_caller_scope(agent, current_user)` → `agent:{name}:caller:{principal}`, where `caller_principal` is `agent:{name}` for an agent key, `user:{id}` for a person (browser JWT or user-scoped MCP key — one principal across both), and `key:{mcp_key_id}` for any other machine credential. A client-chosen key identifies a request only together with the client that chose it; `agent:{name}` alone did not carry the caller. Header-key boundaries: `/chat`, `/task`, `fan_out`, `voip`, `reminders` (header only), brain-orb actions, agent-data import, git bind. Platform-derived keys (operator resume, x402 `derive_payment_key`, portal effect keys, a reminder's input key, the scheduler's `sched:` keys) stay on `agent:{name}`, which a header key can no longer reach. `metric_points` already appended `:user:{username}`; `make_inline_auth_scope` (#848) folds the body-verified email. Migration: a retry spanning the deploy lands in the new scope, so within that one 24 h window it can run once more instead of replaying.
 - **Key derivation**:
   - `derive_webhook_key(token, body)` — `idempotency_service.py:55`. `auto:{sha256(token + b"\x00" + body)}`. Header-independent so a naive sender that retries the same POST resolves to the same key; distinct bodies get distinct keys.
   - Schedule key — `sched:{execution_id}`, built by the scheduler itself (`src/scheduler/service.py`, which cannot import the backend). The scheduler creates one execution_id per fire and reuses it across an HTTP-level resend of the same dispatch (the #525 network-blip case); intentional #271 retries create a fresh execution_id → fresh key → not suppressed.
@@ -83,7 +84,7 @@ Idempotency covers the whole batch — a duplicate replays the original `FanOutR
 
 ## MCP Layer (Invariant #13 — third surface in sync)
 - `src/mcp-server/src/tools/chat.ts:23` — `deriveMcpIdempotencyKey(parts)` returns `mcp:{sha256(parts.join(" "))}`.
-- `chat_with_agent` derives the key over `[caller, agent, "chat"|"task", model, "sync"|"async", message]` (`chat.ts:284`) and passes it into `apiClient.task(...)` / `apiClient.chat(...)`.
+- `chat_with_agent` derives the key over `[caller, agent, "chat"|"task", model, "sync"|"async", message]`, plus `turn:{id}` when the platform-stamped caller turn (`X-Trinity-Execution-Id`, #2392) names one (#3296), and passes it into `apiClient.task(...)` / `apiClient.chat(...)`. **The turn is identity; report-back is not.** The same text from a later turn is a new delegation (its own run, reporting into its own turn); a repeat from the same turn still replays. **A scheduler retry is the same turn:** it is a new execution row, so `{id}` is the retry chain's original (`delegationTurnScope` reads the caller's own row, `GET /api/agents/{caller}/executions/{turn}` → `retry_of_execution_id`), and a retried scheduled run replays attempt 1's children instead of running them twice; an unreadable row falls back to the turn itself. The model-typed `execution_id` never enters the key (Invariant #18: a re-send that only adds, drops or changes report-back keeps its key, so it cannot run twice), and with no turn (`manual`, user keys) the key is byte-identical to the pre-#3296 one. A typed-arm replay (no header, two typed ids on one key) gets `REPORT_BACK_TYPED_REPLAY_NOTE`, since it reports into the parent the first call named. A replayed receipt whose report-back carried a note gets `REPORT_BACK_REPLAY_NOTE` ("repeats an earlier identical call from this same turn: no new run was started") instead of the fresh default.
 - `fan_out` derives the key over `[caller, agent, "fan_out", model, JSON.stringify(tasks)]` (`chat.ts:746`) and passes it into `apiClient.fanOut(...)`.
 - **Replay marker (#3245)**: `client.ts` `markIdempotentReplay` copies `X-Idempotent-Replay: true` into the body as `idempotent_replay: true` on `task()` / `chat()` 200 replays, and the 409 in-flight receipt (`inFlightReplayReceipt`) carries it too. The client's own timeout-recovery receipts carry no field — absence is not proof of a fresh dispatch. `runAgentChat`'s receipt re-wording keeps the field.
 - `src/mcp-server/src/client.ts` forwards the key as the `Idempotency-Key` header on the `chat` / `task` / `fanOut` methods (`client.ts:485,498-501`, `client.ts:647,656-658`, `client.ts:762,787-789`). A transport-level retry of a byte-identical MCP call within 24h dedupes.
@@ -95,19 +96,22 @@ DDL in `db/schema.py:1098` (fresh installs); migration `_migrate_idempotency_key
 
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,            -- "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,            -- "agent:{name}[:caller:{principal}]" | "webhook:{token}"
     idempotency_key TEXT NOT NULL,  -- caller-supplied or derived
     execution_id TEXT,              -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,           -- 'in_flight' | 'completed'
     response_snapshot TEXT,         -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,               -- #3298: the in_flight claim's owner token (NULL on pre-#3298 rows)
     PRIMARY KEY (scope, idempotency_key)
 );
 ```
 
 ### Lifecycle of a row
 `claim` (INSERT `in_flight`) → optional `attach_execution` (set `execution_id`) → `complete` (status→`completed`, store `response_snapshot`) **or** `release` (DELETE the `in_flight` row so a failed first attempt can retry — never deletes a `completed` row). A row older than the 24h TTL is treated as expired and re-claimed as new.
+
+**Owner token and stale-claim reclaim (#3298).** `claim` writes a fresh `claim_token` and returns it (and, on a duplicate, the holder's token + `updated_at`); `IdempotencyDecision` carries both. `attach_execution` / `complete` / `fail` write only while the decision's token still owns the row (`claim_token =` or `IS NULL` for a pre-#3298 row), so a request whose claim was reclaimed cannot overwrite or delete the reclaimer's row. Intent keys (ent#665) and `upgrade_snapshot` pass no token and write by `(scope, key)` as before. `dispatch_admission_service._reclaim_stale_claim` runs at the `/chat` and `/task` seam before `_reclaim_ended_receipt`: an `in_flight` claim whose `updated_at` is older than the **lease** — the agent's execution timeout + `SLOT_TTL_BUFFER`, the horizon the slot reaper uses for a dispatch, which bounds the slowest legitimate `begin → complete` window (a sync turn) — is compare-and-deleted on the token it was seen with and claimed again once, **only** when its run has ended or is gone (#3245 liveness) or it never named one. A live run keeps its 409 until the watchdog ends it; a **succeeded** run keeps it too (re-dispatching finished work is the duplicate the key prevents). `sched:` keys are never reclaimed; any doubt holds. Logs `[#3298] claim_reclaim … cas=deleted|no_match|error` / `[#3298] claim_hold …`. **Rolling deploy:** a worker still on pre-#3298 code writes `complete` / `release` by `(scope, key)` with no token, so during the overlap it can overwrite or delete a row a new worker has just reclaimed. The window is the rollout itself, and it needs a claim that is already past its lease; it closes when the last old worker drains.
 
 ## Side Effects
 - **Audit log**: every replay hit writes a platform-audit `EXECUTION / idempotent_replay` event with `idempotency_key`, `execution_id`, and `in_flight` flag (chat/task/webhook/fan-out replay blocks). See [audit-trail.md](audit-trail.md).
@@ -122,6 +126,7 @@ CREATE TABLE idempotency_keys (
 | Duplicate, prior claim still running | `409` (`request_in_progress` for chat/task, `detail` string for webhook), with original `execution_id` where known |
 | Duplicate, prior claim completed | `200`/`202` replay of stored `response_snapshot` + `X-Idempotent-Replay: true` |
 | Duplicate on `/chat` or `/task`, stored receipt's run ended `failed`/`cancelled`/`skipped` or its row is gone (#3245) | Row compare-and-deleted, key re-claimed: a **new** run, no replay header |
+| Duplicate on `/chat` or `/task` hitting an `in_flight` claim left by a dead process, past the lease, run ended/gone or never created (#3298) | Claim compare-and-deleted on its token, key re-claimed: a **new** run. Inside the lease, or while the run is live or succeeded: 409 as before |
 | Same, but the `failed` error starts `lease_expired:` and the hold window (`completed_at` + timeout + 300 s) is still open | Replay of the original receipt (logged `receipt_hold`); fresh once the window ends |
 | Same, but the key is `sched:…` | Replay (the scheduler's own key is never reclaimed) |
 | Same, but the request names a gated skill with a gate record | The gate's answer (pending / `409 request_<state>`) — the receipt is not checked |
@@ -164,4 +169,5 @@ Unit coverage: `tests/unit/test_3245_async_replay_after_failure.py` (verdict mat
 | Date | ID | Change |
 |------|-----|--------|
 | 2026-06-02 | RELIABILITY-006 (#525), PR #1019 (commit 1bb8f271) | Initial implementation — `idempotency_keys` table + migration, `db/idempotency.py`, `services/idempotency_service.py`, wiring at `/chat`, `/task`, `/api/internal/execute-task`, `/api/webhooks/{token}`, `/api/agents/{name}/fan-out`, the scheduler, and MCP `chat_with_agent`/`fan_out`; 24h purge in the cleanup service. Established Architectural Invariant #18. |
+| 2026-10-23 | #3298 | An `in_flight` claim has an owner token (`claim_token`, both tracks); attach/complete/release are compare-and-set on it, and `/chat` + `/task` admission reclaims a claim left by a dead process once its lease (timeout + slot buffer) has passed and its run ended, vanished or never existed. |
 | 2026-10-06 | #3245 | A dispatch receipt replays only while its run can still succeed: `execution_liveness` + `discard_replay_of` (service), `discard_completed_if_execution` + `get_execution_failure_stamp` (DB), `_reclaim_ended_receipt` at the `/chat` and `/task` admission seams, a `lease_expired` hold window, and the MCP `idempotent_replay` marker. |

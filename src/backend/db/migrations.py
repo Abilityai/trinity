@@ -4912,6 +4912,43 @@ def _migrate_execution_conversation_key(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_execution_chat_session_id(cursor, conn):
+    """#3380 — a /chat turn names the thread it answers.
+
+    One nullable column on `schedule_executions`. The #2944 watchdog claims a
+    finished turn whose waiting connection a restart destroyed; without the
+    thread it could finalize the row but not write the reply into it.
+    Nullable, no backfill: old rows stay NULL and recover as before.
+    PostgreSQL half: Alembic `0106_execution_chat_session_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "chat_session_id",
+        "ALTER TABLE schedule_executions ADD COLUMN chat_session_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_idempotency_claim_token(cursor, conn):
+    """#3298 — an idempotency claim names its owner.
+
+    One nullable column on `idempotency_keys`. A claim left `in_flight` by a dead
+    process can now be reclaimed safely: attach/complete/release compare-and-set
+    on the token, so the original request, if it was only slow, cannot overwrite
+    or delete the reclaimer's row. Nullable, no backfill: a pre-existing claim
+    has no token and is matched by `IS NULL`.
+    PostgreSQL half: Alembic `0105_idempotency_claim_token`.
+    """
+    _safe_add_column(
+        cursor,
+        "idempotency_keys",
+        "claim_token",
+        "ALTER TABLE idempotency_keys ADD COLUMN claim_token TEXT",
+    )
+    conn.commit()
+
 def _migrate_metric_points_restatement(cursor, conn):
     """trinity-enterprise#729 — a corrected value restates its row (R45).
 
@@ -5690,6 +5727,31 @@ def _migrate_agent_skill_gates(cursor, conn):
     conn.commit()
 
 
+def _migrate_a2a_caller_identity(cursor, conn):
+    """abilityai/trinity-enterprise#862 — store the AAuth peer identity that
+    triggered an inbound A2A execution so it is visible on the execution row.
+    Additive: NULL for all existing rows. Mirrored by Alembic 0103_a2a_caller_identity."""
+    _safe_add_column(
+        cursor, "schedule_executions", "a2a_caller_identity",
+        "ALTER TABLE schedule_executions ADD COLUMN a2a_caller_identity TEXT",
+    )
+    conn.commit()
+
+
+
+def _migrate_agent_sync_state_git_stats_at(cursor, conn):
+    """#4000 — `agent_sync_state.git_stats_at`: when the agent last measured
+    git_dir_bytes / pack_count / loose_objects (canary RD-04 ages it). Nullable,
+    no backfill: an old base image never sends it, and RD-04 falls back to
+    `last_sync_at` while it is NULL. Mirrored by Alembic
+    0104_agent_sync_state_git_stats_at."""
+    _safe_add_column(
+        cursor, "agent_sync_state", "git_stats_at",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_stats_at TEXT",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5862,4 +5924,8 @@ MIGRATIONS = [
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
     ("nevermined_delegations", _migrate_nevermined_delegations),
+    ("a2a_caller_identity", _migrate_a2a_caller_identity),
+    ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
+    ("idempotency_claim_token", _migrate_idempotency_claim_token),
+    ("execution_chat_session_id", _migrate_execution_chat_session_id),
 ]

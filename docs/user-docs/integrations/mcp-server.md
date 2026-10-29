@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 168 tools across 38 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 163 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 169 tools across 38 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 164 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -72,7 +72,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `skills.ts` | 14 | Skill management and assignment (including skill sets: `list_skill_sets`, `unassign_skill_set`), the per-agent skill gate map (`list_skill_gates`, `set_skill_gate`, `clear_skill_gate` — see [Approvals](../automation/approvals.md#gated-skill-approvals)), plus the skill-runner tools `run_skill` and `list_runnable_skills` (enterprise-gated — return `"disabled"` in community builds) |
 | `skill_sources.ts` | 6 | Skills-library source management — `list_skill_sources`, `register_skill_source` (idempotent on the repository URL), `update_skill_source`, `delete_skill_source`, `sync_skill_source`, `sync_skill_library`. Admin only: shown to an admin's user-scoped key and the system agent, never to agent-scoped or connector keys; the backend admits the same callers |
 | `tags.ts` | 5 | Agent tagging |
-| `systems.ts` | 5 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default) — see [System Manifest](../collaboration/system-manifest.md) |
+| `systems.ts` | 6 | `deploy_system`, `list_systems`, `restart_system`, `get_system_manifest`, `teardown_system` (needs a matching entitlement; previews by default), `apply_system` (reconciles a live instance to a manifest; previews by default; a person's key only) — see [System Manifest](../collaboration/system-manifest.md) |
 | `subscriptions.ts` | 6 | Subscription management |
 | `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
 | `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |

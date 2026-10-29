@@ -293,13 +293,61 @@ def email_has_access(email: str | None) -> bool:
         return False
 
 
+# #3922 — what `portal_signin_verify` returns instead of a token for a platform
+# account: it signs in at `/login`, never as an outside client.
+PLATFORM_LOGIN_REQUIRED = object()
+
+
+def platform_login_admits(email: str | None) -> bool:
+    """#3922 — True when this address has a platform account that `/login`
+    can sign in: a `users` row exists for it, AND either
+
+    * it has a password (`POST /api/token` takes the email for an account with
+      a password hash — the admin, `authenticate_user`), or
+    * the platform email login (`POST /api/auth/email/verify`) would admit it:
+      email login on, the login policy allows codes (the pair
+      `GET /api/auth/mode` reports as `email_code_login_enabled`), and the
+      address is allow-listed (the #2381 re-check that route applies).
+
+    Such an address is a platform account, so the Workspace door sends it to
+    `/login` rather than minting a client session that resolves as
+    `is_platform=False`. The user row is required: an allow-list row is not
+    an account (sharing and access-request approval wrote allow-list rows for
+    outside clients before trinity-enterprise#837, and those remain), and
+    sending such a client to `/login` would create a user for them there.
+    Anything else, including a lookup error, keeps the client door: a `/login`
+    that cannot admit the person is a dead end."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from config import EMAIL_AUTH_ENABLED
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+        if not user:
+            return False
+        if user.get("password"):
+            return True
+        setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+        if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+            return False
+        return bool(core_db.is_email_whitelisted(addr))
+    except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
+        logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
+        return False
+
+
 def portal_signin_request(email: str | None) -> str | None:
     """Step 1: if the email has portal access, mint a 6-digit login code and
     return it (the caller dispatches the email). Returns None otherwise — the
     router ALWAYS returns the same generic body, so this never reveals whether
-    an email has access (#186 enumeration discipline)."""
+    an email has access (#186 enumeration discipline).
+
+    #3922: a platform account gets a code too, even with nothing shared to it,
+    so the verify step can send it on to `/login` instead of leaving it waiting
+    for a code that never comes."""
     email = (email or "").strip().lower()
-    if not email or not email_has_access(email):
+    if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -308,9 +356,13 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None) -> str | None:
+def portal_signin_verify(email: str | None, code: str | None):
     """Step 2: verify the code AND re-check access, then mint a portal session
-    token (a verified email, no platform account). Returns None on any failure."""
+    token (a verified email, no platform account). Returns None on any failure.
+
+    #3922: a platform account returns `PLATFORM_LOGIN_REQUIRED` and gets no
+    token. It is decided only after the code verifies, so only the owner of the
+    inbox learns that the address has an account."""
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -318,6 +370,8 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
+    if platform_login_admits(email):
+        return PLATFORM_LOGIN_REQUIRED
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token
@@ -5182,6 +5236,29 @@ def _human_size(n: int) -> str:
     return f"{n / 1024 / 1024:.1f} MB"
 
 
+def _age_phrase(iso, *, now: datetime | None = None) -> str:
+    """"just now" / "N minutes|hours|days ago" for an ISO timestamp, or ""
+    when it is missing or unreadable (#4072 — lets the agent tell a file shared
+    just now from one shared weeks ago). Naive input is UTC; a time slightly
+    ahead of `now` reads "just now". `now` defaults to the current UTC time."""
+    if not iso or not isinstance(iso, str):
+        return ""
+    try:
+        ts = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    secs = ((now or datetime.now(timezone.utc)) - ts).total_seconds()
+    if secs < 60:
+        return "just now"
+    for unit, size in (("day", 86400), ("hour", 3600), ("minute", 60)):
+        if secs >= size:
+            n = int(secs // size)
+            return f"{n} {unit}{'' if n == 1 else 's'} ago"
+    return "just now"
+
+
 def _legacy_migration_is_safe(agent_name: str, email: str) -> bool:
     """True iff exactly one of this agent's shared emails claims the legacy dir.
 
@@ -5392,8 +5469,10 @@ async def _read_file_b64(container, path: str) -> str | None:
 async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
     """Build (images, image_names, doc_files) for a chat turn. Images are attached
     as vision blocks ONLY when the message references them (size/count-capped);
-    otherwise they're listed by name so the client can ask. Documents are always
-    listed so the agent can read them on demand. Best-effort; never raises."""
+    otherwise they're listed by name so this person can ask. Documents are always
+    listed — as files this person has shared over time, not as this turn's
+    attachment (#4072) — so the agent can open one on demand. Best-effort; never
+    raises."""
     try:
         uploads = await _read_inbox(agent_name, email)
     except Exception as e:  # noqa: BLE001
@@ -5424,7 +5503,7 @@ async def _collect_inbox_for_turn(agent_name: str, email: str, message: str):
 
 
 async def collect_inbox_context(agent_name: str, email: str, message: str) -> tuple[str, list[dict]]:
-    """How ONE agent is told about ONE client's files for ONE turn.
+    """How ONE agent is told about ONE person's files for ONE turn.
 
     Returns ``(manifest_prefix, images)``:
 
@@ -5437,6 +5516,18 @@ async def collect_inbox_context(agent_name: str, email: str, message: str) -> tu
     * ``images`` — vision blocks for ``execute_task(images=…)``, attached only
       when this turn actually references them ("only when told", #78).
 
+    **The inbox is per person per agent, not per chat (#4072).** Every file this
+    person ever shared with the agent is listed on every turn, in the 1:1 chat
+    and in every room, so the sentence must never say the person "has uploaded"
+    them: an agent reads that literally and opens a file from three
+    conversations ago to answer an unrelated question. Every branch therefore
+    hedges provenance ("not necessarily with this message") and makes use
+    conditional on the latest request, and each document carries its age
+    (`_age_phrase`) so "summarise this" can still resolve to the file shared
+    just now. The per-turn attachment set that would make an unhedged "attached
+    to this message" true exists only for 1:1 chat (#3265); splitting attached
+    from standing files on it is a follow-up.
+
     **This is the one place that composition lives (#2794).** It was inline in
     `portal_chat`, which meant the 1:1 conversation was the only surface that
     ever told an agent a file existed: a multi-agent ROOM built its turn prompt
@@ -5448,25 +5539,33 @@ async def collect_inbox_context(agent_name: str, email: str, message: str) -> tu
 
     Best-effort in both halves — a listing or read failure yields ``("", [])``
     rather than raising, because a file the agent cannot be told about must
-    still not cost the client their turn.
+    still not cost the person their turn.
     """
     images, image_names, doc_files = await _collect_inbox_for_turn(agent_name, email, message)
     parts: list[str] = []
     if images:
         parts.append(
-            "The client's image(s) are shown to you directly below as images — "
+            "This person's image(s) from your inbox are shown to you directly below as images — "
+            "use them only if the latest request is about them; "
             "do NOT open/cat/read image files as text: " + ", ".join(image_names)
         )
     elif image_names:
         parts.append(
-            "The client has image(s) in your inbox (ask to see one and it'll be shown to you; "
-            "do NOT read image files as text): " + ", ".join(image_names)
+            "This person also has image(s) in your inbox that are not attached to this message "
+            "(possibly from other conversations) — do NOT read image files as text; "
+            "if they ask about one, have them name it and it will be shown to you: "
+            + ", ".join(image_names)
         )
     if doc_files:
-        listing = ", ".join(f"{d['filename']} ({_human_size(d['size_bytes'])})" for d in doc_files)
+        def _item(d):
+            age = _age_phrase(d.get("uploaded_at"))
+            return f"{d['filename']} ({_human_size(d['size_bytes'])}{', shared ' + age if age else ''})"
+        listing = ", ".join(_item(d) for d in doc_files)
         parts.append(
-            f"The client has uploaded these files to your inbox at `{_client_inbox(email)}/` — "
-            f"read any that are relevant: {listing}"
+            f"Files this person has shared with you over time, in `{_client_inbox(email)}/` — "
+            "not necessarily with this message, and possibly from other conversations. "
+            "Open one only when the latest request refers to it (by name, or as \"this\"/\"the file\" "
+            f"about one shared just now): {listing}"
         )
     if not parts:
         return "", images

@@ -199,7 +199,9 @@ export function createNeverminedTools(
         "(remaining cents, expiry, purchases used) — live from Nevermined, " +
         "'unknown' if Nevermined is unreachable. Agent keys: own agent only.",
       parameters: z.object({
-        agent_name: z.string().describe("Agent whose Nevermined spending to read"),
+        agent_name: z.string().describe(
+          "Agent whose Nevermined spending to read. An agent-scoped key may only pass its own name.",
+        ),
       }),
       execute: async (
         params: { agent_name: string },

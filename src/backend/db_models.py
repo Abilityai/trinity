@@ -313,6 +313,9 @@ class ScheduleExecution(BaseModel):
     open_canvas_id: Optional[str] = None
     # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
     chain_depth: Optional[int] = None
+    # ent#862 — verified AAuth peer identity of an inbound A2A caller
+    # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
+    a2a_caller_identity: Optional[str] = None
 
 
 # =========================================================================
@@ -1191,6 +1194,8 @@ class AgentHealthDetail(BaseModel):
     agent_name: str
     aggregate_status: str
     last_check_at: Optional[str] = None
+    # #3950: a stored reading older than this many seconds reads `unknown`.
+    stale_after_seconds: Optional[int] = None
     docker: Optional[DockerHealthCheck] = None
     network: Optional[NetworkHealthCheck] = None
     business: Optional[BusinessHealthCheck] = None
@@ -1278,6 +1283,9 @@ class FleetHealthStatus(BaseModel):
     enabled: bool = True
     last_check_at: Optional[str] = None
     summary: FleetHealthSummary
+    # #3950: a stored reading older than this many seconds reads `unknown`
+    # (and is counted so); 3× the check interval.
+    stale_after_seconds: Optional[int] = None
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
     sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707
