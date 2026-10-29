@@ -19,7 +19,7 @@ the real schema (`tests/db_harness.py`, both dialects):
     inaccessible or missing node without returning it;
   * `tier0_gate_outcome` is shared by the analytics rollup (moved, not copied);
   * the dead `latest_for_execution` helper is gone (N3);
-  * `0101_execution_parent_index` indexes `schedule_executions.parent_execution_id`
+  * `0106_execution_parent_index` indexes `schedule_executions.parent_execution_id`
     on both tracks.
 """
 from __future__ import annotations
@@ -352,10 +352,10 @@ def test_fresh_schema_declares_the_index():
 def test_alembic_revision_chains_after_0100():
     versions = _BACKEND / "migrations" / "versions"
     hits = [p for p in versions.glob("*.py")
-            if 'down_revision = "0100_delegation_link"' in p.read_text()]
-    assert [p.name for p in hits] == ["0101_execution_parent_index.py"]
+            if 'down_revision = "0105_delegation_link"' in p.read_text()]
+    assert [p.name for p in hits] == ["0106_execution_parent_index.py"]
     rev = _load(str(hits[0].relative_to(_BACKEND)), "ent937_rev")
-    assert rev.revision == "0101_execution_parent_index"
+    assert rev.revision == "0106_execution_parent_index"
     executed = []
 
     class _Op:

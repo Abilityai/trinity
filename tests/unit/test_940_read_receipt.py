@@ -111,6 +111,10 @@ def client(db_backend, monkeypatch):
             walk(route.dependant)
     monkeypatch.setattr(skill_gate_map_service, "self_approved_flags",
                         lambda name, ids, user: {})
+    # The human here is the agents' owner: ent#875's viewer tier reads every
+    # row only for an owner or admin, and narrows a share holder to their own.
+    from database import db
+    monkeypatch.setattr(db, "can_user_share_agent", lambda user, name: user == HUMAN.username)
     tc = TestClient(app)
     tc.as_user = lambda u: principal.__setitem__("user", u)
     return tc

@@ -1051,7 +1051,6 @@ the platform's own records, with **zero LLM calls**. OSS core, always on, no set
   tooltip on each reads "N of M runs with a gate check graded · deterministic checks,
   not answer quality".
 
-
 - **FR-11 — Aggregate read (ent#937)**: `GET /api/evaluations/aggregate` (`by ∈
   {agent, schedule, pair}`), `/evaluations/failed`, `/evaluations/chain/{execution_id}` and
   `/agents/{name}/evaluations/summary` fold Tier-0 rows (plus any `platform:tier1:*` row,
