@@ -366,7 +366,7 @@ write_files:
     content: "your-password-here"
 ```
 
-It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The file is shredded once the password has been read, the admin is provisioned at boot, and the form never appears; sign in as `admin` with that password.
+It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The admin is provisioned at boot, and the form never appears; sign in as `admin` with that password. The password stays in the droplet's user-data for the droplet's life: cloud-init keeps it on disk and the metadata service serves it ([#3942](https://github.com/abilityai/trinity/issues/3942)). Change it after you sign in.
 
 The login banner (Droplet → Console) prints the URL to open, whether HTTPS came up, and which of the two paths this Droplet took — never a password.
 

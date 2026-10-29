@@ -161,7 +161,23 @@ doctl compute droplet create "$DROPLET_NAME" \
 
 IP="$(doctl compute droplet list "$DROPLET_NAME" \
       --format PublicIPv4 --no-header | tail -1 | tr -d '[:space:]')"
-[ -n "$IP" ] || fail "The droplet was created but has no public IP yet. Check https://cloud.digitalocean.com/droplets"
+# The droplet boots with no admin (#3799), so every exit after this point tells
+# the operator to claim it: Trinity can start even when this script gives up.
+claim_warning() {
+    cat >&2 <<CLAIM
+  Open $1 and create your admin account (email and password).
+  Until you do, the first person to open that address can create it.
+  If you see a sign-in page instead of that form, someone got there
+  first: destroy the droplet and run this again.
+CLAIM
+}
+
+if [ -z "$IP" ]; then
+    printf '\nThe droplet was created but has no public IP yet. Check https://cloud.digitalocean.com/droplets\n\n' >&2
+    claim_warning "https://<the droplet's IP>, once it has one,"
+    printf '\n' >&2
+    exit 1
+fi
 
 printf '\n  Server is up at %s. Installing Trinity — about five more minutes.\n  ' "$IP" >&2
 
@@ -178,10 +194,9 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
 
       Open:     https://${IP}
 
-  Open it now and create your admin account (email and password).
-  Until you do, the first person to open that address can create it.
-  If you see a sign-in page instead of that form, someone got there
-  first: destroy the droplet and run this again.
+DONE
+        claim_warning "it now"
+        cat >&2 <<DONE
 
   After you sign in, Trinity asks you to connect Claude.
 
@@ -205,4 +220,6 @@ cat >&2 <<SLOW
       tail -50 /var/log/trinity-install.log
 
 SLOW
+claim_warning "https://${IP} as soon as it answers"
+printf '\n' >&2
 exit 1

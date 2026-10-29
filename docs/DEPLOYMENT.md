@@ -499,9 +499,12 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    a trusted LAN this is a non-issue. After setup, login is fully authenticated
    and the window is closed.
 
-   **Marketplace one-click droplets are claimed in the browser — an accepted
-   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
-   created without a password boots with **no admin account**, and the first
+   **DigitalOcean droplets are claimed in the browser — an accepted risk.**
+   This covers the Marketplace 1-Click and the `trinity-do-create.sh` script
+   install (`TRINITY_INSTALL_SOURCE=do-script`), and the Vultr Marketplace
+   server. DigitalOcean's 1-Click create page has no input form, and the script
+   install puts no password in user-data (#3799), so the droplet boots with
+   **no admin account**, and the first
    person to open `https://<droplet-ip>` creates it — email, password,
    product-updates consent — without ever opening a terminal (ent#580). Between
    creating the droplet and that first visit, **anyone who finds its IP can claim
@@ -518,7 +521,8 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
      to `/etc/trinity/admin-password`, see
      [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
      droplet boots with the admin already provisioned and never shows the
-     wizard.
+     wizard. The password stays in the droplet's user-data for the droplet's
+     life ([#3942](https://github.com/abilityai/trinity/issues/3942)).
 
    If a droplet you have never opened sends you to the login page rather than
    the "create your admin account" screen, someone else got there first:

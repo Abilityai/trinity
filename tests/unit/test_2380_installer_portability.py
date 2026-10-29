@@ -83,7 +83,9 @@ def test_every_single_quoted_interpolation_in_the_user_data_is_quoted() -> None:
     heredoc = re.search(r"<<USERDATA\n(.*?)\nUSERDATA$", _script(), re.S | re.M)
     assert heredoc, "the user-data heredoc is gone"
     interpolated = re.findall(r"'\$\{([A-Za-z_]+)\}'", heredoc.group(1))
-    assert "TRINITY_IMAGE_TAG_Q" in interpolated
+    # The tag is the only operator value in the user-data (#3799): a password
+    # under any other name would show up here.
+    assert set(interpolated) == {"TRINITY_IMAGE_TAG_Q"}, interpolated
     raw = [v for v in interpolated if not v.endswith("_Q")]
     assert not raw, f"unquoted value(s) inside single quotes in the user-data: {raw}"
 
@@ -230,7 +232,9 @@ def test_no_admin_password_reaches_the_droplets_user_data(tmp_path: Path) -> Non
     installer asks for none, and first boot leaves the admin to /setup."""
     proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS)
     assert "no public IP yet" in proc.stderr, proc.stderr
-    assert "password" not in proc.stderr.lower(), "the installer still asks for a password"
+    assert "choose a password" not in proc.stderr.lower(), "the installer still asks for a password"
+    # The droplet exists and boots with no admin, so this exit also says to claim it.
+    assert "create your admin account" in proc.stderr, proc.stderr
     user_data = (tmp_path / "user-data.sh").read_text()
     assert "ADMIN_PASSWORD=" not in user_data, "an admin password is in the user-data"
     assert "export ADMIN_PASSWORD_SOURCE=browser" in user_data
