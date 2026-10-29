@@ -28,7 +28,7 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from db_harness import db_backend  # noqa: E402,F401
+from db_harness import db_backend, sqlite_only_backend  # noqa: E402,F401
 
 pytestmark = pytest.mark.unit
 
@@ -229,3 +229,23 @@ def test_the_sqlite_migration_is_registered():
     from db import migrations
 
     assert "loop_runs_stale_duplicates" in [name for name, _ in migrations.MIGRATIONS]
+
+
+def test_the_sqlite_migration_closes_the_stale_rows_through_its_cursor(sqlite_only_backend):  # noqa: F811
+    """The SQLite half drives the shared runner through a raw `sqlite3` cursor
+    (named parameters, `fetchall` tuples), not the SQLAlchemy adapter above."""
+    from db.engine import get_engine
+    from db.loop_run_hygiene import ABANDONED
+    from db.migrations import _migrate_loop_runs_stale_duplicates
+
+    ops = _ops()
+    lid, dup = _loop_with_stale_twin_and_run2_open()
+    raw = get_engine().raw_connection()
+    try:
+        _migrate_loop_runs_stale_duplicates(raw.cursor(), raw)
+    finally:
+        raw.close()
+
+    statuses = {r["id"]: r["status"] for r in ops.list_runs(lid)}
+    assert statuses[dup] == ABANDONED
+    assert sorted(statuses.values()) == sorted([ABANDONED, "completed", "running"])
