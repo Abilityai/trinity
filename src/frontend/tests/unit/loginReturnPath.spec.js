@@ -133,13 +133,14 @@ describe('loginLocation — the one place a way to /login is built', () => {
     ['/settings?tab=general#keys'],
     ['/workspace/c/s_1'],
     ['/workspace/a/scout?panel=work'],
+    ['/?view=list'],
+    ['/?tags=team-a'],
   ])('carries %s', (path) => {
     expect(loginLocation(path)).toEqual({ path: '/login', query: { redirect: path } })
   })
 
   it.each([
     ['the dashboard', '/'],
-    ['the dashboard with a query', '/?view=list'],
     ['nothing', ''],
     ['undefined', undefined],
     ['the login page', '/login'],
@@ -176,6 +177,18 @@ describe('#3444 — a logged-out deep link', () => {
 
     await signInOnLoginPage()
     expect(here()).toBe('/agents/test-echo?tab=files')
+  })
+
+  // /review of #4069 (reviewer's nit): a dashboard link with a query
+  // (`?view=`, `?tags=` — ent#126/ent#260 deep links) is a destination;
+  // only the bare dashboard is where a sign-in lands anyway.
+  it('a dashboard link with a query keeps it through the sign-in', async () => {
+    await router.push('/?view=list')
+    expect(router.currentRoute.value.path).toBe('/login')
+    expect(router.currentRoute.value.query).toEqual({ redirect: '/?view=list' })
+
+    await signInOnLoginPage()
+    expect(here()).toBe('/?view=list')
   })
 
   it('the dashboard itself reaches a bare /login, as before', async () => {

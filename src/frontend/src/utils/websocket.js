@@ -31,7 +31,8 @@ let lastEventId = null
 // `disconnect()`, so a ticket still being minted and a close event from a
 // socket already let go of both find out they belong to a session that is over;
 // `disconnect()` also cancels a pending retry. `socketToken` is the platform
-// token the socket was opened for, which is how a changed token is told apart.
+// token the socket was opened for, which is how a changed token is told apart;
+// `connect()` records it once a ticket is on its way, never before.
 let generation = 0
 let minting = null
 let retryTimer = null
@@ -91,6 +92,10 @@ export function useWebSocket() {
 
     const gen = generation
     minting = gen
+    // Recorded here, where the socket actually starts — not in `followToken`,
+    // where a token whose socket could not start (nothing stored yet) would
+    // read as "open for this token" and its next call would do nothing.
+    socketToken = token
     let ticket
     try {
       ticket = await fetchWsTicket()
@@ -177,10 +182,7 @@ export function useWebSocket() {
   const followToken = (token) => {
     const action = socketActionFor({ socketToken, token })
     if (action === 'disconnect' || action === 'reconnect') disconnect()
-    if (action === 'connect' || action === 'reconnect') {
-      socketToken = token
-      connect()
-    }
+    if (action === 'connect' || action === 'reconnect') connect()
     return action
   }
 

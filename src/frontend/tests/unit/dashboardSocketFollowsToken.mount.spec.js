@@ -238,6 +238,21 @@ describe('#3445 — the Dashboard socket follows the platform session', () => {
     expect(FakeSocket.all.map((s) => s.url.match(/ticket=([^&]+)/)[1])).toEqual(['for-B'])
   })
 
+  // /review of #4069, reviewer's I1: a failed ticket mint left the token
+  // recorded, so the state read "open for this token" with no socket.
+  it('a failed ticket mint does not leave the token recorded as having a socket', async () => {
+    http.ticket = () => (http.tickets === 1 ? Promise.reject(new Error('mint failed')) : { data: { ticket: 'retry' } })
+    localStorage.setItem('token', 'A')
+    const store = useNetworkStore()
+    await store.connectWebSocket()
+    expect(FakeSocket.all).toHaveLength(0)
+
+    expect(store.followToken('A')).toBe('connect')         // not 'none'
+    await flushPromises()
+    expect(FakeSocket.all).toHaveLength(1)
+    store.disconnectWebSocket()
+  })
+
   it('a second connect while one is minting or connecting opens nothing more', async () => {
     let release
     http.ticket = () => new Promise((resolve) => { release = () => resolve({ data: { ticket: 'only' } }) })

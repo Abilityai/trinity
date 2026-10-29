@@ -670,6 +670,8 @@ export const useNetworkStore = defineStore('network', () => {
       ticket = data.ticket
     } catch (err) {
       console.error('[Collaboration] failed to mint WS ticket', err)
+      // No socket was opened for this token, so do not record one.
+      if (gen === socketGeneration) socketToken = null
       return
     } finally {
       if (socketMinting === gen) socketMinting = null

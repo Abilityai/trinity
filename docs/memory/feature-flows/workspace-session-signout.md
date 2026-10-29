@@ -254,9 +254,10 @@ The page to come back to is read the same way, query and hash included:
 
 **The way to `/login` carries the page (#3444, #3466).** A `logout` verdict pushes
 `loginLocation(returnPath)` — `/login?redirect=<the page>` — and `Login.vue` already
-returns there through `landingAfterSignIn` → `safeRedirect`. No `redirect` for `/`,
-for the sign-in pages themselves (`/login`, `/setup`, `/m`), or for anything
-`safeRedirect` would refuse. The router guard builds a logged-out deep link's
+returns there through `landingAfterSignIn` → `safeRedirect`. No `redirect` for the
+bare dashboard `/` (a dashboard link with a query, such as `?view=` or `?tags=`,
+keeps it), for the sign-in pages themselves (`/login`, `/setup`, `/m`), or for
+anything `safeRedirect` would refuse. The router guard builds a logged-out deep link's
 location with the same function, and a signed-in visit to `/login?redirect=X` now
 lands on X (through `landingAfterSignIn`, so a Workspace-only member asking for an
 operator page still gets its Workspace counterpart) instead of `/`. This applies to

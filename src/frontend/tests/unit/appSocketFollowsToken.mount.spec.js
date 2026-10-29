@@ -249,6 +249,25 @@ describe('#3445 — a socket already let go of touches nothing', () => {
   })
 })
 
+// /review of #4069, reviewer's I1: `followToken` used to record the token
+// before `connect()` had checked storage, so a token whose socket never started
+// read as "open for this token" and the next call for it did nothing. Safe
+// only while sign-in writes storage before the watch runs.
+describe('#3445 — the token is recorded only once a socket is on its way', () => {
+  it('a token whose socket could not start yet is not recorded as having one', async () => {
+    const socket = useWebSocket()
+    expect(socket.followToken('A')).toBe('connect')        // storage not written yet
+    await flushPromises()
+    expect(http.tickets).toBe(0)
+    expect(FakeSocket.all).toHaveLength(0)
+
+    localStorage.setItem('token', 'A')
+    expect(socket.followToken('A')).toBe('connect')        // not 'none'
+    await flushPromises()
+    expect(FakeSocket.all).toHaveLength(1)
+  })
+})
+
 describe('#3445 — one socket, one ticket at a time', () => {
   it('two connects while a ticket is being minted mint one ticket and open one socket', async () => {
     let release

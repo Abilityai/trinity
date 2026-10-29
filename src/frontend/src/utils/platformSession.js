@@ -66,9 +66,11 @@ export function isAuthRoute(path) {
  * `Login.vue` has honoured `?redirect=` since #3406; the router guard and the
  * 401 reaction both sent a bare `/login`, so a deep link opened while signed
  * out, or a page whose session died under it, came back to the dashboard.
- * Both build the location here now. No `redirect` for the dashboard (that is
- * where a sign-in lands anyway), for the sign-in pages themselves (a loop), or
- * for anything `safeRedirect` would refuse on the way back.
+ * Both build the location here now. No `redirect` for the bare dashboard (that
+ * is where a sign-in lands anyway — a dashboard link with a query, such as
+ * `?view=` or `?tags=`, is a destination and keeps it), for the sign-in pages
+ * themselves (a loop), or for anything `safeRedirect` would refuse on the way
+ * back.
  *
  * @param {string} returnPath   the full path (path + query + hash) to return to
  * @returns {{ path: string, query?: { redirect: string } }}
@@ -76,7 +78,7 @@ export function isAuthRoute(path) {
 export function loginLocation(returnPath) {
   const target = safeRedirect(returnPath, null)
   const path = target ? target.split(/[?#]/)[0] : ''
-  if (!target || path === '/' || isAuthRoute(path)) return { path: LOGIN_ROUTE }
+  if (!target || target === '/' || isAuthRoute(path)) return { path: LOGIN_ROUTE }
   return { path: LOGIN_ROUTE, query: { redirect: target } }
 }
 
