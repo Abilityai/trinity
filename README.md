@@ -58,7 +58,7 @@ One task, end to end: a schedule fires, the agent works in its container, reache
 
 **Watch more**
 
-- [Trinity 1.0 — The Complete Course](https://youtu.be/u0dZ3g_i-FU) - 41 chapters in 8 parts, from first setup to governance (1:16:21)
+- [Trinity 1.0 — The Complete Course](https://youtu.be/Q3-YFXz8NSI) - 41 chapters in 8 parts, from first setup to governance (1:16:21)
 - [Trinity Architecture Explained](https://youtu.be/XDLOq1crF9w) - one scheduled task followed through the container, gate, delegation, approval, audit and breaker machinery (4:44)
 - [The Multi-Agent Platform I Run My Company On](https://youtu.be/8j6q-kABRqc) - a live fleet tour: delegation, memory, observability
 - [Autonomous Cornelius on Trinity](https://youtu.be/QUZ5ZgB5f6E) - a second-brain agent running on its own
