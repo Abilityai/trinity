@@ -4497,17 +4497,21 @@ class DatabaseManager:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
-    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
-        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+        return self._idempotency_ops.attach_execution(scope, key, execution_id, claim_token=claim_token)
 
-    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot, *, claim_token=None) -> None:
         """Mark an idempotency claim completed and store the replay snapshot."""
-        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot, claim_token=claim_token)
 
-    def idempotency_release(self, scope: str, key: str) -> None:
+    def idempotency_release(self, scope: str, key: str, *, claim_token=None) -> None:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
-        return self._idempotency_ops.release(scope, key)
+        return self._idempotency_ops.release(scope, key, claim_token=claim_token)
+
+    def idempotency_reclaim_in_flight(self, scope: str, key: str, claim_token) -> bool:
+        """Compare-and-delete a stale in_flight claim still owned by claim_token (#3298)."""
+        return self._idempotency_ops.reclaim_in_flight(scope, key, claim_token)
 
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
