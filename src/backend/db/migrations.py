@@ -4939,7 +4939,7 @@ def _migrate_execution_chat_session_id(cursor, conn):
     finished turn whose waiting connection a restart destroyed; without the
     thread it could finalize the row but not write the reply into it.
     Nullable, no backfill: old rows stay NULL and recover as before.
-    PostgreSQL half: Alembic `0105_execution_chat_session_id`.
+    PostgreSQL half: Alembic `0106_execution_chat_session_id`.
     """
     _safe_add_column(
         cursor,
