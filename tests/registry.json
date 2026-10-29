@@ -12,6 +12,16 @@
       "description": "platform git children never start git auto-maintenance; stale maintenance.lock reaped"
     },
     {
+      "file": "unit/test_4064_gemini_process_group.py",
+      "feature": "#4064",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",
@@ -2318,6 +2328,18 @@
         "unit"
       ],
       "description": "Full-directory skill packages (ent#183): pure packaging primitives (hardened frontmatter contract parse — alias-bomb refused, garbage requires typed-guarded, malicious dep names regex-gated; git-archive member vetting — REGTYPE only, symlinks/litter/protected basenames dropped with named warnings; injection tar with generated .trinity-skill.json meta appended LAST; manifest-based prune diff capped 200/skill); round-trip against the REAL agent-server restore_from_tar incl. allowlist confinement; real-git end-to-end (repo -> archive -> filter -> restore, tree-SHA determinism across clones, exec bits from git modes); injection orchestration (skip-if-unchanged vs force, old-image 404 fallback with multi_file_dropped_old_image only for multi-file skills, restore-failure repair path = delete-dir + one re-restore, prune deletes ONLY previous-manifest files, unmanaged same-named dir overwritten but never pruned, per-skill + total caps named errors, dep-probe warnings missing_binary/missing_env fail-open and run for unchanged skills too, SkillInjectionBusy on lock contention, CLAUDE.md section rebuilt from ALL present skills with line-anchored replacement that spares ### lookalikes)."
+    },
+    {
+      "file": "unit/test_3254_skills_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "skills",
+        "unit"
+      ],
+      "description": "#3254 S1: the two `_skills-sync` host alarms report through the #3246 platform alert seam, on a fresh full schema per test (db_harness; PostgreSQL when TEST_POSTGRES_URL is set) with the clock pinned and every pass starting after the last reading. Reconcile refusal (skills_reconcile_refused:<agent>): two refusals with different orphan counts are one pending row (subject, seen_count 2, moved last_seen_at and 30-day net deadline, counts never skill names); a clean or reconciled pass ends it as the platform; an inventory-unavailable, busy or erroring pass leaves it (R10), including the REAL agent-side inventory script run locally against a skills path that is a file, a mode-000 dir, a listable-but-unsearchable dir, or a dir with inaccessible children (anything it cannot inspect is an unknown inventory), while an absent skills dir is a clean pass that ends it and entries whose names can never be skills (a looping symlink, an inaccessible .cache) are ignored. Fleet sweep (skills_fleet_reinject:fleet): two bad sweeps are one row; a sweep that reached every agent (injected, or no skills) ends it; a Docker-error empty enumeration, a busy agent or a missing result leaves it (R10). Overlapping passes (event-controlled): an older reconcile pass or fleet sweep that finishes last never ends a row a newer one filed; the evidence floor finds its row behind 1,001 higher-priority pending rows. A person's ending through ask_service.answer lands acknowledged, is never re-ended, and snoozes the next reading. R1 legacy-id parity for both kinds. Other shape: on a fresh install the clear sites end nothing, write nothing and schedule nothing, and the first refusal files one row. A sweep that never reached an agent the fleet row names (it failed, then stopped) ends nothing; an inventory the agent could not inspect skips the pass with a WARNING naming the agent. The fleet row names every failed agent, not the report's 25, capped by count and by serialised size (long names cannot push the alarm past the 64 KiB context belt); a capped or malformed list is never evidence, so that row is left to its lifetime."
     },
     {
       "file": "unit/test_ent123_tokenless_clone.py",
@@ -6660,6 +6682,52 @@
         "security"
       ],
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
+    },
+    {
+      "file": "unit/test_ent875_viewer_tier.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "The viewer tier (owner / share / key) as an allowlist both ways: unlisted scopes, a missing mcp_scope, the loopback JWT and a bare principal fail closed to share; a missing or malformed user id matches no row, never all; row_is_viewers compares the int column and the queue's string id; the shared-state refusal is fixed text."
+    },
+    {
+      "file": "unit/test_ent875_own_rows_sql.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "db",
+        "unit"
+      ],
+      "description": "A real SQLite with three users and the caller's rows the oldest: the per-user filter applies before the LIMIT on the agent list, a schedule's history, a fan-out batch, the fleet list (with search and OR-clause precedence, only on shared agents) and the activity timeline; NULL source_user_id is hidden; the unfiltered call is unchanged."
+    },
+    {
+      "file": "unit/test_ent875_exec_control_routes.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "Every execution read and control route called with real tier resolution for owner, admin, share (JWT and user-scope key) and agent key, in both directions: list/detail/log/stream/running/queue/fan-out narrowing, the uniform 404, terminate needing both ids, shared-state 403, model and force_reset owner tier, the five webhook routes and can_manage_webhook; plus the route census and an AST guard over every router read of an execution row."
+    },
+    {
+      "file": "unit/test_ent875_workspace_work_own_rows.py",
+      "feature": "trinity-enterprise#875",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "executions",
+        "unit"
+      ],
+      "description": "The Workspace Work tab over a real SQLite: on a shared agent a viewer's list reads, window count and live activity lines carry only their own rows (by user id, by email, or spawned for them), narrowed before each LIMIT; an owned agent keeps every row; no other person's prompt reaches a card title."
     },
     {
       "file": "unit/test_sqlite_upgrade_parity_guard.py",

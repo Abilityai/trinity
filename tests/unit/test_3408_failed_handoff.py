@@ -10,9 +10,9 @@ a lone surrogate (which the agent server's FastAPI accepts from a JSON body)
 makes the text-mode write raise UnicodeEncodeError while the child lives.
 
 Claude and Codex children lead their own process group, so their teardown
-kills that group. Gemini children share the agent server's group (they are
-spawned without `start_new_session`), so the Gemini teardown signals the pid
-only. Every case runs under a guard that refuses, and never forwards, a signal
+kills that group. Gemini children lead their own group too since #4064, but the
+Gemini handoff teardown signals the pid only (the post-turn cgroup sweep reaps
+descendants). Every case runs under a guard that refuses, and never forwards, a signal
 aimed at this test session's own group: tests/signal_guard.py is a
 pass-through where there is no cgroup (macOS).
 
@@ -213,7 +213,8 @@ async def test_a_failed_handoff_kills_the_child_before_releasing_it(
     _assert_released(registry, child)
     assert signals["refused"] == [], "a signal was aimed at this test session's own group"
     if site in GEMINI_SITES:
-        # The Gemini pgid is the agent server's own group: pid only, never a group.
+        # The Gemini handoff teardown signals the pid, not the group (#3408 shape;
+        # since #4064 the child leads its own group, so the group would be safe).
         assert {fn for fn, _target, _sig in signals["sent"]} == {"kill"}, signals["sent"]
         assert ("kill", child.pid, signal.SIGKILL) in signals["sent"]
     else:
