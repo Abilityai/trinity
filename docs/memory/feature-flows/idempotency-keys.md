@@ -126,6 +126,7 @@ CREATE TABLE idempotency_keys (
 | Same, but the `failed` error starts `lease_expired:` and the hold window (`completed_at` + timeout + 300 s) is still open | Replay of the original receipt (logged `receipt_hold`); fresh once the window ends |
 | Same, but the key is `sched:…` | Replay (the scheduler's own key is never reclaimed) |
 | Same, but the request names a gated skill with a gate record | The gate's answer (pending / `409 request_<state>`) — the receipt is not checked |
+| `/task` (or a pulled `/chat`) failed at its turn limit (`max_turns`, #3993) | Claim **completed** with a stored-error snapshot (`{"stored_error": {status_code, detail, error_code}}`): a replay re-raises the same `422` with `X-Trinity-Error-Code: max_turns` + `X-Idempotent-Replay: true` and never runs again (the limit is deterministic). Not receipt-shaped, so #3245 never reclaims it; every other failure still releases |
 | Upfront at-capacity rejection (chat/task) | Claim released (`fail`) so caller can retry once capacity frees |
 | Dispatch error (webhook → scheduler) | Claim released (`fail`) so a legitimate re-delivery can retry |
 | Dedup-layer DB error | **Fail-open** — `begin` logs a warning and returns a no-dedup decision; the real execution always proceeds |

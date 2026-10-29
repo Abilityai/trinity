@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",

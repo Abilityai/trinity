@@ -2423,6 +2423,32 @@ _SYNC_BACKLOG_TERMINAL = (
 )
 
 
+# #3993: a terminal failure stored as the idempotency snapshot. A turn limit is
+# deterministic (#3988), so a replay of the same key must answer the same 422
+# rather than run the task again. Neither receipt-shaped (#3245 never reclaims
+# it) nor a success body: the routers' replay branches re-raise it.
+_STORED_ERROR_KEY = "stored_error"
+
+
+def _stored_error_snapshot(result, status_code: int) -> dict:
+    code = getattr(result, "error_code", None)
+    return {_STORED_ERROR_KEY: {
+        "status_code": status_code,
+        "detail": result.error,
+        "error_code": getattr(code, "value", code),
+    }}
+
+
+def stored_error(snapshot) -> Optional[dict]:
+    """The stored terminal error a replay must re-raise, or None (#3993)."""
+    if not isinstance(snapshot, dict):
+        return None
+    stored = snapshot.get(_STORED_ERROR_KEY)
+    if not isinstance(stored, dict) or not isinstance(stored.get("status_code"), int):
+        return None
+    return stored
+
+
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
     422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
@@ -2431,6 +2457,9 @@ def _map_task_failure(name, result, *, idem):
     #3988: the turn limit answers 422 — the agent's own status — and always
     carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
     from the 422 this route already answers for invalid input (#2806).
+
+    #3993: a turn limit completes the claim with the stored 422 instead; every
+    other failure releases it.
 
     #2661: releases the idempotency claim before raising. Both sync branches
     call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
@@ -2446,7 +2475,6 @@ def _map_task_failure(name, result, *, idem):
     wedge is invisible until someone retries a full day later.
     """
     if result.status in ("failed", "cancelled"):
-        idempotency_service.fail(idem)
         # #2889: the producer-side code. The backlog-reconstruct path reads it
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
@@ -2454,10 +2482,16 @@ def _map_task_failure(name, result, *, idem):
         if getattr(getattr(result, "error_code", None), "value", None) == (
             TaskExecutionErrorCode.MAX_TURNS.value
         ):
+            # #3993: terminal, not released. A retry of the same key would burn
+            # a full turn budget on the same failure, so the claim completes
+            # with the 422 and a replay answers it without running again.
+            idempotency_service.complete(
+                idem, getattr(result, "execution_id", None), _stored_error_snapshot(result, 422))
             # #3988: checked before the prose matches below — the detail carries
             # the CLI's raw text, and a "timed out" in it would answer 504, which
             # the MCP client reads as its own wait running out.
             raise ChatDispatchError(422, result.error, headers=code_headers)
+        idempotency_service.fail(idem)
         if "at capacity" in (result.error or "") or getattr(
             getattr(result, "error_code", None), "value", None
         ) == TaskExecutionErrorCode.CAPACITY.value:
