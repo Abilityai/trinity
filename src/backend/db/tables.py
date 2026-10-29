@@ -1769,6 +1769,7 @@ idempotency_keys = Table(
     Column("response_snapshot", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
+    Column("claim_token", Text),  # #3298: owner token of the in_flight claim
 )
 
 # Agent compatibility results (#668) — latest snapshot per agent (upserted).

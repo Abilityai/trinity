@@ -17,6 +17,12 @@ As a developer, I want to trigger a Trinity agent schedule from a CI pipeline, G
 
 ---
 
+## Who May Manage a Webhook (trinity-enterprise#875)
+
+A webhook URL is a bearer credential that triggers the schedule with the agent's own authority. It is held by the **schedule's creator** (`agent_schedules.owner_id`), the **agent owner** and an **admin**; a person the agent is merely shared with is refused (403 `webhook_owner_or_creator`) on every management route: mint/rotate (`POST .../webhook`), revoke (`DELETE .../webhook`), signing secret set/clear (`.../webhook/secret`) and the status read (`GET .../webhook`, which returns the live URL). Agent keys keep their `schedules.manage` capability fence. The public trigger (`POST /api/webhooks/{token}`) is unchanged. `ScheduleResponse.can_manage_webhook` carries the same predicate to the Schedules panel, which does not render the controls or fetch the status for a viewer who may not use them.
+
+**Upgrading:** nothing records who minted a token, so tokens minted before this change cannot be classified. `python3 scripts/management/list_webhook_rotation_candidates.py` (read-only; `--all` for every webhook) lists the schedules on shared agents to rotate.
+
 ## Token Lifecycle
 
 ```
