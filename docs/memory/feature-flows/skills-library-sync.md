@@ -68,6 +68,60 @@ honest surface.
 
 ---
 
+## Bundled Pin Follow on Upgrade (trinity-enterprise#529)
+
+The fresh-install seed (ent#237) picks the catalog once. Its *version* stays the
+platform's call for an install that kept the default, so an upgrade that raises
+`config.DEFAULT_SKILL_SOURCE_REF` carries the untouched default row forward.
+
+```
+main._schedule_staggered_services → _start_skills_sync_delayed (+11s, every worker)
+   │ await skill_service.follow_bundled_pin()          never raises
+   │   _follow_bundled_pin_row (asyncio.to_thread)
+   │     db.get_default_skill_source()
+   │     eligible: follows_bundled_pin · enabled · url == DEFAULT_SKILL_SOURCE_URL (exact)
+   │     forward:  _release_version(row.ref) < _release_version(pin)   strict vX.Y.Z
+   │     db.follow_skill_source_pin(id, from_ref, to_ref, url)
+   │       SkillSourcesOperations.follow_bundled_pin — CAS UPDATE, every predicate in WHERE
+   │       SET ref=pin, _RETARGET_RESET (sha/status/at/error → none),
+   │           followed_from_ref=old, followed_at=now        marker stays 1
+   │   winner only → platform_audit_service.log(CONFIGURATION,
+   │                  skill_source_follow_bundled_pin, source=system, {from_ref, to_ref})
+   ▼
+skills_sync_service.start() → run_cycle → sync_library
+   expected_sha None → no moved_tag · previous_sha None → commit_changed
+   → run_fleet_reinject (when auto re-inject is on)
+```
+
+- **The marker.** `skill_sources.follows_bundled_pin` is written 1 by the seed only
+  for the built-in URL (`config.BUNDLED_SKILL_SOURCE_URL`), and set to 0 by
+  `SkillSourcesOperations.update_source` whenever `url`, `ref` or `ref_type`
+  changes value — the one write path under `PUT /api/skills/sources/{id}` and
+  `POST /api/skills/sources/apply` (the MCP tools). Rename, priority and
+  `enabled` leave it alone; the CAS requires `enabled = 1`, so a disabled row
+  pauses. Rows seeded before the column were classified once by
+  `db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL` (both tracks; Alembic
+  `0107_skill_sources_follow_bundled_pin`).
+- **One reset for both retargets.** `_RETARGET_RESET` is shared by an admin
+  retarget and the follow. Without it the new tag is compared against the old
+  tag's commit and refused as `moved_tag` (update path), or deleted after clone
+  (`_refuse_moved_pin_after_clone`). An admin retarget also clears
+  `followed_from_ref` / `followed_at`, since the line explains the current ref.
+- **A sync in flight cannot undo it.** `record_sync` takes the `url`/`ref`/`ref_type`
+  the sync fetched (`skill_service._synced_target`) and writes only while the row
+  still points there; otherwise the outcome is dropped and logged at INFO.
+- **Surfaces.** `GET /api/skills/sources` (and the MCP `list_skill_sources` body)
+  carries `follows_bundled_pin`, `followed_from_ref`, `followed_at`;
+  `SkillSourcesPanel.vue` renders "Followed bundled pin vA → vB on <date>" under
+  the row's status line, after the error line when a sync failed (`data-testid="skill-source-followed"`). Until the next
+  sync the status line reads "Never synced".
+
+Tests: `tests/unit/test_ent529_follow_bundled_pin.py` (real git, annotated tags,
+both clone paths, the in-flight race, the backfill), and
+`src/frontend/tests/unit/skillSourcesFollowLine.mount.spec.js`.
+
+---
+
 ## Frontend Layer
 
 ### Component (`src/frontend/src/views/Settings.vue`)
@@ -710,6 +764,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
+| 2026-10-29 | **ent#529**: the untouched seeded default follows the bundled pin on upgrade (boot, forward only, CAS, system audit row) — see *Bundled Pin Follow on Upgrade*. `follows_bundled_pin` / `followed_from_ref` / `followed_at` on `skill_sources` (SQLite migration + Alembic 0107); `record_sync` scoped to the synced target; Settings → Library shows the latest follow. |
 | 2026-10-15 | **#3430**: bundled community-catalog pin bumped to `trinity-skills` **v0.5.0** (fresh-install seed only). v0.4.0 adds `project-status`; v0.5.0 adds `update-status` and brings `project-status` and `add-pipeline` onto the platform's current ask-id and 120-char escalation-title contracts (both failed on `dev` at v0.3.0). 40 skills, none dropped since v0.3.0. The guard floor rises to v0.5.0; existing instances keep their row (ent#529) and move with the user-doc steps. |
 | 2026-10-10 | **ent#692**: source management over MCP for admin principals (`src/mcp-server/src/tools/skill_sources.ts`) — fenced by principal, not transport. New idempotent `POST /api/skills/sources/apply` (keyed on the repo URL; `created`/`updated`/`unchanged`, 409 `ambiguous_source`); create accepts `priority`. `GET /api/skills/library/status` now carries `last_fleet_reinject` (counts only — the per-agent `failures` map stays on the admin routes), so whoever ran a sync can read its consequence. Sync tools report `ran` / `refused_busy` / `failed`. |
 | 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
@@ -722,5 +777,5 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 ---
 
-**Last Updated**: 2026-10-15
-**Status**: Verified - Updated for #3430 bundled catalog pin v0.5.0
+**Last Updated**: 2026-10-29
+**Status**: Verified - Updated for ent#529 bundled pin follow
