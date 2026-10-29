@@ -29,6 +29,7 @@ from models import (
 from dependencies import (
     agent_may_reach,
     capability_fence,
+    person_or_capability_admits,
     require_person_or_capability,
     agent_viewer_tier,
     VIEWER_SHARE,
@@ -138,13 +139,16 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
 
 
 def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
-    """Who may mint, rotate, revoke or read a schedule's webhook (ent#875).
+    """The share-tier half of who may mint, rotate, revoke or read a schedule's
+    webhook (ent#875).
 
     A webhook URL is a bearer credential that triggers the schedule with the
     agent's own authority, so it is held by the schedule's creator or the agent
     owner (an admin included) — not by everyone the agent is merely shared with.
-    The owner, admin and key tiers are unchanged (a key still meets the
-    `schedules.manage` capability fence on the route); a share holder needs to
+    This check passes the owner, admin and key tiers; the principal half is the
+    routes' decorator, `require_person_or_capability("schedules.manage")`
+    (trinity-enterprise#719: a person, or an agent key holding the grant on an
+    agent its owner owns; the system key is refused). A share holder needs to
     be the creator (`agent_schedules.owner_id`). A schedule with no recorded
     creator is the owner's alone."""
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
@@ -167,12 +171,16 @@ def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) ->
 
 
 def _schedule_response(schedule, agent_name: str, current_user: User) -> ScheduleResponse:
-    """The response, with `can_manage_webhook` computed by the same predicate the
-    webhook routes enforce, so the Schedules panel hides exactly the controls the
-    server would refuse (ent#875) — the client has no numeric user id to compare."""
+    """The response, with `can_manage_webhook` computed by both checks the
+    webhook routes enforce — the decorator's principal rule and the share-tier
+    rule — so it is true exactly when this caller's webhook call would pass
+    (ent#875, trinity-enterprise#719). The client has no numeric user id to compare."""
     return ScheduleResponse(
         **schedule.model_dump(),
-        can_manage_webhook=_can_manage_webhook(schedule, agent_name, current_user),
+        can_manage_webhook=(
+            person_or_capability_admits(current_user, "schedules.manage", agent_name)
+            and _can_manage_webhook(schedule, agent_name, current_user)
+        ),
     )
 
 

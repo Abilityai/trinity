@@ -676,3 +676,39 @@ def test_the_gate_runs_before_the_path_dependency():
         assert first.__name__ == "require_person_or_schedules_manage", (key, first)
         names = {d.call.__name__ for d in route.dependant.dependencies}
         assert "capability_fence_schedules_manage" not in names, key
+
+
+# --------------------------------------------------------------------------- #
+# 7. `can_manage_webhook` says what the same caller's webhook call would do
+# --------------------------------------------------------------------------- #
+
+# (id, headers, expected). Each caller can read the schedule itself, so the
+# field is served to it; the field must match the webhook read's own answer.
+FIELD_CALLERS = [
+    pytest.param(lambda: _agent_key(), False, id="ungranted-own-agent-key"),
+    pytest.param(lambda: _agent_key(EDGE), False, id="ungranted-sibling-with-edge"),
+    pytest.param(lambda: _system_key(), False, id="system-key"),
+    pytest.param(lambda: (_grant(AGENT), _agent_key())[1], True, id="granted-own-agent-key"),
+    pytest.param(lambda: _jwt(), True, id="owner-jwt"),
+    pytest.param(lambda: _owner_user_key(), True, id="owner-user-key"),
+]
+
+
+@pytest.mark.parametrize("headers,expected", FIELD_CALLERS)
+def test_can_manage_webhook_is_true_only_when_the_webhook_call_passes(
+    world, headers, expected
+):
+    """trinity-enterprise#719: the field was the share-tier rule alone, so an
+    ungranted agent key and the system key read `true` and then got 403 on
+    every webhook route. It now applies the route gate's principal rule too."""
+    h = headers()
+    listed = world.client.get(f"/api/agents/{AGENT}/schedules", headers=h)
+    assert listed.status_code == 200, listed.text
+    row = next(s for s in listed.json() if s["id"] == world.schedule)
+    one = world.client.get(f"/api/agents/{AGENT}/schedules/{world.schedule}", headers=h)
+    assert one.status_code == 200, one.text
+
+    assert row["can_manage_webhook"] is expected
+    assert one.json()["can_manage_webhook"] is expected
+    read = _call(world, "read", AGENT, world.schedule, h)
+    assert (200 <= read.status_code < 300) is expected, read.text

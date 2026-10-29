@@ -2539,6 +2539,25 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
     return fence
 
 
+def _is_capability_agent_key(current_user) -> bool:
+    """The caller `require_person_or_capability` judges by its grant: an agent
+    key that is not a vouched loopback. Every other caller meets `assert_person`."""
+    return bool(getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None)
+                and not getattr(current_user, "vouched_source_agent", None))
+
+
+def person_or_capability_admits(current_user, capability: str, target: str) -> bool:
+    """Would `require_person_or_capability(capability)` admit this caller on
+    `target`? The same predicate, answered without raising or writing the
+    refusal's audit row, for a response field that says what the caller may do
+    (`ScheduleResponse.can_manage_webhook`, trinity-enterprise#719). Not for a
+    route with `self_person_only`."""
+    if _is_capability_agent_key(current_user):
+        return capability_refusal(current_user, capability) is None and owner_owns_agent(current_user, target)
+    return is_person_principal(current_user) and not getattr(current_user, "vouched_source_agent", None)
+
+
 def require_person_or_capability(capability: str, *, self_person_only: bool = False):
     """`require_person`, except that an AGENT holding `capability` passes
     (trinity-enterprise#164 — the reconfigure routes were person-only, so no
@@ -2562,9 +2581,7 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
       not be the one that lifts it (the grant-vs-use line, Invariant #8).
     """
     async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
-        if (getattr(current_user, "mcp_scope", None) == "agent"
-                and getattr(current_user, "agent_name", None)
-                and not getattr(current_user, "vouched_source_agent", None)):
+        if _is_capability_agent_key(current_user):
             target = _path_agent(request)
             if self_person_only and target == current_user.agent_name:
                 assert_person(current_user)
