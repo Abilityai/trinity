@@ -4,11 +4,11 @@
 
 ## What hardware and operating system do I need to run Trinity?
 
-Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, a minimum of 8 GB RAM, and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md) and [Single-Server Deployment](../guides/deploying/single-server.md).
+Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, at least 4 GB RAM (8 GB recommended), and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md) and [Single-Server Deployment](../guides/deploying/single-server.md).
 
 ## How many agents can I run on one machine?
 
-RAM is the practical ceiling — Trinity itself doesn't cap fleet size. Each agent runs as its own Docker container with a configurable memory limit (options range from 1g to 64g, and an admin can set fleet-wide defaults for new containers), so budget your host memory against the limits you assign. The docs recommend 8 GB minimum and 16 GB for running multiple agents; watch host memory and CPU against the thresholds in the monitoring guide as your fleet grows. See [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
+RAM is the practical ceiling — Trinity itself doesn't cap fleet size. Each agent runs as its own Docker container with a configurable memory limit (options range from 1g to 64g, and an admin can set fleet-wide defaults for new containers), so budget your host memory against the limits you assign. The docs give 4 GB as the minimum, 8 GB as the recommended size, and 16 GB for running many agents at once; watch host memory and CPU against the thresholds in the monitoring guide as your fleet grows. See [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
 
 ## I claimed my new instance in the browser — when does the system agent appear?
 

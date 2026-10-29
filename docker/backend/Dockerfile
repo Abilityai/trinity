@@ -82,7 +82,7 @@ RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.10 \
     docker==7.1.0 \
     aiofiles==24.1.0 \
-    apscheduler==3.11.0 \
+    apscheduler==3.11.3 \
     croniter==5.0.1 \
     pytz==2024.2 \
     # #1823 portability floor for the tz database. `zoneinfo` reads the SYSTEM
@@ -219,5 +219,9 @@ USER trinity
 
 EXPOSE 8000
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--proxy-headers", "--forwarded-allow-ips=*"]
+# --no-proxy-headers (trinity-enterprise#873): uvicorn must never rewrite the
+# client address. The former `--forwarded-allow-ips=*` let ANY caller choose its
+# own address on a bare `docker run`; utils/client_ip.py now resolves it from
+# explicitly configured proxies only, and trusts none by default.
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--no-server-header", "--no-proxy-headers"]
 

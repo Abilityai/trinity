@@ -302,6 +302,9 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- ent#862: AAuth peer identity that triggered this execution,
+            -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
+            a2a_caller_identity TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -1240,6 +1243,7 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,  -- #4000: when the agent last measured the three stats above
             diverged_since TEXT,
             dirty_files INTEGER,
             dirty_since TEXT,
@@ -1890,6 +1894,39 @@ TABLES = {
         )
     """,
 
+    # Nevermined card delegation (trinity-enterprise#966). The organization is
+    # a singleton (id = 'default'); its widget secret and agent API key live in
+    # one AES-256-GCM envelope and are never returned by any route. Nevermined
+    # holds the card and the mandate; Trinity keeps only the delegation id.
+    "nevermined_organization": """
+        CREATE TABLE IF NOT EXISTS nevermined_organization (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            encrypted_credentials TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        )
+    """,
+
+    "agent_delegations": """
+        CREATE TABLE IF NOT EXISTS agent_delegations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            delegation_id TEXT NOT NULL,
+            payment_method_id TEXT,
+            provider TEXT,
+            environment TEXT NOT NULL,
+            api_key_injected INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_by TEXT,
+            agent_deleted_at TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Agent Event Subscription Tables (EVT-001)
     # -------------------------------------------------------------------------
@@ -2368,6 +2405,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_agent ON nevermined_payment_log(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_execution ON nevermined_payment_log(execution_id)",
+    # trinity-enterprise#966 — one active binding per agent; a deleted agent's
+    # kept row is not active.
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent ON agent_delegations(agent_name, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active ON agent_delegations(agent_name) WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
 
     # Agent event subscription indexes (EVT-001)
     "CREATE INDEX IF NOT EXISTS idx_event_subs_subscriber ON agent_event_subscriptions(subscriber_agent)",

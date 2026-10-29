@@ -448,6 +448,7 @@
           @session-adopted="onSessionAdopted"
           @thread-missing="onThreadMissing"
           @sessions-changed="onConversationTurnDone"
+          @thread-caught-up="onThreadCaughtUp"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -1073,21 +1074,29 @@ function backToEmail() { step.value = 'email'; code.value = ''; error.value = nu
 async function onVerify() {
   if (code.value.length < 6 || busy.value) return
   busy.value = true; error.value = null
+  // #2261 — read the resume target BEFORE the roster load, since the sign-in
+  // that consumed the expiry is what makes it spendable. `endSession` recorded
+  // where the client was when their session lapsed, and until now nothing ever
+  // read it back: the expired notice promises "pick up where you left off", so
+  // it has to actually land there rather than on the roster root.
+  // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+  const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
+  const address = email.value.trim().toLowerCase()
   try {
-    // #2261 — read the resume target BEFORE the roster load, since the sign-in
-    // that consumed the expiry is what makes it spendable. `endSession` recorded
-    // where the client was when their session lapsed, and until now nothing ever
-    // read it back: the expired notice promises "pick up where you left off", so
-    // it has to actually land there rather than on the roster root.
-    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
-    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
-    await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
+    await store.verifyCode(address, code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
       store.resumePath = null
       router.push(resumeTo)
     }
   } catch (err) {
+    // #3922: the code was right, but this address has a platform account. It
+    // signs in at `/login`, which gives it the team view, then comes back here.
+    if (err.response?.status === 409 && err.response?.data?.detail?.reason === 'platform_login_required') {
+      store.resumePath = null
+      router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
+      return
+    }
     error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
     code.value = ''
     await nextTick(); codeInput.value?.focusFirst()
@@ -2254,6 +2263,17 @@ async function refreshThreads() {
   store.seedAgentRecency(threads.value)
 }
 
+// #3439: the open conversation appended rows the agent wrote on its own (a
+// report, an approval outcome, a background task's reply) — what the person is
+// looking at is read. Mark-read only: unlike a finished turn this neither
+// re-reads the list (the 20 s tick that surfaced the row already did) nor
+// touches the #2579 title-settle cycle, which an agent-initiated row must not
+// cancel or arm. Same "still here?" question as a turn, for the same reason.
+function onThreadCaughtUp(sessionId) {
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
+}
+
 // A turn finishing in the conversation the user is LOOKING AT is read by
 // definition. Without this, the reply the user just watched arrive would land
 // after the read cursor set at dispatch and badge the chat they are sitting in
@@ -3122,10 +3142,23 @@ function startAsksPoll() {
     // enough to ride here.
     refreshThreads()
   }, ASKS_POLL_MS)
+  // #3439: coming back to the tab is the moment the person wants to know what
+  // happened while they were away — catch up now rather than at the next tick
+  // (up to 20 s of a transcript the badge already contradicts). One tick body,
+  // on the same visibility rule the interval skips on.
+  document.addEventListener('visibilitychange', onTabVisible)
+}
+
+function onTabVisible() {
+  if (document.visibilityState !== 'visible' || !asksTimer) return
+  store.fetchAsks()
+  store.fetchMentions()
+  refreshThreads()
 }
 
 function stopAsksPoll() {
   if (asksTimer) { clearInterval(asksTimer); asksTimer = null }
+  document.removeEventListener('visibilitychange', onTabVisible)
 }
 
 async function bootstrap() {

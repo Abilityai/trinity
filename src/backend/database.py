@@ -151,6 +151,7 @@ from db.dashboard_history import DashboardHistoryOperations
 from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
+from db.nevermined_delegation import NeverminedDelegationOperations
 from db.operator_queue import OperatorQueueOperations
 from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
@@ -865,15 +866,31 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
+# #3825: printed when boot leaves the admin password alone because it was
+# changed in the app after this ADMIN_PASSWORD value was applied. Literal text
+# plus the username only: nothing derived from either password reaches a log.
+_ADMIN_ENV_SKIPPED_NOTE = (
+    "ADMIN_PASSWORD not re-applied to admin user '%s': the password was changed "
+    "in the app after this value was applied. To reset it from .env, set a "
+    "different value and restart."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
     Reuses the dialect-agnostic ``UserOperations`` (already on SQLAlchemy Core)
-    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB;
-    updates the password when the env password no longer verifies.
+    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB, and
+    re-applies the env password only when it differs from the one last applied
+    (#3825, ``utils.admin_identity.env_apply_decision``).
     """
+    from db.settings import SettingsOperations
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision, fingerprint_value,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
     if not admin_password:
         print(_NO_ADMIN_AT_BOOT_NOTE)
         return
@@ -882,32 +899,52 @@ def _ensure_admin_user_engine():
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     user_ops = UserOperations()
-    existing = user_ops.get_user_by_username(admin_username)
+    settings_ops = SettingsOperations()
+    existing = user_ops.get_user_by_username(name)
     if existing is None:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Created admin user '{admin_username}' with hashed password")
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+        print(f"Created admin user '{name}' with hashed password")
         return
 
-    existing_hash = existing.get("password")
-    needs_update = False
-    if existing_hash and not existing_hash.startswith("$2"):
-        needs_update = existing_hash == admin_password  # plaintext → bcrypt
-    elif existing_hash:
-        try:
-            needs_update = not pwd_context.verify(admin_password, existing_hash)
-        except Exception:
-            needs_update = True
-    else:
-        needs_update = True
-    if needs_update:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Updated admin user '{admin_username}' password")
+    action, record = env_apply_decision(
+        admin_password, existing.get("password"),
+        settings_ops.get_setting_value(ADMIN_ENV_FINGERPRINT_KEY), name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        print(f"Updated admin user '{name}' password")
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+
+
+def _record_admin_env_fingerprint(cursor, conn, name, hashed):
+    """SQLite half of the #3825 fingerprint write (see `env_apply_decision`)."""
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value
+
+    cursor.execute(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, hashed), utc_now_iso()),
+    )
+    conn.commit()
 
 
 def _ensure_admin_user(cursor, conn):
-    """Ensure the admin user exists with properly hashed password."""
+    """Ensure the admin user exists with properly hashed password.
+
+    Re-applies `ADMIN_PASSWORD` only when it differs from the value last applied
+    (#3825), so a password changed in the app survives a restart."""
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
 
     # Warn operators if ADMIN_PASSWORD doesn't meet complexity requirements
     if admin_password:
@@ -922,7 +959,7 @@ def _ensure_admin_user(cursor, conn):
         except ImportError:
             pass  # password_validation module not available during early init
 
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (name,))
     existing = cursor.fetchone()
 
     if existing is None:
@@ -940,39 +977,37 @@ def _ensure_admin_user(cursor, conn):
         cursor.execute("""
             INSERT INTO users (username, password_hash, role, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (admin_username, hashed, "admin", now, now))
+        """, (name, hashed, "admin", now, now))
         conn.commit()
-        print(f"Created admin user '{admin_username}' with hashed password")
-    else:
-        # Check if existing password needs update (migration or change)
-        existing_hash = existing[1]
-        should_update = False
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
+        print(f"Created admin user '{name}' with hashed password")
+        return
 
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not admin_password:
+        return
 
-        if existing_hash and not existing_hash.startswith("$2"):
-            # Password is likely plaintext (bcrypt hashes start with $2)
-            if admin_password and existing_hash == admin_password:
-                should_update = True
-                print(f"Migrating admin user '{admin_username}' password from plaintext to bcrypt")
-        elif admin_password:
-            # Check if environment password matches DB hash
-            try:
-                if not pwd_context.verify(admin_password, existing_hash):
-                    should_update = True
-                    print(f"Environment password changed - updating admin user '{admin_username}'")
-            except Exception as e:
-                print(f"Error verifying password hash: {e}")
-                should_update = True
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-        if should_update and admin_password:
-            hashed = pwd_context.hash(admin_password)
-            cursor.execute("""
-                UPDATE users SET password_hash = ?, updated_at = ?
-                WHERE username = ?
-            """, (hashed, utc_now_iso(), admin_username))
-            conn.commit()
+    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_ENV_FINGERPRINT_KEY,))
+    row = cursor.fetchone()
+    action, record = env_apply_decision(
+        admin_password, existing[1], row[0] if row else None, name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        if existing[1] and not existing[1].startswith("$2"):
+            print(f"Migrating admin user '{name}' password from plaintext to bcrypt")
+        else:
+            print(f"Environment password changed - updating admin user '{name}'")
+        cursor.execute("""
+            UPDATE users SET password_hash = ?, updated_at = ?
+            WHERE username = ?
+        """, (pwd_context.hash(admin_password), utc_now_iso(), name))
+        conn.commit()
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
 
 
 class DatabaseManager:
@@ -1035,6 +1070,7 @@ class DatabaseManager:
         self._slack_ops = SlackOperations()
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
+        self._nevermined_delegation_ops = NeverminedDelegationOperations()  # ent#966
         self._operator_queue_ops = OperatorQueueOperations()
         self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
@@ -1593,6 +1629,16 @@ class DatabaseManager:
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
 
+    # SUB-003 walk on a pulled turn (#3487)
+    def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
+        return self._schedule_ops.rotate_claim_token(execution_id, old_token, new_token)
+
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        return self._schedule_ops.holds_claim_token(execution_id, claim_token)
+
+    def set_backlog_metadata_for_token(self, execution_id: str, claim_token: str, backlog_metadata: str) -> bool:
+        return self._schedule_ops.set_backlog_metadata_for_token(execution_id, claim_token, backlog_metadata)
+
     # Lease reaper (#1081 Phase 3 — #429 / #1402)
     def find_expired_leases(self, now_iso: str = None, limit: int = 500):
         return self._schedule_ops.find_expired_leases(now_iso, limit)
@@ -1858,6 +1904,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1897,8 +1947,11 @@ class DatabaseManager:
             agent_name, claude_session_id, user_id
         )
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50):
-        return self._schedule_ops.get_schedule_executions(schedule_id, limit)
+    def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
+                                source_user_id=None, include_unattributed=False):
+        return self._schedule_ops.get_schedule_executions(
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1908,7 +1961,7 @@ class DatabaseManager:
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
                                      exclude_triggers=None, scope_to_viewer=False,
-                                     viewer_email=None):
+                                     viewer_email=None, source_user_id=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1918,7 +1971,8 @@ class DatabaseManager:
         """
         return self._schedule_ops.get_agent_executions_summary(
             agent_name, limit, exclude_triggers=exclude_triggers,
-            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email,
+            source_user_id=source_user_id)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -1930,9 +1984,11 @@ class DatabaseManager:
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
-    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200, *,
+                               source_user_id=None):
         """Every execution row of one fan-out batch (#2670)."""
-        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+        return self._schedule_ops.get_fan_out_executions(
+            agent_name, fan_out_id, limit, source_user_id=source_user_id)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -1962,9 +2018,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
@@ -2232,8 +2289,10 @@ class DatabaseManager:
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 
-    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
-        return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
+    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None, *, own_rows_user_id=None, own_rows_exempt_agents=None):
+        return self._activity_ops.get_activities_in_range(
+            start_time, end_time, activity_types, limit, agent_names,
+            own_rows_user_id=own_rows_user_id, own_rows_exempt_agents=own_rows_exempt_agents)
 
     def get_latest_activity_for_agents(self, agent_names: list):
         return self._activity_ops.get_latest_activity_for_agents(agent_names)
@@ -3833,6 +3892,46 @@ class DatabaseManager:
         return self._voip_ops.count_calls_since(agent_name, hours=hours)
 
     # =========================================================================
+    # Nevermined card delegation (delegated to db/nevermined_delegation.py) - ent#966
+    # =========================================================================
+
+    def get_nevermined_organization(self):
+        return self._nevermined_delegation_ops.get_organization()
+
+    def get_nevermined_organization_secrets(self):
+        return self._nevermined_delegation_ops.get_organization_secrets()
+
+    def save_nevermined_organization(self, org_id, environment, secrets, updated_by):
+        return self._nevermined_delegation_ops.save_organization(
+            org_id, environment, secrets, updated_by
+        )
+
+    def delete_nevermined_organization(self):
+        return self._nevermined_delegation_ops.delete_organization()
+
+    def count_active_agent_delegations(self):
+        return self._nevermined_delegation_ops.count_active_delegations()
+
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
+
+    # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================
 
@@ -4459,7 +4558,7 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
     def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
@@ -4481,6 +4580,9 @@ class DatabaseManager:
 
     def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
         return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def rearm_lost_dispatch(self, loop_id: str, *, due_for):
+        return self._loop_ops.rearm_lost_dispatch(loop_id, due_for=due_for)
 
     def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
         return self._loop_ops.claim_due_loop(loop_id, next_run_at)

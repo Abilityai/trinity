@@ -198,10 +198,12 @@ INTERNAL_FAILURE_DETAIL = (
 def _public_chat_url() -> str:
     """Local mirror of OSS ``settings_service.get_public_chat_url()`` — the
     fallback base when no explicit portal base URL is set."""
+    from services.settings_service import normalize_public_url  # #3881
+
     url = db.get_setting("public_chat_url", "")
     if url:
-        return url.rstrip("/")
-    return os.getenv("PUBLIC_CHAT_URL", "").rstrip("/")
+        return normalize_public_url(url)
+    return normalize_public_url(os.getenv("PUBLIC_CHAT_URL", ""))
 
 
 def get_portal_base_url() -> str:
@@ -291,13 +293,61 @@ def email_has_access(email: str | None) -> bool:
         return False
 
 
+# #3922 — what `portal_signin_verify` returns instead of a token for a platform
+# account: it signs in at `/login`, never as an outside client.
+PLATFORM_LOGIN_REQUIRED = object()
+
+
+def platform_login_admits(email: str | None) -> bool:
+    """#3922 — True when this address has a platform account that `/login`
+    can sign in: a `users` row exists for it, AND either
+
+    * it has a password (`POST /api/token` takes the email for an account with
+      a password hash — the admin, `authenticate_user`), or
+    * the platform email login (`POST /api/auth/email/verify`) would admit it:
+      email login on, the login policy allows codes (the pair
+      `GET /api/auth/mode` reports as `email_code_login_enabled`), and the
+      address is allow-listed (the #2381 re-check that route applies).
+
+    Such an address is a platform account, so the Workspace door sends it to
+    `/login` rather than minting a client session that resolves as
+    `is_platform=False`. The user row is required: an allow-list row is not
+    an account (sharing and access-request approval wrote allow-list rows for
+    outside clients before trinity-enterprise#837, and those remain), and
+    sending such a client to `/login` would create a user for them there.
+    Anything else, including a lookup error, keeps the client door: a `/login`
+    that cannot admit the person is a dead end."""
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from config import EMAIL_AUTH_ENABLED
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+        if not user:
+            return False
+        if user.get("password"):
+            return True
+        setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+        if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+            return False
+        return bool(core_db.is_email_whitelisted(addr))
+    except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
+        logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
+        return False
+
+
 def portal_signin_request(email: str | None) -> str | None:
     """Step 1: if the email has portal access, mint a 6-digit login code and
     return it (the caller dispatches the email). Returns None otherwise — the
     router ALWAYS returns the same generic body, so this never reveals whether
-    an email has access (#186 enumeration discipline)."""
+    an email has access (#186 enumeration discipline).
+
+    #3922: a platform account gets a code too, even with nothing shared to it,
+    so the verify step can send it on to `/login` instead of leaving it waiting
+    for a code that never comes."""
     email = (email or "").strip().lower()
-    if not email or not email_has_access(email):
+    if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -306,9 +356,13 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None) -> str | None:
+def portal_signin_verify(email: str | None, code: str | None):
     """Step 2: verify the code AND re-check access, then mint a portal session
-    token (a verified email, no platform account). Returns None on any failure."""
+    token (a verified email, no platform account). Returns None on any failure.
+
+    #3922: a platform account returns `PLATFORM_LOGIN_REQUIRED` and gets no
+    token. It is decided only after the code verifies, so only the owner of the
+    inbox learns that the address has an account."""
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
@@ -316,6 +370,8 @@ def portal_signin_verify(email: str | None, code: str | None) -> str | None:
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
         return None
+    if platform_login_admits(email):
+        return PLATFORM_LOGIN_REQUIRED
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token

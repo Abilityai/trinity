@@ -703,6 +703,7 @@ def build_pull_queue_payload(
     attempt: Optional[int] = None,
     images: Optional[list] = None,
     collaboration_activity_id: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -780,6 +781,7 @@ def build_pull_queue_payload(
         timeout_seconds=timeout_seconds,
         async_mode=True,
         resume_session_id=resume_session_id,
+        max_turns=max_turns,
     )
     return PersistentTaskPayload(
         request=request,
@@ -956,6 +958,48 @@ async def dispatch_and_await_terminal(
     return result_from_execution_row(result.execution_id) or result
 
 
+async def start_dispatch_activity(
+    *,
+    agent_name: str,
+    message: str,
+    execution_id: Optional[str],
+    triggered_by: str,
+    source_agent_name: Optional[str],
+    source_user_id: Optional[int],
+    parent_activity_id: Optional[str],
+    extra_activity_details: Optional[dict],
+) -> Optional[str]:
+    """Open the CHAT_START dispatch activity. Shared by push dispatch
+    (``execute_task`` step 3) and the pull claim (#3932), so the two paths
+    write the same timeline bar.
+
+    Best-effort — a tracking failure logs and returns ``None`` (the
+    turn proceeds without a paired activity, as before).
+    """
+    activity_id: Optional[str] = None
+    activity_details = {
+        "message_preview": message[:100] if message else "",
+        "source_agent": source_agent_name,
+        "execution_id": execution_id,
+        "triggered_by": triggered_by,
+    }
+    if extra_activity_details:
+        activity_details.update(extra_activity_details)
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=agent_name,
+            activity_type=ActivityType.CHAT_START,
+            user_id=source_user_id,
+            triggered_by=triggered_by,
+            parent_activity_id=parent_activity_id,
+            related_execution_id=execution_id,
+            details=activity_details,
+        )
+    except Exception as e:
+        logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
+    return activity_id
+
+
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
@@ -1020,9 +1064,21 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
     )
     error_code, error = _split_error_code(error)
+    # #3487: a pulled turn that walked the subscription pool carries the same
+    # summary a pushed one returns (`subscription_switch`, #3470 shape).
+    subscription_switch = None
+    try:
+        walk_state = json.loads(getattr(execution, "backlog_metadata", None) or "{}").get(
+            "subscription_walk"
+        )
+        if isinstance(walk_state, dict) and isinstance(walk_state.get("summary"), dict):
+            subscription_switch = walk_state["summary"]
+    except (TypeError, ValueError, AttributeError):
+        subscription_switch = None
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
+        subscription_switch=subscription_switch,
         response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
@@ -1582,6 +1638,10 @@ class TaskExecutionService:
         # #3127: the agent-to-agent /chat collaboration activity. Only a pull
         # pilot's queue reads it (the pull sink closes it); ignored on push.
         collaboration_activity_id: Optional[str] = None,
+        # #2328: the caller's per-task turn cap (`POST /task` `max_turns`). Sent
+        # to the agent, which applies it to `--max-turns`; None ⇒ the agent's
+        # own guardrail. Queued for a pull pilot, frozen by the skill gate.
+        max_turns: Optional[int] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1712,6 +1772,7 @@ class TaskExecutionService:
             attempt=attempt,
             images=images,
             collaboration_activity_id=collaboration_activity_id,
+            max_turns=max_turns,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
@@ -1750,6 +1811,7 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
+                        max_turns=max_turns,
                     ),
                 )
 
@@ -1769,7 +1831,7 @@ class TaskExecutionService:
                 return admission_denied
 
             # ---- 3. Track activity start -------------------------------------
-            activity_id = await self._start_dispatch_activity(
+            activity_id = await start_dispatch_activity(
                 agent_name=agent_name,
                 message=message,
                 execution_id=execution_id,
@@ -1839,6 +1901,9 @@ class TaskExecutionService:
                 # Claude-runtime agent on a new base image; everyone else ignores
                 # it and runs synchronously (200 → sync fallback below).
                 "async_result": async_dispatch,
+                # #2328: the caller's per-task turn cap. Both retries copy the
+                # payload (`{**payload, ...}`), so they keep it too.
+                "max_turns": max_turns,
             }
 
             response = await self._call_agent_with_retries(
@@ -2251,47 +2316,6 @@ class TaskExecutionService:
                 )
 
         return slot_acquired, None
-
-    async def _start_dispatch_activity(
-        self,
-        *,
-        agent_name: str,
-        message: str,
-        execution_id: Optional[str],
-        triggered_by: str,
-        source_agent_name: Optional[str],
-        source_user_id: Optional[int],
-        parent_activity_id: Optional[str],
-        extra_activity_details: Optional[dict],
-    ) -> Optional[str]:
-        """Step 3 of execute_task: open the CHAT_START dispatch activity.
-
-        Best-effort — a tracking failure logs and returns ``None`` (the
-        turn proceeds without a paired activity, as before).
-        """
-        activity_id: Optional[str] = None
-        # ---- 3. Track activity start -------------------------------------
-        activity_details = {
-            "message_preview": message[:100] if message else "",
-            "source_agent": source_agent_name,
-            "execution_id": execution_id,
-            "triggered_by": triggered_by,
-        }
-        if extra_activity_details:
-            activity_details.update(extra_activity_details)
-        try:
-            activity_id = await activity_service.track_activity(
-                agent_name=agent_name,
-                activity_type=ActivityType.CHAT_START,
-                user_id=source_user_id,
-                triggered_by=triggered_by,
-                parent_activity_id=parent_activity_id,
-                related_execution_id=execution_id,
-                details=activity_details,
-            )
-        except Exception as e:
-            logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-        return activity_id
 
     async def _breaker_fast_fail(
         self,

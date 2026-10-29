@@ -105,6 +105,7 @@ from routers.telegram import public_router as telegram_public_router, auth_route
 from routers.whatsapp import public_router as whatsapp_public_router, auth_router as whatsapp_auth_router
 from routers.paid import router as paid_router
 from routers.nevermined import router as nevermined_router
+from routers.nevermined_delegation import router as nevermined_delegation_router
 from routers.image_generation import router as image_generation_router
 from routers.avatar import router as avatar_router
 from routers.operator_queue import router as operator_queue_router, agent_router as operator_queue_agent_router, set_websocket_manager as set_operator_queue_ws_manager
@@ -938,7 +939,7 @@ async def _start_telegram_transport(app: FastAPI) -> None:
 
         # Reconcile webhooks for all existing bindings on startup
         from services.settings_service import settings_service
-        public_url = settings_service.get_setting("public_chat_url", "")
+        public_url = settings_service.get_public_chat_url_setting()
         if public_url:
             bindings = _db.get_all_telegram_bindings()
             for binding in bindings:
@@ -989,7 +990,7 @@ async def _start_whatsapp_transport(app: FastAPI) -> None:
 
         # Backfill webhook_url for existing bindings so UI displays the current URL
         from services.settings_service import settings_service as _settings_svc
-        public_url = _settings_svc.get_setting("public_chat_url", "")
+        public_url = _settings_svc.get_public_chat_url_setting()
         if public_url:
             backfill_whatsapp_webhook_urls(public_url)
             bindings = _db.get_all_whatsapp_bindings()
@@ -1320,7 +1321,8 @@ async def add_security_headers(request: Request, call_next):
 
     # HSTS only when we know the wire is HTTPS — checking both the
     # direct scheme and the X-Forwarded-Proto header set by upstream
-    # reverse proxies (uvicorn launched with --proxy-headers honours it).
+    # reverse proxies. uvicorn runs with --no-proxy-headers (ent#873), so
+    # the scheme is always the raw hop's and the header is what carries it.
     is_https = (
         request.url.scheme == "https"
         or request.headers.get("x-forwarded-proto", "").lower() == "https"
@@ -1333,6 +1335,20 @@ async def add_security_headers(request: Request, call_next):
 
     return response
 
+
+# trinity-enterprise#873 — one canonical client address per request, before any
+# route, limiter or audit writer reads `request.client`. Registered just before
+# the Host guard so it runs immediately INSIDE it and outside everything else;
+# it rewrites `scope["client"]` in place and leaves every header untouched.
+# The proxy-trust configuration is validated here, at import: an invalid
+# TRUSTED_PROXIES stops the backend with the offending entry named rather than
+# serving with a partial list. uvicorn's own forwarded-header processing is
+# switched OFF in every launcher (`--no-proxy-headers`), so this is the only
+# place a forwarded address is ever believed.
+from utils.client_ip import ClientAddressMiddleware, get_config as _client_ip_config
+
+_client_ip_config()
+app.add_middleware(ClientAddressMiddleware)
 
 # #3102 — reject a Host header that would shift the Host-built request URL.
 # Registered LAST so it runs FIRST (add_middleware prepends); keep every other
@@ -1413,6 +1429,7 @@ app.include_router(whatsapp_public_router)  # WhatsApp via Twilio Public (WHATSA
 app.include_router(whatsapp_auth_router)  # WhatsApp via Twilio Auth (WHATSAPP-001)
 app.include_router(paid_router)  # Nevermined Paid Chat (NVM-001)
 app.include_router(nevermined_router)  # Nevermined Admin Config (NVM-001)
+app.include_router(nevermined_delegation_router)  # Nevermined card delegation (ent#966)
 app.include_router(image_generation_router)  # Image Generation (IMG-001)
 app.include_router(avatar_router)  # Agent Avatars (AVATAR-001)
 app.include_router(operator_queue_router)  # Operator Queue (OPS-001)
@@ -1947,6 +1964,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
+    from utils.admin_identity import is_usable_password_hash
     user_data = db.get_user_by_username(current_user.username)
     if user_data:
         return {
@@ -1954,11 +1972,16 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
             "email": user_data.get("email"),
             "name": user_data.get("name"),
             "picture": user_data.get("picture"),
-            "role": user_data["role"]
+            "role": user_data["role"],
+            # #3825: whether this account can change a password in Settings —
+            # a boolean only, never the hash. Email-only accounts have none.
+            "has_password": is_usable_password_hash(user_data.get("password")),
         }
-    return {"username": current_user.username, "role": current_user.role}
+    return {"username": current_user.username, "role": current_user.role, "has_password": False}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # proxy_headers=False: client addresses are resolved by ClientAddressMiddleware
+    # from explicitly trusted proxies only (trinity-enterprise#873).
+    uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False)

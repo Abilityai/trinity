@@ -9,7 +9,7 @@ Loop operations for sequential bounded task execution (#740).
 import json
 import secrets
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional, Tuple
 
 from sqlalchemy import select, insert, update, func, and_
 
@@ -306,25 +306,76 @@ class LoopOperations:
         run_number: int,
         *,
         execution_id: Optional[str] = None,
-    ) -> str:
-        """Insert a new `running` loop-run row; return its id."""
+    ) -> Optional[str]:
+        """Claim run ``run_number`` and insert its `running` row (#3317).
+
+        Inserting a run row is the claim on dispatching that iteration. Two
+        callers can reach here for the same run K: the worker that closed run
+        K-1, and a sweep that took a park a booting worker's reconcile wrote
+        while the first was between its close and this call. Returns the new
+        run id to the one that may spawn the turn, and None to the other.
+
+        One transaction, write first:
+
+        1. ``UPDATE agent_loops SET next_run_at = NULL WHERE id AND
+           runs_completed = K-1 AND status`` non-terminal. The write takes the
+           loop row (PostgreSQL row lock, SQLite write lock) and spends any
+           pending park for run K, because run K is being dispatched now. No
+           row matched: the loop moved on or finished, so the claim is lost.
+        2. Under that lock, a run row numbered K or above: lost.
+        3. Insert run K and commit: won.
+
+        A lost claim rolls back, so it writes nothing. Step 2 is sound only
+        because every inserter of ``agent_loop_runs`` takes the parent row
+        first, and this method is the only one (a static guard pins that). A
+        single ``UPDATE ... WHERE NOT EXISTS (...)`` would not be: on PostgreSQL
+        the re-check after a lock wait covers the target row only, and the
+        subquery keeps the statement's original snapshot.
+        """
         run_id = f"lr_{secrets.token_urlsafe(10)}"
-        now = utc_now_iso()
-        stmt = insert(agent_loop_runs).values(
-            id=run_id,
-            loop_id=loop_id,
-            run_number=run_number,
-            execution_id=execution_id,
-            status="running",
-            response=None,
-            error=None,
-            cost=None,
-            duration_ms=None,
-            started_at=now,
-            completed_at=None,
-        )
-        with get_engine().begin() as conn:
-            conn.execute(stmt)
+        with get_engine().connect() as conn, conn.begin() as tx:
+            claimed = conn.execute(
+                update(agent_loops)
+                .where(
+                    and_(
+                        agent_loops.c.id == loop_id,
+                        agent_loops.c.runs_completed == run_number - 1,
+                        agent_loops.c.status.notin_(tuple(TERMINAL_STATUSES)),
+                    )
+                )
+                .values(next_run_at=None)
+            ).rowcount
+            if not claimed:
+                tx.rollback()
+                return None
+            taken = conn.execute(
+                select(agent_loop_runs.c.id)
+                .where(
+                    and_(
+                        agent_loop_runs.c.loop_id == loop_id,
+                        agent_loop_runs.c.run_number >= run_number,
+                    )
+                )
+                .limit(1)
+            ).first()
+            if taken is not None:
+                tx.rollback()
+                return None
+            conn.execute(
+                insert(agent_loop_runs).values(
+                    id=run_id,
+                    loop_id=loop_id,
+                    run_number=run_number,
+                    execution_id=execution_id,
+                    status="running",
+                    response=None,
+                    error=None,
+                    cost=None,
+                    duration_ms=None,
+                    started_at=utc_now_iso(),
+                    completed_at=None,
+                )
+            )
         return run_id
 
     def finalize_loop_run(
@@ -453,6 +504,91 @@ class LoopOperations:
         )
         with get_engine().begin() as conn:
             conn.execute(stmt)
+
+    def rearm_lost_dispatch(
+        self,
+        loop_id: str,
+        *,
+        due_for: Callable[[dict, List[dict]], str],
+    ) -> Tuple[str, Optional[dict]]:
+        """Re-arm a loop that lost its dispatch, deciding under its row lock (#3317).
+
+        ``reconcile_after_restart`` calls this for each loop its snapshot showed
+        unparked. Any read taken outside the lock can be overtaken (a live
+        worker claims, closes and dies; another reconcile parks and a sweep
+        clears it), so the decision is made here, on the state read while the
+        loop row is held. One transaction, write first:
+
+        1. ``UPDATE agent_loops SET next_run_at = next_run_at WHERE id AND
+           next_run_at IS NULL AND status`` non-terminal: a no-op write whose
+           only job is to take the row lock (PostgreSQL row lock, SQLite write
+           lock). No row matched: read the status, roll back, and return
+           ``"missing"``, ``"terminal"`` or ``"parked"``.
+        2. Read the loop row and all its run rows. Both reads come after the
+           lock is held: on PostgreSQL each statement takes a fresh snapshot
+           that includes every committed claim, and on SQLite no other writer
+           can commit meanwhile. Then:
+
+           * a ``running`` run row: roll back, return ``("open_run", row)``;
+           * a run numbered above ``runs_completed``: roll back, return
+             ``"stuck"`` (re-arming would dispatch a run number that already
+             exists);
+           * otherwise write ``next_run_at = due_for(loop, runs)``, commit and
+             return ``"armed"``.
+
+        ``due_for`` is the service's due-time policy. It runs inside this
+        transaction while the row is held, so it must not touch the database
+        or await; if it raises, the transaction rolls back. Every outcome other
+        than ``"open_run"`` carries None as its second element.
+        """
+        with get_engine().connect() as conn, conn.begin() as tx:
+            locked = conn.execute(
+                update(agent_loops)
+                .where(
+                    and_(
+                        agent_loops.c.id == loop_id,
+                        agent_loops.c.next_run_at.is_(None),
+                        agent_loops.c.status.notin_(tuple(TERMINAL_STATUSES)),
+                    )
+                )
+                .values(next_run_at=agent_loops.c.next_run_at)
+            ).rowcount
+            if not locked:
+                row = conn.execute(
+                    select(agent_loops.c.status).where(agent_loops.c.id == loop_id)
+                ).first()
+                tx.rollback()
+                if row is None:
+                    return "missing", None
+                return ("terminal" if row[0] in TERMINAL_STATUSES else "parked"), None
+
+            loop = _loop_row_to_dict(
+                conn.execute(
+                    select(agent_loops).where(agent_loops.c.id == loop_id)
+                ).mappings().first()
+            )
+            runs = [
+                _run_row_to_dict(r)
+                for r in conn.execute(
+                    select(agent_loop_runs)
+                    .where(agent_loop_runs.c.loop_id == loop_id)
+                    .order_by(agent_loop_runs.c.run_number.asc())
+                ).mappings()
+            ]
+            open_run = next((r for r in runs if r["status"] == "running"), None)
+            if open_run is not None:
+                tx.rollback()
+                return "open_run", open_run
+            runs_completed = loop["runs_completed"] or 0
+            if any(r["run_number"] > runs_completed for r in runs):
+                tx.rollback()
+                return "stuck", None
+            conn.execute(
+                update(agent_loops)
+                .where(agent_loops.c.id == loop_id)
+                .values(next_run_at=due_for(loop, runs))
+            )
+        return "armed", None
 
     def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
         """Atomically take ownership of a due loop by clearing ``next_run_at``.

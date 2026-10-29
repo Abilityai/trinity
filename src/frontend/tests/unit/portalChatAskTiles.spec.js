@@ -203,6 +203,8 @@ describe("an answered ask's result lands in the open chat (ent#747, mounted)", (
       expect(wrapper.findAll('[data-message-id]').length).toBe(before + 1)
       expect(wrapper.find('[data-message-id="r1"]').exists()).toBe(true)
       expect(store.askResultWatch).toBeNull()
+      // #3439: a report watched landing is read — the shell hears it.
+      expect(wrapper.emitted('thread-caught-up')).toEqual([['s1']])
       vi.advanceTimersByTime(20000)
       await flushPromises()
       expect(store.fetchHistory).toHaveBeenCalledTimes(1)

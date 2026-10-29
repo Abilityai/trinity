@@ -130,7 +130,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
 | BaseCard | `components/base/BaseCard.vue` | `CredentialSetupChecklist.vue` surface |
 
-The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`.
+The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`, and `BoundedRegion.vue` (the bounded viewport, #3451 — recipe under Data table).
 
 ### BaseButton
 
@@ -315,6 +315,17 @@ Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
 
 - **Do:** bounded container + sticky header + stated total.
 - **Don't:** render 5,000 rows into the page and let it scroll for minutes.
+
+### Bounded region — fill the window (#3451)
+
+**Shipped primitive:** `components/BoundedRegion.vue` — the principle-28 viewport for any list, table or feed. A named, focusable `role="region"` (required `label`; `tabindex="0"` so the scroll is reachable from the keyboard) that scrolls on one axis with a reserved gutter. Two sizes: `fill` (default) takes the rest of a flex column from a **0px basis** with a **20rem floor**; `:fill="false"` leaves the cap to the consumer (`max-h-*`). `scrollToTop()` is for a new query. Reference adoption: the four Operations list tabs.
+
+**Recipe — the list takes the window's remaining height:** the page root is `min-h-dvh flex flex-col`, and every element between it and the region is a flex column that grows from a 0px basis (`grow basis-0 flex flex-col`); an element that also carries `mx-auto` needs `w-full`, because auto margins in a column flexbox suppress the stretch. The page is then `max(window, chrome + 20rem)` high whatever the item count: below the floor it scrolls by the shortfall, never by the rows.
+- **Never `flex-1` in that chain.** Tailwind's `flex-1` is a 0% basis, and a percentage of an auto-height column resolves as the content's height — the list regrows the page (measured: 30,306 px for 300 rows, identically in Chromium, Firefox and WebKit). One block wrapper in the chain does the same, or leaves the list short with a band of empty page below it.
+- **Wrap the whole state chain** (loading / failed / empty / rows / Load more) in the region, so a poll that swaps the rows keeps the node and the reader's place (principle 5); a filter change calls `scrollToTop()`, a poll never does.
+- **Nothing that toggles on its own stacks above the region** (principle 30). Page scroll anchoring used to absorb a banner appearing above a scrolled reader; it cannot when the scroller's own box moves. Put a selection's bulk actions in the list's fixed-height header row and a live count in an existing fixed row; a failure banner raised by the user's own verb may sit above (principle 18).
+- **Do:** stated total and filters outside the region; Load more as its last child; an inset (`-mx-1 px-1 py-1`) when cards inside carry a ring or shadow.
+- **Don't:** a magic `h-[calc(100vh-…px)]` — it breaks the first time a subtitle wraps or a banner appears.
 
 ### Empty states
 

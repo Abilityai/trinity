@@ -503,6 +503,12 @@ class User(BaseModel):
     # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
     # an agent key's fleet reach. Private, never serialized; None until read.
     _fleet_reach: Optional[set] = PrivateAttr(default=None)
+    # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
+    # key's request carried (#2392) — the turn the agent is acting in. Private
+    # like the reach set: written only by `dependencies.record_acting_turn`, from
+    # the request, never from a token, and never serialized. Read by the viewer
+    # helpers, which narrow a shared person's turn to that person's rows.
+    _acting_execution_id: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -566,7 +572,12 @@ class ParallelTaskRequest(BaseModel):
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
     timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
-    max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
+    # Maximum agentic turns (--max-turns) for runaway prevention. #2328: bounded to the
+    # owner guardrail's own legal range (routers/agent_config.py
+    # `_GUARDRAILS_NUMBER_BOUNDS["max_turns_task"]`, parity-tested), so 0, a negative
+    # or an unbounded value is a 422 here whatever image the agent runs; the /task
+    # route then clamps it to the owner's configured `max_turns_task`.
+    max_turns: Optional[int] = Field(None, ge=1, le=500)
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
     user_message: Optional[str] = None  # Original user message (without context), used when save_to_session=True
@@ -1436,6 +1447,125 @@ class SystemDeployResponse(BaseModel):
     # frontend needs it to choose its post-deploy navigation, and a requested view
     # that failed also appends a warning.
     system_view_requested: bool = False
+
+
+# ============================================================================
+# System apply (trinity-enterprise#695): reconcile a live system to its manifest
+# ============================================================================
+
+
+class SystemApplyRequest(BaseModel):
+    """Request to reconcile a live system to a manifest (`POST /api/systems/apply`).
+
+    `extra="forbid"`: a stray `mode` or `strict` is a 422, never silently
+    dropped. Silently dropping an unknown key is exactly how a `mode: "apply"`
+    sent to `/deploy` on an older build would run CREATE and suffix the fleet.
+
+    `dry_run` defaults to TRUE (unlike `SystemDeployRequest`): a verb that
+    changes live agents previews unless the caller says otherwise, the teardown
+    precedent.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: str  # Raw YAML string, parsed by `system_service.parse_manifest`
+    dry_run: bool = True
+
+
+class SystemApplyChange(BaseModel):
+    """One difference apply found on a member.
+
+    `action` is `write` (apply changes it on a real run) or `report` (apply
+    tells you and leaves it). A member whose changes are all `report` is
+    `unchanged`: AC1 counts writes, not notices.
+    """
+    field: str
+    action: Literal["write", "report"]
+    code: str
+    current: Optional[Any] = None
+    desired: Optional[Any] = None
+    note: Optional[str] = None
+
+
+class SystemApplyMember(BaseModel):
+    """One declared member and what apply does to it."""
+    name: str
+    short_name: str
+    verdict: Literal["create", "update", "unchanged", "blocked"]
+    changes: List[SystemApplyChange] = []
+    # A stored configuration the running container does not have yet, from the
+    # platform's own drift predicates; independent of this run's writes. Apply
+    # never restarts an existing member.
+    restart_required: bool = False
+    # None on a dry run or a refused run; otherwise whether every write planned
+    # for this member succeeded.
+    applied: Optional[bool] = None
+
+
+class SystemApplyDrift(BaseModel):
+    """A tagged member of the system that the manifest does not declare.
+
+    Reported, never deleted, stopped or renamed (AC3)."""
+    name: str
+    evidence: str  # "tag" | "both" (a prefix-only member blocks instead)
+    note: Optional[str] = None
+
+
+class SystemApplyBlocker(BaseModel):
+    """A reason the whole run is refused before any write."""
+    code: str
+    member: Optional[str] = None
+    detail: str
+    remedy: str
+    retryable: bool = False
+
+
+class SystemApplyPromptVerdict(BaseModel):
+    """The platform-wide `trinity_prompt` (written only by an admin)."""
+    verdict: Literal["unchanged", "update", "not_declared", "requires_admin"]
+    note: Optional[str] = None
+
+
+class SystemApplyViewVerdict(BaseModel):
+    """The auto-created system view."""
+    verdict: Literal["unchanged", "create", "not_requested", "ambiguous"]
+    id: Optional[str] = None
+    changes: List[SystemApplyChange] = []
+
+
+class SystemApplyFailure(BaseModel):
+    """One write that did not land on a real run."""
+    name: str
+    short_name: str
+    step: str
+    reason: str  # Sanitized, truncated (`system_service._failure_reason`)
+
+
+class SystemApplyResponse(BaseModel):
+    """Response from `POST /api/systems/apply` (trinity-enterprise#695).
+
+    `status`: `valid` (dry run, no blockers) | `invalid` (dry run, blockers) |
+    `refused` (real run, blockers, nothing written) | `applied` (every
+    attempted write succeeded, including none planned) | `partial` (some
+    failed) | `failed` (every attempted write failed). A separate model from
+    `SystemDeployResponse`, whose five-valued `status` stays untouched (AC6).
+    """
+    mode: Literal["apply"] = "apply"
+    dry_run: bool
+    system_name: str
+    status: Literal["valid", "invalid", "refused", "applied", "partial", "failed"]
+    members: List[SystemApplyMember] = []
+    drift: List[SystemApplyDrift] = []
+    blockers: List[SystemApplyBlocker] = []
+    prompt: SystemApplyPromptVerdict
+    system_view: SystemApplyViewVerdict
+    failed: List[SystemApplyFailure] = []
+    warnings: List[str] = []
+    # What a real run actually did, for the router's audit row and its thin
+    # `agent_tags_changed` triggers (never the plan: a create that failed is
+    # not a create). Private: never serialized.
+    _tags_written: List[str] = PrivateAttr(default_factory=list)
+    _created: List[str] = PrivateAttr(default_factory=list)
+    _writes_ok: Dict[str, int] = PrivateAttr(default_factory=dict)
 
 
 # ============================================================================
@@ -3326,6 +3456,14 @@ class InternalTaskExecutionRequest(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
 
 
+class InternalPreCheckRequest(BaseModel):
+    """The schedule a pre-check is gating (#3966). Every field is optional: a
+    bodyless request (an older scheduler) runs the hook exactly as before."""
+    schedule_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_message: Optional[str] = None
+
+
 class ValidateExecutionRequest(BaseModel):
     """Request model for triggering execution validation."""
     execution_id: str
@@ -4107,6 +4245,12 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
+    # webhook (its creator, the agent owner, an admin). Computed server-side by
+    # the same predicate the webhook routes enforce — the client has no numeric
+    # user id to compare an owner id against, and the creator's id is not exposed.
+    # Defaults False: a response built without the predicate claims nothing.
+    can_manage_webhook: bool = False
 
     class Config:
         from_attributes = True
@@ -4194,6 +4338,10 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # RETRY-001: a scheduler retry links to its chain's original execution.
+    # The MCP server scopes a delegation's idempotency key to it (#3296), so a
+    # retried scheduled run replays attempt 1's children instead of re-running.
+    retry_of_execution_id: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001
@@ -4209,6 +4357,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
@@ -4555,6 +4705,31 @@ class SlackChannelMessageRequest(IntentKeyFields):
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / portal
+    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
 
 
 class UpdateMyEmailRequest(BaseModel):
@@ -5782,3 +5957,73 @@ class AAuthResourceCallResponse(BaseModel):
     detail: Optional[str] = None
     do_not_retry: Optional[bool] = None
     next_step: str
+
+
+# ---------------------------------------------------------------------------
+# Nevermined card delegation (trinity-enterprise#966). Nevermined holds the
+# card and the mandate; these models carry the organization config and never
+# echo a secret back.
+# ---------------------------------------------------------------------------
+
+def _nevermined_secret(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.splitlines() not in ([], [value]):  # the agent .env splitter's boundary set
+        raise ValueError("a Nevermined secret cannot contain a newline")
+    value = value.strip()
+    return value or None
+
+
+class NeverminedOrganizationUpdate(BaseModel):
+    """PUT /api/nevermined/organization. Secrets are write-only: an absent one
+    keeps the stored value."""
+    org_id: str = Field(..., min_length=1, max_length=256)
+    environment: Literal["sandbox", "live"] = "sandbox"
+    widget_secret: Optional[str] = Field(default=None, max_length=4096)
+    agent_api_key: Optional[str] = Field(default=None, max_length=4096)
+
+    @field_validator("org_id")
+    @classmethod
+    def _org_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or any(c in v for c in "\r\n"):
+            raise ValueError("org_id must be a non-empty single line")
+        return v
+
+    @field_validator("widget_secret", "agent_api_key")
+    @classmethod
+    def _secret(cls, v: Optional[str]) -> Optional[str]:
+        return _nevermined_secret(v)
+
+
+class NeverminedOrganizationState(BaseModel):
+    """The organization as any route returns it — no secret field exists here."""
+    configured: bool
+    org_id: Optional[str] = None
+    environment: Optional[Literal["sandbox", "live"]] = None
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+    active_delegations: int = 0
+
+
+NEVERMINED_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+class NeverminedDelegationBind(BaseModel):
+    """POST /api/nevermined/agents/{agent_name}/delegation — the ids the
+    Nevermined widget handed the browser. Both spellings are accepted."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    delegation_id: str = Field(..., alias="delegationId", pattern=NEVERMINED_ID_PATTERN)
+    payment_method_id: Optional[str] = Field(default=None, alias="paymentMethodId", pattern=NEVERMINED_ID_PATTERN)
+    provider: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if any(c in v for c in "\r\n"):
+            raise ValueError("provider must be a single line")
+        return v or None

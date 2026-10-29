@@ -341,6 +341,121 @@ class TestServiceClaim:
         assert claim is not None and claim["execution_id"] == eid
 
 
+class TestClaimActivity:
+    """#3932: a claim opens the turn's CHAT_START, as push dispatch does."""
+
+    def _dispatch_rows(self, eid):
+        from sqlalchemy import text
+        from db.engine import get_engine
+
+        with get_engine().connect() as conn:
+            return conn.execute(text(
+                "SELECT id, activity_state, parent_activity_id, triggered_by "
+                "FROM agent_activities WHERE related_execution_id = :e "
+                "AND activity_type = 'chat_start'"), {"e": eid}).all()
+
+    def test_claim_opens_one_chat_start_and_redelivery_reopens_after_close(
+        self, seed_agent, enqueue
+    ):
+        import asyncio
+        import json
+        from models import TaskExecutionStatus
+        from services import pull_coordination_service as pcs
+        from services.activity_service import activity_service
+
+        seed_agent("alpha")
+        eid = enqueue("alpha", backlog_metadata=json.dumps(
+            {"collaboration_activity_id": "collab-1"}))
+        claim = pcs.claim_next_task("alpha", "alpha#w1")
+        assert claim["execution_id"] == eid
+
+        assert asyncio.run(pcs.open_claim_activity(eid))
+        rows = self._dispatch_rows(eid)
+        assert len(rows) == 1
+        assert rows[0][1] == "started"
+        assert rows[0][2] == "collab-1"
+        assert rows[0][3] == "manual"
+
+        # Still open: a second open reuses it, never a second bar.
+        assert asyncio.run(pcs.open_claim_activity(eid)) is None
+        assert len(self._dispatch_rows(eid)) == 1
+
+        # The attempt ends; nothing open stays nothing open.
+        asyncio.run(activity_service.close_execution_activity(
+            eid, TaskExecutionStatus.SUCCESS))
+        assert [r[1] for r in self._dispatch_rows(eid)] == ["completed"]
+
+    def test_success_result_closes_the_claim_bar(self, seed_agent, enqueue):
+        import asyncio
+        from services import pull_coordination_service as pcs
+        from services import activity_service as act_mod
+
+        seed_agent("alpha")
+        eid = enqueue("alpha")
+        claim = pcs.claim_next_task("alpha", "alpha#w1")
+
+        async def go():
+            await pcs.open_claim_activity(eid)
+            outcome = pcs.apply_task_result(
+                eid, claim["claim_token"], status="success", content="done")
+            await asyncio.gather(*list(act_mod._inflight_close_tasks))
+            return outcome
+
+        assert asyncio.run(go()).kind == "applied"
+        assert [r[1] for r in self._dispatch_rows(eid)] == ["completed"]
+
+    def test_reclaim_inside_the_reaper_gap_keeps_the_live_bar(
+        self, seed_agent, enqueue, monkeypatch
+    ):
+        """The reaper commits the re-queue, then closes the dead attempt's bar.
+        A re-claim in between must keep its own bar open and closeable."""
+        import asyncio
+        import config
+        from database import db
+        from services import lease_reaper_service, pull_coordination_service as pcs
+        from services import activity_service as act_mod
+        from services.cleanup_service import CleanupReport, CleanupService
+
+        monkeypatch.setattr(config, "REDELIVERY_GOVERNOR_ENABLED", False, raising=False)
+        seed_agent("alpha")
+        eid = enqueue("alpha")
+        pcs.claim_next_task("alpha", "alpha#w1")
+        asyncio.run(pcs.open_claim_activity(eid))
+        _hrun("UPDATE schedule_executions SET lease_expires_at = '2000-01-01T00:00:00Z' "
+              "WHERE id = :e", e=eid)
+
+        real_reap = lease_reaper_service.reap_expired_leases
+
+        async def go():
+            report = real_reap(db, max_redelivery=3)
+            assert report.requeued_execution_ids == [eid]
+            # Re-claim lands in the gap, before the reaper's close runs.
+            claim = pcs.claim_next_task("alpha", "alpha#w2")
+            assert claim["redelivery_count"] == 1
+            live = await pcs.open_claim_activity(eid)
+            assert live
+            monkeypatch.setattr(lease_reaper_service, "reap_expired_leases",
+                                lambda *_a, **_k: report)
+            await CleanupService(poll_interval=300)._sweep_expired_leases(CleanupReport())
+            states = {r[0]: r[1] for r in self._dispatch_rows(eid)}
+            assert states[live] == "started"
+            assert sorted(states.values()) == ["cancelled", "started"]
+            pcs.apply_task_result(eid, claim["claim_token"], status="success", content="ok")
+            await asyncio.gather(*list(act_mod._inflight_close_tasks))
+            return live
+
+        live = asyncio.run(go())
+        states = {r[0]: r[1] for r in self._dispatch_rows(eid)}
+        assert states[live] == "completed"
+        assert sorted(states.values()) == ["cancelled", "completed"]
+
+    def test_unknown_execution_opens_nothing(self, seed_agent):
+        import asyncio
+        from services import pull_coordination_service as pcs
+
+        assert asyncio.run(pcs.open_claim_activity("nope")) is None
+
+
 class TestServiceResult:
     def _claim(self, agent="alpha"):
         from database import db
@@ -543,6 +658,18 @@ class TestHttpAuth:
             )
         assert r.status_code == 200
         assert r.json()["execution_id"] == "exec-1"
+
+    def test_next_task_opens_the_claim_activity(self, client):
+        # #3932: the claim is a pull turn's dispatch, so it opens the timeline bar.
+        from unittest.mock import AsyncMock
+        fake = {"envelope": {"id": "m1"}, "execution_id": "exec-1", "claim_token": "t"}
+        with patch("services.pull_coordination_service.claim_next_task", return_value=fake), \
+             patch("services.pull_coordination_service.open_claim_activity",
+                   new=AsyncMock()) as opened:
+            r = client.get("/api/internal/next-task",
+                           params={"agent_name": "alpha", "worker_id": "w"}, headers=_HDR)
+        assert r.status_code == 200
+        opened.assert_awaited_once_with("exec-1")
 
     # --- Proof 1b (#1081 B1): a valid own scoped key but the agent is NOT a
     # pilot (de-piloted / never piloted) -> 403 on the CLAIM seam. The allowlist

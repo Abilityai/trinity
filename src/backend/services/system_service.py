@@ -3,9 +3,11 @@ System manifest parsing and deployment service.
 
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
+import asyncio
 import json
 import os
 import stat
+import time
 import yaml
 
 from utils.safe_yaml import (
@@ -30,6 +32,14 @@ from models import (
     BundledManifestDetail,
     BundledManifestSummary,
     MANIFEST_MAX_BYTES,
+    SystemApplyBlocker,
+    SystemApplyChange,
+    SystemApplyDrift,
+    SystemApplyFailure,
+    SystemApplyMember,
+    SystemApplyPromptVerdict,
+    SystemApplyResponse,
+    SystemApplyViewVerdict,
     SystemDeployFailure,
     SystemDeployResponse,
     SystemSchedulePreview,
@@ -37,6 +47,7 @@ from models import (
 )
 from database import db
 from db_models import ScheduleCreate, SystemViewCreate
+from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
@@ -2149,3 +2160,1675 @@ async def deploy_manifest(
     except Exception as e:
         logger.exception(f"System deployment failed: {e}")
         raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+
+
+# ============================================================================
+# Apply mode (trinity-enterprise#695): reconcile a live system to its manifest.
+#
+# `deploy_manifest` above is CREATE mode and stays exactly as it is (AC6): it
+# can only create, so re-sending a manifest whose agents exist builds `_N`
+# copies. Apply is the sibling verb (`POST /api/systems/apply`): per declared
+# member, absent -> create, present -> update the declared fields in place,
+# present but undeclared -> report as drift. Four parts, in this order:
+#
+#   read_apply_snapshot   reads only; a failed read is a retryable blocker,
+#                         never an empty value (create fails OPEN, apply CLOSED)
+#   resolve_apply_plan    pure; per-member verdicts and the ordered write-set
+#   execute_apply_plan    writes only, each outcome from the writer's return
+#   apply_manifest        snapshot + plan -> refuse, or lock -> re-snapshot +
+#                         re-plan under the lock -> execute under a lease keeper
+#
+# Requirement: docs/memory/requirements/roadmap.md §16.5.4.
+# ============================================================================
+
+# Blocker codes. The first five are RETRYABLE: nothing about the manifest is
+# wrong, a read or the lock failed (the router answers 503 when only these
+# are present, 409 otherwise).
+APPLY_RETRYABLE_BLOCKERS = frozenset({
+    "membership_tags_unreadable",
+    "roster_unreadable",
+    "member_reads_unavailable",
+    "apply_in_progress",
+    "apply_lock_unavailable",
+})
+
+# One detail for EVERY declared name the caller may not manage (another user's
+# agent, a shared-with-me agent, a soft-deleted name, a reserved volume base,
+# a container nobody owns). Byte-identical apart from the name, which the
+# caller supplied, so the code and the text never say which of those it is
+# (Invariant #8). It adds no existence oracle: `POST /api/agents` already
+# answers 409 to any creator for a name that is taken, soft-deleted or
+# volume-reserved (`crud._check_name_availability`), and create mode's dry
+# run warns `_2` for a live one.
+_NAME_UNAVAILABLE_DETAIL = (
+    "The agent name '{name}' is in use or reserved by an agent you cannot manage."
+)
+_NAME_UNAVAILABLE_REMEDY = (
+    "Rename this member in the manifest, or have the agent's owner or an admin "
+    "run apply."
+)
+
+
+def _apply_blocker(
+    code: str, member: Optional[str], detail: str, remedy: str
+) -> "SystemApplyBlocker":
+    return SystemApplyBlocker(
+        code=code,
+        member=member,
+        detail=detail,
+        remedy=remedy,
+        retryable=code in APPLY_RETRYABLE_BLOCKERS,
+    )
+
+
+def _read_error(exc: Exception) -> str:
+    """What a caller is told about a failed READ: the exception class only.
+    A database error's message carries the SQL text and its parameters, which
+    belong in the server log, not in an API response."""
+    logger.warning("system apply: read failed (%s): %s", type(exc).__name__, exc)
+    return type(exc).__name__
+
+
+def _read_failed(member: Optional[str], what: str, exc: Optional[Exception] = None) -> "SystemApplyBlocker":
+    """A read apply depends on failed: retryable, never "absent" (P-B)."""
+    reason = f" ({_read_error(exc)})" if exc is not None else ""
+    return _apply_blocker(
+        "member_reads_unavailable",
+        member,
+        f"Could not read {what}{reason}.",
+        "Retry; apply never treats an unreadable value as absent.",
+    )
+
+
+@dataclass
+class ApplyMemberState:
+    """What the snapshot knows about one DECLARED member.
+
+    `status` is `absent` (the name is free: create it), `unavailable` (taken
+    by something the caller may not manage: the uniform refusal) or `managed`
+    (a live agent the caller may manage: reconcile it). The per-member reads
+    are populated only for a `managed` member that passed every gate.
+    """
+
+    short_name: str
+    name: str
+    status: str = "absent"
+    owner_username: Optional[str] = None
+    labels: Optional[Dict[str, str]] = None
+    tags: List[str] = field(default_factory=list)
+    edges: List[str] = field(default_factory=list)
+    schedules: List = field(default_factory=list)
+    folders: Optional[object] = None  # db_models.SharedFolderConfig, or None
+    resource_limits: Optional[Dict[str, Optional[str]]] = None
+    restart_pending: bool = False
+    blocked: bool = False
+
+
+@dataclass
+class ApplySnapshot:
+    """Everything apply read, and every blocker the reads or gates produced."""
+
+    system_name: str
+    roster: List[str]
+    membership: SystemMembership
+    members: Dict[str, ApplyMemberState]
+    blockers: List["SystemApplyBlocker"]
+    caller_id: int
+    caller_username: str
+    caller_role: str
+    caller_is_admin: bool
+    stored_prompt: Optional[str] = None
+    # The fleet default a member to create gets when it declares no resources
+    # (`_manifest_default_resources`, a settings read): read here so a failure
+    # is a blocker, never an exception after the first write.
+    default_resources: Optional[Dict[str, str]] = None
+    views: List = field(default_factory=list)
+
+
+def _member_container(name: str):
+    """The one per-member container read apply makes (a test seam).
+
+    `get_agent_container` turns every Docker error into None, so a caller must
+    never read None as "no container" for a name the tri-state roster already
+    showed: the snapshot treats it as a read failure.
+    """
+    from services.docker_service import get_agent_container
+    return get_agent_container(name)
+
+
+def _container_labels(container) -> Optional[Dict[str, str]]:
+    if container is None:
+        return None
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels")
+    except Exception:  # noqa: BLE001 — an unreadable container is a read failure
+        return None
+    return dict(labels) if isinstance(labels, dict) else None
+
+
+async def _restart_pending(name: str, container) -> bool:
+    """Does the stored config differ from what this container runs?
+
+    The platform's OWN start-path drift predicates, so apply's
+    `restart_required` cannot disagree with what the next start will do:
+    computed every run from the container, never from this run's writes,
+    so an override stored by an earlier apply keeps reporting until a restart.
+    """
+    from services.agent_service.helpers import (
+        check_resource_limits_match,
+        check_shared_folder_mounts_match,
+    )
+    resources_match = check_resource_limits_match(container, name)
+    # strict: a failed source-volume inspect raises (a read failure, P-B)
+    # instead of reading as "mounts match".
+    folders_match = await check_shared_folder_mounts_match(container, name, strict=True)
+    return not (resources_match and folders_match)
+
+
+def _evidence_remedy(name: str, system_name: str, declared: bool) -> str:
+    if declared:
+        return (
+            f"Add this system's tag to '{name}' with the additive "
+            f"`POST /api/agents/{name}/tags/{system_name}` (or the MCP `tag_agent` "
+            f"tool); not `PUT /api/agents/{name}/tags`, which replaces the whole set."
+        )
+    return (
+        f"If '{name}' belongs to '{system_name}', add the tag '{system_name}' "
+        f"(`POST /api/agents/{name}/tags/{system_name}`). If it belongs to another "
+        f"system (e.g. '{system_name}-extra'), tag it with THAT system's name, "
+        f"which takes it out of this one. Or rename it."
+    )
+
+
+async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> ApplySnapshot:
+    """Read what apply needs to plan. Reads only, never writes (AC4).
+
+    Roster: the live ownership rows (a recovered agent with no container
+    included) the caller may manage, by the name classification's predicate (a live owner +
+    `can_user_share_agent` + `agent_may_reach(manage=True)`): an agent merely
+    shared with the caller, or a container nobody owns, is outside it, so it
+    never blocks the run or shows as drift. The tri-state container list is
+    still read (an unreadable Docker refuses) — never
+    `get_accessible_agents`, which is built on `list_all_agents_fast` and
+    returns `[]` without a Docker client, so the evidence gate would pass over
+    an empty membership (#2196 class). The ownership rows bring in a recovered
+    agent with no container.
+
+    Each declared name is classified GLOBALLY, never from the caller's roster:
+    taken (a container, the #1790 predicate, or a reserved volume base)
+    AND a live agent the caller may manage (the deploy-local predicate,
+    `can_user_share_agent` + `agent_may_reach(manage=True)`) -> the specific
+    gates, then reconcile; taken but not manageable -> one uniform
+    `member_name_unavailable`; free -> create. Never "absent -> create" for a
+    taken name, so apply cannot suffix.
+    """
+    from dependencies import agent_may_reach, assert_admin
+
+    from services import docker_service
+    from services.agent_service.crud import agent_name_is_taken
+
+    system = manifest.name
+    blockers: List[SystemApplyBlocker] = []
+
+    try:
+        assert_admin(current_user)
+        caller_is_admin = True
+    except HTTPException:
+        caller_is_admin = False
+
+    snapshot = ApplySnapshot(
+        system_name=system,
+        roster=[],
+        membership=SystemMembership(members=[]),
+        members={},
+        blockers=blockers,
+        caller_id=current_user.id,
+        caller_username=current_user.username,
+        caller_role=current_user.role,
+        caller_is_admin=caller_is_admin,
+    )
+
+    # 1. Roster (see the docstring).
+    states = docker_service.agent_container_states()
+    roster_ok = docker_ok = states is not None
+    if states is None:
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            "Docker could not be asked which agent containers exist.",
+            "Retry when Docker is reachable. An unreadable Docker would read as "
+            "'no members, no drift', so apply refuses instead.",
+        ))
+        states = {}
+    try:
+        live_rows = set(db.get_all_agent_metadata().keys())
+    except Exception as e:  # noqa: BLE001 — fail closed (P-B)
+        roster_ok = False
+        live_rows = set()
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            f"Could not read the agent ownership rows ({_read_error(e)}).",
+            "Retry; apply never plans over a roster it could not read.",
+        ))
+    if roster_ok:
+        try:
+            # A live owner row first (`bool(owner)`): an admin
+            # passes `can_user_share_agent` for ANY name, so a container with no
+            # live owner row (nobody's to manage; its tag route 404s) would
+            # otherwise refuse an admin's run or show as drift.
+            snapshot.roster = [
+                n for n in sorted(live_rows)
+                if db.can_user_share_agent(current_user.username, n)
+                and agent_may_reach(current_user, n, manage=True)
+            ]
+        except Exception as e:  # noqa: BLE001
+            roster_ok = False
+            blockers.append(_apply_blocker(
+                "roster_unreadable", None,
+                f"Could not check access to the agents ({_read_error(e)}).",
+                "Retry; apply never plans over a roster it could not read.",
+            ))
+
+    # 2. Membership through THE one predicate, and the evidence gate (AC5).
+    declared = {short: f"{system}-{short}" for short in manifest.agents}
+    if roster_ok:
+        snapshot.membership = system_membership(system, snapshot.roster)
+        if not snapshot.membership.tags_readable:
+            blockers.append(_apply_blocker(
+                "membership_tags_unreadable", None,
+                "The agents' tags could not be read, so membership can only be "
+                "guessed from names.",
+                "Retry; apply refuses on unverified membership rather than guess.",
+            ))
+
+    # 3. Each declared name, classified globally.
+    for short, name in declared.items():
+        state = ApplyMemberState(short_name=short, name=name)
+        snapshot.members[short] = state
+        try:
+            taken = (
+                name in states
+                or agent_name_is_taken(name)
+                or db.is_volume_base_reserved(name)
+            )
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"whether '{name}' exists", e))
+            state.blocked = True
+            continue
+        if not taken:
+            if not docker_ok:
+                # P-B: with Docker unreadable a name held only by a container
+                # reads as free; its verdict is unknown, never `create`.
+                state.blocked = True
+            continue  # absent -> create
+
+        try:
+            owner = db.get_agent_owner(name)
+            manageable = bool(owner) and bool(
+                db.can_user_share_agent(current_user.username, name)
+            ) and agent_may_reach(current_user, name, manage=True)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"who manages '{name}'", e))
+            state.blocked = True
+            continue
+        if not manageable:
+            state.status = "unavailable"
+            state.blocked = True
+            blockers.append(_apply_blocker(
+                "member_name_unavailable", name,
+                _NAME_UNAVAILABLE_DETAIL.format(name=name),
+                _NAME_UNAVAILABLE_REMEDY,
+            ))
+            continue
+
+        # A live agent the caller may manage: only now the specific gates.
+        state.status = "managed"
+        state.owner_username = owner.get("owner_username")
+        try:
+            is_system = bool(owner.get("is_system")) or bool(db.is_system_agent(name))
+            ephemeral = db.get_agent_ephemeral_info(name)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is", e))
+            state.blocked = True
+            continue
+        if ephemeral is None:
+            # The name is known to exist; an empty follow-up read is a read
+            # failure, not an absence (P-B).
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is"))
+            state.blocked = True
+            continue
+        gate = None
+        if is_system:
+            gate = ("member_is_system_agent",
+                    f"'{name}' is a system agent; apply never reconfigures one.",
+                    "Remove it from the manifest.")
+        elif ephemeral.get("is_ephemeral"):
+            gate = ("member_is_ephemeral",
+                    f"'{name}' is an ephemeral agent (budgeted, discarded at its budget).",
+                    "Remove it from the manifest, or let it be discarded and re-apply.")
+        elif not docker_ok:
+            # Docker could not be asked: `roster_unreadable` already refuses
+            # the run, and "no container" is unknown here, not absent (P-B,
+            # #2196) — never a `member_container_missing` that says otherwise.
+            state.blocked = True
+            continue
+        elif name not in states:
+            gate = ("member_container_missing",
+                    f"'{name}' has an ownership row but no container.",
+                    f"Start '{name}' (its container is rebuilt from the workspace "
+                    "volume), then re-apply.")
+        elif roster_ok and snapshot.membership.tags_readable and name not in snapshot.membership.members:
+            gate = ("member_claimed_by_another_system",
+                    f"'{name}' carries another system's tag that claims it.",
+                    f"Remove that tag from '{name}' if it belongs to '{system}', or "
+                    "rename this member in the manifest.")
+        if gate is not None:
+            blockers.append(_apply_blocker(gate[0], name, gate[1], gate[2]))
+            state.blocked = True
+            continue
+        if snapshot.membership.evidence.get(name) == "prefix":
+            state.blocked = True  # refused below by the evidence gate (AC5)
+            continue
+
+        # The member passed every gate: read what the plan compares.
+        try:
+            state.tags = list(db.get_agent_tags(name) or [])
+            state.edges = list(db.get_permitted_agents(name) or [])
+            state.schedules = list(db.list_agent_schedules(name) or [])
+            state.folders = db.get_shared_folder_config(name)
+            state.resource_limits = db.get_resource_limits(name)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
+            state.blocked = True
+            continue
+        try:
+            container = _member_container(name)
+            state.labels = _container_labels(container)
+            if state.labels is None:
+                blockers.append(_read_failed(name, f"the container of '{name}'"))
+                state.blocked = True
+                continue
+            state.restart_pending = await _restart_pending(name, container)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the container of '{name}'", e))
+            state.blocked = True
+            continue
+
+    # The evidence gate, literally (AC5): ANY computed member, declared or
+    # not, matched by name only. Before any write, and before the lock.
+    if roster_ok and snapshot.membership.tags_readable:
+        unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
+        declared_names = set(declared.values())
+        for member in snapshot.membership.members:
+            if snapshot.membership.evidence.get(member) != "prefix" or member in unavailable:
+                continue
+            is_declared = member in declared_names
+            blockers.append(_apply_blocker(
+                "membership_evidence_prefix_only", member,
+                f"'{member}' is matched to '{system}' by its name only; no deploy "
+                f"ever tagged it{'' if is_declared else ', and the manifest does not declare it'}.",
+                _evidence_remedy(member, system, is_declared),
+            ))
+
+    # 4. The default resources for members to create that declare none.
+    if any(st.status == "absent" and not st.blocked and not manifest.agents[st.short_name].resources
+           for st in snapshot.members.values()):
+        try:
+            snapshot.default_resources = dict(_manifest_default_resources())
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the default agent resources", e))
+
+    # 5. The platform prompt and the system view (only when the manifest asks).
+    if manifest.prompt:
+        try:
+            setting = db.get_setting("trinity_prompt")
+            snapshot.stored_prompt = setting.value if setting is not None else None
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the platform prompt", e))
+    if manifest.system_view:
+        try:
+            # Own or shared views only: never another user's private view.
+            snapshot.views = list(db.list_user_system_views(str(current_user.id)) or [])
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "your system views", e))
+
+    return snapshot
+
+
+# ----------------------------------------------------------------------------
+# Schedule matching: the seam schedule identity (trinity-enterprise#694 /
+# trinity#1198) plugs into.
+#
+# No identity column exists on `agent_schedules` (`db/tables.py`), so the
+# default policy matches by exact name, unique on BOTH sides, and fails closed
+# otherwise. The policy is a function over the declaration and the candidate
+# rows rather than a scalar key, because the id-first search those issues
+# describe is two-stage with an extra outcome: declared id -> stored id; no id
+# match but the same name -> `unlinked` (reported, never adopted). The writers
+# consume ACTIONS, never matches, so that policy replaces this one without
+# touching a writer.
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ScheduleMatch:
+    """How one declared schedule relates to the member's live rows."""
+
+    kind: str  # "matched" | "missing" | "unlinked" | "ambiguous"
+    row: Optional[object] = None
+    rows: Tuple = ()
+
+
+def schedule_match_policy(declared_entry: dict, live_rows) -> ScheduleMatch:
+    """The default policy: exact name, unique on both sides.
+
+    Never produces `unlinked`: with no identity to link by, every row is
+    "unlinked", so the #1198 rule read literally ("never adopt an unlinked
+    row") would make an in-place update impossible (AC2). Two live rows with
+    the declared name are `ambiguous`, which refuses the run.
+    """
+    same = [r for r in live_rows if getattr(r, "name", None) == declared_entry.get("name")]
+    if not same:
+        return ScheduleMatch("missing")
+    if len(same) > 1:
+        return ScheduleMatch("ambiguous", rows=tuple(same))
+    return ScheduleMatch("matched", row=same[0])
+
+
+@dataclass(frozen=True)
+class ScheduleAction:
+    """What apply does about one declared entry or one live row.
+
+    `create` / `update` are writes; `in_sync` is nothing; `enabled_differs`,
+    `undeclared` and `unlinked` are reports; `ambiguous` and `declared_twice`
+    are blockers.
+    """
+
+    kind: str
+    name: str
+    entry: Optional[dict] = None
+    row: Optional[object] = None
+    fields: Dict = field(default_factory=dict)   # update: column -> declared value
+    current: Dict = field(default_factory=dict)  # update: column -> live value
+
+
+# The manifest keys a MATCHED row is compared on, the `Schedule` column each
+# maps to, and whether the key is always compared. `timezone` and
+# `description` only when the entry declares them: comparing the defaults
+# `_build_schedule_create` fills in would reset a row's `Europe/Berlin` to UTC
+# and wipe a template's `purpose:` description. `enabled` is
+# never compared for a write.
+_SCHEDULE_DECLARED_FIELDS = (
+    ("cron", "cron_expression", True),
+    ("message", "message", True),
+    ("timezone", "timezone", False),
+    ("description", "description", False),
+)
+
+
+def resolve_declared_schedule_actions(
+    declared, live, *, match: Callable = schedule_match_policy
+) -> List[ScheduleAction]:
+    """Diff a member's declared schedules against its live rows (pure).
+
+    * declared, no match -> `create` (through the shared `_build_schedule_create`);
+    * matched -> `update` of only the declared fields that differ, or `in_sync`;
+      a different `enabled` is reported (`enabled_differs`), never written, so
+      apply cannot arm a row a template left off (#1198 §5) nor disarm one an
+      operator turned on;
+    * a live row no entry names -> `undeclared` (reported, left as it is: a
+      declared RENAME is therefore a `create` plus the old row reported, still
+      armed as it was, never presented as an update);
+    * two live rows with one name -> `ambiguous`; one name declared twice ->
+      `declared_twice` (both refuse the run; the writers never guess).
+    """
+    entries = list(declared or [])
+    counts: Dict = {}
+    for entry in entries:
+        counts[entry.get("name")] = counts.get(entry.get("name"), 0) + 1
+
+    actions: List[ScheduleAction] = []
+    named = set()
+    twice_reported = set()
+    for entry in entries:
+        name = entry.get("name")
+        named.add(name)
+        if counts[name] > 1:
+            if name not in twice_reported:
+                twice_reported.add(name)
+                actions.append(ScheduleAction("declared_twice", name, entry=entry))
+            continue
+        found = match(entry, live)
+        if found.kind == "missing":
+            actions.append(ScheduleAction("create", name, entry=entry))
+            continue
+        if found.kind == "ambiguous":
+            actions.append(ScheduleAction("ambiguous", name, entry=entry))
+            continue
+        if found.kind == "unlinked":
+            actions.append(ScheduleAction("unlinked", name, entry=entry, row=found.row))
+            continue
+        row = found.row
+        fields, current = {}, {}
+        for key, column, always in _SCHEDULE_DECLARED_FIELDS:
+            if not always and key not in entry:
+                continue
+            if entry.get(key) != getattr(row, column, None):
+                fields[column] = entry.get(key)
+                current[column] = getattr(row, column, None)
+        actions.append(ScheduleAction(
+            "update" if fields else "in_sync", name,
+            entry=entry, row=row, fields=fields, current=current,
+        ))
+        # P-F: a schedule the manifest creates is armed unless it says
+        # otherwise, so that is what "the manifest wants" means here too.
+        wanted = bool(entry.get("enabled", True))
+        if wanted != bool(getattr(row, "enabled", False)):
+            actions.append(ScheduleAction(
+                "enabled_differs", name, entry=entry, row=row,
+                fields={"enabled": wanted},
+                current={"enabled": bool(getattr(row, "enabled", False))},
+            ))
+
+    for row in live:
+        if getattr(row, "name", None) not in named:
+            actions.append(ScheduleAction("undeclared", row.name, row=row))
+    return actions
+
+
+# ----------------------------------------------------------------------------
+# The plan: pure over the manifest and the snapshot (P-D: the dry run and the
+# real run compute it with the same functions).
+# ----------------------------------------------------------------------------
+
+# Field coverage census. Every `SystemManifest` /
+# `SystemAgentConfig` field and every schedule key `_build_schedule_create`
+# reads appears here exactly once, so a new manifest key fails CI
+# (`test_ent695_apply_engine.py`) until someone decides what apply does with
+# it. `inert`: neither mode writes it anywhere.
+APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "inert"})
+APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
+    "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
+    "SystemManifest.description": ("inert", "neither mode stores it"),
+    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
+    "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
+    "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
+    "SystemManifest.system_view": ("reconciled", "created when absent; differences reported"),
+    "SystemManifest.unknown_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemManifest.unknown_agent_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemAgentConfig.template": ("report-only", "template_differs; used to create"),
+    "SystemAgentConfig.resources": ("reconciled", "declared keys win as overrides (P-F exception 2)"),
+    "SystemAgentConfig.folders": ("reconciled", "declared keys only on an existing member"),
+    "SystemAgentConfig.schedules": ("reconciled", "matched by name; see schedule.*"),
+    "SystemAgentConfig.tags": ("reconciled", "added, never replaced"),
+    "SystemAgentConfig.kind": ("create-only", "nothing readable stores it"),
+    "schedule.name": ("reconciled", "the match key"),
+    "schedule.cron": ("reconciled", "updated in place"),
+    "schedule.message": ("reconciled", "updated in place"),
+    "schedule.enabled": ("create-only", "never written on a matched row; enabled_differs"),
+    "schedule.timezone": ("reconciled", "only when declared"),
+    "schedule.description": ("reconciled", "only when declared"),
+}
+
+# The order the executor writes in, by kind (phase-major, as create mode does),
+# and each kind's `failed[].step`: the name the write itself reports, so a
+# skipped write and an attempted one never use two names for one writer.
+_APPLY_OP_STEP = {
+    "tag": "tag", "edge": "permissions", "folders": "folders", "resources": "resources",
+    "created_resources": "resources", "schedule_create": "schedules",
+    "schedule_update": "schedules", "created_schedules": "schedules",
+}
+_APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
+
+
+@dataclass
+class ApplyOp:
+    """One write the executor makes. `member` is the agent it names."""
+
+    kind: str
+    member: Optional[str]
+    short_name: str
+    args: Dict = field(default_factory=dict)
+
+
+@dataclass
+class ApplyMemberPlan:
+    name: str
+    short_name: str
+    verdict: str  # "create" | "update" | "unchanged" | "blocked"
+    config: SystemAgentConfig
+    creating: bool = False
+    changes: List["SystemApplyChange"] = field(default_factory=list)
+    ops: List[ApplyOp] = field(default_factory=list)
+    restart_required: bool = False
+
+
+@dataclass
+class ApplyPlan:
+    system_name: str
+    agent_names: Dict[str, str]  # short -> final, the full declared map
+    members: Dict[str, ApplyMemberPlan]
+    drift: List["SystemApplyDrift"]
+    blockers: List["SystemApplyBlocker"]
+    prompt: "SystemApplyPromptVerdict"
+    system_view: "SystemApplyViewVerdict"
+    prompt_op: Optional[ApplyOp] = None
+    view_op: Optional[ApplyOp] = None
+    warnings: List[str] = field(default_factory=list)
+    default_resources: Optional[Dict[str, str]] = None
+
+
+def _apply_change(field_name: str, action: str, code: str, *, current=None,
+                  desired=None, note: Optional[str] = None) -> "SystemApplyChange":
+    return SystemApplyChange(field=field_name, action=action, code=code,
+                             current=current, desired=desired, note=note)
+
+
+def _normalized_tags(tags) -> List[str]:
+    """Lower/stripped, deduplicated, in declaration order: what `add_tag`
+    stores, so a declared `Prod` compares equal to a stored `prod` (AC1)."""
+    out: List[str] = []
+    for tag in tags:
+        normalized = str(tag).lower().strip()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _desired_tags(system_name: str, default_tags, agent_tags) -> List[str]:
+    return _normalized_tags([system_name, *(default_tags or []), *(agent_tags or [])])
+
+
+def _desired_edges(agent_names: Dict[str, str], permissions) -> Dict[str, List[str]]:
+    """The edges the manifest wants, per source: what `set_permissions` would
+    STORE after create mode's writes — the last write per source wins (it is a
+    full replacement), self-edges dropped (it never stores one),
+    duplicates removed."""
+    write_set, _count = resolve_permission_edges(agent_names, permissions)
+    final: Dict[str, List[str]] = {}
+    for source, targets in write_set:
+        final[source] = list(targets)
+    return {
+        source: sorted({t for t in targets if t != source})
+        for source, targets in final.items()
+    }
+
+
+def _folders_error(folders) -> Optional[str]:
+    """`folders` must map `expose` / `consume` to booleans. Create mode does
+    not check (and stays as it is); apply must, or a `null` would compare
+    unequal on every run and break AC1."""
+    if folders is None:
+        return None
+    if not isinstance(folders, dict):
+        return "folders must be a mapping of expose / consume to true or false"
+    unknown = sorted(str(k) for k in folders if k not in ("expose", "consume"))
+    if unknown:
+        return f"unknown folders key(s): {', '.join(unknown)} (expected expose, consume)"
+    bad = sorted(str(k) for k, v in folders.items() if not isinstance(v, bool))
+    if bad:
+        return f"folders value(s) for {', '.join(bad)} must be true or false"
+    return None
+
+
+def _normalized_resources(resources) -> Tuple[Dict[str, str], Optional[str]]:
+    """The declared `cpu` / `memory`, through create's own validators."""
+    from services.agent_service.capabilities import normalize_cpu, normalize_memory
+    from services.agent_service.crud import _get_default_resource
+
+    if resources is None:
+        return {}, None
+    if not isinstance(resources, dict):
+        return {}, "resources must be a mapping of cpu / memory"
+    out: Dict[str, str] = {}
+    try:
+        if resources.get("cpu") not in (None, ""):
+            out["cpu"] = normalize_cpu(resources["cpu"], _get_default_resource("cpu"))
+        if resources.get("memory") not in (None, ""):
+            out["memory"] = normalize_memory(resources["memory"], _get_default_resource("memory"))
+    except ValueError as e:
+        return {}, _failure_reason(e)[0]
+    return out, None
+
+
+def _schedule_entry_error(entry: dict, *, cron: Optional[str] = None,
+                          timezone: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """(code, detail) when a row apply would create or update is invalid.
+
+    The scheduler's own parser (#1472, #1823), so a row apply writes can
+    always be armed. Create mode's gap (#2992: a manifest cron is never
+    parsed) is left alone (AC6).
+    """
+    from services.schedule_validation import validate_cron_expression, validate_timezone
+
+    try:
+        _build_schedule_create(entry)
+    except Exception as e:  # noqa: BLE001 — the writer's own model rejected it
+        return "schedule_definition_invalid", _failure_reason(e)[0]
+    cron = cron if cron is not None else entry.get("cron")
+    tz = timezone if timezone is not None else entry.get("timezone", "UTC")
+    try:
+        validate_timezone(tz)
+    except Exception as e:  # noqa: BLE001
+        return "schedule_timezone_invalid", _failure_reason(e)[0]
+    try:
+        validate_cron_expression(cron, tz or "UTC")
+    except Exception as e:  # noqa: BLE001
+        return "schedule_cron_invalid", _failure_reason(e)[0]
+    return None
+
+
+def _well_formed_schedule_entries(cfg: SystemAgentConfig, name: str, blockers: List) -> List[dict]:
+    """The declared schedule entries the writer's own model accepts.
+
+    `validate_manifest` checks only that `name` / `cron` / `message` are
+    PRESENT, so `{name: [daily]}` reaches here; matching hashes the name and
+    would raise an unnamed 500. Each rejected entry is a
+    `schedule_definition_invalid` blocker, and only accepted entries are
+    matched.
+    """
+    accepted = []
+    for index, entry in enumerate(cfg.schedules or []):
+        try:
+            _build_schedule_create(entry)
+        except Exception as e:  # noqa: BLE001 — ScheduleCreate rejected a field type
+            blockers.append(_apply_blocker(
+                "schedule_definition_invalid", name,
+                f"Schedule {index} of '{name}': {_failure_reason(e)[0]}",
+                "Give each schedule a string name, cron and message."))
+            continue
+        accepted.append(entry)
+    return accepted
+
+
+def _schedule_view(entry_or_row) -> Dict:
+    """The schedule fields a report shows. Never webhook tokens or secrets."""
+    if isinstance(entry_or_row, dict):
+        return {k: entry_or_row.get(k) for k in
+                ("name", "cron", "message", "enabled", "timezone", "description")
+                if k in entry_or_row}
+    row = entry_or_row
+    return {
+        "name": row.name, "cron": row.cron_expression, "message": row.message,
+        "enabled": bool(row.enabled), "timezone": row.timezone,
+        "description": row.description,
+    }
+
+
+def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest: SystemManifest,
+                          snapshot: ApplySnapshot, desired_edges: Dict[str, List[str]],
+                          declared_final: set, normalized_resources: Dict[str, str],
+                          blockers: List) -> None:
+    """Changes and writes for a live member the caller may manage."""
+    from services.agent_service.crud import _get_default_resource
+
+    cfg, name, short = mp.config, mp.name, mp.short_name
+    labels = state.labels or {}
+
+    # Tags: additive. Extra tags are not drift and are not reported.
+    live_tags = set(_normalized_tags(state.tags))
+    missing = [t for t in _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+               if t not in live_tags]
+    if missing:
+        mp.changes.append(_apply_change("tags", "write", "tag_missing",
+                                        current=sorted(live_tags), desired=missing))
+        mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in missing)
+
+    # Edges: missing ones added; a live edge between two declared members that
+    # the manifest does not want is reported, never removed.
+    live_edges = set(state.edges)
+    wanted = desired_edges.get(name, [])
+    add = [t for t in wanted if t not in live_edges]
+    if add:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=sorted(live_edges & declared_final),
+                                        desired=add))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in add)
+    extra = sorted((live_edges & declared_final) - set(wanted) - {name})
+    if extra:
+        mp.changes.append(_apply_change(
+            "permissions", "report", "permission_extra", current=extra,
+            note="apply never removes an edge; remove it by hand if it is unwanted"))
+
+    # Folders: only the declared keys.
+    folder_write: Dict[str, bool] = {}
+    if isinstance(cfg.folders, dict):
+        live = {
+            "expose": bool(getattr(state.folders, "expose_enabled", False)),
+            "consume": bool(getattr(state.folders, "consume_enabled", False)),
+        }
+        for key in ("expose", "consume"):
+            if key in cfg.folders and cfg.folders[key] != live[key]:
+                folder_write[key] = cfg.folders[key]
+                mp.changes.append(_apply_change(f"folders.{key}", "write", "folder_differs",
+                                                current=live[key], desired=cfg.folders[key]))
+    if folder_write:
+        mp.ops.append(ApplyOp("folders", name, short, {
+            "expose_enabled": folder_write.get("expose"),
+            "consume_enabled": folder_write.get("consume"),
+        }))
+
+    # Resources: declared keys win as a per-agent override (P-F exception 2).
+    stored = dict(state.resource_limits or {})
+    resource_write: Dict[str, str] = {}
+    label_mismatch = False
+    for key, desired in normalized_resources.items():
+        effective = (stored.get(key) or labels.get(f"trinity.{key}")
+                     or _get_default_resource(key))
+        if desired != effective:
+            resource_write[key] = desired
+            mp.changes.append(_apply_change(f"resources.{key}", "write", "resource_differs",
+                                            current=effective, desired=desired,
+                                            note="takes effect at the member's next restart"))
+            if desired != labels.get(f"trinity.{key}"):
+                label_mismatch = True
+    if resource_write:
+        # The omitted key keeps its stored value: `set_resource_limits` writes
+        # both columns, and None would clear it.
+        mp.ops.append(ApplyOp("resources", name, short, {
+            "cpu": resource_write.get("cpu", stored.get("cpu")),
+            "memory": resource_write.get("memory", stored.get("memory")),
+        }))
+
+    # Template: reported, never recreated. `kind` is create-only.
+    live_template = labels.get("trinity.template") or ""
+    if live_template != cfg.template:
+        mp.changes.append(_apply_change(
+            "template", "report", "template_differs", current=live_template or None,
+            desired=cfg.template, note="apply never recreates an agent"))
+
+    # Schedules.
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
+    for action in resolve_declared_schedule_actions(entries, state.schedules):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            error = _schedule_entry_error(action.entry)
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_create",
+                                            desired=_schedule_view(action.entry)))
+            # Created as the AGENT OWNER, like a template-materialized row, so
+            # the owner can still edit and delete it.
+            mp.ops.append(ApplyOp("schedule_create", name, short, {
+                "entry": action.entry, "owner_username": state.owner_username}))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC",
+            )
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            # `update_schedule` is owner-or-admin and returns None otherwise —
+            # silently. Refuse up front instead.
+            if not (snapshot.caller_role == "admin" or action.row.owner_id == snapshot.caller_id):
+                blockers.append(_apply_blocker(
+                    "schedule_not_updatable_by_caller", name,
+                    f"Schedule '{action.name}' on '{name}' belongs to another user; "
+                    "only its owner or an admin can change it.",
+                    "Ask the schedule's owner or an admin to run apply, or leave the "
+                    "schedule's declared fields as they are."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_update",
+                                            current=action.current, desired=action.fields))
+            mp.ops.append(ApplyOp("schedule_update", name, short, {
+                "schedule_id": action.row.id, "fields": dict(action.fields)}))
+        elif action.kind == "enabled_differs":
+            mp.changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="apply never arms or disarms a schedule; toggle it by hand"))
+        elif action.kind == "undeclared":
+            mp.changes.append(_apply_change(
+                field_name, "report", "schedule_undeclared",
+                current=_schedule_view(action.row),
+                note="not in the manifest; left as it is"))
+        elif action.kind == "unlinked":
+            mp.changes.append(_apply_change(field_name, "report", "schedule_unlinked",
+                                            current=_schedule_view(action.row)))
+        elif action.kind == "ambiguous":
+            blockers.append(_apply_blocker(
+                "schedule_name_ambiguous", name,
+                f"'{name}' has more than one schedule named '{action.name}'.",
+                "Delete or rename the duplicate rows, then re-apply."))
+        elif action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+
+    # `restart_required`: the platform's own predicates over the container,
+    # plus what this run's writes would leave the container out of step with.
+    mp.restart_required = bool(state.restart_pending or label_mismatch or folder_write)
+
+
+def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
+                         desired_edges: Dict[str, List[str]],
+                         normalized_resources: Dict[str, str], blockers: List) -> None:
+    """Changes and writes for a member apply will create.
+
+    Create mode's semantics wherever create mode defines them (P-F), so a fresh
+    install comes out as create mode would build it, but for the two stated
+    differences, which need the post-create state and so are resolved by the
+    executor: a template's same-named schedule, and a template resource that
+    overrides a declared one.
+    """
+    cfg, name, short = mp.config, mp.name, mp.short_name
+
+    failure = _preflight_template(name, short, cfg.template, None)
+    if failure is not None:
+        blockers.append(_apply_blocker(
+            "template_unresolvable", name, f"Template '{cfg.template}': {failure.reason}",
+            "Fix the template reference in the manifest."))
+
+    tags = _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+    mp.changes.append(_apply_change("tags", "write", "tag_missing", current=[], desired=tags))
+    # The system tag is written by the executor right after create.
+    mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in tags if t != manifest.name)
+
+    wanted = desired_edges.get(name, [])
+    if wanted:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=[], desired=wanted))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in wanted)
+
+    if isinstance(cfg.folders, dict) and cfg.folders and _folders_error(cfg.folders) is None:
+        # Both keys, an omitted one False, and nothing for `{}` (the template's
+        # settings stand): create's `configure_folders`.
+        expose = cfg.folders.get("expose", False)
+        consume = cfg.folders.get("consume", False)
+        mp.changes.append(_apply_change("folders", "write", "folder_differs",
+                                        desired={"expose": expose, "consume": consume}))
+        mp.ops.append(ApplyOp("folders", name, short,
+                              {"expose_enabled": expose, "consume_enabled": consume}))
+
+    if normalized_resources:
+        mp.changes.append(_apply_change(
+            "resources", "report", "pending_template_resolution", desired=normalized_resources,
+            note="compared with the template's resources once the member is created; a "
+                 "template value that differs is overridden before its first start"))
+        mp.ops.append(ApplyOp("created_resources", name, short,
+                              {"declared": dict(normalized_resources)}))
+
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
+    for action in resolve_declared_schedule_actions(entries, []):
+        if action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+            continue
+        error = _schedule_entry_error(action.entry)
+        if error:
+            blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                           "Fix the schedule in the manifest."))
+            continue
+        mp.changes.append(_apply_change(
+            f"schedule:{action.name}", "write", "pending_template_resolution",
+            desired=_schedule_view(action.entry),
+            note="created, or a same-named schedule from the template updated to these "
+                 "fields, after the member is created"))
+    if entries:
+        mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
+
+
+def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> ApplyPlan:
+    """The per-member verdicts, the drift, every blocker, and the write-set.
+
+    Pure over `manifest` and `snapshot` (the template preflight reads a local
+    template file, as create's dry run does). A member whose only differences
+    are reports is `unchanged`: AC1 counts writes.
+    """
+    system = manifest.name
+    agent_names = {short: f"{system}-{short}" for short in manifest.agents}
+    declared_final = set(agent_names.values())
+    blockers: List[SystemApplyBlocker] = list(snapshot.blockers)
+    desired_edges = _desired_edges(agent_names, manifest.permissions)
+    warnings: List[str] = []
+
+    members: Dict[str, ApplyMemberPlan] = {}
+    for short, cfg in manifest.agents.items():
+        name = agent_names[short]
+        state = snapshot.members.get(short) or ApplyMemberState(short_name=short, name=name)
+        mp = ApplyMemberPlan(name=name, short_name=short, verdict="unchanged", config=cfg)
+        members[short] = mp
+        before = len(blockers)
+
+        folders_error = _folders_error(cfg.folders)
+        if folders_error:
+            blockers.append(_apply_blocker("folders_invalid", name, folders_error,
+                                           "Use `folders: {expose: true|false, consume: true|false}`."))
+        normalized_resources, resources_error = _normalized_resources(cfg.resources)
+        if resources_error:
+            blockers.append(_apply_blocker("resources_invalid", name, resources_error,
+                                           "Use a supported cpu / memory value, quoted."))
+
+        if state.status == "absent" and not state.blocked:
+            mp.creating = True
+            _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            mp.verdict = "create"
+        elif state.status == "managed" and not state.blocked:
+            _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
+                                  declared_final, normalized_resources, blockers)
+            mp.verdict = "update" if mp.ops else "unchanged"
+        else:
+            mp.verdict = "blocked"
+        if len(blockers) > before or state.blocked:
+            mp.verdict = "blocked"
+
+    # A member that consumes shared folders mounts every exposing agent it may
+    # call, so a new edge from it, or a peer's expose flipping, changes the
+    # mounts it must have. Predicted here; the real run re-reads the
+    # platform's predicate for every existing member after its writes.
+    expose_flips = any(
+        op.kind == "folders" and op.args.get("expose_enabled") is not None
+        for mp in members.values() for op in mp.ops)
+    for short, mp in members.items():
+        state = snapshot.members.get(short)
+        if mp.creating or mp.verdict == "blocked" or state is None or state.status != "managed":
+            continue
+        consumes = bool(getattr(state.folders, "consume_enabled", False))
+        for op in mp.ops:
+            if op.kind == "folders" and op.args.get("consume_enabled") is not None:
+                consumes = bool(op.args["consume_enabled"])
+        if consumes and (expose_flips or any(op.kind == "edge" for op in mp.ops)):
+            mp.restart_required = True
+
+    # Drift: tagged members the manifest does not declare (AC3). Reported,
+    # never touched. A prefix-only one never gets here: it blocks.
+    drift: List[SystemApplyDrift] = []
+    if snapshot.membership.tags_readable:
+        for member in snapshot.membership.members:
+            if member in declared_final:
+                continue
+            evidence = snapshot.membership.evidence.get(member)
+            if evidence not in ("tag", "both"):
+                continue
+            note = None
+            if any(re.fullmatch(re.escape(d) + r"_\d+", member) for d in declared_final):
+                note = ("suffixed copy from an earlier create-mode deploy; apply never "
+                        "removes it")
+            drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
+
+    # The platform prompt (P-F exception 3).
+    prompt_op = None
+    if not manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="not_declared")
+    elif snapshot.stored_prompt == manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="unchanged")
+    elif snapshot.caller_is_admin:
+        prompt = SystemApplyPromptVerdict(
+            verdict="update",
+            note="running agents pick up the new prompt at their next start")
+        prompt_op = ApplyOp("prompt", None, "", {"prompt": manifest.prompt})
+    else:
+        prompt = SystemApplyPromptVerdict(
+            verdict="requires_admin",
+            note="prompt_requires_admin: the platform-wide prompt changes every agent's "
+                 "instructions, so only an admin may change it; nothing was written")
+
+    # The auto-created system view.
+    view_op = None
+    if not manifest.system_view:
+        view = SystemApplyViewVerdict(verdict="not_requested")
+    else:
+        marker = SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=system)
+        matches = [
+            v for v in snapshot.views
+            if getattr(v, "description", None) == marker
+            and system in [str(t).lower().strip() for t in (getattr(v, "filter_tags", None) or [])]
+        ]
+        if not matches:
+            view = SystemApplyViewVerdict(verdict="create")
+            view_op = ApplyOp("view", None, "", {})
+        elif len(matches) == 1:
+            found, wanted_view = matches[0], manifest.system_view
+            changes = [
+                _apply_change(f"system_view.{attr}", "report", "view_differs",
+                              current=getattr(found, live_attr, None), desired=value)
+                for attr, live_attr, value in (
+                    ("name", "name", wanted_view.name), ("icon", "icon", wanted_view.icon),
+                    ("color", "color", wanted_view.color),
+                    ("shared", "is_shared", wanted_view.shared))
+                if getattr(found, live_attr, None) != value
+            ]
+            view = SystemApplyViewVerdict(verdict="unchanged", id=found.id, changes=changes)
+        else:
+            view = SystemApplyViewVerdict(verdict="ambiguous")
+            warnings.append(
+                f"More than one system view is marked as {system}'s auto-created view; "
+                "apply created none and changed none.")
+
+    return ApplyPlan(
+        system_name=system, agent_names=agent_names, members=members, drift=drift,
+        blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
+        view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
+    )
+
+
+# ----------------------------------------------------------------------------
+# Execution under a lease, and the orchestrator.
+# ----------------------------------------------------------------------------
+
+APPLY_LOCK_TTL_SECONDS = 900
+# Renew every TTL/3 for the whole run: creation is serial and a `github:`
+# clone can outlive a fixed TTL.
+APPLY_LEASE_RENEW_SECONDS = APPLY_LOCK_TTL_SECONDS / 3
+
+
+class ApplyLeaseKeeper:
+    """Renews the apply lock from acquisition to release; raises a stop flag.
+
+    Any renewal result but OWNED — LOST (another holder, or a lapse), or
+    DEGRADED (Redis error) — stops the run: the in-flight write finishes and
+    every later write and start is reported `lock_lost`. Continuing on
+    DEGRADED would be the fail-open the lock exists to avoid.
+    Renewal is the atomic compare-and-expire, so a stale holder can never
+    extend a successor's lease.
+
+    The renewals run on the event loop, and the writes are synchronous: a
+    write that blocks the loop past the TTL lets the lease lapse in Redis
+    before the keeper runs again, and a successor may take it. So `ok` also
+    keeps a conservative local DEADLINE — the time a renewal (or the
+    acquisition) was ISSUED plus the TTL, minus a margin — and refuses every
+    write after it whether or not the keeper got to run. Ownership as Redis
+    sees it is never older than that deadline assumes.
+    """
+
+    def __init__(self, lock: SingleFlightLock, interval: float, *, ttl: float,
+                 issued_at: float):
+        self._lock = lock
+        self._interval = interval
+        self._ttl = ttl
+        self._margin = min(30.0, ttl * 0.1)
+        self._deadline = issued_at + ttl - self._margin
+        self._task: Optional["asyncio.Task"] = None
+        self.lost: Optional[LeaseState] = None
+
+    @property
+    def ok(self) -> bool:
+        if self.lost is None and time.monotonic() >= self._deadline:
+            self.lost = LeaseState.LOST  # may have lapsed while the loop was blocked
+        return self.lost is None
+
+    def _renew(self) -> LeaseState:
+        issued = time.monotonic()
+        state = self._lock.refresh_if_owned_atomic()
+        if state is LeaseState.OWNED:
+            self._deadline = issued + self._ttl - self._margin
+        return state
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while self.lost is None:
+                await asyncio.sleep(self._interval)
+                if not self.ok:
+                    return
+                state = await asyncio.to_thread(self._renew)
+                if state is not LeaseState.OWNED and self.lost is None:
+                    self.lost = state
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — an unknown is not ownership
+            self.lost = LeaseState.DEGRADED
+
+    def confirm(self) -> LeaseState:
+        """Renew now: ownership is confirmed immediately before the first write."""
+        if not self.ok:
+            return self.lost
+        state = self._renew()
+        if state is not LeaseState.OWNED and self.lost is None:
+            self.lost = state
+        return state
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+
+@dataclass
+class ApplyOutcome:
+    """What a real run did, counted from the writers' return values."""
+
+    failed: List["SystemApplyFailure"] = field(default_factory=list)
+    created: List[str] = field(default_factory=list)
+    started: List[str] = field(default_factory=list)
+    succeeded: int = 0
+    writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
+    tags_written: List[str] = field(default_factory=list)
+    member_failed: set = field(default_factory=set)
+    extra_changes: Dict[str, List] = field(default_factory=dict)
+    restart_required: Dict[str, bool] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+
+
+def _default_start_agent_fn():
+    """The start function, resolved at call time (same reason, and same unit
+    seam, as `_default_create_agent_fn`): the `routers/agents` facade over
+    `lifecycle.start_agent_internal`, one created member at a time."""
+    from routers.agents import start_agent_internal
+    return start_agent_internal
+
+
+def _member_agent_config(name: str, cfg: SystemAgentConfig,
+                         default_resources: Optional[Dict[str, str]]) -> AgentConfig:
+    """The `AgentConfig` create mode builds for a member, field for field
+    (bootstrap equivalence). The resources dict is copied so the create path's
+    template merge never writes into the parsed manifest; the fleet default
+    was read by the snapshot (create mode reads the same setting per member)."""
+    if not cfg.resources and default_resources is None:
+        raise ValueError("the default agent resources were not read")
+    return AgentConfig(
+        name=name,
+        template=cfg.template,
+        resources=dict(cfg.resources) if cfg.resources else dict(default_resources),
+        kind=cfg.kind,
+    )
+
+
+async def execute_apply_plan(
+    plan: ApplyPlan,
+    manifest: SystemManifest,
+    current_user: User,
+    request: Optional[Request],
+    create_agent_fn: Callable,
+    start_agent_fn: Callable,
+    lease: ApplyLeaseKeeper,
+) -> ApplyOutcome:
+    """Write the plan. Writes only; no exception escapes once a write happened.
+
+    Order: create each absent member and tag it with the system tag at once
+    -> keep only the writes that name members which exist (existing +
+    created), as create scopes to `created_map`, so nothing is ever written for
+    an agent whose create failed -> tags, edges, folders, resource overrides,
+    schedules (a created member's against a fresh post-create read), prompt,
+    view -> start the created members one at a time. The lease's stop flag is
+    checked before every write and every start.
+    """
+    out = ApplyOutcome()
+    system = plan.system_name
+    by_name = {mp.name: mp for mp in plan.members.values()}
+
+    def fail(name: str, short: str, step: str, reason: str) -> None:
+        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step, reason=reason))
+        if name in by_name:
+            out.member_failed.add(name)
+
+    def lost(name: str, short: str, step: str) -> bool:
+        if lease.ok:
+            return False
+        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply")
+        return True
+
+    async def attempt(name: str, short: str, step: str, write) -> bool:
+        if lost(name, short, step):
+            return False
+        try:
+            result = write()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as e:  # noqa: BLE001 — recorded per write, the run continues (P-C)
+            fail(name, short, step, _failure_reason(e)[0])
+            return False
+        if result is False or result is None:
+            fail(name, short, step, "the write was refused or stored nothing")
+            return False
+        out.succeeded += 1
+        out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
+        return True
+
+    # 1. Create absent members; tag each with the system tag first.
+    for mp in plan.members.values():
+        if not mp.creating:
+            continue
+        # Built INSIDE the attempt: nothing may raise past a write (P-C).
+        created = await attempt(mp.name, mp.short_name, "create", lambda m=mp: _created(
+            create_agent_fn(config=_member_agent_config(m.name, m.config, plan.default_resources),
+                            current_user=current_user, request=request,
+                            skip_name_sanitization=True)))
+        if not created:
+            continue
+        out.created.append(mp.name)
+        tagged = await attempt(mp.name, mp.short_name, "tag", lambda n=mp.name: _tag_stored(n, system))
+        if tagged:
+            out.tags_written.append(mp.name)
+        else:
+            # The next apply would refuse it as name-only evidence; say so.
+            out.failed[-1].reason += (
+                f"; '{mp.name}' was created but not tagged '{system}', so the next apply "
+                f"refuses it until you add the tag (POST /api/agents/{mp.name}/tags/{system})")
+
+    exists = {mp.name for mp in plan.members.values() if not mp.creating} | set(out.created)
+
+    # 2. The remaining writes, phase by phase, filtered to members that exist.
+    ops = [op for mp in plan.members.values() for op in mp.ops]
+    for phase in _APPLY_OP_PHASES:
+        for op in (o for o in ops if o.kind == phase):
+            step = _APPLY_OP_STEP[op.kind]
+            if op.member not in exists:
+                fail(op.member, op.short_name, step,
+                     "skipped_member_not_created: the member was not created")
+                continue
+            if op.kind == "edge" and op.args["target"] not in exists:
+                fail(op.member, op.short_name, step,
+                     f"skipped_member_not_created: '{op.args['target']}' was not created")
+                continue
+            try:
+                await _run_op(op, current_user, out, attempt)
+            except Exception as e:  # noqa: BLE001 — never lose the report after a write
+                fail(op.member, op.short_name, step, _failure_reason(e)[0])
+
+    # 3. The platform prompt and the view.
+    if plan.prompt_op is not None:
+        await attempt(system, "", "prompt",
+                      lambda: db.set_setting("trinity_prompt", plan.prompt_op.args["prompt"]))
+    if plan.view_op is not None:
+        await attempt(system, "", "system_view", lambda: create_system_view(
+            system_name=system, system_view=manifest.system_view,
+            default_tags=manifest.default_tags, owner_id=str(current_user.id)))
+
+    # 4. Start the members this run created, one at a time, never an existing one.
+    for name in out.created:
+        mp = by_name[name]
+        if await attempt(name, mp.short_name, "start", lambda n=name: _started(start_agent_fn(n))):
+            out.started.append(name)
+
+    # 5. `restart_required` for EVERY existing member once anything landed,
+    # from the platform's predicates over its container as it now is: a write
+    # on one member (a new edge, a peer's expose) changes which shared-folder
+    # mounts another must have.
+    if out.succeeded:
+        for mp in plan.members.values():
+            if mp.creating:
+                continue
+            try:
+                container = _member_container(mp.name)
+                if _container_labels(container) is None:
+                    raise RuntimeError("the container could not be read")
+                out.restart_required[mp.name] = await _restart_pending(mp.name, container)
+            except Exception:  # noqa: BLE001 — keep the plan's prediction, and say so
+                out.warnings.append(
+                    f"restart_required for '{mp.name}' could not be re-read after the "
+                    "writes; the plan's prediction is shown.")
+    return out
+
+
+async def _created(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+async def _started(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+def _tag_stored(name: str, tag: str) -> bool:
+    return tag in (db.add_agent_tag(name, tag) or [])
+
+
+async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt) -> None:
+    name, short = op.member, op.short_name
+    if op.kind == "tag":
+        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
+            if name not in out.tags_written:
+                out.tags_written.append(name)
+    elif op.kind == "edge":
+        target = op.args["target"]
+        await attempt(name, short, "permissions", lambda: (
+            db.add_agent_permission(name, target, current_user.username) is not None
+            or bool(db.is_agent_permitted(name, target))))
+    elif op.kind == "folders":
+        await attempt(name, short, "folders", lambda: db.upsert_shared_folder_config(
+            agent_name=name, expose_enabled=op.args["expose_enabled"],
+            consume_enabled=op.args["consume_enabled"]))
+    elif op.kind == "resources":
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=op.args["memory"], cpu=op.args["cpu"]))
+    elif op.kind == "created_resources":
+        await _apply_created_resources(op, out, attempt)
+    elif op.kind == "schedule_create":
+        await attempt(name, short, "schedules", lambda: db.create_schedule(
+            agent_name=name, username=op.args["owner_username"],
+            schedule_data=_build_schedule_create(op.args["entry"])))
+    elif op.kind == "schedule_update":
+        await attempt(name, short, "schedules", lambda: db.update_schedule(
+            op.args["schedule_id"], current_user.username, op.args["fields"]))
+    elif op.kind == "created_schedules":
+        await _apply_created_schedules(op, current_user, out, attempt)
+
+
+async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:
+    """A member apply created runs with its TEMPLATE's resources (create keeps
+    template-wins, AC6). A declared key the template overrode is written as an
+    override now, before the member's start, so the platform's start path
+    recreates it with the declared values once (P-A)."""
+    name, short = op.member, op.short_name
+    try:
+        labels = _container_labels(_member_container(name))
+    except Exception:  # noqa: BLE001
+        labels = None
+    if labels is None:
+        out.failed.append(SystemApplyFailure(
+            name=name, short_name=short, step="resources",
+            reason="the created member's container could not be read; its declared "
+                   "resources were not compared"))
+        out.member_failed.add(name)
+        return
+    differs = {k: v for k, v in op.args["declared"].items() if labels.get(f"trinity.{k}") != v}
+    changes = out.extra_changes.setdefault(name, [])
+    for key, desired in differs.items():
+        changes.append(_apply_change(
+            f"resources.{key}", "write", "resource_differs",
+            current=labels.get(f"trinity.{key}"), desired=desired,
+            note="the template's value; overridden before the member's first start"))
+    if differs:
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=differs.get("memory"), cpu=differs.get("cpu")))
+
+
+async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOutcome,
+                                   attempt) -> None:
+    """P-D's one re-read: the template materialized its own rows inside create,
+    so a created member's schedules are resolved against a FRESH read. If that
+    read fails they go to `failed[]`, never to an unfiltered create (the open
+    failure `create_schedules` falls back to)."""
+    name, short = op.member, op.short_name
+    try:
+        rows = list(db.list_agent_schedules(name) or [])
+    except Exception as e:  # noqa: BLE001
+        reason = _failure_reason(e)[0]
+        for entry in op.args["entries"]:
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule '{entry.get('name')}': the post-create read failed ({reason})"))
+        out.member_failed.add(name)
+        return
+    changes = out.extra_changes.setdefault(name, [])
+    for action in resolve_declared_schedule_actions(op.args["entries"], rows):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            changes.append(_apply_change(field_name, "write", "schedule_create",
+                                         desired=_schedule_view(action.entry)))
+            await attempt(name, short, "schedules", lambda a=action: db.create_schedule(
+                agent_name=name, username=current_user.username,
+                schedule_data=_build_schedule_create(a.entry)))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC")
+            if error:
+                out.failed.append(SystemApplyFailure(
+                    name=name, short_name=short, step="schedules",
+                    reason=f"{error[0]}: schedule '{action.name}': {error[1]}"))
+                out.member_failed.add(name)
+                continue
+            changes.append(_apply_change(
+                field_name, "write", "schedule_update", current=action.current,
+                desired=action.fields,
+                note="the template's same-named schedule, updated to the manifest's fields"))
+            await attempt(name, short, "schedules", lambda a=action: db.update_schedule(
+                a.row.id, current_user.username, dict(a.fields)))
+        elif action.kind == "enabled_differs":
+            changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="the template's schedule keeps its own enabled state"))
+        elif action.kind == "undeclared":
+            changes.append(_apply_change(field_name, "report", "schedule_undeclared",
+                                         current=_schedule_view(action.row),
+                                         note="declared by the template, not the manifest"))
+        elif action.kind == "ambiguous":
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule_name_ambiguous: more than one schedule named '{action.name}'"))
+            out.member_failed.add(name)
+
+
+def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status: str,
+                  outcome: Optional[ApplyOutcome] = None,
+                  extra_blockers: Tuple = ()) -> "SystemApplyResponse":
+    members = []
+    for mp in plan.members.values():
+        changes = list(mp.changes)
+        restart = mp.restart_required
+        applied = None
+        if outcome is not None:
+            if mp.name in outcome.extra_changes:
+                # The real run reports what it actually did for a created
+                # member's template-resolved fields (P-D).
+                changes = [c for c in changes if c.code != "pending_template_resolution"]
+                changes.extend(outcome.extra_changes[mp.name])
+            restart = outcome.restart_required.get(mp.name, restart)
+            applied = mp.name not in outcome.member_failed
+        members.append(SystemApplyMember(
+            name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
+            restart_required=restart, applied=applied))
+    response = SystemApplyResponse(
+        dry_run=dry_run,
+        system_name=plan.system_name,
+        status=status,
+        members=members,
+        drift=plan.drift,
+        blockers=[*plan.blockers, *extra_blockers],
+        prompt=plan.prompt,
+        system_view=plan.system_view,
+        failed=list(outcome.failed) if outcome else [],
+        warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
+    )
+    if outcome is not None:
+        response._tags_written = list(outcome.tags_written)
+        response._created = list(outcome.created)
+        response._writes_ok = dict(outcome.writes_ok)
+    return response
+
+
+async def apply_manifest(
+    manifest_yaml: str,
+    current_user: User,
+    request: Optional[Request] = None,
+    *,
+    dry_run: bool,
+    create_agent_fn: Optional[Callable] = None,
+    start_agent_fn: Optional[Callable] = None,
+) -> "SystemApplyResponse":
+    """Reconcile a live system to a manifest (trinity-enterprise#695).
+
+    `parse_manifest` + `validate_manifest` (create's own, unchanged: every named
+    400, `agents: {}` included) -> snapshot -> plan -> a dry run returns here
+    -> blockers refuse with NO lock key written -> acquire the lock and start
+    the lease keeper -> snapshot and plan again under it -> blockers refuse and
+    release -> confirm ownership -> execute -> release.
+
+    `dry_run` has no default here on purpose: the request model's `True` is the
+    only default, so a caller cannot reach a real run by omission.
+    """
+    try:
+        try:
+            manifest = parse_manifest(manifest_yaml)
+        except ManifestError as e:
+            raise HTTPException(status_code=400, detail=f"{e.code}: {e}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            warnings = validate_manifest(manifest)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        snapshot = await read_apply_snapshot(manifest, current_user)
+        plan = resolve_apply_plan(manifest, snapshot)
+        if dry_run:
+            return _apply_report(plan, warnings, dry_run=True,
+                                 status="invalid" if plan.blockers else "valid")
+        if plan.blockers:
+            return _apply_report(plan, warnings, dry_run=False, status="refused")
+
+        lock = SingleFlightLock(f"system_apply:{manifest.name}", APPLY_LOCK_TTL_SECONDS,
+                                client=get_breaker_redis())
+        issued_at = time.monotonic()
+        if not lock.acquire():
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.LOST, manifest.name),))
+        if not lock.held:
+            # `acquire()` failed OPEN (no Redis): apply never runs unlocked.
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.DEGRADED, manifest.name),))
+
+        lease = ApplyLeaseKeeper(lock, APPLY_LEASE_RENEW_SECONDS,
+                                 ttl=APPLY_LOCK_TTL_SECONDS, issued_at=issued_at)
+        lease.start()
+        try:
+            snapshot = await read_apply_snapshot(manifest, current_user)
+            plan = resolve_apply_plan(manifest, snapshot)
+            if plan.blockers:
+                return _apply_report(plan, warnings, dry_run=False, status="refused")
+            state = lease.confirm()
+            if state is not LeaseState.OWNED:
+                return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                     extra_blockers=(_lock_blocker(state, manifest.name),))
+            outcome = await execute_apply_plan(
+                plan, manifest, current_user, request,
+                create_agent_fn or _default_create_agent_fn(),
+                start_agent_fn or _default_start_agent_fn(),
+                lease,
+            )
+        finally:
+            await lease.stop()
+            lock.release_if_owned_atomic()
+
+        if not outcome.failed:
+            status = "applied"
+        elif outcome.succeeded == 0:
+            status = "failed"
+        else:
+            status = "partial"
+        return _apply_report(plan, warnings, dry_run=False, status=status, outcome=outcome)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"System apply failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+
+
+def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":
+    if state is LeaseState.LOST:
+        return _apply_blocker(
+            "apply_in_progress", None,
+            f"Another apply of '{system_name}' holds the lock.",
+            "Retry when it has finished.")
+    return _apply_blocker(
+        "apply_lock_unavailable", None,
+        "The apply lock could not be taken (Redis is unreachable or errored).",
+        "Retry when Redis is reachable; apply never runs without its lock.")

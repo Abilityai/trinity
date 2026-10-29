@@ -33,7 +33,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
@@ -212,6 +212,45 @@ def _scrub_pat(text: str) -> str:
 # the item's ACL and whose 5s queue-sync loop would start writing it into that
 # agent's queue file (#1644 precedent).
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
+
+
+def skills_alarm_last_read_before(kind: str, key: str, since: str, *,
+                                  row_reached: Optional[Callable[[Dict[str, Any]], bool]] = None,
+                                  ) -> bool:
+    """True when the `_skills-sync` host holds a pending `<kind>:<key>` row
+    whose LAST reading is older than `since` (ISO-8601 UTC) — the only kind of
+    row a recovery observed from `since` on may end (#3254, R10). With
+    `row_reached`, the row must also pass it: the caller's evidence must cover
+    what the row reports (the fleet sweep's agents).
+
+    The two skills alarms are raised and cleared by passes that can overlap: a
+    reconcile pass on one agent (the start path, a fleet sweep's prune, the
+    route), and fleet sweeps (every library sync that moves the commit spawns
+    one). An older pass that finishes last must not end a condition a newer
+    pass reported after it started. So a caller passes its own start time and
+    clears only on True. False when there is no pending row (nothing to end),
+    when the row was read at or after `since`, or when anything here cannot be
+    read: unknown is never evidence. Never raises.
+
+    Residual: this read and the platform's end are two statements, so a newer
+    reading that lands between them is still ended. Closing that needs the
+    seam's own end to carry the condition.
+    """
+    from services import platform_alerts
+    from utils.helpers import parse_iso_timestamp
+
+    try:
+        subject = platform_alerts.subject_for(kind, key)
+        cutoff = parse_iso_timestamp(since)
+        # The same indexed one-row lookup `platform_alerts.clear` makes — never
+        # a page of the host's queue, which orders by priority before its limit
+        # and could leave this row off the page.
+        row = db.find_pending_operator_queue_by_subject(RECONCILE_ALARM_AGENT_NAME, subject)
+        return (row is not None and parse_iso_timestamp(row["last_seen_at"]) < cutoff
+                and (row_reached is None or bool(row_reached(row))))
+    except Exception as e:  # noqa: BLE001 — unreadable: leave the alarm standing
+        logger.warning(f"could not read the {kind} alarm; leaving it standing: {e}")
+        return False
 
 
 def _read_last_fleet_reinject() -> Optional[Dict[str, Any]]:
@@ -1561,20 +1600,57 @@ print(json.dumps(out))
         everything". Names are re-validated backend-side before use: this list
         comes from the agent's own filesystem, i.e. untrusted input that later
         reaches path math.
+
+        An ABSENT skills directory is an empty inventory (nothing is managed),
+        and so is an entry or marker that is simply not there. Only an entry
+        whose NAME could be a platform skill (`SKILL_NAME_RE`) is inspected at
+        all; anything else (`.cache`, a stray symlink) can never be managed and
+        is skipped unstat'ed, as it always was. Anything that could not be
+        INSPECTED is a failure and the script prints ``null``: a directory that
+        cannot be listed, or a candidate entry or marker whose stat fails (a
+        skills dir that lists but cannot be searched, a child dir with no
+        permissions). The script used to print ``[]`` for a failed listing, and
+        `os.path.isdir`/`isfile` turn a failed stat into False, so an
+        uninspectable inventory read as smaller than it is. A clean or
+        reconciled pass ends the reconcile-refusal alarm (#3254, R10) and lets
+        the gate reconcile drop unassigned defaults (`drop_after_prune`), so
+        "could not look" must never read as "nothing there".
         """
         script = f"""
-import json, os
+import json, os, re, stat
 base = os.path.expanduser("~/.claude/skills")
 meta_name = {json.dumps(pkg.META_FILENAME)}
-out = []
-try:
-    for name in os.listdir(base):
+skill_name = re.compile({json.dumps(pkg.SKILL_NAME_RE.pattern)})
+
+def mode_of(path):
+    # None: not there. Raises: could not look.
+    try:
+        return os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+
+def inventory():
+    try:
+        names = os.listdir(base)
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        if not skill_name.match(name):
+            continue
         d = os.path.join(base, name)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, meta_name)):
+        mode = mode_of(d)
+        if mode is None or not stat.S_ISDIR(mode):
+            continue
+        meta = mode_of(os.path.join(d, meta_name))
+        if meta is not None and stat.S_ISREG(meta):
             out.append(name)
+    return sorted(out)
+
+try:
+    print(json.dumps(inventory()))
 except Exception:
-    pass
-print(json.dumps(sorted(out)))
+    print("null")
 """
         result = await self._run_agent_python(agent_name, script)
         if not isinstance(result, list):
@@ -2571,6 +2647,9 @@ print(json.dumps(out))
         Never raises: reconciliation is best-effort cleanup and must not be able
         to fail an agent start.
         """
+        from utils.helpers import utc_now_iso
+
+        started_at = utc_now_iso()   # the refusal clear's evidence floor (#3254)
         try:
             if assigned_names is None:
                 assigned_names = db.get_agent_skill_names(agent_name)
@@ -2578,10 +2657,19 @@ print(json.dumps(out))
 
             managed = await self._list_managed_skills(agent_name)
             if managed is None:
+                # Not silent (#3254 fresh review): an inventory that cannot be
+                # taken (one skill-named entry that cannot be listed or stat'ed,
+                # or a failed probe) blocks every pass on this agent — no prune,
+                # no gate drop, no refusal clear — until it can be taken again.
+                logger.warning(
+                    f"skill reconcile skipped for {agent_name}: its skills inventory "
+                    f"could not be inspected; nothing is pruned and an open refusal "
+                    f"alarm stays")
                 return {"status": "skipped", "reason": "inventory_unavailable"}
 
             orphans = sorted(set(managed) - assigned)
             if not orphans:
+                self._clear_reconcile_refusal(agent_name, started_at)
                 return {"status": "clean", "removed": 0}
 
             cap = _reconcile_max_removals()
@@ -2602,6 +2690,7 @@ print(json.dumps(out))
             await self._audit_removal(
                 agent_name, orphans, result, trigger="reconcile"
             )
+            self._clear_reconcile_refusal(agent_name, started_at)
             return {
                 "status": "reconciled",
                 "removed": result.get("skills_removed", 0),
@@ -2624,7 +2713,22 @@ print(json.dumps(out))
         operator-visible state, and G-04's lesson is that the "show them what
         would be deleted" instinct is how that state starts carrying content it
         shouldn't. The names are already available via the skills API.
+
+        #3254: one platform condition per refused agent,
+        `skills_reconcile_refused:<agent>` on the `_skills-sync` host. A repeat
+        refusal (each start of that agent, whatever its orphan count) updates
+        the one pending row in place — latest count, seen count, last-seen
+        time — where the old `skills-reconcile-{agent}-{count}` id filed a new
+        row whenever the count moved. The clear is `_clear_reconcile_refusal`.
+        The kind's 30-day net lifetime is the fallback for a clear lost to a
+        crash, and it also ends a refusal that nothing re-reads: the refusal is
+        read again only when that agent next starts, so one left running past
+        30 days with the refusal standing leaves the queue (accepted in the
+        #3254 plan). `observe` never raises and logs its own failure, and
+        nothing here retries: the next start re-reads it.
         """
+        from services import platform_alerts
+
         message = (
             f"[Skills] REFUSED reconcile for agent '{agent_name}': {orphan_count} "
             f"orphaned skill package(s) exceeds the per-agent cap of {cap}. Nothing "
@@ -2632,28 +2736,32 @@ print(json.dumps(out))
             f"in smaller batches or raise SKILLS_RECONCILE_MAX_REMOVALS (ent#236)."
         )
         logger.error(message)
-        try:
-            db.create_operator_queue_item(
-                RECONCILE_ALARM_AGENT_NAME,
-                {
-                    "id": f"skills-reconcile-{agent_name}-{orphan_count}",
-                    "type": "alert",
-                    "priority": "high",
-                    "title": f"Skill reconcile refused: {agent_name}",
-                    "question": message,
-                    "context": {
-                        "alert_type": "skills_reconcile_blast_radius",
-                        "agent_name": agent_name,
-                        "orphan_count": orphan_count,
-                        "cap": cap,
-                    },
-                    # Must stay NULL: `mark_operator_queue_expired` flips any
-                    # pending row past `expires_at` to `expired` every 5s.
-                    "expires_at": None,
-                },
-            )
-        except Exception as e:  # noqa: BLE001 — the alarm is decorative
-            logger.warning(f"could not raise skills reconcile alarm: {e}")
+        platform_alerts.observe(
+            RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused", agent_name,
+            priority="high",
+            title=f"Skill reconcile refused: {agent_name}",
+            question=message,
+            context={
+                "alert_type": "skills_reconcile_blast_radius",
+                "agent_name": agent_name,
+                "orphan_count": orphan_count,
+                "cap": cap,
+            },
+        )
+
+    def _clear_reconcile_refusal(self, agent_name: str, pass_started_at: str) -> None:
+        """The agent's orphan set is back under the cap — a "clean" or
+        "reconciled" pass — so the refusal no longer holds and the platform
+        ends its row (#3254). Only those two outcomes call this: a skipped pass
+        (unreadable inventory, a busy lock, an error) looked at nothing and is
+        not evidence of recovery (R10). A refusal read after this pass started
+        is newer than its evidence and stays (`skills_alarm_last_read_before`).
+        On an install that never raised the alarm this is one read and no
+        write. Never raises."""
+        from services import platform_alerts
+        if skills_alarm_last_read_before("skills_reconcile_refused", agent_name, pass_started_at):
+            platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused",
+                                  agent_name)
 
     def _record_adoption_failure(
         self, url: str, message: str, *, steady_state: bool = False

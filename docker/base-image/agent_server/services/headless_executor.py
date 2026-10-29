@@ -657,6 +657,12 @@ class HeadlessRunContext:
     # the top env layer of THIS spawn only. None = the container's baseline.
     auth_override: Optional[object] = None
 
+    # #2328: the `--max-turns` value this spawn was given and which cap set it
+    # ("per_task" when the caller's tighter value bound, else "guardrail"), so
+    # the turn-limit 422 can name the cap that actually stopped the turn.
+    max_turns_effective: Optional[int] = None
+    max_turns_source: str = "guardrail"
+
     # Shared mutable buffers (populated by stream_parser via process_stream_line)
     response_parts: List[str] = field(default_factory=list)
     execution_log: List[ExecutionLogEntry] = field(default_factory=list)
@@ -693,6 +699,42 @@ class HeadlessRunContext:
                 pgid=self.process_pgid, execution_tag=self.task_session_id,
             )
             _safe_close_pipes(self.process)
+
+
+def _resolve_task_max_turns(per_task: Optional[int], guardrail: int) -> Tuple[int, str]:
+    """GUARD-003 (#2328): a per-task ``max_turns`` may only TIGHTEN the guardrail.
+
+    ``POST /task`` lets any caller who can reach the agent send a per-task cap,
+    while ``max_turns_task`` is the owner's guardrail. So the effective cap is
+    the lower of a valid per-task value and the guardrail; a missing,
+    non-integer (bool included) or non-positive per-task value leaves the
+    guardrail in force. The type check matters on the pull path, which hands
+    over the claimed envelope's JSON value without pydantic coercion. Returns
+    ``(cap, source)`` where source is ``"per_task"`` only when the caller's
+    value is strictly tighter (on a tie the guardrail is what binds).
+    """
+    if per_task is None:
+        return guardrail, "guardrail"
+    if isinstance(per_task, bool) or not isinstance(per_task, int):
+        logger.warning(
+            f"[Headless Task] Ignoring non-integer per-task max_turns={per_task!r}; "
+            f"using the guardrail ({guardrail})"
+        )
+        return guardrail, "guardrail"
+    if per_task < 1:
+        logger.warning(
+            f"[Headless Task] Ignoring non-positive per-task max_turns={per_task}; "
+            f"using the guardrail ({guardrail})"
+        )
+        return guardrail, "guardrail"
+    if per_task < guardrail:
+        return per_task, "per_task"
+    if per_task > guardrail:
+        logger.info(
+            f"[Headless Task] Per-task max_turns={per_task} exceeds the guardrail "
+            f"({guardrail}); a per-task value may only tighten it"
+        )
+    return guardrail, "guardrail"
 
 
 def _setup_headless_command(
@@ -803,12 +845,13 @@ def _setup_headless_command(
         logger.info(f"[Headless Task] Appending system prompt ({len(system_prompt)} chars)")
 
     # GUARD-003: max-turns limit for runaway prevention.
-    # Caller value wins; otherwise fall back to guardrails config, then hardcoded default.
-    effective_max_turns = max_turns
-    if effective_max_turns is None:
-        effective_max_turns = int(guardrails.get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
+    guardrail_max_turns = int(guardrails.get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
+    effective_max_turns, max_turns_source = _resolve_task_max_turns(max_turns, guardrail_max_turns)
     cmd.extend(["--max-turns", str(effective_max_turns)])
-    logger.info(f"[Headless Task] Limiting to {effective_max_turns} agentic turns")
+    logger.info(
+        f"[Headless Task] Limiting to {effective_max_turns} agentic turns "
+        f"(set by the {'per-task value' if max_turns_source == 'per_task' else 'guardrail'})"
+    )
 
     # Use provided execution_id if available (enables termination tracking from backend)
     task_session_id = execution_id or str(uuid.uuid4())
@@ -828,6 +871,8 @@ def _setup_headless_command(
         images=images,
         prompt=prompt,
         claude_session_uuid=claude_session_uuid,
+        max_turns_effective=effective_max_turns,
+        max_turns_source=max_turns_source,
         auth_override=auth_override,
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
@@ -1121,8 +1166,32 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
     else:
         stdin_payload = ctx.prompt
 
-    process.stdin.write(stdin_payload)
-    process.stdin.close()
+    try:
+        process.stdin.write(stdin_payload)
+        process.stdin.close()
+    except BaseException:
+        # #3408: since #3307 the caller's `finally: unregister()` keeps a live
+        # child, so a write that fails while the child lives (an unencodable
+        # prompt, say) must end it here; this already runs off the event loop.
+        # The reader threads are running, so drain them as the normal path
+        # does and never close stdout/stderr under them. No unregister here:
+        # the caller's `finally` releases the now-dead child. Each step is
+        # best-effort and logged, so the caller still sees the handoff error.
+        try:
+            _terminate_process_group(process, graceful_timeout=0, pgid=ctx.process_pgid, execution_tag=ctx.task_session_id)
+        except Exception:
+            logger.exception(f"[Headless Task] killing {ctx.task_session_id} after its failed handoff raised")
+        try:
+            process.stdin.close()
+        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+            logger.debug(f"[Headless Task] stdin close after failed handoff of {ctx.task_session_id} raised", exc_info=True)
+        try:
+            _drain_bounded(process, stdout_thread, stderr_thread,
+                           grace=3, pgid=ctx.process_pgid,
+                           execution_tag=ctx.task_session_id)
+        except Exception:  # e.g. the drain's own thread cannot start
+            logger.exception(f"[Headless Task] draining {ctx.task_session_id} after its failed handoff raised")
+        raise
 
     # Bounded, polling wait. Three exits beyond the overall budget (#970):
     #   (a) early-completion — claude emitted its {"type":"result"} (the turn
@@ -1350,9 +1419,25 @@ def _finalize_headless_result(
     if ctx.metadata.error_type == "max_turns":
         error_msg = ctx.metadata.error_message or f"Task stopped after {ctx.metadata.num_turns} turns"
         logger.warning(f"[Headless Task] Max turns reached: {error_msg}")
+        if ctx.max_turns_source == "per_task":
+            # #2328: the caller's own tighter cap stopped the turn — raising the
+            # guardrail would not have helped, so do not advise it. This wording
+            # adds no number: the backend substring-matches the detail for
+            # "401"/"403" (failure_classifier.AUTH_INDICATORS). That does NOT make
+            # the 422 classifier-safe — error_msg is the CLI's own text and carries
+            # the turn count, so a cap of 401 or 403 (per-task or guardrail) still
+            # reads as an auth failure on push. The fix belongs in the backend
+            # classifier, which should never read a turn-limit 422 as auth.
+            remedy = (
+                "The caller's per-task max_turns stopped this task, "
+                "below the agent's max_turns_task guardrail. Send a larger per-task max_turns "
+                "(it may not exceed the guardrail) or break the work into smaller subtasks."
+            )
+        else:
+            remedy = "Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
         raise HTTPException(
             status_code=422,
-            detail=f"Task exceeded turn limit: {error_msg}. Consider increasing max_turns_task in guardrails or breaking into smaller subtasks."
+            detail=f"Task exceeded turn limit: {error_msg}. {remedy}"
         )
 
     # Stream parser sets ``metadata.error_type = "authentication_failed"`` from
@@ -1678,7 +1763,9 @@ async def execute_headless_task(
         allowed_tools: Optional list of allowed tools (restricts available tools)
         system_prompt: Optional additional system prompt
         timeout_seconds: Execution timeout (default 5 minutes)
-        max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
+        max_turns: Per-task turn cap; may only tighten the agent's
+            ``max_turns_task`` guardrail (#2328). None, a non-integer, 0 or negative
+            = the guardrail.
         execution_id: Optional execution ID to use for process registry (enables termination tracking)
         resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
         persist_session: If True, omit ``--no-session-persistence`` so the
