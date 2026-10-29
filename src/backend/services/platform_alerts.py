@@ -318,6 +318,18 @@ def _db_backup(rest: str, ctx: Mapping) -> Tuple[str, Optional[str]]:
     return "db_backup_failure", None
 
 
+_scrub_day_key = _rx(rf"(.+)-{_DAY}")
+
+
+def _token_scrub_unreadable(rest: str, ctx: Mapping) -> Tuple[str, Optional[str]]:
+    # The refusal prefix is a prefix of this one, so a refusal row of an agent
+    # named `unreadable…` lands here too. Its context is the sweep's counts
+    # report (`refused`); this kind's is `{"reason": "root_readable=0"}`.
+    if "refused" in ctx:
+        return "git_token_scrub_refused", _scrub_day_key("unreadable-" + rest, ctx)
+    return "git_token_scrub_unreadable", _scrub_day_key(rest, ctx)
+
+
 # (id prefix, kind, key parser) — matched longest prefix first. A parser
 # returns the natural key or None. `db-backup-` picks its kind from context.
 _LEGACY_PARSERS: Tuple[Tuple[str, str, Callable], ...] = (
@@ -338,7 +350,7 @@ _LEGACY_PARSERS: Tuple[Tuple[str, str, Callable], ...] = (
     ("log-archive-", "log_archive_unwritable", _context_key("path")),
     ("retention-guard-", "retention_refused", _rx(r"(.+)-\d+")),
     ("system-seed-", "system_seed", _whole),
-    ("ent615-git-token-scrub-unreadable-", "git_token_scrub_unreadable", _rx(rf"(.+)-{_DAY}")),
+    ("ent615-git-token-scrub-unreadable-", "git_token_scrub_unreadable", _token_scrub_unreadable),
     ("ent615-git-token-scrub-", "git_token_scrub_refused", _rx(rf"(.+)-{_DAY}")),
     ("queue-flood-", "queue_flood", _context_key("reason")),
     ("alert-budget-", "alert_budget", _alert_budget),

@@ -52,11 +52,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
         ("git-bloat-", _PR2),
     ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"): ("system-seed-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        ("ent615-git-token-scrub-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        ("ent615-git-token-scrub-unreadable-", _PR2),
     ("services/lease_reaper_service.py", "_create_park_item"): ("poison-", _PR2),
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         ("val_", _PR2),
