@@ -44,10 +44,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
     # -- PR 2 ---------------------------------------------------------------
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        ("skills-reconcile-", _PR2),
-    ("services/skills_sync_service.py", "SkillsLibrarySyncService._announce_fleet_failures"):
-        ("skills-fleet-reinject-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
         ("sync-failing-", _PR2),
     ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
@@ -57,11 +53,6 @@ EMITTERS_NOT_YET_ON_SEAM = {
     ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
     ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
     ("services/retention_guard.py", "announce_refusal"): ("retention-guard-", _PR2),
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"): ("system-seed-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        ("ent615-git-token-scrub-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        ("ent615-git-token-scrub-unreadable-", _PR2),
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         ("alert-budget-", _PR2),
     # The #1677 budget helper stays as it is in PR 1; the budgeted emitters

@@ -305,6 +305,9 @@ TABLES = {
             -- ent#862: AAuth peer identity that triggered this execution,
             -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
             a2a_caller_identity TEXT,
+            -- #3380: the /chat thread this turn answers, so a watchdog-claimed
+            -- result can still write its reply there. NULL = not a /chat turn.
+            chat_session_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -1243,6 +1246,7 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,  -- #4000: when the agent last measured the three stats above
             diverged_since TEXT,
             dirty_files INTEGER,
             dirty_since TEXT,
@@ -2039,6 +2043,9 @@ TABLES = {
             response_snapshot TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            -- #3298: the claimer's owner token; attach/complete/release are
+            -- compare-and-set on it, so a reclaimed claim's late writer is a no-op.
+            claim_token TEXT,
             PRIMARY KEY (scope, idempotency_key)
         )
     """,

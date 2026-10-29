@@ -321,6 +321,8 @@ schedule_executions = Table(
         sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
         postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
     ),
+    # #3380 — the /chat thread this turn answers; NULL = not a /chat turn.
+    Column("chat_session_id", Text),
 )
 
 agent_loops = Table(
@@ -1066,6 +1068,7 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    Column("git_stats_at", Text),  # #4000: when the agent measured the git stats (ISO-Z)
     # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
     # once, cleared on return to 0), the porcelain change count, and the last
     # push that actually landed. All nullable, no backfill.
@@ -1766,6 +1769,7 @@ idempotency_keys = Table(
     Column("response_snapshot", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
+    Column("claim_token", Text),  # #3298: owner token of the in_flight claim
 )
 
 # Agent compatibility results (#668) — latest snapshot per agent (upserted).
