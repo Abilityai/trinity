@@ -4440,6 +4440,10 @@ class DatabaseManager:
             agent_name, day_start_iso, limit
         )
 
+    def metric_point_usage(self, agent_name: str, metric: str, limit: int):
+        """`(count to limit, newest ts)` for one metric — the retire check (ent#1006)."""
+        return self._metric_point_ops.point_usage(agent_name, metric, limit)
+
     def latest_metric_points(
         self, agent_name: str, metric_names, per_metric_limit: int = 200
     ):
