@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4001_no_auto_maintenance.py",
+      "feature": "#4001",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "platform git children never start git auto-maintenance; stale maintenance.lock reaped"
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
