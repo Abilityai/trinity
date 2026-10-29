@@ -330,6 +330,49 @@ def test_objective_and_widget_references_are_listed(agent, monkeypatch):
     assert kinds == ["objective", "widget"]
 
 
+_REAL_WIDGETS = svc._widgets  # the `agent` fixture stubs it; these tests run the real one
+
+
+def _dashboard_answers(monkeypatch, body):
+    """Fake the agent's GET /api/dashboard at the HTTP seam, so `_widgets` itself runs."""
+    from services.agent_service import helpers
+
+    async def fake_request(agent_name, method, path, **kw):
+        assert path == "/api/dashboard"
+        return SimpleNamespace(status_code=200, json=lambda: body)
+
+    monkeypatch.setattr(helpers, "agent_http_request", fake_request)
+    monkeypatch.setattr(svc, "_widgets", _REAL_WIDGETS)
+
+
+def test_a_widget_bound_to_the_metric_is_found_in_the_real_dashboard_read(agent, monkeypatch):
+    _dashboard_answers(monkeypatch, {"has_dashboard": True, "error": None, "config": {
+        "title": "Sales", "sections": [{"widgets": [
+            {"type": "metric", "metric": "close_rate", "label": "Close rate"},
+            {"type": "metric", "metric": "other", "label": "Other"}]}]}})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["references"] == [{"kind": "widget", "label": "Close rate", "detail": "dashboard.yaml"}]
+    assert body["unchecked"] == []
+
+
+def test_a_broken_dashboard_is_unchecked_not_unused(agent, monkeypatch):
+    # The agent answers 200 with config None and the parse error when the file
+    # exists but cannot be read; that is a source that could not be checked (#2196).
+    _dashboard_answers(monkeypatch, {"has_dashboard": False, "config": None,
+                                     "error": "YAML parse error at line 3, column 1: oops"})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["references"] == []
+    assert body["unchecked"] == ["dashboard"]
+
+
+def test_no_dashboard_file_means_no_widget_uses_the_metric(agent, monkeypatch):
+    _dashboard_answers(monkeypatch, {"has_dashboard": False, "config": None,
+                                     "error": "No dashboard.yaml found at /home/developer/dashboard.yaml"})
+    body = asyncio.run(svc.references(AGENT, "close_rate"))
+    assert body["references"] == []
+    assert body["unchecked"] == []
+
+
 # ---------------------------------------------------------------------------
 # routes: the HTTP shape and the gate
 # ---------------------------------------------------------------------------
@@ -423,3 +466,11 @@ def test_recorded_by_is_on_the_metric_read(agent):
     by_name = {m["name"]: m for m in body["metrics"]}
     assert by_name["proposals_sent"]["recorded_by"] == "the weekly skill"
     assert by_name["close_rate"]["recorded_by"] is None
+
+
+def test_the_missing_dashboard_wording_matches_the_agent_server():
+    # `_widgets` tells "no file" from "broken file" by this prefix; if the agent
+    # server rewords it, every agent with no dashboard would read as unchecked.
+    src = (_BACKEND.parent.parent / "docker" / "base-image" / "agent_server"
+           / "routers" / "dashboard.py").read_text()
+    assert f'"error": "{svc._NO_DASHBOARD_PREFIX}' in src

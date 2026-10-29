@@ -279,6 +279,10 @@ async def _objectives(agent_name: str, metric: str) -> List[Dict[str, Any]]:
     return out
 
 
+# The agent server's wording for a missing file (agent_server/routers/dashboard.py).
+_NO_DASHBOARD_PREFIX = "No dashboard.yaml found"
+
+
 async def _widgets(agent_name: str, metric: str) -> List[Dict[str, Any]]:
     from services.agent_service.helpers import agent_http_request
 
@@ -286,7 +290,15 @@ async def _widgets(agent_name: str, metric: str) -> List[Dict[str, Any]]:
                                         max_retries=1, timeout=_LOOKUP_TIMEOUT)
     if response.status_code != 200:
         raise RuntimeError(f"dashboard read {response.status_code}")
-    config = (response.json() or {}).get("config") or {}
+    body = response.json() or {}
+    # The agent answers 200 with `config: None` and an `error` both when there is
+    # no dashboard.yaml and when the file exists but does not parse or validate.
+    # Only the first means "no widget reads this metric"; the second is a source
+    # that could not be checked (#2196), so it must not read as an empty list.
+    error = body.get("error")
+    if body.get("config") is None and error and not str(error).startswith(_NO_DASHBOARD_PREFIX):
+        raise RuntimeError("dashboard.yaml unreadable")
+    config = body.get("config") or {}
     out = []
     for section in config.get("sections") or []:
         for widget in (section or {}).get("widgets") or []:
