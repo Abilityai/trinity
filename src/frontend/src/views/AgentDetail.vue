@@ -73,7 +73,10 @@
           </button>
         </div>
 
-        <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
+        <!-- `sm:ml-16` makes room for the header avatar that hangs off the card's
+             left edge. Below `sm` the avatar sits inside the card, so the page
+             keeps its full width (#3542). -->
+        <div v-if="agent" :class="['sm:ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
