@@ -222,39 +222,60 @@ class SkillSourcesOperations:
         PUT route, the `apply` route behind the MCP tools and any later caller
         are all covered. Rename, priority and `enabled` leave it alone — a
         disabled row is simply not moved while it is off.
+
+        "Did the target change?" is decided from a read, so the write only lands
+        on the target that read saw; if the row was retargeted in between (the
+        boot follow is a second writer of `ref`), the change is re-decided
+        against the row as it now is. Unscoped, a save naming the ref it last
+        saw put the old tag back while keeping the follow's marker and record.
         """
-        values: Dict[str, Any] = {
+        requested: Dict[str, Any] = {
             k: (int(v) if k == "enabled" else v)
             for k, v in fields.items()
             if k in self._MUTABLE_FIELDS and v is not None
         }
-        if not values:
+        if not requested:
             return self.get_source(source_id)
 
-        current = self.get_source(source_id)
-        if current is None:
-            return None
-        if any(
-            k in values and values[k] != getattr(current, k)
-            for k in self._IDENTITY_FIELDS
-        ):
-            values.update(_RETARGET_RESET, follows_bundled_pin=0)
-        values["updated_at"] = utc_now_iso()
+        # Bounded: a retry needs another writer to retarget the row between our
+        # read and our write, and the only other writer of the target (the boot
+        # follow) moves it once per boot.
+        for _ in range(3):
+            current = self.get_source(source_id)
+            if current is None:
+                return None
+            values = dict(requested)
+            if any(
+                k in values and values[k] != getattr(current, k)
+                for k in self._IDENTITY_FIELDS
+            ):
+                values.update(_RETARGET_RESET, follows_bundled_pin=0)
+            values["updated_at"] = utc_now_iso()
 
-        stmt = (
-            update(skill_sources)
-            .where(skill_sources.c.id == source_id)
-            .values(**values)
+            stmt = (
+                update(skill_sources)
+                .where(
+                    skill_sources.c.id == source_id,
+                    *(skill_sources.c[k] == getattr(current, k)
+                      for k in self._IDENTITY_FIELDS),
+                )
+                .values(**values)
+            )
+            try:
+                with get_engine().begin() as conn:
+                    landed = conn.execute(stmt).rowcount == 1
+            except IntegrityError as exc:
+                raise DuplicateSkillSource(
+                    "another source already points at that url and ref"
+                ) from exc
+            if landed:
+                # Read after the commit, never inside it: another connection
+                # would still see the row as it was.
+                return self.get_source(source_id)
+            # 0 rows: deleted (the next read says so) or retargeted since the read.
+        raise DuplicateSkillSource(
+            "the source changed concurrently while it was being updated; retry"
         )
-        try:
-            with get_engine().begin() as conn:
-                if conn.execute(stmt).rowcount == 0:
-                    return None
-        except IntegrityError as exc:
-            raise DuplicateSkillSource(
-                "another source already points at that url and ref"
-            ) from exc
-        return self.get_source(source_id)
 
     def follow_bundled_pin(
         self, source_id: str, *, from_ref: str, to_ref: str, url: str

@@ -5768,8 +5768,10 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
 #
 # Limits: the audit write is best-effort and audit rows are pruned after the
 # retention window, so a retarget whose row was lost and which landed on a
-# historical pin reads as untouched. A no-op PUT naming `ref` reads as touched
-# (conservative).
+# historical pin reads as untouched. Both routes audit the field NAMES they were
+# sent, not the ones that changed, so a no-op PUT naming `ref`, or a declarative
+# `apply` (the MCP tools) that re-states `ref` while changing only `priority`,
+# reads as touched (conservative: the row stops following, it never moves).
 SKILL_SOURCE_FOLLOW_BACKFILL_SQL = """
     UPDATE skill_sources SET follows_bundled_pin = 1
     WHERE is_default = 1

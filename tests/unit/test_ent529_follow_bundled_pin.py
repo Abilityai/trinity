@@ -486,6 +486,56 @@ class TestCompareAndSet:
         assert facade.audit_entries == []
 
 
+class TestCompareAndSetPredicates:
+    """Every eligibility condition is in the UPDATE's WHERE, not only in the
+    caller's pre-check. A disable, a marker clear or a retarget that lands
+    between the service's read and the move must still stop it, so each
+    condition is driven here with the pre-check out of the way."""
+
+    @pytest.mark.parametrize(
+        "cols",
+        [
+            {"follows_bundled_pin": 0},
+            {"enabled": 0},
+            {"ref_type": "branch"},
+            {"is_default": 0},
+            {"created_by": "1"},
+            {"url": "github.com/example/skills-fork"},
+            {"ref": "v0.4.0"},
+        ],
+        ids=["marker-cleared", "disabled", "branch", "not-default", "not-the-seed",
+             "other-url", "ref-moved"],
+    )
+    def test_the_update_itself_refuses(self, db_path, ops, cols):
+        sid = _seed(db_path, "v0.3.0")
+        _set_columns(db_path, sid, **cols)
+        before = _row(db_path, sid)
+
+        moved = ops.follow_bundled_pin(
+            sid, from_ref="v0.3.0", to_ref="v0.5.0", url=BUILTIN_URL
+        )
+
+        assert moved is None
+        assert _row(db_path, sid) == before
+
+    def test_a_disable_between_the_read_and_the_move_writes_no_audit_row(
+        self, db_path, facade, pin, monkeypatch
+    ):
+        sid = _seed(db_path, "v0.3.0")
+        pin("v0.5.0")
+        real = facade.follow_skill_source_pin
+
+        def disabled_meanwhile(source_id, **kwargs):
+            _set_columns(db_path, source_id, enabled=0)
+            return real(source_id, **kwargs)
+
+        monkeypatch.setattr(facade, "follow_skill_source_pin", disabled_meanwhile)
+
+        assert _follow() is None
+        assert _row(db_path, sid)["ref"] == "v0.3.0"
+        assert facade.audit_entries == []
+
+
 # =============================================================================
 # The seed writes the marker
 # =============================================================================
@@ -658,6 +708,148 @@ class TestSyncAfterFollow:
         entry = next(s for s in result["sources"] if s["source_id"] == sid)
         assert entry["success"] is True, entry
         assert _is_commit(entry["commit_sha"], upstream, "v0.5.0")
+
+
+def _admin():
+    from models import User
+
+    return User(id=1, username="admin", role="admin")
+
+
+class TestRowSyncAfterFollow:
+    """After a follow the row shows "Never synced" beside its own Sync button,
+    which is the click an admin makes. That route used to record the moved
+    commit without starting the fleet re-inject, so the signal was spent and
+    the next full sync or scheduled cycle saw nothing to propagate: running
+    agents kept the old tag's skills until they restarted. Both sync routes now
+    start the re-inject the same way when the commit moved and automatic
+    re-inject is on (the `/review` finding on PR #4091)."""
+
+    @pytest.fixture
+    def routes(self, facade, service, monkeypatch):
+        import routers.skills as rs
+        import services.settings_service as settings
+        import services.skills_sync_service as sss
+
+        monkeypatch.setattr(rs, "db", facade)
+        monkeypatch.setattr(rs, "skill_service", service)
+        reinject = AsyncMock(return_value={"agents_total": 0})
+        monkeypatch.setattr(sss.skills_sync_service, "run_fleet_reinject", reinject)
+
+        def auto_reinject(on):
+            monkeypatch.setattr(settings, "is_skills_auto_reinject_enabled", lambda: on)
+
+        return rs, reinject, auto_reinject
+
+    @staticmethod
+    def _call(route, **kwargs):
+        async def go():
+            out = await route(admin_user=_admin(), **kwargs)
+            await asyncio.sleep(0)  # let the background sweep start
+            return out
+
+        return asyncio.run(go())
+
+    @pytest.mark.parametrize("which", ["row", "all"])
+    def test_the_sync_after_a_follow_reinjects_the_fleet(
+        self, db_path, pin, service, upstream, routes, which
+    ):
+        rs, reinject, auto_reinject = routes
+        sid = _seed_local(db_path, upstream, pin)
+        service.sync_library()
+        pin("v0.5.0")
+        assert _follow() is not None
+        auto_reinject(True)
+
+        if which == "row":
+            out = self._call(rs.sync_skill_source, source_id=sid)
+        else:
+            out = self._call(rs.sync_library)
+
+        assert out["commit_changed"] is True, out
+        assert out["fleet_reinject_started"] is True
+        reinject.assert_awaited_once()
+        assert _is_commit(reinject.await_args.kwargs["commit_sha"], upstream, "v0.5.0")
+
+    @pytest.mark.parametrize("which", ["row", "all"])
+    def test_no_sweep_when_automatic_reinject_is_off(
+        self, db_path, pin, service, upstream, routes, which
+    ):
+        rs, reinject, auto_reinject = routes
+        sid = _seed_local(db_path, upstream, pin)
+        service.sync_library()
+        pin("v0.5.0")
+        _follow()
+        auto_reinject(False)
+
+        if which == "row":
+            out = self._call(rs.sync_skill_source, source_id=sid)
+        else:
+            out = self._call(rs.sync_library)
+
+        assert out["commit_changed"] is True
+        assert out["fleet_reinject_started"] is False
+        reinject.assert_not_called()
+
+    def test_no_sweep_when_the_commit_did_not_move(
+        self, db_path, pin, service, upstream, routes
+    ):
+        rs, reinject, auto_reinject = routes
+        sid = _seed_local(db_path, upstream, pin)
+        service.sync_library()
+        auto_reinject(True)
+
+        out = self._call(rs.sync_skill_source, source_id=sid)
+
+        assert out["commit_changed"] is False
+        assert out["fleet_reinject_started"] is False
+        reinject.assert_not_called()
+
+
+class TestAdminEditAcrossTheFollow:
+    """`update_source` decides "did the target change?" from a read. When the
+    boot follow commits between that read and the write, the write must be
+    re-decided against the row as it now is, or a save naming the old ref
+    puts it back while keeping the follow's marker and record (the panel then
+    read "v0.3.0 → v0.3.0" and the next boot moved it again)."""
+
+    @staticmethod
+    def _follow_inside_the_read(ops, monkeypatch):
+        real = ops.get_source
+        state = {"followed": False}
+
+        def read_then_follow(source_id):
+            row = real(source_id)
+            if not state["followed"]:
+                state["followed"] = True
+                ops.follow_bundled_pin(
+                    source_id, from_ref="v0.3.0", to_ref="v0.5.0", url=BUILTIN_URL
+                )
+            return row
+
+        monkeypatch.setattr(ops, "get_source", read_then_follow)
+
+    def test_a_stale_save_of_the_old_ref_is_a_retarget(self, db_path, ops, monkeypatch):
+        sid = _seed(db_path, "v0.3.0")
+        self._follow_inside_the_read(ops, monkeypatch)
+
+        ops.update_source(sid, ref="v0.3.0", name="Ours")
+
+        row = _row(db_path, sid)
+        assert (row["ref"], row["name"]) == ("v0.3.0", "Ours")
+        assert row["follows_bundled_pin"] == 0
+        assert (row["followed_from_ref"], row["followed_at"]) == (None, None)
+        assert row["last_sync_status"] == "never"
+
+    def test_a_rename_across_the_follow_keeps_the_follow(self, db_path, ops, monkeypatch):
+        sid = _seed(db_path, "v0.3.0")
+        self._follow_inside_the_read(ops, monkeypatch)
+
+        ops.update_source(sid, name="Ours")
+
+        row = _row(db_path, sid)
+        assert (row["ref"], row["name"]) == ("v0.5.0", "Ours")
+        assert (row["follows_bundled_pin"], row["followed_from_ref"]) == (1, "v0.3.0")
 
 
 # =============================================================================

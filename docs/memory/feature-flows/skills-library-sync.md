@@ -61,10 +61,14 @@ written on **both** the success and failure branches. `_last_commit` is also wha
 "did the commit change?" compares against: reading the in-memory field would make
 every backend restart look like a change and sweep the whole fleet.
 
-**Manual sync** (`POST /api/skills/library/sync`) spawns the same sweep in the
+**Manual sync** (`POST /api/skills/library/sync`, and since trinity-enterprise#529
+the per-source `POST /api/skills/sources/{id}/sync` too, through the shared
+`routers/skills._start_fleet_reinject_if_moved`) spawns the same sweep in the
 background when the flag is on and the commit moved — the operator clicked "Sync
 Library", not "block until every agent is updated"; the sweep's own report is the
-honest surface.
+honest surface. The per-source route used to skip the sweep while still recording
+the new commit, which spent the moved-commit signal: the next full or scheduled sync
+saw nothing to propagate.
 
 ---
 
@@ -107,6 +111,9 @@ skills_sync_service.start() → run_cycle → sync_library
   tag's commit and refused as `moved_tag` (update path), or deleted after clone
   (`_refuse_moved_pin_after_clone`). An admin retarget also clears
   `followed_from_ref` / `followed_at`, since the line explains the current ref.
+- **An admin edit across it is re-decided.** `update_source` writes only over the
+  `url`/`ref`/`ref_type` it read and re-reads on a miss, so a save naming the old ref
+  that lands across the follow counts as a retarget instead of quietly undoing it.
 - **A sync in flight cannot undo it.** `record_sync` takes the `url`/`ref`/`ref_type`
   the sync fetched (`skill_service._synced_target`) and writes only while the row
   still points there; otherwise the outcome is dropped and logged at INFO.
@@ -764,7 +771,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 | Date | Changes |
 |------|---------|
-| 2026-10-29 | **ent#529**: the untouched seeded default follows the bundled pin on upgrade (boot, forward only, CAS, system audit row) — see *Bundled Pin Follow on Upgrade*. `follows_bundled_pin` / `followed_from_ref` / `followed_at` on `skill_sources` (SQLite migration + Alembic 0107); `record_sync` scoped to the synced target; Settings → Library shows the latest follow. |
+| 2026-10-29 | **ent#529**: the untouched seeded default follows the bundled pin on upgrade (boot, forward only, CAS, system audit row) — see *Bundled Pin Follow on Upgrade*. `follows_bundled_pin` / `followed_from_ref` / `followed_at` on `skill_sources` (SQLite migration + Alembic 0107); `record_sync` scoped to the synced target; Settings → Agents → Skills Library shows the latest follow. |
 | 2026-10-15 | **#3430**: bundled community-catalog pin bumped to `trinity-skills` **v0.5.0** (fresh-install seed only). v0.4.0 adds `project-status`; v0.5.0 adds `update-status` and brings `project-status` and `add-pipeline` onto the platform's current ask-id and 120-char escalation-title contracts (both failed on `dev` at v0.3.0). 40 skills, none dropped since v0.3.0. The guard floor rises to v0.5.0; existing instances keep their row (ent#529) and move with the user-doc steps. |
 | 2026-10-10 | **ent#692**: source management over MCP for admin principals (`src/mcp-server/src/tools/skill_sources.ts`) — fenced by principal, not transport. New idempotent `POST /api/skills/sources/apply` (keyed on the repo URL; `created`/`updated`/`unchanged`, 409 `ambiguous_source`); create accepts `priority`. `GET /api/skills/library/status` now carries `last_fleet_reinject` (counts only — the per-agent `failures` map stays on the admin routes), so whoever ran a sync can read its consequence. Sync tools report `ran` / `refused_busy` / `failed`. |
 | 2026-10-06 | **#3123**: bundled community-catalog pin bumped to `trinity-skills` **v0.3.0** (fresh-install seed only). The catalog gains `update-dashboard`, the playbook the metrics tiles already point users at, and drops the four retired `add-*` installers (now marketplace-only), giving 38 skills. The guard floor rises to v0.3.0, and `docs/user-docs/automation/skills-and-playbooks.md` joins `.env.example` in the parity check. Existing instances keep their row (ent#529); that user doc now carries the steps for moving one to a newer tag (`PUT /api/skills/sources/{id}`, then a full sync). |
