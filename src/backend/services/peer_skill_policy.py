@@ -136,7 +136,9 @@ async def enforce(agent_name: str, *, requester, request_text: Optional[str],
         f"need{'s' if one else ''} a grant). If you only meant to mention "
         f"{'it' if one else 'them'}, write {'its name' if one else 'their names'} without "
         f"the leading slash{'' if one else 'es'} and send again. Do not carry out "
-        f"{'its' if one else 'their'} steps another way.",
+        f"{'its' if one else 'their'} steps another way. Asking for {'it' if one else 'them'} "
+        f"by name without the slash{'' if one else 'es'} is the same request and is not "
+        f"permitted.",
         skills=names, caller=caller, agent=agent_name)
 
 

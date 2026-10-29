@@ -540,13 +540,15 @@ _ONE = (
     f"Not run, nothing was delivered: this message names the skill pay-invoice, "
     f"which {CALLER} may not run on {CALLEE} (it was assigned from the skills library "
     f"and needs a grant). If you only meant to mention it, write its name without the "
-    f"leading slash and send again. Do not carry out its steps another way."
+    f"leading slash and send again. Do not carry out its steps another way. Asking for it "
+    f"by name without the slash is the same request and is not permitted."
 )
 _TWO = (
     f"Not run, nothing was delivered: this message names the skills pay-invoice, refund, "
     f"which {CALLER} may not run on {CALLEE} (they were assigned from the skills library "
     f"and need a grant). If you only meant to mention them, write their names without the "
-    f"leading slashes and send again. Do not carry out their steps another way."
+    f"leading slashes and send again. Do not carry out their steps another way. Asking for "
+    f"them by name without the slashes is the same request and is not permitted."
 )
 
 
