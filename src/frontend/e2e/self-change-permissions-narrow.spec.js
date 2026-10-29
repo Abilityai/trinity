@@ -99,6 +99,18 @@ function measure(page) {
       range.selectNodeContents(el)
       return new Set([...range.getClientRects()].filter((r) => r.width > 0).map((r) => Math.round(r.top))).size
     }
+    // Where each line of the text starts. A <button> centres its text, so a
+    // label that wraps inside BaseToggle started each line at a different x.
+    const lineLefts = (el) => {
+      const range = document.createRange()
+      range.selectNodeContents(el)
+      const byLine = new Map()
+      for (const r of [...range.getClientRects()].filter((x) => x.width > 0)) {
+        const top = Math.round(r.top)
+        byLine.set(top, Math.min(byLine.get(top) ?? Infinity, r.left))
+      }
+      return [...byLine.values()]
+    }
     const rows = caps.map((id) => {
       const row = document.querySelector(`[data-testid="self-change-${id}"]`)
       const toggle = row.querySelector(`[data-testid="self-change-toggle-${id}"]`)
@@ -112,7 +124,7 @@ function measure(page) {
         row: box(row),
         track: box(track),
         toggle: box(toggle),
-        label: { ...box(label), lines: lines(label) },
+        label: { ...box(label), lines: lines(label), lineLefts: lineLefts(label) },
         status: { ...box(status), lines: lines(status), ink: ink(status), overflowX: status.scrollWidth - status.clientWidth },
         desc: { ...box(desc), ink: ink(desc) },
       }
@@ -127,30 +139,38 @@ function measure(page) {
 const PX = 0.5
 
 // Per-row checks are soft, so one run names every row and every way it fails.
+// 320px is where the longest label ("Change other agents' schedules") wraps.
 for (const theme of ['light', 'dark']) {
-  test(`@smoke at 390px each permission stacks and nothing passes the card — ${theme}`, async ({ page }) => {
-    await openPanel(page, { width: 390, theme })
-    const m = await measure(page)
+  for (const width of [320, 390]) {
+    test(`@smoke at ${width}px each permission stacks and nothing passes the card — ${theme}`, async ({ page }) => {
+      await openPanel(page, { width, theme })
+      const m = await measure(page)
 
-    expect.soft(m.pageOverflow, 'the page scrolls sideways').toBeLessThanOrEqual(0)
-    for (const r of m.rows) {
-      // Nothing past the row's right edge — the email granter included.
-      expect.soft(r.status.ink.right, `${r.id}: "${r.text}" runs ${Math.round(r.status.ink.right - r.row.right)}px past the row`).toBeLessThanOrEqual(r.row.right + PX)
-      expect.soft(r.status.overflowX, `${r.id}: the status overflows its own box`).toBeLessThanOrEqual(0)
-      // The label starts on the toggle's line and stays inside the row.
-      expect.soft(r.label.top < r.track.bottom && r.label.bottom > r.track.top, `${r.id}: the label is off the toggle's line`).toBe(true)
-      expect.soft(r.label.right, `${r.id}: the label runs past the row`).toBeLessThanOrEqual(r.row.right + PX)
-      // The status has its own line under the whole toggle — label included —
-      // so nothing squeezes the label into a column, and the description runs under both.
-      expect.soft(r.status.top, `${r.id}: the status sits beside the toggle, not under it`).toBeGreaterThanOrEqual(r.toggle.bottom - PX)
-      expect.soft(r.desc.top, `${r.id}: the description starts above the status's end`).toBeGreaterThanOrEqual(r.status.bottom - PX)
-    }
-    // One left edge for the status and the description text, on every row.
-    const lefts = m.rows.flatMap((r) => [r.status.ink.left, r.desc.ink.left])
-    expect.soft(Math.max(...lefts) - Math.min(...lefts), `status/description left edges differ: ${lefts.map(Math.round)}`).toBeLessThanOrEqual(PX)
-    // "Off" is one word on one line (a min-w-0 attempt once split it "O / ff").
-    for (const r of m.rows.filter((x) => x.text === 'Off')) expect.soft(r.status.lines, `${r.id}: "Off" wraps`).toBe(1)
-  })
+      expect.soft(m.pageOverflow, 'the page scrolls sideways').toBeLessThanOrEqual(0)
+      for (const r of m.rows) {
+        // Every line of the label starts at the label's left edge (#4093: a
+        // wrapped label sat centred beside its switch).
+        for (const x of r.label.lineLefts) expect.soft(x - r.label.left, `${r.id}: a label line starts ${Math.round(x - r.label.left)}px in from the label's left edge`).toBeLessThanOrEqual(PX)
+        // Nothing past the row's right edge — the email granter included.
+        expect.soft(r.status.ink.right, `${r.id}: "${r.text}" runs ${Math.round(r.status.ink.right - r.row.right)}px past the row`).toBeLessThanOrEqual(r.row.right + PX)
+        expect.soft(r.status.overflowX, `${r.id}: the status overflows its own box`).toBeLessThanOrEqual(0)
+        // The label starts on the toggle's line and stays inside the row.
+        expect.soft(r.label.top < r.track.bottom && r.label.bottom > r.track.top, `${r.id}: the label is off the toggle's line`).toBe(true)
+        expect.soft(r.label.right, `${r.id}: the label runs past the row`).toBeLessThanOrEqual(r.row.right + PX)
+        // The status has its own line under the whole toggle — label included —
+        // so nothing squeezes the label into a column, and the description runs under both.
+        expect.soft(r.status.top, `${r.id}: the status sits beside the toggle, not under it`).toBeGreaterThanOrEqual(r.toggle.bottom - PX)
+        expect.soft(r.desc.top, `${r.id}: the description starts above the status's end`).toBeGreaterThanOrEqual(r.status.bottom - PX)
+      }
+      // One left edge for the status and the description text, on every row.
+      const lefts = m.rows.flatMap((r) => [r.status.ink.left, r.desc.ink.left])
+      expect.soft(Math.max(...lefts) - Math.min(...lefts), `status/description left edges differ: ${lefts.map(Math.round)}`).toBeLessThanOrEqual(PX)
+      // "Off" is one word on one line (a min-w-0 attempt once split it "O / ff").
+      for (const r of m.rows.filter((x) => x.text === 'Off')) expect.soft(r.status.lines, `${r.id}: "Off" wraps`).toBe(1)
+      // The 320px case exists to put a wrapped label under the check above.
+      if (width === 320) expect(m.rows.some((r) => r.label.lines > 1), 'no label wraps at 320px, so the alignment check measured nothing').toBe(true)
+    })
+  }
 
   test(`@smoke at 1280px the desktop row is kept, the status on the toggle's line — ${theme}`, async ({ page }) => {
     await openPanel(page, { width: 1280, theme })

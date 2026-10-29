@@ -33,7 +33,9 @@
         ]"
       ></span>
     </span>
-    <span v-if="label" class="text-[13.5px] text-gray-900 dark:text-gray-100">{{ label }}</span>
+    <!-- `text-left`: a <button> centres its text, which only shows once the
+         label wraps; a two-line label then sat centred beside its switch (#4093). -->
+    <span v-if="label" class="text-left text-[13.5px] text-gray-900 dark:text-gray-100">{{ label }}</span>
   </button>
 </template>
 
