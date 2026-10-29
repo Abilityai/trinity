@@ -2377,6 +2377,17 @@
       "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict — computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
     },
     {
+      "file": "unit/test_3254_housekeeping_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 (S5): the boot housekeeping alarms report through the #3246 platform alert seam, asserted as rows on a fresh database per test (db_harness). First-run seed: kind system_seed, one pending row per seed kind (failed, error, override-unreadable, partial, cornelius-failed) on trinity-system, updated in place (subject, seen_count, last_seen_at, 30-day deadline moved); a deployed/partial deploy or an existence-backstop converge ends failed/error/override-unreadable as the platform, only a complete fleet ends partial; a Cornelius created/already_exists ends cornelius-failed while every skip, create_* failure, missing result or raise does not; an inconclusive seed pass ends nothing. ent#615 token sweep: git_token_scrub_refused / git_token_scrub_unreadable, one row per agent, ended only by a successful sweep that read ROOT's repository (root_readable); zero refusals without that evidence end neither, including no repository at ROOT, which is also what a fallback ROOT reads. A person's acknowledgement through ask_service.answer stands and snoozes the next reading. Other shape: a fresh install whose first boot's seed fails files one row and the next boot's seed ends it. R1 key parity with the upgrade sweep's legacy parsers for all three kinds, including agent names that collide with the nested -unreadable- prefix (unreadable, unreadable-…), whose legacy refusal rows the parser tells apart by context, and the sweep then ends such a row beside the seam row. A missing Cornelius result ends nothing. No Docker, no Redis (exec, deploy and Cornelius stubbed)."
+    },
+    {
       "file": "unit/test_1809_image_drift_recreate.py",
       "feature": "#1809",
       "added": "2026-07-27",
