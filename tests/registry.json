@@ -3421,7 +3421,20 @@
         "reliability",
         "operator-queue"
       ],
-      "description": "#1834 refusal-alarm retry: a failed `create_operator_queue_item` is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning 'did not raise' under ON CONFLICT DO NOTHING; two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Doubles only, no backend."
+      "description": "#1834 refusal-alarm retry: a failed alarm write (since #3254 an `observe` that returns `failed`) is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning a delivered `platform_alerts.observe` outcome (created / updated / snoozed), never 'rows inserted' (#3254); two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Since #3254 the alarm is written through the platform-alert seam on a real SQLite database of this file's own, with the fault injection and the attempt count at the seam's create; a delivered alarm is re-read once per refresh period (R9), not never."
+    },
+    {
+      "file": "unit/test_3254_retention_alert.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#3254 (part 2 of #3246), the retention guard's refusal alarm on the platform-alert seam, against the unit island's real SQLite: the alarm is one row with subject `retention_refused:<setting>`, a second reading bumps `seen_count` and moves `last_seen_at` and the default-lifetime `expires_at`, and an allowed sweep through the real `_guard_allows` ends it as the platform (also after a restart, with nothing raised it writes nothing). The #1834 contract on the seam's outcomes: a `failed` reading is not delivery and is retried every cycle with one escalation; a `refused_unregistered` reading is not delivery either. R9: a delivered refusal is re-read once per `ALARM_REFRESH_SECONDS`, a failed refresh is retried next cycle with one WARNING and never the undelivered-alarm escalation, and the period is well inside the lifetime. A reason change rewrites the one row in both directions. After a person's ending through `ask_service.answer`, the same window snoozes (and that snoozed refresh is delivery, not retried every cycle), a different window files a fresh row, and the snooze is bounded; after a restart, a snoozed first reading is delivery too, with no false escalation. R1 legacy-id parity. Other shape, the clock 30 days ahead: a prune refused every 5-minute cycle for 30 simulated days keeps one pending row with a forward-moving deadline while the real expiry sweep runs."
     },
     {
       "file": "unit/test_2127_background_task_gate.py",
