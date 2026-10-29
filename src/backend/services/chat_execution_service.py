@@ -144,6 +144,26 @@ async def broadcast_collaboration_event(
         print("[Warning] WebSocket manager not set, skipping collaboration broadcast")
 
 
+async def release_admission(name: str, *, execution_id: str, capacity, idem) -> None:
+    """Undo an admission whose turn never reached ``run_chat_turn`` (#3998).
+
+    ``admit_chat_request`` acquires the capacity slot (keyed on the admission's
+    execution id) and claims the Idempotency-Key; only ``run_chat_turn``'s
+    ``finally`` releases them. When the execution setup between the two raises
+    (the row insert, an activity, the session), neither was released: the slot
+    stayed held until the cleanup sweep or its TTL, and a retry with the same
+    key answered 409 until the claim expired. ``capacity`` is None for a pull
+    pilot's admission, which holds no slot. Never raises.
+    """
+    if capacity is not None:
+        try:
+            await capacity.release(name, execution_id)
+        except Exception:  # noqa: BLE001 — the caller re-raises the real error
+            logger.exception("[Chat] releasing the slot of %s after a failed setup raised",
+                             execution_id)
+    idempotency_service.fail(idem)
+
+
 async def prepare_chat_execution(
     *,
     name: str,

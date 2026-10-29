@@ -284,20 +284,27 @@ async def chat_with_agent(
     # user-message log. Returns the ids/records the execute+finalize body below
     # consumes; every field is unpacked (slice-1 lesson: a stranded local
     # NameErrors the admitted path).
-    ctx = await chat_execution_service.prepare_chat_execution(
-        name=name,
-        request=request,
-        current_user=current_user,
-        x_source_agent=x_source_agent,
-        x_via_mcp=x_via_mcp,
-        idem=idem,
-        chat_execution_id=chat_execution_id,
-        capacity_result=capacity_result,
-        queue_result=queue_result,
-        chain_depth=admission.chain_depth,
-        # trinity-enterprise#752: a self-approval is recorded on the row.
-        gate=admission.gate,
-    )
+    # #3998: the slot and the idempotency claim are released by
+    # run_chat_turn's `finally`, which a setup that raises never reaches.
+    try:
+        ctx = await chat_execution_service.prepare_chat_execution(
+            name=name,
+            request=request,
+            current_user=current_user,
+            x_source_agent=x_source_agent,
+            x_via_mcp=x_via_mcp,
+            idem=idem,
+            chat_execution_id=chat_execution_id,
+            capacity_result=capacity_result,
+            queue_result=queue_result,
+            chain_depth=admission.chain_depth,
+            # trinity-enterprise#752: a self-approval is recorded on the row.
+            gate=admission.gate,
+        )
+    except BaseException:
+        await chat_execution_service.release_admission(
+            name, execution_id=chat_execution_id, capacity=capacity, idem=idem)
+        raise
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
     triggered_by = ctx.triggered_by
