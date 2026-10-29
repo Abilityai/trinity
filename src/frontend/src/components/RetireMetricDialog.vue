@@ -32,12 +32,12 @@
           <li
             v-for="(ref, i) in references"
             :key="`r${i}`"
-            class="flex items-baseline gap-2 px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
+            class="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 px-3 py-2 text-sm text-gray-900 dark:text-gray-100"
             data-testid="retire-metric-reference"
           >
-            <span class="font-medium">{{ kindLabel(ref.kind) }}</span>
-            <span class="min-w-0 truncate">{{ ref.label }}</span>
-            <span v-if="refMeta(ref)" class="ml-auto whitespace-nowrap text-xs text-status-warning-800 dark:text-status-warning-300" :title="refTitle(ref)">{{ refMeta(ref) }}</span>
+            <span v-if="showKind(ref.kind)" class="whitespace-nowrap font-medium">{{ kindLabel(ref.kind) }}</span>
+            <span class="min-w-0 break-words" :class="showKind(ref.kind) ? '' : 'font-medium'">{{ ref.label }}</span>
+            <span v-if="refMeta(ref)" class="ml-auto text-xs text-status-warning-800 dark:text-status-warning-300" :title="refTitle(ref)">{{ refMeta(ref) }}</span>
           </li>
           <li
             v-for="source in unchecked"
@@ -133,6 +133,9 @@ const KIND_LABELS = {
   project: 'Workspace project',
 }
 const kindLabel = (kind) => KIND_LABELS[kind] || kind
+// A label that already names its kind ("412 recorded points", "Linked in 2
+// Workspace projects") reads twice with the kind in front of it.
+const showKind = (kind) => kind !== 'points' && kind !== 'project'
 
 function refMeta(ref) {
   if (ref.kind === 'points' && ref.last_point_at) return `last ${formatRelativeTime(ref.last_point_at)}`

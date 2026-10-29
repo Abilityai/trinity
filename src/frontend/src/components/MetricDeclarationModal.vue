@@ -202,7 +202,7 @@
               placeholder="e.g. the weekly-pipeline-review skill"
               help="For people reading the tile. Trinity doesn't use it to record anything."
               :error="fieldErrors.recorded_by || fieldErrors['x-recorded-by']"
-              data-testid="metric-recorded-by"
+              data-testid="metric-recorded-by-input"
             />
             <div v-if="form.type !== 'status'" class="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <BaseInput v-model="form.warning" label="Warning threshold (optional)" placeholder="e.g. 25" inputmode="decimal" :error="fieldErrors.warning_threshold" data-testid="metric-warning" />
