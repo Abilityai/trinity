@@ -55,7 +55,7 @@ Every runtime talks to its provider's own API. The endpoint, proxy and TLS trust
 - Every Codex turn runs with the built-in `openai` provider and its default URLs, whatever `config.toml` says, and Trinity removes proxy, TLS and other protected lines from Codex's own `.env` before each turn.
 - A Gemini turn starts with those variables already set, so the `.env` the Gemini CLI loads itself cannot set them.
 
-A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Using a self-hosted model or an alternative endpoint is not supported.
+A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Behind such a proxy, list the platform's internal hosts (`mcp-server`, `backend`, `localhost`) in the container's `NO_PROXY`, or Trinity MCP calls go through the proxy too. Using a self-hosted model or an alternative endpoint is not supported.
 
 ### Codex authentication
 
