@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4058_loop_stale_run_rows.py",
+      "feature": "#4058",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "reliability",
+        "migrations"
+      ],
+      "description": "#4058: a stale duplicate running loop-run row (pre-#4023) is never the open run: rearm_lost_dispatch returns the real one or re-arms, reconcile advances the real run; the dual-track cleanup closes stale rows abandoned without moving failed_runs, idempotently."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",

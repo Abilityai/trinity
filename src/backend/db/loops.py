@@ -14,6 +14,7 @@ from typing import Any, Callable, List, Optional, Tuple
 from sqlalchemy import select, insert, update, func, and_
 
 from .engine import get_engine
+from .loop_run_hygiene import stale_running_run_ids
 from .tables import agent_loops, agent_loop_runs
 from utils.helpers import utc_now_iso
 
@@ -575,11 +576,17 @@ class LoopOperations:
                     .order_by(agent_loop_runs.c.run_number.asc())
                 ).mappings()
             ]
-            open_run = next((r for r in runs if r["status"] == "running"), None)
+            runs_completed = loop["runs_completed"] or 0
+            # #4058: a stale duplicate `running` row (pre-#4023) is never the
+            # open run: no terminal can advance it, and choosing it would hide
+            # the real open run, or keep the loop from ever re-arming.
+            stale = stale_running_run_ids(
+                loop_is_terminal=False, runs_completed=runs_completed, runs=runs)
+            open_run = next(
+                (r for r in runs if r["status"] == "running" and r["id"] not in stale), None)
             if open_run is not None:
                 tx.rollback()
                 return "open_run", open_run
-            runs_completed = loop["runs_completed"] or 0
             if any(r["run_number"] > runs_completed for r in runs):
                 tx.rollback()
                 return "stuck", None
