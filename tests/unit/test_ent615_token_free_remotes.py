@@ -1460,15 +1460,19 @@ class TestAnUnreadableSweepReachesAnOperator:
 
     def test_the_two_alarms_are_separate_families(self):
         """A refusal and an unreadable tree need DIFFERENT operator action (set
-        a token vs. re-run with full capabilities). Sharing one daily-stable id
-        would let whichever fired first suppress the other all day."""
-        gs = _git_service()
-        assert (
-            gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX != gs._SCRUB_ALARM_ID_PREFIX
-        )
-        assert not gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX.startswith(
-            gs._SCRUB_ALARM_ID_PREFIX
-        ) or gs._SCRUB_UNREADABLE_ALARM_ID_PREFIX != gs._SCRUB_ALARM_ID_PREFIX
+        a token vs. re-run with full capabilities). Sharing one row would let
+        either reading overwrite the other.
+
+        #3254 re-pin (id shape): the two daily-stable id prefixes became two
+        registered platform-alert kinds, so the families are told apart by
+        subject (and still by request-id prefix)."""
+        from services import platform_alerts as pa
+
+        refused = pa.KINDS["git_token_scrub_refused"]
+        unreadable = pa.KINDS["git_token_scrub_unreadable"]
+        assert unreadable.prefix != refused.prefix
+        assert (pa.subject_for(refused.name, "a1")
+                != pa.subject_for(unreadable.name, "a1"))
 
 
 class TestTheRootOwnershipClaimStaysHonest:
