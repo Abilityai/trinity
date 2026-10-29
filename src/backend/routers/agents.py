@@ -1113,6 +1113,7 @@ async def force_release_agent(
 @router.post("/{agent_name}/circuit-breaker/reset")
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
+    request: Request,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
     # admin gate, and the one this PR's first pass missed. `require_role`
     # rejects connector principals but NOT agent ones, deliberately: agent
@@ -1155,6 +1156,7 @@ async def reset_circuit_breaker_endpoint(
         event_action="circuit_breaker_reset",
         source="api",
         actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
         target_type="agent",
         target_id=agent_name,
         details={

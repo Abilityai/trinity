@@ -3,7 +3,7 @@ Agent chat and activity routes for the Trinity backend.
 
 Includes execution queue integration to prevent parallel execution on the same agent.
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import asyncio
 import httpx
@@ -1015,7 +1015,10 @@ async def terminate_agent_execution(
     execution_id: str,
     task_execution_id: Optional[str] = None,
     name: str = Depends(get_authorized_agent),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    # Audit context only (#3180): FastAPI injects a `Request`-annotated
+    # parameter regardless of its default, while direct callers need not pass one.
+    request: Request = None,
 ):
     """
     Terminate a running execution on an agent.
@@ -1063,6 +1066,7 @@ async def terminate_agent_execution(
             event_action="execution_terminate",
             source="api",
             actor_user=current_user,
+            actor_ip=request.client.host if request and request.client else None,
             target_type="agent",
             target_id=name,
             details={

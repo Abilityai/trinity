@@ -77,6 +77,10 @@ RESET = "circuit_breaker_reset"
 TERMINATE = "execution_terminate"
 # A fixed date, never compared to "now".
 STARTED_AT = "2026-03-14T09:26:53.000000Z"
+# The peer address Starlette's TestClient presents. Each row must record the
+# address the route saw (`request.client.host`, which behind the proxy is the
+# resolved client, ent#873), as the agent lifecycle rows do.
+CALLER_ADDRESS = "testclient"
 
 
 def _reset_path(agent: str = AGENT) -> str:
@@ -275,6 +279,7 @@ def _assert_person_row(row: dict, username: str, email: str) -> None:
     assert row["actor_type"] == "user"
     assert row["actor_id"] == _user_id(username)
     assert row["actor_email"] == email
+    assert row["actor_ip"] == CALLER_ADDRESS
     assert row["mcp_key_id"] is None
     assert row["mcp_key_name"] is None
     assert row["mcp_scope"] is None
@@ -286,6 +291,7 @@ def _assert_key_row(
     assert row["actor_type"] == "user"
     assert row["actor_id"] == _user_id(username)
     assert row["actor_email"] == email
+    assert row["actor_ip"] == CALLER_ADDRESS
     assert row["mcp_key_id"] == key_id
     assert row["mcp_key_name"] == key_name
     assert row["mcp_scope"] == "user"
