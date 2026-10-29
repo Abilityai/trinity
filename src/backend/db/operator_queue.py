@@ -877,14 +877,28 @@ class OperatorQueueOperations:
                     if subject is not None:
                         context["seen_count"] = 1
                     values_item = {**item, "context": context or None}
-                    request_id, values = self._insert_values(
-                        agent_name, values_item, channel=None, raised_by=None,
-                        subject=subject, last_seen_at=now,
-                    )
-                    conn.execute(
-                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                            index_elements=["agent_name", "request_id"])
-                    )
+                    # #4050: the caller's id is `<prefix><key>-<timestamp>`, and
+                    # two kinds can share a prefix and key (and an event repeats
+                    # its id) in one instant. `DO NOTHING` then wrote nothing and
+                    # the re-select returned the OTHER reading's row as
+                    # `created`. A conflict re-mints this reading's id instead,
+                    # so `created` always names the row this call inserted.
+                    for _ in range(3):
+                        request_id, values = self._insert_values(
+                            agent_name, values_item, channel=None, raised_by=None,
+                            subject=subject, last_seen_at=now,
+                        )
+                        inserted = conn.execute(
+                            make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                                index_elements=["agent_name", "request_id"])
+                        ).rowcount
+                        if inserted:
+                            break
+                        values_item = {**values_item,
+                                       "id": f"{item['id']}-{uuid.uuid4().hex[:8]}"}
+                    else:
+                        raise RuntimeError(
+                            f"operator-queue id {item['id']!r} for {agent_name} kept colliding")
                     row = conn.execute(select(*self._SELECT_COLS).where(and_(
                         operator_queue.c.agent_name == agent_name,
                         operator_queue.c.request_id == request_id,

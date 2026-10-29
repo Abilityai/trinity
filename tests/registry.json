@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4050_platform_alert_id_collision.py",
+      "feature": "#4050",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4050: at a frozen clock, both kinds of a shared-prefix pair (git_bloat_*, db_backup_*) and a repeated event are separate rows; create_platform_item re-mints a colliding id and never returns created for a row it did not insert."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
