@@ -558,10 +558,20 @@ def _snoozed_by(kind: Kind, ended: Optional[Mapping], priority: str, context: Ma
     return all(context.get(k) == old.get(k) for k in kind.material_keys)
 
 
-def _spawn(factory: Callable[[], Any]) -> None:
+def _spawn(factory: Callable[[], Any], *, agent_name: str, kind: str) -> None:
+    # #4055: `spawn_on_loop`'s done-callback only drops the task from its
+    # in-flight set, so a follow-up that raised (an alert-budget episode that
+    # failed to write, a broadcast) left no trace. Log it here, once.
+    async def _logged():
+        try:
+            await factory()
+        except Exception:  # noqa: BLE001 — the row is committed; report, never propagate
+            logger.error("[platform-alerts] a follow-up for %s/%s raised", agent_name, kind,
+                         exc_info=True)
+
     try:
         from services import operator_resume_service
-        operator_resume_service.spawn_on_loop(factory)
+        operator_resume_service.spawn_on_loop(_logged)
     except Exception:  # noqa: BLE001 — the row is committed; a lost trigger is not fatal
         logger.warning("[platform-alerts] could not schedule a follow-up", exc_info=True)
 
@@ -641,10 +651,11 @@ def observe(
         if out["outcome"] == OBSERVED_REFUSED_AT_BUDGET:
             from services import operator_queue_service as oqs
             _spawn(lambda: oqs._maybe_emit_alert_budget_episode(
-                agent_name, k.budgeted_type, ctx.get("triggered_by")))
+                agent_name, k.budgeted_type, ctx.get("triggered_by")),
+                agent_name=agent_name, kind=kind)
             return OBSERVED_REFUSED_AT_BUDGET
         if out.get("changed"):
-            _spawn(lambda: _broadcast_sync(agent_name))
+            _spawn(lambda: _broadcast_sync(agent_name), agent_name=agent_name, kind=kind)
         return out["outcome"]
     except Exception:  # noqa: BLE001 — an alert must never break its emitter
         logger.error("[platform-alerts] observe failed for %s/%s", agent_name, kind, exc_info=True)

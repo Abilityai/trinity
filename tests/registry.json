@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4055_platform_alert_followup_logged.py",
+      "feature": "#4055",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4055: a follow-up the platform-alert seam spawns (alert-budget episode, operator_queue_sync broadcast) that raises is logged once at ERROR with kind and agent; a successful one logs nothing."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
