@@ -321,6 +321,8 @@ schedule_executions = Table(
         sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
         postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
     ),
+    # #3380 — the /chat thread this turn answers; NULL = not a /chat turn.
+    Column("chat_session_id", Text),
 )
 
 agent_loops = Table(

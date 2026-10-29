@@ -6829,6 +6829,17 @@
       "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
     },
     {
+      "file": "unit/test_3380_recovered_chat_reply.py",
+      "feature": "#3380",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "A watchdog-claimed /chat turn writes its reply into the chat thread, on real SQLite: schedule_executions.chat_session_id round-trips and the real prepare_chat_execution stamps the thread it logs the user message into; through the real cleanup_service._claim_retained_result (apply_result stood in by a CAS on the real row) a won SUCCESS writes exactly one assistant message equal to the persisted response (recovered notice included, cost carried); a lost CAS, a FAILED terminal, a row with no thread and a thread of another agent write nothing; a failing message write never unclaims the turn; the notice no longer says the thread may lack the reply. Mutation: dropping the reply write or the stamp turns one test red each."
+    },
+    {
       "file": "unit/test_ent830_idempotency_caller_scope.py",
       "feature": "trinity-enterprise#830",
       "added": "2026-10-23",
