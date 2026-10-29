@@ -6538,6 +6538,18 @@
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
     },
     {
+      "file": "unit/test_3298_stale_claim_reclaim.py",
+      "feature": "#3298",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "idempotency",
+        "unit"
+      ],
+      "description": "An in_flight idempotency claim left by a dead process, on real SQLite. Store: a claim returns its owner token and a duplicate sees the holder's; after a reclaim the original's late attach/complete/release changes nothing and the owner's own writes still land; a stale-token or completed-row reclaim matches nothing; a pre-#3298 token-less claim is still reclaimable. Admission through the real begin_task_idempotency/_reclaim_stale_claim: inside the lease (timeout + slot buffer) a retry is still 409; past it a claim with no run or an ended run is reclaimed and the retry dispatches; a running or succeeded run keeps its claim; the lease follows the agent's timeout; an unreadable timeout and a sched: key hold; two racing retries start one run; the slow original cannot complete over the reclaimer. Eleven of the seventeen fail on the pre-fix code."
+    },
+    {
       "file": "unit/test_3651_recovery_companion_close.py",
       "feature": "#3651",
       "added": "2026-10-22",
@@ -6828,6 +6840,17 @@
       "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
     },
     {
+      "file": "unit/test_3380_recovered_chat_reply.py",
+      "feature": "#3380",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "A watchdog-claimed /chat turn writes its reply into the chat thread, on real SQLite: schedule_executions.chat_session_id round-trips and the real prepare_chat_execution stamps the thread it logs the user message into; through the real cleanup_service._claim_retained_result (apply_result stood in by a CAS on the real row) a won SUCCESS writes exactly one assistant message equal to the persisted response (recovered notice included, cost carried); a lost CAS, a FAILED terminal, a row with no thread and a thread of another agent write nothing; a failing message write never unclaims the turn; the notice no longer says the thread may lack the reply. Mutation: dropping the reply write or the stamp turns one test red each."
+    },
+    {
       "file": "unit/test_ent830_idempotency_caller_scope.py",
       "feature": "trinity-enterprise#830",
       "added": "2026-10-23",
@@ -6906,6 +6929,16 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_4072_inbox_notice_wording.py",
+      "feature": "#4072",
+      "added": "2026-10-29",
+      "categories": [
+        "workspace",
+        "unit"
+      ],
+      "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
     }
   ]
 }
