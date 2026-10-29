@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1001_endpoint_env.py",
+      "feature": "trinity-enterprise#1001",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1001: .env cannot set proxy/TLS-trust names (every runtime), the runtime's own endpoint names (that runtime only) or AGENT_RUNTIME; container-baseline values still apply; Claude settings env pinned by a root-owned managed-settings.d drop-in written from the container env; Codex -c endpoint pins and $CODEX_HOME/.env stripping; Gemini spawns carry every pin against the CLI's own fill-only .env loader; CLI-version guards."
+    },
+    {
       "file": "unit/test_4001_no_auto_maintenance.py",
       "feature": "#4001",
       "added": "2026-10-27",

@@ -12,6 +12,18 @@ if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
         echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
 fi
 
+# === Routing env: pin it to this container's own values (trinity-enterprise#1001) ===
+# Claude Code applies `env` from the agent-writable user and workspace settings,
+# so the endpoint, proxy and TLS-trust names are pinned in a root-owned policy
+# drop-in. Written here, before the agent server starts and before anything
+# below exports a variable, so the values are the container baseline. On
+# failure the image's all-empty pins stay: a proxy set on the container then
+# stops applying to Claude Code, which this line names.
+if [ -f /opt/trinity/hooks/write-routing-env.py ]; then
+    sudo -E /usr/local/bin/python3 -I -S /opt/trinity/hooks/write-routing-env.py || \
+        echo "GUARDRAILS: ERROR — could not pin the routing env to this container's values; Claude Code keeps the image's empty pins (trinity-enterprise#1001)"
+fi
+
 # === Guardrails: assert the registration is where the agent cannot reach (ent#345) ===
 # The hooks are registered in root-owned /etc/claude-code/managed-settings.json,
 # outside the agent's HOME and outside the git-synced tree. This checks the two

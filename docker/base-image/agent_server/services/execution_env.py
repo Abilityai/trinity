@@ -46,6 +46,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, Optional
 
@@ -73,6 +75,10 @@ PROTECTED_KEYS = frozenset({
     # ent#787: Claude Code prepends this to every shell-form hook, the Bash
     # tool and stdio MCP servers, so a `.env` line would decide what runs them.
     "CLAUDE_CODE_SHELL_PREFIX",
+    # trinity-enterprise#1001: the runtime is set at creation. `get_runtime()`
+    # reads `os.environ` per request, so a mirrored `.env` value would run one
+    # runtime under another's protection set (`RUNTIME_ENDPOINT_KEYS`).
+    "AGENT_RUNTIME",
     # Node equivalents (#2010 review): every runtime here is a Node process, and
     # `NODE_OPTIONS=--require /tmp/x.js` is LD_PRELOAD for Node. NODE_REPL_*
     # and the loader flags are the same mechanism under other names.
@@ -101,9 +107,142 @@ PROTECTED_KEYS = frozenset({
 PROTECTED_KEY_PREFIXES = ("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")
 
 
+# trinity-enterprise#1001: names that decide WHERE a runtime sends its traffic,
+# and with it the API key or OAuth token that traffic carries. `.env` is
+# agent-writable, so one line here would route every later turn through a host
+# of the writer's choosing. A value from the container baseline still applies:
+# a sanctioned proxy or endpoint is the platform's to set, never the file's.
+#
+# Proxy and TLS-trust names apply to every runtime (each one's HTTP client
+# honours them), in both cases, because Claude Code and Gemini read the
+# lowercase spelling first. `SSL_CERT_FILE` is Codex's CA bundle after
+# `CODEX_CA_CERTIFICATE`.
+ROUTING_KEYS = frozenset({
+    "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+    "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy",
+    "NODE_EXTRA_CA_CERTS", "NODE_TLS_REJECT_UNAUTHORIZED", "SSL_CERT_FILE",
+})
+
+# Each runtime's own endpoint names, protected on that runtime only, read from
+# the CLI version the image pins (Claude Code 2.1.281, Codex 0.147.0, Gemini
+# 0.62.0). A Claude agent's `.env` may still carry `OPENAI_BASE_URL` for its own
+# MCP servers and scripts (`${OPENAI_BASE_URL}/v1` is a documented `.mcp.json`
+# shape): Claude Code never reads it, and neither does that Codex.
+RUNTIME_ENDPOINT_KEYS = {
+    "claude": frozenset({
+        "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL",
+        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL", "ANTHROPIC_AWS_BASE_URL",
+        "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
+        "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE",
+        "ANTHROPIC_UNIX_SOCKET",
+    }),
+    "codex": frozenset({
+        "CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
+        "CODEX_AUTHAPI_BASE_URL", "CODEX_EXEC_SERVER_URL",
+        "CODEX_EXEC_SERVER_NOISE_REGISTRY_URL", "CODEX_CA_CERTIFICATE",
+    }),
+    "gemini": frozenset({
+        "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "CODE_ASSIST_ENDPOINT",
+    }),
+}
+
+# Refused from `.env` but never pinned to a value (`routing_pins`). OpenSSL
+# opens `SSL_CERT_FILE` even when it is "", so an empty pin would break TLS for
+# every child tool; Claude Code ignores `ANTHROPIC_UNIX_SOCKET` in every
+# settings file, so there is no settings route to pin against.
+_UNPINNED_ROUTING_KEYS = frozenset({"SSL_CERT_FILE", "ANTHROPIC_UNIX_SOCKET"})
+
+# A pin's value when the container has none, where "" would not mean "the
+# default": Gemini reads `CODE_ASSIST_ENDPOINT` with `??`, so "" would become
+# the host.
+_PIN_DEFAULTS = {"CODE_ASSIST_ENDPOINT": "https://cloudcode-pa.googleapis.com"}
+
+
 def is_protected_key(key: str) -> bool:
     """True when `.env` may not set ``key`` (exact name or protected family)."""
-    return key in PROTECTED_KEYS or key.startswith(PROTECTED_KEY_PREFIXES)
+    return (
+        key in PROTECTED_KEYS
+        or key.startswith(PROTECTED_KEY_PREFIXES)
+        or is_routing_key(key)
+    )
+
+
+def is_routing_key(key: str) -> bool:
+    """True when ``key`` decides where this agent's runtime sends its traffic."""
+    return key in ROUTING_KEYS or key in RUNTIME_ENDPOINT_KEYS.get(runtime_family(), ())
+
+
+def routing_pins(family: Optional[str] = None) -> Dict[str, str]:
+    """``{name: value}`` that holds each routing name of ``family`` (default:
+    this container's) at the container's own value, or at a value meaning "the
+    CLI's default" when the container has none.
+
+    For a runtime that reads these names from a file the agent can write, where
+    only an explicit value wins: Claude Code's settings `env` (the policy
+    drop-in `hooks/write-routing-env.py` keeps a copy of the Claude set) and
+    the Gemini CLI's own `.env` loader.
+    """
+    family = family or runtime_family()
+    names = (ROUTING_KEYS | RUNTIME_ENDPOINT_KEYS.get(family, frozenset())) - _UNPINNED_ROUTING_KEYS
+    return {name: INITIAL_ENV.get(name, _PIN_DEFAULTS.get(name, "")) for name in sorted(names)}
+
+
+_EXPORT_PREFIX = re.compile(r"^export\s+")
+
+
+def strip_protected_env_lines(path: Path) -> list:
+    """Remove every line of a dotenv file that sets a `.env`-protected name and
+    return those names, sorted.
+
+    For `$CODEX_HOME/.env`: the Codex CLI loads it at start and it OVERWRITES
+    the process env (only `CODEX_*` names are refused there), so the refusal in
+    `build_execution_env` would not hold. `$CODEX_HOME` sits under the
+    agent-writable `$TMPDIR`. A line counts when, after whitespace, a BOM and an
+    optional `export`, it starts with a name followed by `=`; anything else is
+    left exactly as written.
+
+    A file this process cannot read, the CLI (same user) cannot read either, so
+    that returns ``[]``. A protected line that cannot be removed raises
+    `OSError`: running the CLI anyway would apply it.
+    """
+    try:
+        if not path.is_file():
+            return []
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        mode = path.stat().st_mode & 0o777
+    except OSError as e:
+        logger.warning("could not read %s to remove protected names: %s", path, e)
+        return []
+    kept, removed = [], set()
+    for line in raw.splitlines(keepends=True):
+        body = _EXPORT_PREFIX.sub("", line.strip().lstrip("\ufeff").strip(), count=1)
+        key, sep, _ = body.partition("=")
+        key = key.strip()
+        if sep and key and is_protected_key(key):
+            removed.add(key)
+            continue
+        kept.append(line)
+    if not removed:
+        return []
+    names = ", ".join(sorted(removed))
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("".join(kept))
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    logger.warning(
+        "removed %s from %s: the CLI loads that file over the process env, and "
+        "these names are not settable from an agent's files", names, path,
+    )
+    return sorted(removed)
+
 
 # NOTE (#1999, revised by #2023): the parsing below WAS byte-faithful to the export
 # loop this replaces. That loop's exact quirks are a published contract — the
@@ -136,6 +275,27 @@ SUBSCRIPTION_SHADOW_KEYS = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 # import-free (loadable standalone), so the pair is kept by this comment,
 # not by an import.
 _CLAUDE_RUNTIME_NAMES = frozenset({"claude-code", "claude"})
+# The other two families, mirroring `runtime_adapter._GEMINI_RUNTIMES` /
+# `_CODEX_RUNTIMES` the same way.
+_GEMINI_RUNTIME_NAMES = frozenset({"gemini-cli", "gemini"})
+_CODEX_RUNTIME_NAMES = frozenset({"codex"})
+
+
+def runtime_family() -> Optional[str]:
+    """``"claude"``, ``"codex"``, ``"gemini"`` or ``None`` for this container.
+
+    Read from the container baseline, never from `.env` or `os.environ`: a
+    `.env` `AGENT_RUNTIME` must not choose which endpoint names it may set.
+    Unset/empty means Claude, as everywhere else.
+    """
+    runtime = (INITIAL_ENV.get("AGENT_RUNTIME") or "claude-code").lower()
+    if runtime in _CLAUDE_RUNTIME_NAMES:
+        return "claude"
+    if runtime in _CODEX_RUNTIME_NAMES:
+        return "codex"
+    if runtime in _GEMINI_RUNTIME_NAMES:
+        return "gemini"
+    return None
 
 # Keys whose file-supplied value build_execution_env has already WARNed about
 # suppressing (names only). Per-key, actively invalidated: a key that stops
@@ -339,6 +499,13 @@ def build_execution_env(
 
     file_env = parse_env_file(env_file)
     for key, value in file_env.items():
+        if is_routing_key(key):
+            logger.warning(
+                "ignoring %s from .env: it decides where the runtime sends its "
+                "traffic and credentials, so only the platform or the container "
+                "can set it", key,
+            )
+            continue
         if is_protected_key(key):
             logger.warning(
                 "ignoring %s from .env: it controls what the runtime executes "
@@ -346,6 +513,14 @@ def build_execution_env(
             )
             continue
         env[key] = value
+
+    # trinity-enterprise#1001: the Gemini CLI loads `~/.env` (or
+    # `~/.gemini/.env`) itself and sets each name the process env does not
+    # already hold, "" included. So a name refused above is handed over pinned,
+    # never absent, or that loader would set it from the same file.
+    if runtime_family() == "gemini":
+        for key, value in routing_pins("gemini").items():
+            env.setdefault(key, value)
 
     # list(): spawns run this in executor threads while the async reload
     # endpoint mutates the dict on the event loop — a key ADDED mid-iteration

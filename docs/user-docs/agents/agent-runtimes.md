@@ -46,6 +46,17 @@ Safety controls are not the same on every runtime. Platform controls (which cred
 
 See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md#coverage-by-runtime) for where the boundary sits.
 
+### Endpoints and proxies
+
+Every runtime talks to its provider's own API. The endpoint, proxy and TLS trust come from the platform or the container, never from the agent's files:
+
+- The agent's `.env` cannot set proxy or TLS-trust variables on any runtime, or the endpoint variables its own runtime reads. The agent log names each ignored variable.
+- Claude Code's endpoint and proxy variables are pinned in its managed settings, so a `settings.json` `env` block cannot change them.
+- Every Codex turn runs with the built-in `openai` provider and its default URLs, whatever `config.toml` says, and Trinity removes proxy, TLS and other protected lines from Codex's own `.env` before each turn.
+- A Gemini turn starts with those variables already set, so the `.env` the Gemini CLI loads itself cannot set them.
+
+A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Using a self-hosted model or an alternative endpoint is not supported.
+
 ### Codex authentication
 
 A Codex agent authenticates in one of two ways, and Trinity handles the file the CLI reads its credential from:

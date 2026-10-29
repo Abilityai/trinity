@@ -461,6 +461,18 @@ fails if the agent image calls a backend path the app does not register.
    agent-writable and is re-read at every spawn, and `GIT_CONFIG_NOSYSTEM`
    would disable `/etc/gitconfig`, which is where the credential helper and the
    #1595 gc guards are registered.
+10. **`.env` may not set where a runtime sends its traffic** (trinity-enterprise#1001,
+   `execution_env.ROUTING_KEYS` + `RUNTIME_ENDPOINT_KEYS`): proxy names in both
+   cases, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSL_CERT_FILE` on
+   every runtime, plus the runtime's own endpoint names on that runtime only
+   (`ANTHROPIC_BASE_URL` and the other `ANTHROPIC_*` base URLs on Claude Code, the
+   `CODEX_*` URL overrides on Codex, `GOOGLE_GEMINI_BASE_URL` and friends on
+   Gemini). A Claude agent's `.env` keeps `OPENAI_BASE_URL`. A value in the
+   container baseline still applies. The WARN names the key and says it decides
+   where traffic and credentials go. `AGENT_RUNTIME` is refused too (it would
+   change which runtime's names are open). The settings-file routes are closed
+   per runtime: see [agent-guardrails.md](agent-guardrails.md),
+   [codex-runtime.md](codex-runtime.md), [gemini-runtime.md](gemini-runtime.md).
 
 ---
 
