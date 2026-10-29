@@ -10,6 +10,7 @@ import asyncio
 import subprocess
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -23,8 +24,9 @@ from ..state import agent_state
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
+from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .execution_env import build_execution_env
-from .subprocess_lifecycle import _capture_pgid
+from .subprocess_lifecycle import _capture_pgid, _terminate_process_group
 from .gemini_cli_args import (
     RESUME_MISSING_MARKER,
     build_chat_argv,
@@ -64,6 +66,85 @@ def _sweep_allowlist_pids() -> list:
 # callback to clean up the worker thread on GC, which is not deterministic
 # under load. #333 hardening.
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gemini-subproc")
+
+
+class _WallClockDeadline:
+    """Bound a Gemini run by wall clock, on a timer (trinity-enterprise#1003).
+
+    The chat path used to have no bound at all (a bare ``process.wait()``), and
+    the task path checked its budget only when a stream line arrived, so a
+    child that went silent was never cut off. Claude Code and Codex bound the
+    run with ``process.wait(timeout=...)``; Gemini reads stdout on the same
+    thread, so the read phase needs a timer instead.
+
+    While the stream is read, a timer terminates the child's process group
+    when the budget runs out. The child leads that group since #4064, so the
+    kill reaches the run's descendants too, and they release stdout, which
+    ends the reader. ``reap()`` stops the timer BEFORE anything reaps the child,
+    so the timer never signals a pgid whose leader is already reaped (and
+    whose pid could be reused). It then waits only for what is left of the
+    budget, and terminates the group on this thread if that runs out too.
+    """
+
+    def __init__(self, process, pgid, seconds, label):
+        self._process = process
+        self._pgid = pgid
+        self.seconds = seconds
+        self._label = label
+        self._ends_at = time.monotonic() + seconds
+        self._lock = threading.Lock()
+        self._finished = False
+        self.expired = threading.Event()
+        self._timer = threading.Timer(seconds, self._on_timer)
+        self._timer.daemon = True
+
+    def start(self):
+        self._timer.start()
+
+    def _terminate(self):
+        self.expired.set()
+        logger.error(
+            f"[Gemini] {self._label} exceeded its {self.seconds}s wall-clock "
+            f"budget — terminating its process group"
+        )
+        try:
+            _terminate_process_group(self._process, graceful_timeout=5, pgid=self._pgid)
+        except Exception:
+            logger.exception(f"[Gemini] terminating {self._label} after its timeout raised")
+
+    def _on_timer(self):
+        # Under the lock, `poll()` is the only reaper (`reap()` takes the lock
+        # first), so a live answer means the pgid still names this run.
+        with self._lock:
+            if self._finished or self._process.poll() is not None:
+                return
+            self._terminate()
+
+    def finish(self):
+        """Stop the timer. No signal is sent from it after this returns."""
+        self._timer.cancel()
+        with self._lock:
+            self._finished = True
+
+    def reap(self) -> int:
+        """Stop the timer and reap the child within what is left of the budget.
+
+        Returns the exit code. Raises ``TimeoutError`` when the budget ran out
+        (on the timer or here); the child's group has then been terminated,
+        and its exit is waited for briefly. An exit that is never observed
+        keeps the child registered, so it can be stopped again (#3307).
+        """
+        self.finish()
+        if not self.expired.is_set():
+            try:
+                return self._process.wait(timeout=max(0.0, self._ends_at - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                self._terminate()
+        try:
+            self._process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            logger.error(f"[Gemini] {self._label} did not exit after its timeout kill — it stays registered")
+        raise TimeoutError(f"exceeded {self.seconds}s timeout")
 
 # Gemini pricing per 1K tokens (as of Dec 2024, from ai.google.dev/pricing)
 # Free tier has limits, but we calculate what it *would* cost
@@ -274,6 +355,11 @@ class GeminiRuntime(AgentRuntime):
 
             # Only flags the pinned gemini-cli accepts (#2971).
             cmd = build_chat_argv(model, resume)
+            # trinity-enterprise#1003: the same wall-clock cap as the Claude
+            # Code chat path (GUARD-003, #313), enforced on a timer below.
+            timeout_seconds = int(
+                _load_guardrails().get("execution_timeout_sec") or _DEFAULT_EXECUTION_TIMEOUT_SEC
+            )
             if model:
                 logger.info(f"Using Gemini model: {model}")
             logger.info(
@@ -382,8 +468,11 @@ class GeminiRuntime(AgentRuntime):
                 raise
 
             # Helper function that reads subprocess output (runs in thread pool)
+            deadline = _WallClockDeadline(process, process_pgid, timeout_seconds, f"chat {execution_id}")
+
             def read_subprocess_output():
                 """Blocking function to read subprocess output line by line"""
+                deadline.start()
                 try:
                     for line in iter(process.stdout.readline, ''):
                         if not line:
@@ -411,24 +500,27 @@ class GeminiRuntime(AgentRuntime):
 
                 # Wait for process to complete and get stderr
                 stderr = process.stderr.read()
-                return_code = process.wait()
-
-                # Issue #817 follow-up: cgroup-walk sweep for Gemini-
-                # spawned descendants that escaped via setsid, FD
-                # detachment, or env stripping. Best-effort — never
-                # fail the response on this path.
                 try:
-                    killed = kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
-                    if killed:
-                        logger.info(
-                            f"[Gemini] Cgroup sweep killed {killed} orphan(s) "
-                            f"after execution {execution_id} exit"
+                    # trinity-enterprise#1003: bounded by what is left of the
+                    # budget; raises TimeoutError once the group is terminated.
+                    return_code = deadline.reap()
+                finally:
+                    # Issue #817 follow-up: cgroup-walk sweep for Gemini-
+                    # spawned descendants that escaped via setsid, FD
+                    # detachment, or env stripping. Best-effort — never
+                    # fail the response on this path.
+                    try:
+                        killed = kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
+                        if killed:
+                            logger.info(
+                                f"[Gemini] Cgroup sweep killed {killed} orphan(s) "
+                                f"after execution {execution_id} exit"
+                            )
+                    except Exception:
+                        logger.exception(
+                            f"[Gemini] cgroup sweep raised after {execution_id} — "
+                            "continuing"
                         )
-                except Exception:
-                    logger.exception(
-                        f"[Gemini] cgroup sweep raised after {execution_id} — "
-                        "continuing"
-                    )
 
                 return stderr, return_code
 
@@ -438,8 +530,9 @@ class GeminiRuntime(AgentRuntime):
             # reader is submitted, so the reader, even one still queued behind
             # the single shared worker, must run to drain and reap it. A
             # cancelled waiter shields the worker and hands it the release
-            # (#3307's chat shape in claude_code.py). There is no outer
-            # timeout here, and none is added.
+            # (#3307's chat shape in claude_code.py). The wall-clock bound is
+            # the reader's own deadline (trinity-enterprise#1003); there is no
+            # outer timeout here, and none is added.
             waiter_abandoned = threading.Event()
 
             def read_owned_subprocess_output():
@@ -460,6 +553,12 @@ class GeminiRuntime(AgentRuntime):
             except asyncio.CancelledError:
                 waiter_abandoned.set()
                 raise
+            except TimeoutError:
+                # Same status and detail as the Claude Code chat path.
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"Chat execution timed out after {timeout_seconds} seconds",
+                )
             finally:
                 # #2433: always unregister — a timeout/pipe error above must not
                 # leave a dead handle that /api/executions/running keeps reporting.
@@ -897,11 +996,16 @@ class GeminiRuntime(AgentRuntime):
                             teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
+            # trinity-enterprise#1003: the budget is enforced on a timer, so a
+            # child that stops writing is still cut off. The per-line check
+            # below stays as the early exit.
+            deadline = _WallClockDeadline(process, process_pgid, timeout_seconds, f"task {session_id}")
+
             # Helper function that reads subprocess output
             def read_subprocess_output():
                 """Blocking function to read subprocess output line by line with timeout"""
-                import time
                 start_time = time.time()
+                deadline.start()
                 try:
                     for line in iter(process.stdout.readline, ''):
                         if not line:
@@ -910,7 +1014,14 @@ class GeminiRuntime(AgentRuntime):
                             process.kill()
                             raise TimeoutError(f"Task exceeded {timeout_seconds}s timeout")
                         self._process_stream_line(line, execution_log, metadata, tool_start_times, tool_names, response_parts, model)
+                    stderr = process.stderr.read()
+                    try:
+                        return_code = deadline.reap()
+                    except TimeoutError:
+                        raise TimeoutError(f"Task exceeded {timeout_seconds}s timeout") from None
                 except Exception as e:
+                    # Stop the timer before the kill below reaps the child.
+                    deadline.finish()
                     logger.error(f"[Headless Task {session_id}] Error: {e}")
                     # #3408: end the child and observe its exit before raising
                     # (the inner timeout and any per-line error). The waiter's
@@ -945,9 +1056,6 @@ class GeminiRuntime(AgentRuntime):
                         )
                     raise
 
-                stderr = process.stderr.read()
-                return_code = process.wait()
-
                 # Issue #817 follow-up: cgroup sweep catches descendants
                 # that escaped via setsid, FD detachment, or env
                 # stripping. Best-effort.
@@ -972,8 +1080,9 @@ class GeminiRuntime(AgentRuntime):
             # reader is submitted, so the reader, even one still queued behind
             # the single shared worker, must run to drain and reap it. A
             # cancelled waiter shields the worker and hands it the release
-            # (#3307's chat shape in claude_code.py). There is no outer
-            # timeout here, and none is added.
+            # (#3307's chat shape in claude_code.py). The wall-clock bound is
+            # the reader's own deadline (trinity-enterprise#1003); there is no
+            # outer timeout here, and none is added.
             waiter_abandoned = threading.Event()
 
             def read_owned_subprocess_output():

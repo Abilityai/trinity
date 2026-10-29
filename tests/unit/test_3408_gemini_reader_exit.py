@@ -188,6 +188,11 @@ class _Harness:
             return child
 
         self.monkeypatch.setattr(subprocess, "Popen", popen)
+        if exit_unobserved:
+            # A child SIGKILL cannot end ends by no group signal either: the
+            # wall-clock timer's group kill (trinity-enterprise#1003) is a
+            # no-op too, so the reader's own error path is what is exercised.
+            self.monkeypatch.setattr(gemini_runtime, "_terminate_process_group", lambda *a, **kw: None)
         return await asyncio.wait_for(
             self.runtime.execute_headless(prompt="hello", execution_id=execution_id, **kwargs),
             timeout=10,

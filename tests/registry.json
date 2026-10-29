@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
       "file": "unit/test_4064_gemini_process_group.py",
       "feature": "#4064",
       "added": "2026-10-28",
