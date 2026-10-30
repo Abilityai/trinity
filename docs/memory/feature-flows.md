@@ -127,6 +127,7 @@
 | Workspace Inbox | [workspace-inbox.md](feature-flows/workspace-inbox.md) | The landing view — Action (asks waiting on you), Unread (chats where something came back: replies, delivered runs with a done/failed outcome, deliverables addressed to you) and All, with a reading pane; one #557 cursor, no table/store/router (ent#610) |
 | Workspace person tags | [workspace-person-tag.md](feature-flows/workspace-person-tag.md) | `@` a colleague in a chat or a room: one Unread item in their Inbox on the existing queue ledger (type `mention`, never `pending`); the picker suggests only people who can reach the agents and refuses an unknown name by name; content crosses only to a reader who can already see the conversation; the tagger sees delivered/read; agents never tag (ent#631) |
 | Workspace Suggestions | [workspace-suggestions.md](feature-flows/workspace-suggestions.md) | Per-viewer, per-agent suggestions — waiting asks and decisions, schedule health for owners, dormancy, playbooks you have not run; Accept prefills / opens / deep-links, Dismiss holds until the state changes (ent#465) |
+| Workspace Autonomy Dial | [workspace-autonomy-dial.md](feature-flows/workspace-autonomy-dial.md) | What a companion may do unprompted, per seat and ask class — the instance level as a ceiling over a state earned from the decision record and the rating history (ent#641, P12) |
 
 ### Dashboard & Monitoring
 

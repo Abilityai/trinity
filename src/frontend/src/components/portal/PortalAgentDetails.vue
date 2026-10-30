@@ -205,6 +205,9 @@
     <div ref="decisionsEl">
       <PortalAgentDecisions :agent-name="agentName" />
     </div>
+
+    <!-- ent#641: what this agent may do unprompted for you, per kind of ask. -->
+    <PortalAgentAutonomy :agent-name="agentName" />
   </div>
 </template>
 
@@ -227,6 +230,7 @@ import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
+import PortalAgentAutonomy from './PortalAgentAutonomy.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { capCount } from '@/utils/tabTitle'

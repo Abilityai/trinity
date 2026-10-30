@@ -1,4 +1,4 @@
-# mcp: decisions.ts (record_decision, list_seat_decisions)
+# mcp: decisions.ts (record_decision, list_seat_decisions, get_autonomy)
 """
 Seat decision record — the companion's half (trinity-enterprise#638, R25).
 
@@ -44,10 +44,29 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 # owner's role, so `assert_agent_access` alone lets a sibling agent inside its
 # reach name this agent and one of its seat runs: a forged `active` row becomes
 # standing instruction text in this agent's system prompt, and the GET returns a
-# person's criteria and notes. Both handlers self-gate first (`assert_own_agent`,
+# person's criteria and notes. Every handler self-gates first (`assert_own_agent`,
 # trinity-enterprise#840), before any lookup, so the refusal says nothing about
 # the target.
 _OWN_DECISIONS = "Agent-scoped key may only record and read its own agent's seat decisions"
+
+
+def _require_running_turn(current_user: User, execution_id: str, turn_header: Optional[str]) -> None:
+    """#2984 review (option b): an agent records a decision only for the turn it
+    is running. The graduation rule counts distinct conversations, and the
+    `execution_id` in the body is the model's to type — so without this one turn
+    could cite three past executions of the seat and graduate a class nobody
+    asked about. The turn is the PLATFORM-stamped `X-Trinity-Execution-Id`
+    (#2392), which the model cannot set; the body must name that same turn, and
+    `record_seat_decision` checks it is still `running`. A person's own record
+    (a non-agent principal) is not an agent inventing evidence and keeps its path."""
+    if not current_user.agent_name:
+        return
+    turn = (turn_header or "").strip()
+    if not turn or turn == "manual" or turn != (execution_id or "").strip():
+        raise HTTPException(status_code=422, detail={
+            "code": "not_this_turn",
+            "message": ("Record a decision only for the turn you are running: pass your own "
+                        "execution_id from your Execution Context.")})
 
 
 def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
@@ -96,12 +115,19 @@ async def record_seat_decision(
     body: RecordDecisionRequest,
     current_user: User = Depends(get_current_user),
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    x_trinity_execution_id: Optional[str] = Header(default=None, alias="X-Trinity-Execution-Id"),
 ):
     """Record a decision for the seat this execution serves."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
+    _require_running_turn(current_user, body.execution_id, x_trinity_execution_id)
     seat_email, execution = _seat_for(agent_name, body.execution_id)
+    _status = getattr(execution, "status", "")
+    if current_user.agent_name and str(getattr(_status, "value", _status)).lower() != "running":
+        raise HTTPException(status_code=422, detail={
+            "code": "turn_not_running",
+            "message": "A decision is recorded during the turn it was made in; this execution is not running."})
 
     scope = f"seat_decision:{agent_name}:{seat_email}"
     idem = idempotency_service.begin(scope, idempotency_key)
@@ -141,6 +167,43 @@ async def record_seat_decision(
     logger.info("[ent#638] decision %s recorded on %s (%s, %s)", row["id"], agent_name,
                 row.get("outcome"), row.get("status"))
     return result
+
+
+# `/{agent_name}/autonomy` is TAKEN — `agent_config` owns it (the agent-level
+# autonomy_enabled toggle) and is registered first in `main.py`, so a second
+# declaration here is simply never reached: FastAPI matches the first, returns
+# the toggle's payload, and nothing anywhere errors. This is a SEAT-scoped read
+# of a different thing, so it gets its own noun (#641, caught live).
+@router.get("/{agent_name}/seat-autonomy")
+async def get_seat_autonomy(
+    agent_name: str,
+    execution_id: str = Query(..., min_length=1, max_length=200),
+    current_user: User = Depends(get_current_user),
+):
+    """What this companion may do unprompted for the seat it is serving, and
+    why not where it may not (trinity-enterprise#641).
+
+    Same seat rule as the decision routes — the seat comes from the execution,
+    never from a parameter — and the same email-free contract: the answer names
+    ask classes and blockers, never a person. A companion that cannot read this
+    cannot tell someone why it is asking first."""
+    assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
+    seat_email, _ = _seat_for(agent_name, execution_id)
+    from services import autonomy_dial_service
+
+    summary = autonomy_dial_service.seat_summary(db, agent_name, seat_email, persist=False)
+    return {
+        "agent_name": agent_name,
+        **{k: summary[k] for k in ("level", "level_label", "ceiling_allows_unprompted",
+                                   "agent_autonomy_enabled", "rating_window_days", "rule_version")},
+        "classes": [
+            {k: c[k] for k in ("ask_class", "state", "unprompted", "blocked_by",
+                               "evidence_expires_at", "guard_metric", "held")}
+            for c in summary["classes"]
+        ],
+        "blocker_text": autonomy_dial_service.BLOCKER_TEXT,
+    }
 
 
 @router.get("/{agent_name}/decisions")

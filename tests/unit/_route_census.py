@@ -856,6 +856,9 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/seat_decisions.py::list_seat_decisions": (
         "GET /api/agents/{agent_name}/decisions",
         "MCP list_seat_decisions: the seat's standing decisions, read to reuse a criterion (trinity-enterprise#638)"),
+    "routers/seat_decisions.py::get_seat_autonomy": (
+        "GET /api/agents/{agent_name}/seat-autonomy",
+        "MCP get_autonomy: this companion's seat verdict, ask classes only, never a person (trinity-enterprise#641)"),
     "routers/public_memory.py::write_user_memory": (
         "POST /api/agents/{agent_name}/user-memory",
         "MCP write_user_memory: notes about the person the run serves, resolved from the execution (MEM-001); every write recorded and undoable (trinity-enterprise#637)"),
@@ -1040,6 +1043,11 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/git.py::get_pull_sync_config": (
         "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle",
         _SIB_READ + " — one boolean"),
+    # The autonomy dial (ent#641): the instance ceiling a companion reads to tell a person
+    # why it asks first. The write is the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    "routers/settings/autonomy_dial.py::get_autonomy_dial": (
+        "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant",
+        _SIB_NO_AGENT + ": one instance-wide level"),
 }
 
 # Authenticates itself, or unauthenticated by design. key -> ("METHOD /full/path", reason)
