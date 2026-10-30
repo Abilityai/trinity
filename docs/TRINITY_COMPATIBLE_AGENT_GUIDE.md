@@ -179,6 +179,9 @@ Must exclude secrets, instance-specific files, and large content.
 .env
 .env.*
 .mcp.json
+.gemini/settings.json
+.gemini/oauth_creds.json
+.gemini/installation_id
 credentials.json
 *.pem
 *.key

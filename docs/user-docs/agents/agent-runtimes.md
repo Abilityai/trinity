@@ -63,6 +63,8 @@ A Gemini agent uses the platform's Gemini key. Trinity reads the key saved in **
 
 Trinity pins `gemini-cli` in the base image, and the image build checks that the pinned CLI accepts every argument Trinity passes. A new CLI release that drops a flag therefore fails the image build instead of every turn. Gemini CLI has no system-prompt flag, so Trinity puts the platform instructions in front of each turn's input. The execution log still shows only your message as the user turn.
 
+Gemini CLI sends Google usage statistics by default. Trinity turns them off: it writes `privacy.usageStatisticsEnabled: false` to the agent's `~/.gemini/settings.json` at startup and again before every turn, keeping the rest of the file. An agent's own setting cannot turn them back on. The settings file holds the agent's Trinity MCP key, so it is never committed by Git sync, like `.mcp.json`.
+
 A chat turn resumes only the agent's own chat session, never the newest session on disk, so a scheduled or headless run never leaks into the chat. Changing the model or resetting the chat history starts a fresh session. If the saved session is gone, the turn retries once from a fresh session.
 
 ### How failures are reported

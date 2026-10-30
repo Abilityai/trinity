@@ -134,6 +134,13 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".env",
     ".env.*",
     ".mcp.json",
+    # trinity-enterprise#986: the Gemini equivalents. settings.json carries the
+    # Trinity MCP bearer token (as .mcp.json does), oauth_creds.json the Google
+    # login, installation_id the CLI's persistent usage-statistics id. Targeted,
+    # not `.gemini/`: GEMINI.md and commands/ are authored content.
+    ".gemini/settings.json",
+    ".gemini/oauth_creds.json",
+    ".gemini/installation_id",
     "credentials.json",
     "*.pem",
     "*.key",
@@ -368,6 +375,9 @@ _GITIGNORE_CREDENTIAL_PATTERNS: Tuple[str, ...] = (
     ".env",
     ".env.*",
     ".mcp.json",
+    ".gemini/settings.json",  # trinity-enterprise#986 (see _GITIGNORE_PATTERNS)
+    ".gemini/oauth_creds.json",
+    ".gemini/installation_id",
     "credentials.json",
     "*.pem",
     "*.key",

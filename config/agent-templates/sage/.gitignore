@@ -67,6 +67,9 @@ __pycache__/
 .env
 .env.*
 .mcp.json
+.gemini/settings.json
+.gemini/oauth_creds.json
+.gemini/installation_id
 credentials.json
 *.pem
 *.key
