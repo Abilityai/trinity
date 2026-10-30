@@ -834,6 +834,9 @@ def apply_task_result(
         # No error_code column on schedule_executions — fold the typed class into
         # the persisted error text so it survives for observability.
         err_text = sanitized_content or ""
+        if row_status == TaskExecutionStatus.CANCELLED:
+            # #3618: the text the terminate route writes; the reply stays in `response`.
+            err_text = "Execution terminated by user"
         if error_code:
             err_text = f"[{error_code}] {err_text}".strip()
         if (error_code or "").strip().lower() == "timeout":
