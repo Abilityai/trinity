@@ -121,13 +121,14 @@ def get_chat_state_with_previews(email: str, is_platform: bool,
     `db.unread_room_arrivals`, which reads only through the viewer's own
     participant row — membership is the grant, so no roster check is added on
     top (a room's agents are what its members already read in the room)."""
+    as_of = service.utc_now_iso()  # before the reads it labels (#1010)
     arrivals = db.unread_arrivals_with_latest(email)
     room_arrivals = db.unread_room_arrivals(email, *room_reader) if room_reader else {}
     state = service.get_chat_state(
         email, unread={sid: a["n"] for sid, a in arrivals.items()},
         room_reader=room_reader,
         room_unread={rid: a["n"] for rid, a in room_arrivals.items()},
-        sees_all_rooms=sees_all_rooms)
+        sees_all_rooms=sees_all_rooms, as_of=as_of)
 
     roster = service.roster_agent_names(email, include_owned=is_platform)
     eligible = sorted(

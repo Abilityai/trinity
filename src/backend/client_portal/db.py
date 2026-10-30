@@ -19,7 +19,7 @@ from db.tables import (
     system_settings, agent_sharing, agent_ownership, users,
     enterprise_portal_chat_state, portal_file_dismissals, schedule_executions,
 )
-from utils.helpers import iso_cutoff, utc_now_iso
+from utils.helpers import iso_cutoff, parse_iso_timestamp, utc_now_iso
 
 
 # Max agents per SQL statement — see `list_portal_sessions_for_agents` (#2198).
@@ -1137,16 +1137,80 @@ def _ensure_unread_baseline(client_email: str, now: str) -> None:
                        last_read_at=now)
 
 
-def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str) -> None:
+def room_cursor_kind(participant_kind: str) -> str:
+    """The chat-state kind that holds a ROOM's read cursor for one identity
+    space (trinity-enterprise#1011).
+
+    A room seats a person as ``user`` + username or ``workspace_user`` + email,
+    and the row is keyed by email, so one email seated under both used to share
+    one cursor: reading through either credential cleared the room for both. The
+    cursor now lives in a row per space. The plain ``room`` row stays what it
+    was — it carries the star, and a cursor written before the split, which each
+    space reads as its floor until it writes its own (`mark_chat_read`'s
+    ``floor_kind``, `_UNREAD_ROOM_ARRIVALS`). Never in `CHAT_KINDS`: the API
+    addresses a room as ``room`` and the space comes from the credential."""
+    return f"room:{participant_kind}"
+
+
+def _later(a: Optional[str], b: Optional[str]) -> Optional[str]:
+    """The later of two stored instants, compared as instants, returned in the
+    spelling it was stored in. Lexical order is wrong across precisions
+    ("…00Z" sorts after "…00.5Z"), and the winner must keep its own spelling so
+    a message's `created_at` sent back verbatim still compares equal to itself."""
+    if not a:
+        return b
+    if not b:
+        return a
+    try:
+        return a if parse_iso_timestamp(a) >= parse_iso_timestamp(b) else b
+    except (TypeError, ValueError):
+        return max(a, b)
+
+
+def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str,
+                   *, through: Optional[str] = None,
+                   floor_kind: Optional[str] = None) -> None:
     """Advance one chat's read cursor for one user.
 
+    trinity-enterprise#1010: the cursor moves to ``through`` — the newest
+    instant the client actually held — not to ``now``. Written at ``now``, an
+    arrival that landed after the client's last fetch but before this write was
+    older than the cursor and never counted, though nobody saw it. The caller
+    clamps ``through`` to now; ``None`` keeps the old meaning (now) for a client
+    that predates it. The cursor never moves BACK: an older ``through`` (a slow
+    request overtaken by a later one, a second tab) leaves it where it is.
+
+    ``floor_kind`` (#1011) is the row whose cursor this one may not start below:
+    a room's per-space cursor is seeded from the shared pre-split ``room`` row,
+    so the first read in a space never resurrects what that row already read.
+
     Also establishes the account baseline on the viewer's FIRST ever read
-    (ent#557). Here rather than at sign-in because this is the first moment we
-    know the viewer has actually looked at something: a baseline written at
-    sign-in would start counting from a session someone opened and abandoned.
+    (ent#557), at the same instant the read covers. Here rather than at sign-in
+    because this is the first moment we know the viewer has actually looked at
+    something: a baseline written at sign-in would start counting from a session
+    someone opened and abandoned.
     """
-    _ensure_unread_baseline(client_email, now)
-    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=now)
+    target = through or now
+    _ensure_unread_baseline(client_email, target)
+    current = _read_cursor(client_email, chat_kind, chat_id)
+    if current is None and floor_kind:
+        current = _read_cursor(client_email, floor_kind, chat_id)
+    cursor = _later(current, target)
+    if cursor == _read_cursor(client_email, chat_kind, chat_id):
+        return
+    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=cursor)
+
+
+def _read_cursor(client_email: str, chat_kind: str, chat_id: str) -> Optional[str]:
+    stmt = text(
+        "SELECT last_read_at FROM enterprise_portal_chat_state "
+        "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {
+            "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
+        }).first()
+    return row[0] if row else None
 
 
 # ---------------------------------------------------------------------------
@@ -1226,8 +1290,8 @@ def dismissed_file_ids(client_email: str) -> set[str]:
 # 20 s poll. Every reader aliases the subquery (PostgreSQL < 16 requires it).
 _UNREAD_CURSOR = (
     "  AND ("
-    "        (st.last_read_at IS NOT NULL AND {at} > st.last_read_at)"
-    "     OR (st.last_read_at IS NULL AND {at} > ("
+    "        ({cur} IS NOT NULL AND {at} > {cur})"
+    "     OR ({cur} IS NULL AND {at} > ("
     "           SELECT b.last_read_at FROM enterprise_portal_chat_state b "
     "           WHERE b.client_email = :email AND b.chat_kind = :bkind "
     "             AND b.chat_id = :bid"
@@ -1244,7 +1308,7 @@ _UNREAD_ARRIVALS = (
     " AND st.chat_id = m.session_id "
     "WHERE m.client_email = :email "
     "  AND m.role = 'assistant' "
-    + _UNREAD_CURSOR.format(at="m.created_at")
+    + _UNREAD_CURSOR.format(at="m.created_at", cur="st.last_read_at")
     + "UNION ALL "
     "SELECT r.portal_session_id AS session_id, r.id AS id, r.created_at AS at, "
     "       'deliverable' AS kind, s.agent_name AS agent_name "
@@ -1255,7 +1319,7 @@ _UNREAD_ARRIVALS = (
     "  ON st.client_email = :email AND st.chat_kind = 'thread' "
     " AND st.chat_id = r.portal_session_id "
     "WHERE r.addressed_to_email = :email "
-    + _UNREAD_CURSOR.format(at="r.created_at")
+    + _UNREAD_CURSOR.format(at="r.created_at", cur="st.last_read_at")
 )
 
 
@@ -1424,11 +1488,15 @@ _UNREAD_ROOM_ARRIVALS = (
     "JOIN enterprise_room_participants p "
     "  ON p.room_id = msg.room_id AND p.kind = :pkind AND p.identity = :pid "
     " AND p.left_at IS NULL "
+    "LEFT JOIN enterprise_portal_chat_state sp "
+    "  ON sp.client_email = :email AND sp.chat_kind = :rkind "
+    " AND sp.chat_id = msg.room_id "
     "LEFT JOIN enterprise_portal_chat_state st "
     "  ON st.client_email = :email AND st.chat_kind = 'room' "
     " AND st.chat_id = msg.room_id "
     "WHERE msg.sender_kind = 'agent' "
-    + _UNREAD_CURSOR.format(at="msg.created_at")
+    + _UNREAD_CURSOR.format(at="msg.created_at",
+                            cur="COALESCE(sp.last_read_at, st.last_read_at)")
 )
 
 
@@ -1498,7 +1566,8 @@ def unread_room_arrivals(client_email: str, participant_kind: str,
         "WHERE w.rn = 1"
     )
     params = {**_unread_params(client_email),
-              "pkind": participant_kind, "pid": participant_identity}
+              "pkind": participant_kind, "pid": participant_identity,
+              "rkind": room_cursor_kind(participant_kind)}
     out: dict[str, dict] = {}
     with get_engine().connect() as conn:
         for r in conn.execute(stmt, params).mappings():

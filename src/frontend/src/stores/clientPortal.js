@@ -20,6 +20,7 @@ import {
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { useAuthStore } from './auth'
+import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
 import { usePortalDraftsStore } from './portalDrafts'
@@ -344,6 +345,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // agentName, chatId, since }` — whose result the chat `chatId` is waiting
     // to show. Cleared when the result lands or the wait gives up.
     askResultWatch: null,
+    // trinity-enterprise#1010: the server's `as_of` for the newest chat-state
+    // read — the instant the badges on screen were read. A read write sends it
+    // back as `through` when nothing newer was rendered for that chat.
+    chatStateAsOf: null,
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -1548,6 +1553,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       })
       const out = {}
       const previews = {}
+      if (data && data.as_of) this.chatStateAsOf = laterInstant(this.chatStateAsOf, data.as_of)
       for (const c of data.chats || []) {
         if (!(c && c.kind && c.id)) continue
         const key = `${c.kind}:${c.id}`
@@ -1569,13 +1575,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Fire-and-forget by design: a failed read marker leaves a stale badge,
     // which is not worth interrupting navigation over, and the next state fetch
     // corrects it.
-    async markChatRead(kind, chatId) {
+    //
+    // trinity-enterprise#1010: `through` is the newest instant this client held
+    // for the chat — the cursor moves there, not to the server's now, so an
+    // arrival after the last fetch still counts. Omitted, it falls back to the
+    // last chat-state `as_of`; with neither — or READ_UP_TO_NOW — no body, and
+    // the server reads up to now.
+    async markChatRead(kind, chatId, through) {
       try {
-        await portalHttp.post(
-          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-          null,
-          { headers: this.authHeader },
-        )
+        await this.markChatReadStrict(kind, chatId, through)
       } catch { /* stale badge only */ }
     },
 
@@ -1583,10 +1591,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read settles many of these and must report how many failed —
     // `markChatRead` swallows every error by design, so `Promise.allSettled`
     // over it would report zero failures even if all of them failed.
-    async markChatReadStrict(kind, chatId) {
+    async markChatReadStrict(kind, chatId, through) {
+      const held = through === READ_UP_TO_NOW ? null : laterInstant(this.chatStateAsOf, through)
       await portalHttp.post(
         `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-        null,
+        held ? { through: held } : null,
         { headers: this.authHeader },
       )
     },

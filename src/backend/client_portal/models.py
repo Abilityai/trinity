@@ -914,6 +914,20 @@ class PortalChatState(BaseModel):
     order them together.
     """
     chats: list[PortalChatStateEntry] = []
+    # trinity-enterprise#1010: the instant this state was read. The client sends
+    # it back as the read write's `through` when it has rendered nothing newer.
+    as_of: Optional[str] = None
+
+
+class PortalChatRead(BaseModel):
+    """Body of `POST /chat-state/{kind}/{id}/read` (trinity-enterprise#1010).
+
+    ``through`` is the newest instant the client actually held for this chat —
+    the `as_of` of the state it was shown, or the newest message it rendered.
+    The cursor moves there (clamped to now, never backwards), so an arrival
+    after the client's last fetch still counts as unread. Omitted, or no body,
+    the cursor moves to now: the meaning before #1010."""
+    through: Optional[str] = None
 
 
 class PortalSearchResult(BaseModel):
