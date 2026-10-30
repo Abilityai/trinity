@@ -927,6 +927,14 @@ addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
 
+**The read write covers what the client held; a room's cursor is per identity space
+(trinity-enterprise#1010, #1011).** `mark_chat_read(…, through=)` moves the cursor to the
+client's `through` (the later of `GET /chat-state`'s `as_of` and the newest row it rendered),
+clamped to now and never backwards, instead of to server time — so an arrival between the last
+fetch and the write stays unread. A room's cursor row is `chat_kind = 'room:<kind>'`
+(`db.room_cursor_kind`); the plain `room` row keeps the star and is every space's floor until
+that space writes its own. No schema change: `chat_kind` is free text in the existing PK.
+
 **A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
 `db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's
 `chat_kind = 'room'` cursor (or the #557 baseline), in one windowed statement that also

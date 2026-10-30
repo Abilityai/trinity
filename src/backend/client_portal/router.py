@@ -88,6 +88,7 @@ from .models import (
     PortalSeatDecisionAction,
     PortalSeatDecisionResult,
     PortalAgentReports,
+    PortalChatRead,
     PortalChatState,
     PortalSessionSummary,
     PortalMainReset,
@@ -756,14 +757,18 @@ def portal_unstar_chat(chat_kind: str, chat_id: str,
 
 @router.post("/chat-state/{chat_kind}/{chat_id}/read", status_code=204)
 def portal_mark_chat_read(chat_kind: str, chat_id: str,
+                          body: Optional[PortalChatRead] = None,
                           principal: PortalPrincipal = Depends(get_portal_principal)):
     """Advance this viewer's read cursor — clears the chat's unread count and
-    its share of the agent row's badge. A room's cursor moves only for a
-    credential actively in the room (trinity-enterprise#959); otherwise the
-    same 204, with nothing written."""
+    its share of the agent row's badge, up to ``body.through``: what the client
+    held (trinity-enterprise#1010; no body = up to now). A room's cursor moves
+    only for a credential actively in the room (trinity-enterprise#959), and
+    only in that credential's identity space (#1011); otherwise the same 204,
+    with nothing written."""
     try:
         service.mark_chat_read(principal.email, chat_kind, chat_id,
-                               room_reader=service.room_reader_of(principal))
+                               room_reader=service.room_reader_of(principal),
+                               through=body.through if body else None)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)

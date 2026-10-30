@@ -524,9 +524,24 @@ POST /client-portal/chat-state/room/{id}/read
   `portalInboxRooms.mount.spec.js`.
 - **Reading only what is on screen**: a room is read only once the transcript held reaches the
   room's `message_count` (`roomTranscriptComplete`), in the pane and in the room view alike.
-- **Known gaps (follow-ups)**: a message landing between the last fetch and the read write is
-  cleared unseen (the write stamps server time, as a chat's does); and the cursor row has no
-  identity-space column, so one email in the SAME room under both identities shares one cursor.
+- **The read covers what the client held (trinity-enterprise#1010, chats and rooms)**:
+  `POST …/read` takes `{"through": "<instant>"}` — the later of the last `GET /chat-state`
+  `as_of` (stamped before the counts it labels) and the newest row the view rendered
+  (`utils/readThrough.js::heldThrough`: the room's newest message, the conversation's newest
+  row; the conversation also reads itself after its history loads). The cursor moves to
+  `through`, clamped to now and never backwards (`db._later`, compared as instants, stored in
+  the client's own spelling so a message's `created_at` sent back reads that message). An
+  arrival after the last fetch therefore still counts. No body = up to now (the old meaning);
+  a live reply with no instant sends none (`READ_UP_TO_NOW`). The first read's ent#557
+  baseline takes the same instant. A `through` that is not an ISO-Z instant is a 422.
+- **One room read state per identity space (trinity-enterprise#1011)**: a room's cursor lives
+  in `chat_kind = 'room:<participant kind>'` (`db.room_cursor_kind`), so one email seated as
+  both `user` and `workspace_user` reads the room separately in each. The plain `room` row keeps
+  the star and any pre-split cursor, which each space reads as its floor
+  (`COALESCE(sp.last_read_at, st.last_read_at)`) until it writes its own — no count moves on
+  upgrade, no migration. The payload is still one `room` entry per room; another space's row
+  never lists one. Pinned by `tests/unit/test_ent1010_1011_read_cursor.py` and
+  `portalReadThrough.spec.js`.
 - **Counts**: the room's count rides `sidebarThreads`, so Σ "N new" == came holds
   (`portalInboxRooms.spec.js` property; `portalInboxRoomsShell.mount.spec.js` through the shell).
 - **Known limit**: between an agent message landing and the open room's next 3 s poll, a

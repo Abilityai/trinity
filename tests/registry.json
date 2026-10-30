@@ -6952,6 +6952,27 @@
         "unit"
       ],
       "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "unit/test_ent1010_1011_read_cursor.py",
+      "feature": "abilityai/trinity-enterprise#1010",
+      "added": "2026-10-30",
+      "categories": [
+        "workspace",
+        "unit"
+      ],
+      "description": "The Inbox read write covers what the client held (ent#1010) and a room's read state is per identity space (ent#1011). A reply or room message landing between the client's fetch and the read write stays unread; what was held is read; no `through` keeps the old up-to-now meaning; a future `through` is clamped to now; an older one never moves the cursor back; the client's own spelling is stored (a held `created_at` reads that message); a non-instant is a 422 with nothing written; the first read's baseline takes `through` and never moves; the route passes the body and answers 422; `GET /chat-state` (with and without previews) carries `as_of`, stamped before the counts. One email seated as both `user` and `workspace_user` reads a room separately in each space; a pre-split `room` cursor is both spaces' floor (no count moves on upgrade, and a space's first cursor never starts below it); the room is one entry and keeps its star; a read room is still listed; another space's row never lists a room; `room:<kind>` is not an API chat kind; the row cap applies to a new space row. Mutations (through ignored, space row unread-ignored, shared row written, no clamp, not monotone, no legacy floor) each turn it red."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalReadThrough.spec.js",
+      "feature": "abilityai/trinity-enterprise#1010",
+      "added": "2026-10-30",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui"
+      ],
+      "description": "The Workspace read write sends what the client held (ent#1010): laterInstant compares as instants and keeps the winner's spelling; newestAt and heldThrough pick the newest rendered row, READ_UP_TO_NOW when it has no instant, nothing for an empty view; the store keeps the newest chat-state as_of (an overtaken poll never lowers it) and posts `through` = the later of it and the rendered row, no body for up-to-now or before any state was read."
     }
   ]
 }
