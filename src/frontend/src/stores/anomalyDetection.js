@@ -7,6 +7,9 @@
  * agent's opt-in / remediation and closes an incident. The guard is the API
  * (entitlement + admin + person); the Schedules tab shows the panel only to an
  * admin on an entitled install, which mirrors it.
+ *
+ * Plus the fleet list behind Operations › Anomalies (ruled 2026-10-29): every
+ * agent's incidents by status, and the open count the tab's badge shows.
  */
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
@@ -18,6 +21,8 @@ export const BASE = '/api/enterprise/anomaly-detection'
 export const schedulesUrl = (name) => `${BASE}/agents/${encodeURIComponent(name)}/schedules`
 export const settingsUrl = (name) => `${BASE}/agents/${encodeURIComponent(name)}/settings`
 export const resolveUrl = (id) => `${BASE}/incidents/${encodeURIComponent(id)}/resolve`
+export const INCIDENTS_URL = `${BASE}/incidents`
+export const FLEET_LIMIT = 200
 
 export const useAnomalyDetectionStore = defineStore('anomalyDetection', () => {
   const agent = ref(null)
@@ -31,6 +36,14 @@ export const useAnomalyDetectionStore = defineStore('anomalyDetection', () => {
   const resolving = ref('')         // incident id with a close in flight
   const resolveError = ref(null)
   let gen = 0
+  // Operations › Anomalies — every agent's incidents for one status.
+  const fleetStatus = ref('open')
+  const fleetIncidents = ref([])
+  const fleetLoading = ref(false)
+  const fleetHasLoaded = ref(false)
+  const fleetError = ref(null)
+  const openCount = ref(0)          // the tab badge; refreshed with every open read
+  let fleetGen = 0
 
   const effective = computed(() => view.value?.effective || null)
   const watching = computed(() => !!effective.value?.enabled)
@@ -85,11 +98,46 @@ export const useAnomalyDetectionStore = defineStore('anomalyDetection', () => {
     }
   }
 
+  async function loadFleet(status = fleetStatus.value) {
+    if (status !== fleetStatus.value) {
+      fleetStatus.value = status
+      fleetIncidents.value = []
+      fleetHasLoaded.value = false
+    }
+    const mine = ++fleetGen
+    fleetLoading.value = true
+    try {
+      const r = await api.get(INCIDENTS_URL, { params: { status, limit: FLEET_LIMIT } })
+      if (mine !== fleetGen) return
+      fleetIncidents.value = r.data?.incidents || []
+      if (status === 'open') openCount.value = fleetIncidents.value.length
+      fleetHasLoaded.value = true
+      fleetError.value = null
+    } catch (e) {
+      if (mine !== fleetGen) return
+      fleetError.value = apiErrorMessage(e, "Couldn't load anomaly incidents")
+    } finally {
+      if (mine === fleetGen) fleetLoading.value = false
+    }
+  }
+
+  /** The badge count alone, without touching the list on screen. */
+  async function loadOpenCount() {
+    try {
+      const r = await api.get(INCIDENTS_URL, { params: { status: 'open', limit: FLEET_LIMIT } })
+      openCount.value = (r.data?.incidents || []).length
+    } catch {
+      // A badge is context: a failed count leaves the last one.
+    }
+  }
+
   async function resolveIncident(id) {
     resolving.value = id
     resolveError.value = null
     try {
       await api.post(resolveUrl(id))
+      if (fleetHasLoaded.value) await loadFleet()
+      else await loadOpenCount()
       if (agent.value) await load(agent.value)
       return true
     } catch (e) {
@@ -103,5 +151,7 @@ export const useAnomalyDetectionStore = defineStore('anomalyDetection', () => {
   return {
     agent, view, stored, loading, hasLoaded, error, saving, saveError, resolving, resolveError,
     effective, watching, bySchedule, reset, load, save, resolveIncident,
+    fleetStatus, fleetIncidents, fleetLoading, fleetHasLoaded, fleetError, openCount,
+    loadFleet, loadOpenCount,
   }
 })
