@@ -216,12 +216,16 @@ class SkillSourcesOperations:
         The other three go with it because "Synced <date>" against a repo this
         source has never fetched is a claim the row cannot support.
 
-        The same change also ends `follows_bundled_pin` for good
-        (trinity-enterprise#529): an admin who points the source somewhere
-        else owns its version from then on. Here, not in the routers, so the
-        PUT route, the `apply` route behind the MCP tools and any later caller
-        are all covered. Rename, priority and `enabled` leave it alone — a
-        disabled row is simply not moved while it is off.
+        Naming `url`/`ref`/`ref_type` ends `follows_bundled_pin` for good
+        (trinity-enterprise#529), even when the value is unchanged: an admin who
+        sets the source's target, including to the tag it is already on, owns
+        its version from then on. Only the marker goes on such a save; the
+        bookkeeping above resets on an actual change alone, because a sync with
+        no recorded baseline trusts its first fetch. Here, not in the routers,
+        so the PUT route, the `apply` route behind the MCP tools (which passes
+        only the fields that differ) and any later caller are all covered.
+        Rename, priority and `enabled` leave it alone — a disabled row is simply
+        not moved while it is off.
 
         "Did the target change?" is decided from a read, so the write only lands
         on the target that read saw; if the row was retargeted in between (the
@@ -249,7 +253,14 @@ class SkillSourcesOperations:
                 k in values and values[k] != getattr(current, k)
                 for k in self._IDENTITY_FIELDS
             ):
-                values.update(_RETARGET_RESET, follows_bundled_pin=0)
+                values.update(_RETARGET_RESET)
+            # NAMED, not only changed: putting the tag the row is already on is
+            # how an admin holds it there, so it must end following too. The
+            # bookkeeping above still resets only on a real change. `apply`
+            # passes only the fields whose value differs, so re-applying a
+            # declaration is not a pin.
+            if any(k in values for k in self._IDENTITY_FIELDS):
+                values["follows_bundled_pin"] = 0
             values["updated_at"] = utc_now_iso()
 
             stmt = (

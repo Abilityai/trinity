@@ -100,8 +100,10 @@ skills_sync_service.start() → run_cycle → sync_library
 - **The marker.** `skill_sources.follows_bundled_pin` is written 1 by the seed only
   for the built-in URL (`config.BUNDLED_SKILL_SOURCE_URL`), and set to 0 by
   `SkillSourcesOperations.update_source` whenever `url`, `ref` or `ref_type`
-  changes value — the one write path under `PUT /api/skills/sources/{id}` and
-  `POST /api/skills/sources/apply` (the MCP tools). Rename, priority and
+  is named, even unchanged (the sync bookkeeping still resets on a real change
+  only) — the one write path under `PUT /api/skills/sources/{id}` and
+  `POST /api/skills/sources/apply` (the MCP tools, which pass only the fields
+  whose value differs, so re-applying a declaration is not a pin). Rename, priority and
   `enabled` leave it alone; the CAS requires `enabled = 1`, so a disabled row
   pauses. Rows seeded before the column were classified once by
   `db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL` (both tracks; Alembic

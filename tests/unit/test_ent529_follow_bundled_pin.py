@@ -373,12 +373,55 @@ class TestOptOut:
         assert _follow() is not None
         assert _row(db_path, sid)["ref"] == "v0.5.0"
 
-    def test_a_save_that_changes_nothing_keeps_following(self, db_path, ops, facade, pin):
+    @pytest.mark.parametrize(
+        "fields",
+        [{"ref": "v0.3.0"}, {"url": BUILTIN_URL}, {"ref_type": "tag"}],
+        ids=["ref", "url", "ref_type"],
+    )
+    def test_naming_the_current_target_pins_it(self, db_path, ops, facade, pin, fields):
+        """A PUT that names the tag the row is already on is how an admin holds
+        it there: the user doc's pin steps say so. It used to change nothing,
+        so the next upgrade moved the row anyway (PR #4091 review)."""
         sid = _seed(db_path, "v0.3.0")
-        ops.update_source(sid, ref="v0.3.0", url=BUILTIN_URL, ref_type="tag")
+        ops.update_source(sid, **fields)
+        pin("v0.5.0")
+
+        assert _follow() is None
+        row = _row(db_path, sid)
+        assert row["ref"] == "v0.3.0"
+        assert row["follows_bundled_pin"] == 0
+
+    def test_pinning_the_current_tag_keeps_the_moved_tag_baseline(self, db_path, ops):
+        """Only the marker goes. Clearing `last_commit_sha` on a save that moves
+        nothing would let the next sync adopt whatever the tag now points at,
+        because a sync with no baseline trusts the first fetch (ent#237 AC#5)."""
+        sid = _seed(db_path, "v0.3.0")
+        ops.record_sync(sid, success=True, commit_sha="c0ffee" * 2)
+        before = _row(db_path, sid)
+
+        ops.update_source(sid, ref="v0.3.0")
+
+        after = _row(db_path, sid)
+        for col in ("last_commit_sha", "last_sync_status", "last_sync_at", "last_error"):
+            assert after[col] == before[col], col
+
+    def test_a_declarative_apply_that_restates_the_ref_keeps_following(
+        self, db_path, ops, facade, pin
+    ):
+        """`apply` (the MCP register/update tools) is declarative: re-applying a
+        declaration is routine, so only a field whose value differs is passed
+        on. Re-stating the ref while changing the priority is not a pin."""
+        import services.skill_service as ss
+
+        sid = _seed(db_path, "v0.3.0")
+        action, _ = ss.apply_skill_source(
+            url=BUILTIN_URL, fields={"ref": "v0.3.0", "priority": 5}
+        )
+        assert action == "updated"
         pin("v0.5.0")
 
         assert _follow() is not None
+        assert _row(db_path, sid)["ref"] == "v0.5.0"
 
     def test_an_admin_retarget_clears_the_follow_line(self, db_path, ops, facade, pin):
         """The line explains the CURRENT ref; after a hand edit it would lie."""

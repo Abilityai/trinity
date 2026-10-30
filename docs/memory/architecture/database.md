@@ -1128,7 +1128,8 @@ CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
 `skill_sources_follow_bundled_pin` + Alembic `0107_skill_sources_follow_bundled_pin`).
 `follows_bundled_pin` is 1 while the seeded default still points where the platform put it:
 the seed writes it for the built-in catalog URL only, and `update_source` writes 0 when
-`url`, `ref` or `ref_type` changes. The boot follow moves only such a row to a newer
+an edit names `url`, `ref` or `ref_type`, even unchanged (`apply` passes only the fields
+that differ). The boot follow moves only such a row to a newer
 `DEFAULT_SKILL_SOURCE_REF`, through a compare-and-set UPDATE whose WHERE carries every
 eligibility predicate. Pre-existing rows were classified by
 `db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL`, the one statement both tracks execute
