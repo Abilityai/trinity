@@ -1208,6 +1208,34 @@ Trinity enables file-based collaboration between agents via shared Docker volume
    - Agent B has consume enabled
    - Agent B has permission to call Agent A
 
+
+### Declaring from the UI
+
+The agent's owner (or an admin) can declare, edit and retire metrics from the
+Dashboard tab; an agent key needs the `instructions.manage` capability, the
+same one that edits `CLAUDE.md`. The form:
+
+- writes one entry into `template.yaml metrics:` and re-reads the registry
+  from the file it wrote, so the metric appears at once on the tiles and in
+  the Workspace project "Add a metric" picker;
+- changes only that entry's lines — comments and every other key stay as you
+  wrote them — and refuses (`template_not_editable`) a `metrics:` block in a
+  layout it cannot edit safely, such as a one-line `[...]` list or anchors;
+- asks for the cadence in plain words and requires one, and shows the
+  template loader's own errors on the field they belong to;
+- stores the optional "Recorded by" note as `x-recorded-by`, shown on the tile;
+- locks the name and type after the first save, since points are stored by
+  name and read in the type's units;
+- needs the agent running (`agent_not_running`), refuses a `template.yaml` it
+  cannot parse (`template_unreadable`) without changing anything, and refuses
+  a save if the file changed since the form opened (`template_changed`);
+- before retiring, lists what still reads the metric — recorded points,
+  objectives, `dashboard.yaml` widgets, project links — and asks you to
+  confirm. Recorded points are kept.
+
+An agent that edits its own `template.yaml` keeps doing that and calls
+`refresh_metric_definitions`; the UI form has no MCP tool on purpose.
+
 ### Template Configuration
 
 Set defaults in `template.yaml`:
@@ -1491,7 +1519,12 @@ Agents can define custom KPIs displayed in the Trinity UI Metrics tab. This enab
 
 ### How It Works
 
-1. You declare metrics in `template.yaml` under `metrics:`.
+1. You declare metrics in `template.yaml` under `metrics:` — by editing the
+   file, or from the agent's **Dashboard** tab with **Declare metric**
+   (trinity-enterprise#1006). Both doors write the same place: the form edits
+   the `metrics:` block in the agent's `template.yaml` and nothing is stored
+   only in the database, so git sync carries a UI declaration to the repo like
+   any hand edit.
 2. Trinity reads that block and builds a per-agent **metric registry** — a
    validated, persisted record of what this agent claims to measure
    (trinity-enterprise#477). It is reconciled when the agent is created, when a
