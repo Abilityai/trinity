@@ -302,6 +302,14 @@ looked identical to one that worked every time. Now:
   in-process record: `state` (`unknown` · `ok` · `no_credential` · `failing`),
   consecutive failures, timestamps, a bounded credential-free reason ("HTTP
   401", "request failed: ConnectError"), the model.
+- The credential is the one the agent's own chat runs on (#2766), resolved by
+  the platform's one model door — `_resolve_title_auth` → `model_gateway.resolve`
+  (trinity-enterprise#1027): the subscription token, else the instance key for an
+  api-key-mode agent, and `None` (→ `no_credential`) for a subscription-mode agent
+  whose token cannot be read, never a borrowed key. The call goes through
+  `model_gateway.send` rather than `complete` so this record keeps the upstream
+  status and reason; `PORTAL_TITLE_MODEL` overrides the model on the platform key
+  only — a subscription runs the one model the gateway serves it.
 - A credential miss is an episode from the first hit; transport/API failures
   need **3 in a row**, so a single upstream blip pages nobody.
 - The transition **into** a bad state logs one WARNING (pointing at Settings →
