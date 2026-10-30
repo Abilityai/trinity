@@ -198,12 +198,18 @@ _DOORS = (
     "/api/enterprise/client-portal/",  # get_portal_principal
     "/api/enterprise/projects",        # Workspace projects, portal door
     "/api/rooms",                      # get_room_principal
-    # Seating people in a room (trinity-enterprise#701) is served by a private
-    # router mounted under this prefix through the entitlement seam; every one
-    # of its routes authenticates with the same `get_room_principal`, never
-    # `get_current_user`, so it is the rooms door, not an operator route.
-    "/api/enterprise/rooms/",          # get_room_principal
 )
+# Seating people in a room (trinity-enterprise#701) is served by a private
+# router mounted through the entitlement seam; each of these routes
+# authenticates with `get_room_principal`, never `get_current_user`, so it is
+# the rooms door. Listed one by one, not as a prefix, so a future operator
+# route under /api/enterprise/rooms/ is still flagged (PR #3954 review).
+_ROOM_SEAT_DOORS = {
+    "/api/enterprise/rooms/{}/seatable",
+    "/api/enterprise/rooms/{}/people",
+    "/api/enterprise/rooms/{}/people/{}",
+    "/api/enterprise/rooms/{}/people/{}/history",
+}
 _OTHER_AUTH = (
     "/api/files/",                     # token-gated downloads
     "/api/public/",                    # public links
@@ -268,7 +274,7 @@ class TestTheWorkspaceCalls:
                     continue
                 if (rel, raw.split("?", 1)[0]) in _KNOWN:
                     continue
-                if _normalise(raw) in marked:
+                if _normalise(raw) in marked or _normalise(raw) in _ROOM_SEAT_DOORS:
                     continue
                 offenders.append(f"{rel}: {raw}")
         assert not offenders, (
