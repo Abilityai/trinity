@@ -46,7 +46,9 @@ Two properties make `ops` a machine identity rather than a human's proxy:
 **It does not survive its owner's offboarding, and an earlier revision of this
 document said it did.** The opt-in ADMITS the scope; `role == "admin"` is still
 enforced afterwards, so demoting the owner 403s the key at every admin-gated ops
-read — and `get_current_user` rejects a principal whose owner carries
+read, and the resolver checks the owner's role ahead of the route fence (403
+`ops_owner_not_admin`, #3180), so the reads with no admin gate of their own
+refuse it too — and `get_current_user` rejects a principal whose owner carries
 `suspended_at` (#995), so suspension kills the key at the auth entry point
 before any of this runs. Dropping the role check for an opted-in scope was
 considered and refused: it would make this bounded tier *harder* to revoke than

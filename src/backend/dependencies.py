@@ -938,6 +938,7 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # resolves to the key OWNER, so any endpoint doing an inline access
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
+                _enforce_ops_key_owner(user)
                 _enforce_ops_key_fence(request)
             # #3180 — the bounded write tier: listed route, marked handler, and an
             # owner who is still an admin (it dies with its owner on every route).
@@ -1345,6 +1346,26 @@ def scope_may_open_event_stream(
         # value a genuine non-ephemeral row gives.
         return False
     return not info["is_ephemeral"]
+
+
+OPS_OWNER_DETAIL = {
+    "code": "ops_owner_not_admin",
+    "message": "Ops keys work only while the account that minted them is an admin",
+}
+
+
+def _enforce_ops_key_owner(owner: dict) -> None:
+    """An `ops` key dies with its owner's admin role on EVERY route (#3180).
+
+    The fence below reads the method and path only, so the routes it admits
+    with no admin gate of their own (version, monitoring, telemetry, the agent
+    roster, the execution reads, subscriptions) kept answering a demoted
+    owner's key, though the docs said demotion stops it. Same rule and the same
+    place as `_enforce_ops_write_key_fence`: the owner row is already loaded,
+    so the check costs no query and cannot fail open.
+    """
+    if (owner or {}).get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_OWNER_DETAIL))
 
 
 def _enforce_ops_key_fence(request: Request) -> None:

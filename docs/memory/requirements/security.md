@@ -414,7 +414,9 @@
     admitted and `role == "admin"` is still enforced afterwards. An earlier
     revision of this section claimed the tier "stops every ops integration dying
     when that admin is offboarded" — **it does not, and could not**: demoting the
-    owner 403s the key at every ops read, and `get_current_user` rejects a
+    owner 403s the key at every ops read (the resolver checks the owner's role
+    ahead of the route fence, 403 `ops_owner_not_admin`; until #3180 the reads
+    with no admin gate of their own still answered), and `get_current_user` rejects a
     principal whose owner carries `suspended_at` (#995) one layer above this gate,
     so suspension — the usual offboarding action — kills it before any of this
     runs. Dropping the role check for an opted-in scope was considered and

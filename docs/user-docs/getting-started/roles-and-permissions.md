@@ -50,6 +50,7 @@ Admins can change a user's role at any time via Settings. To give someone the op
 | Turn usage sharing on or off | Admin, **human only** |
 | Mint a **Portal delegate** MCP key | Admin, **human only** |
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
+| Mint an **Ops (operational writes)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
 | Create or list MCP keys | operator or above, **signed-in session only** — no key of any scope can create or list them |
 | Change your own sign-in email or personal GitHub token | `operator` and above, **signed-in session only**; a new sign-in email also needs the 6-digit code mailed to it. A Workspace-only `user` asks an admin |
 

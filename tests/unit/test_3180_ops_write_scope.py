@@ -54,7 +54,7 @@ _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import Depends, FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from db_harness import db_backend, run as _hrun  # noqa: E402,F401
@@ -559,6 +559,53 @@ class TestDiesWithItsOwner:
         from services.password_service import PERSON_KEY_SCOPES
         assert PERSON_KEY_SCOPES == set(McpKeyOperations._USER_CREATABLE_SCOPES)
         assert "ops_write" in PERSON_KEY_SCOPES
+
+
+class TestTheReadTierDiesWithItsOwnerToo:
+    """The read-only `ops` key (#2323) is documented to stop when its owner is
+    demoted, but only the reads behind an admin gate did: the ones held by the
+    route fence alone (version, monitoring, telemetry, the agent roster, the
+    execution reads, subscriptions) kept answering, because that fence reads
+    the method and path only. The resolver now checks the owner's role for
+    `ops` exactly as it does for `ops_write`, ahead of the fence.
+
+    Driven through the real resolver on a probe app that mounts one stub per
+    path the `ops` fence admits, each behind `get_current_user`, so every
+    admitted path is exercised without the handlers' own gates in the way."""
+
+    @pytest.fixture
+    def probe(self, world):
+        import dependencies as d
+        paths = [(m, pat.pattern.strip("^$").replace("[^/]+", "ow3180-x"))
+                 for m, pat in d._OPS_ALLOWED_ROUTES]
+        assert paths, "the ops fence admits no route, so this test would prove nothing"
+        app = FastAPI()
+
+        async def _ok(current_user: User = Depends(d.get_current_user)):
+            return {"user": current_user.username}
+
+        for method, path in paths:
+            app.add_api_route(path, _ok, methods=[method])
+        return SimpleNamespace(client=TestClient(app), paths=paths)
+
+    @pytest.mark.parametrize("role", ["creator", "operator"])
+    def test_a_demoted_owners_ops_key_is_refused_on_every_route_the_fence_admits(self, world, probe, role):
+        key = world.mint("ops")
+        for method, path in probe.paths:
+            assert probe.client.request(method, path, headers=key.headers).status_code == 200, path
+        db.update_user_role(OWNER, role)
+        for method, path in probe.paths:
+            res = probe.client.request(method, path, headers=key.headers)
+            assert res.status_code == 403 and _detail_code(res) == "ops_owner_not_admin", (path, res.text)
+
+    def test_demotion_suspends_the_ops_key_and_re_promotion_restores_it(self, world, probe):
+        key = world.mint("ops")
+        db.update_user_role(OWNER, "operator")
+        res = probe.client.get("/api/version", headers=key.headers)
+        assert res.status_code == 403 and _detail_code(res) == "ops_owner_not_admin", res.text
+        assert _key_row(key.id)["is_active"] == 1
+        db.update_user_role(OWNER, "admin")
+        assert probe.client.get("/api/version", headers=key.headers).status_code == 200
 
 
 # =========================================================================== #
