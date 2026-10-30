@@ -169,10 +169,22 @@ class TestSwitches:
         db.set_setting(ms.SETTING_ENABLED, "false")
 
     def test_status_is_honest_about_a_missing_platform_key(self, agent, memory_on, monkeypatch):
+        """Platform-only without a key captures nothing and says so; in `auto`
+        a running agent still extracts on its own runtime (ent#1027), so the
+        platform card names the extractor and the key instead of a blanket reason."""
+        from services import memory_model as mm
         monkeypatch.setattr(am, "has_platform_key", lambda: False)
-        s = ms.status()
-        assert s["enabled"] is True and s["available"] is True
-        assert "no platform Anthropic key" in (s["reason"] or "")
+        db.set_setting(mm.SETTING_EXTRACTOR, "platform")
+        try:
+            s = ms.status()
+            assert s["enabled"] is True and s["available"] is True
+            assert "no platform Anthropic key" in (s["reason"] or "")
+            assert s["extractor"] == "platform" and s["platform_key"] is False
+            db.set_setting(mm.SETTING_EXTRACTOR, "auto")
+            s = ms.status()
+            assert s["reason"] is None and s["extractor"] == "auto"
+        finally:
+            db.set_setting(mm.SETTING_EXTRACTOR, "")
 
 
 # --------------------------------------------------------------------------- #

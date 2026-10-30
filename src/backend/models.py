@@ -2209,6 +2209,30 @@ class MemoryFactOut(BaseModel):
     updated_at: str
 
 
+class MemoryExtractPreviewRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/extract-preview
+    (trinity-enterprise#1027): one exchange, run through the real transcript →
+    extract → screen path on whatever would answer for this agent, nothing
+    stored. The owner's prompt-tuning tool, and the eval's way to score the
+    prompt on the runtime it will actually use."""
+    message: str = Field(..., min_length=1, max_length=20000)
+    response: Optional[str] = Field(default=None, max_length=20000)
+    error: Optional[str] = Field(default=None, max_length=4000)
+    status: str = Field(default="success", max_length=32)
+    triggered_by: str = Field(default="schedule", max_length=32)
+    source_user_email: Optional[str] = Field(default=None, max_length=320)
+
+
+class MemoryExtractPreviewOut(BaseModel):
+    agent_name: str
+    subject: str                      # "agent" | "person"
+    extractor: str                    # "agent" | "platform"
+    runtime: Optional[str] = None
+    facts: list[str]
+    screened: list[str]
+    transcript_chars: int
+
+
 class MemoryFactEventOut(BaseModel):
     """One row of the retrieval-memory journal (trinity-enterprise#1022).
 

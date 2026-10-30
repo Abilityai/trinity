@@ -26,6 +26,7 @@ from .routers import (
     skills_router,
     snapshot_router,
     brain_orb_router,
+    runtime_router,
 )
 from .state import agent_state
 from .services.execution_env import arm_subscription_auth_guard
@@ -84,6 +85,7 @@ app.include_router(dashboard_router)  # Dashboard endpoint
 app.include_router(skills_router)  # Skills/playbooks listing endpoint
 app.include_router(snapshot_router)  # Snapshot/restore primitives (#384, S3)
 app.include_router(brain_orb_router)  # Brain Orb visualization data (#58)
+app.include_router(runtime_router)  # One-shot completion on the agent's own runtime (trinity-enterprise#1027)
 
 # #2114: when the boot baseline says subscription auth is active (truthy
 # CLAUDE_CODE_OAUTH_TOKEN on a Claude runtime), force-unset API-key-style auth

@@ -35,6 +35,11 @@ class RuntimeCapabilities:
         return asdict(self)
 
 
+class RuntimeUnsupported(Exception):
+    """This runtime has no clean one-shot, tool-less completion
+    (trinity-enterprise#1027); the route answers ``503 unsupported``."""
+
+
 class AgentRuntime(ABC):
     """
     Abstract base class for agent execution runtimes.
@@ -179,6 +184,24 @@ class AgentRuntime(ABC):
             Tuple of (response_text, execution_log, metadata, session_id)
         """
         pass
+
+    async def complete(
+        self,
+        prompt: str,
+        *,
+        model: Optional[str] = None,
+        timeout_seconds: int = 60,
+        execution_id: Optional[str] = None,
+    ) -> str:
+        """ONE prompt, one turn, no tools, no project context — the text back
+        (trinity-enterprise#1027: retrieval-memory extraction on the agent's own
+        subscription). Non-abstract by design: a runtime that cannot do this
+        cleanly inherits an honest ``RuntimeUnsupported`` rather than a silently
+        empty string. The Claude runtime overrides it."""
+        raise RuntimeUnsupported(
+            f"{type(self).__name__} has no tool-less one-shot completion; "
+            "memory extraction falls back to the platform key"
+        )
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:

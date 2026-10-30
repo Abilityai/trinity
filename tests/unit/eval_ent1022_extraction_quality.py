@@ -24,6 +24,15 @@ Env:
     MEMORY_EVAL_JUDGE_MODEL judge model id (default: claude-opus-5-5)
     MEMORY_EVAL_LIMIT       cap on cases per corpus (pilot runs)
     MEMORY_EVAL_REPS        reps per case (default 1)
+    MEMORY_EVAL_VIA_BACKEND=<url>  score the prompt on the runtime an agent will
+                            actually use (trinity-enterprise#1027): each case is
+                            POSTed to that Trinity's owner door
+                            ``/api/agents/<MEMORY_EVAL_AGENT>/retrieval-memory/extract-preview``
+                            with ``MEMORY_EVAL_BACKEND_TOKEN`` as the Bearer, and
+                            the extractor that answered (agent runtime / platform
+                            key) is recorded per case. Reconcile pairs still run
+                            locally on the eval key. Without it, extraction runs
+                            locally through the platform path on the eval key.
     MEMORY_EVAL_DRY_RUN=1   no API calls: a fake extractor echoes the gold and
                             a string-matching judge grades it — proves the
                             harness, the metrics and the report, costs nothing
@@ -300,6 +309,9 @@ async def _extract_case(case: Dict[str, Any], tag_holder: Dict[str, str], *, dry
             text = ms.normalize_fact(item)
             (facts if text else screened).append(text or item)
         return {"transcript": transcript, "facts": facts, "screened": screened, "raw": raw, "skipped": None}
+    via_backend = os.environ.get("MEMORY_EVAL_VIA_BACKEND")
+    if via_backend:
+        return await _extract_case_via_backend(case, execution, transcript, via_backend)
     captured: Dict[str, Any] = {}
     real_complete = am.complete
 
@@ -311,11 +323,41 @@ async def _extract_case(case: Dict[str, Any], tag_holder: Dict[str, str], *, dry
         return out
     am.complete = spy
     try:
-        facts, screened = await ms._extract(transcript, subject)
+        facts, screened = await ms._extract(EVAL_AGENT, transcript, subject)
     finally:
         am.complete = real_complete
     return {"transcript": transcript, "facts": facts, "screened": screened, "raw": captured.get("raw"),
             "prompt_chars": captured.get("prompt_chars"), "skipped": None}
+
+
+EVAL_AGENT = "memory-eval"   # the agent name the local platform path is planned for (never a container)
+
+
+async def _extract_case_via_backend(case: Dict[str, Any], execution: Any, transcript: str, base_url: str) -> Dict[str, Any]:
+    """The same case through a running Trinity's owner preview door, so the
+    facts come from the runtime that agent really extracts on."""
+    import httpx
+    agent = os.environ.get("MEMORY_EVAL_AGENT") or ""
+    token = os.environ.get("MEMORY_EVAL_BACKEND_TOKEN") or ""
+    if not agent or not token:
+        raise RuntimeError("MEMORY_EVAL_VIA_BACKEND needs MEMORY_EVAL_AGENT and MEMORY_EVAL_BACKEND_TOKEN")
+    body = {
+        "message": getattr(execution, "message", None) or "", "response": getattr(execution, "response", None),
+        "error": getattr(execution, "error", None), "status": str(getattr(execution, "status", "") or "success"),
+        "triggered_by": getattr(execution, "triggered_by", None) or "schedule",
+        "source_user_email": getattr(execution, "source_user_email", None),
+    }
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(f"{base_url.rstrip('/')}/api/agents/{agent}/retrieval-memory/extract-preview",
+                                     headers={"Authorization": f"Bearer {token}"}, json=body)
+    if response.status_code != 200:
+        return {"transcript": transcript, "facts": [], "screened": [], "raw": None,
+                "skipped": f"preview {response.status_code}: {response.text[:200]}"}
+    data = response.json()
+    LEDGER.calls.append({"tag": "extract", "requested": f"{data.get('extractor')}:{data.get('runtime') or 'platform'}",
+                         "model": f"{data.get('extractor')}:{data.get('runtime') or 'platform'}", "stop_reason": None, "usage": {}})
+    return {"transcript": transcript, "facts": data["facts"], "screened": data["screened"], "raw": json.dumps(data["facts"]),
+            "prompt_chars": None, "skipped": None, "extractor": data.get("extractor"), "runtime": data.get("runtime")}
 
 
 _JUDGE_PROMPT = """\
@@ -433,7 +475,7 @@ async def _reconcile_pair(pair: Dict[str, Any], *, dry: bool) -> Dict[str, Any]:
         fid = f"fact{pair['gold_target']}" if pair.get("gold_target") is not None else None
         got = {"op": op, "id": fid, "text": pair["candidate"] if op in ("ADD", "UPDATE") else None}
     else:
-        ops = await ms._reconcile([pair["candidate"]], [existing])
+        ops = await ms._reconcile(EVAL_AGENT, [pair["candidate"]], [existing])
         got = ops[0]
     target = int(got["id"][4:]) if got.get("id") and str(got["id"]).startswith("fact") else None
     op_ok = got["op"] == pair["gold_op"]
@@ -562,6 +604,10 @@ def test_extraction_quality(monkeypatch):
     if not dry:
         monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: key)
         monkeypatch.setattr(am.httpx, "AsyncClient", _recording_client(tag_holder))
+        # The local run scores the platform path on the eval key; a container is
+        # never planned for (MEMORY_EVAL_VIA_BACKEND is the agent-runtime path).
+        from services import memory_model as mm
+        monkeypatch.setattr(mm, "plan", lambda name: mm.Plan("platform", "platform", None, None))
 
     gold = _load_gold()
     cases = [dict(c, tags=["gold", *c["tags"]]) for c in gold["extraction"]]

@@ -41,7 +41,8 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from database import db
-from services import anthropic_messages, memory_embeddings, memory_ranking, memory_subject, user_memory_guard
+from services import anthropic_messages
+from services import memory_model, memory_embeddings, memory_ranking, memory_subject, user_memory_guard
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import iso_cutoff
 
@@ -224,8 +225,12 @@ def status() -> Dict[str, Any]:
         available, reason = False, error
     else:
         available, reason = loaded, None
-    if enabled and available and not anthropic_messages.has_platform_key():
-        # Recall still works (embeddings are local); capture cannot.
+    extractor = memory_model.mode()
+    platform_key = anthropic_messages.has_platform_key()
+    if enabled and available and extractor == "platform" and not platform_key:
+        # Recall still works (embeddings are local); capture cannot. In `auto`
+        # a running agent still captures on its own runtime (ent#1027), so the
+        # per-agent row says what each agent would do.
         reason = "no platform Anthropic key — facts are recalled but none are captured"
     try:
         stats = db.memory_fact_stats()
@@ -245,6 +250,8 @@ def status() -> Dict[str, Any]:
         "fact_count": stats["count"],
         "last_retained_at": stats["last_retained_at"],
         "daily_retain_limit": daily_retain_limit(),
+        "extractor": extractor,
+        "platform_key": platform_key,
     }
 
 
@@ -500,7 +507,7 @@ def build_transcript(execution: Any, subject: memory_subject.MemorySubject) -> O
     return "\n".join(lines)
 
 
-async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> Tuple[List[str], List[str]]:
+async def _extract(agent_name: str, transcript: str, subject: memory_subject.MemorySubject) -> Tuple[List[str], List[str]]:
     """``(facts, screened)``: the candidates that passed normalisation and the
     raw strings the screen dropped (clamped), so the journal can show what the
     extractor proposed that never became a fact."""
@@ -510,7 +517,7 @@ async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> Tu
         "the agent's own work, nobody in particular — record what was decided, what was attempted and how it ended"
     )
     prompt = _EXTRACT_PROMPT.format(scope_line=scope_line, transcript=transcript, max_facts=MAX_FACTS_PER_RETAIN)
-    raw = await anthropic_messages.complete(prompt, max_tokens=800, timeout=RETAIN_TIMEOUT_S, tag="memory.extract")
+    raw = await memory_model.complete(agent_name, prompt, max_tokens=800, timeout=RETAIN_TIMEOUT_S, tag="memory.extract")
     parsed = _parse_json_array(raw)
     if parsed is None:
         if raw is not None:
@@ -531,7 +538,7 @@ async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> Tu
     return facts, screened
 
 
-async def _reconcile(candidates: List[str], neighbours: List[List[Tuple[str, str]]]) -> List[Dict[str, Any]]:
+async def _reconcile(agent_name: str, candidates: List[str], neighbours: List[List[Tuple[str, str]]]) -> List[Dict[str, Any]]:
     """Ops for each candidate given its neighbours. Validated: an op's id must
     be one the model was handed for THAT candidate; anything else becomes NONE."""
     blocks = []
@@ -542,7 +549,7 @@ async def _reconcile(candidates: List[str], neighbours: List[List[Tuple[str, str
             blocks.append(f"- [{fact_id}]\n" + "\n".join(user_memory_guard.margin_lines(near_text)))
         blocks.append("")
     prompt = _RECONCILE_PROMPT.format(items="\n".join(blocks))
-    raw = await anthropic_messages.complete(prompt, max_tokens=1200, timeout=RETAIN_TIMEOUT_S, tag="memory.reconcile")
+    raw = await memory_model.complete(agent_name, prompt, max_tokens=1200, timeout=RETAIN_TIMEOUT_S, tag="memory.reconcile")
     parsed = _parse_json_array(raw)
     ops: List[Dict[str, Any]] = [{"op": "ADD", "id": None, "text": c} for c in candidates]
     if parsed is None:
@@ -655,8 +662,9 @@ def _prepare(execution_id: str) -> Optional[Dict[str, Any]]:
     transcript = build_transcript(execution, subject)
     if not transcript:
         return None
-    if not anthropic_messages.has_platform_key():
-        logger.info("[memory] no platform Anthropic key — %s not captured", execution_id)
+    who = memory_model.plan(agent_name)
+    if who.effective == "none":
+        logger.info("[memory] nobody to extract (%s) — %s not captured", who.reason, execution_id)
         return None
     limit = daily_retain_limit()
     if _budget_exceeded(agent_name, limit):
@@ -756,7 +764,7 @@ async def _retain_execution(execution_id: str) -> None:
             logger.info("[memory] scope busy for %ds — %s not captured", int(LEASE_RETRIES * LEASE_RETRY_S), execution_id)
             return
     try:
-        candidates, screened = await _extract(transcript, subject)
+        candidates, screened = await _extract(agent_name, transcript, subject)
         if not candidates:
             if screened:
                 await asyncio.to_thread(_journal_screened, agent_name, scope, execution_id, screened)
@@ -770,7 +778,7 @@ async def _retain_execution(execution_id: str) -> None:
             [(r.fact_id, r.text) for r in _rank(vec, ids, texts, matrix, k=5, min_score=NEIGHBOUR_MIN_SCORE)]
             for vec in vectors
         ]
-        ops = (await _reconcile(candidates, neighbours)) if any(neighbours) else [
+        ops = (await _reconcile(agent_name, candidates, neighbours)) if any(neighbours) else [
             {"op": "ADD", "id": None, "text": c} for c in candidates
         ]
         source = subject.triggered_by or "unknown"

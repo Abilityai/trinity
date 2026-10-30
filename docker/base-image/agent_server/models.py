@@ -1,7 +1,7 @@
 """
 Pydantic models for the agent server.
 """
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, Field, SecretStr
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
@@ -278,6 +278,18 @@ class TrinityStatusResponse(BaseModel):
 # ============================================================================
 # Parallel Task Execution Models (Headless Mode)
 # ============================================================================
+
+class RuntimeCompleteRequest(BaseModel):
+    """Body for ``POST /api/runtime/complete`` (trinity-enterprise#1027): one
+    prompt, one tool-less turn on the agent's own runtime. ``max_tokens`` is
+    advisory (Claude Code has no flag for it); ``timeout_seconds`` is clamped
+    by the route to 5..600; ``tag`` is for the log line only."""
+    prompt: str = Field(..., min_length=1, max_length=60000)
+    model: Optional[str] = None
+    max_tokens: int = 1024
+    timeout_seconds: int = 60
+    tag: str = "memory"
+
 
 class ParallelTaskRequest(BaseModel):
     """Request for parallel task execution (stateless, no conversation context)"""
