@@ -131,7 +131,8 @@ def test_no_status_field_is_committed(catalog):
 # ent#498 added J11 (a companion's brief reaches you where you work).
 # ent#600 added J14 (the agent knows the group's conversation when tagged).
 # ent#631 added J20 (a colleague is told about the work — the pointer half of ent#630).
-DECLARED_JOURNEY_COUNT = 23
+# ent#905 added J24 (agents' work survives cancel / restart / rebuild — matrix row B9).
+DECLARED_JOURNEY_COUNT = 24
 
 
 def test_every_journey_is_declared_densely_and_in_order(catalog):

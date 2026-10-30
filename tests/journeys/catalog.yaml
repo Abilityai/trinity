@@ -414,3 +414,24 @@ journeys:
     owner: trinity
     # Skeleton: NOT RUN — no platform writer joins a gate request to a project (ent#880).
     invariants: []
+
+  - id: J24
+    # trinity-enterprise#905 — ent#847 matrix row B9, the live recovery legs of
+    # the 1.0-round fixes t#3588/t#3589/t#3590. Uses the chain machinery (steps,
+    # per-leg report, NOT-RUN verdicts) rather than the per-PR journey lane: the
+    # legs restart the backend, run 30–45 min and need a real model credential,
+    # so the lane is `recovery-journey.yml` (workflow_dispatch + the
+    # JOURNEY_ANTHROPIC_API_KEY secret), driven by scripts/system/run_recovery.sh
+    # in two phases (the pilot allowlist is boot-time backend env, so the
+    # de-pilot leg needs the backend recreated between phases).
+    issue: "abilityai/trinity-enterprise#905"
+    promise: "My agents' work survives the platform failing under it — a cancel really ends it, a restart mid-turn neither loses the result nor mistimes it, and a rebuilt container keeps doing its job."
+    actor: operator
+    lanes: [local]
+    tier: live-stack
+    harness: tests/system_chains/test_j24_recovery_chain.py
+    built: false
+    owner: trinity
+    # E-01: terminal-state closure (the cancel and watchdog legs); AC-01: the
+    # collaboration record of a recovered agent-to-agent turn is closed.
+    invariants: [E-01, AC-01]

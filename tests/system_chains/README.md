@@ -18,9 +18,18 @@ record), never on an agent's own report that it is done.
 | J21 | An approval rule is enforced end to end | runs on any stack with Docker, email-code sign-in and the enterprise modules; **partial** — the canon steps wait for the canon approval map (ent#757), and expiry runs only with `CHAIN_GATE_EXPIRY=1` |
 | J22 | A project is run across agents and people | runs where J21 runs (no model turn needed); **partial** — task dispatch as playbook calls and the steward re-run have no platform writer yet |
 | J23 | An approved action inside a project | **not run** — no platform writer joins a gate request to a project (ent#880) |
+| J24 | Agents' work survives cancel / restart / rebuild (ent#905, matrix row B9) | runs only via its own runner (below); under `run_chains.sh` it reports **not run** (no pilot allowlist, no model credential on the chains lane) |
 
-They are journeys J15–J19 and J21–J23 in `tests/journeys/catalog.yaml`; the harnesses are in
+They are journeys J15–J19 and J21–J24 in `tests/journeys/catalog.yaml`; the harnesses are in
 `tests/system_chains/`.
+
+**J24 has its own runner and lane** — `scripts/system/run_recovery.sh` and the
+`recovery-journey` workflow (`secrets.JOURNEY_ANTHROPIC_API_KEY`). Its legs
+restart the backend container, force-remove agent containers and wait out the
+watchdog claim grace, so it runs ONLY against a same-host stack booted with
+`PULL_MODE_PILOT_AGENTS=pytest-ephemeral-journey-b9pull` — never against a
+shared instance. The runner drives two phases (the de-pilot leg needs the
+backend recreated with the allowlist empty) and writes one report per phase.
 
 ## Running them
 

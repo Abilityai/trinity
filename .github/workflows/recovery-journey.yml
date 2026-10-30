@@ -1,0 +1,120 @@
+# J24 — the B9 recovery chain (trinity-enterprise#905; ent#847 matrix row B9),
+# run against a freshly booted stack of the chosen ref. Manual dispatch, never
+# per-PR or nightly: every leg is a REAL model turn (the stack restarts its own
+# backend mid-turn), so the lane needs a live Anthropic credential and spends
+# real tokens per run — credentials are forbidden on `pull_request` (#1896) and
+# nightly deliberately runs keyless. The precedent is `system-chains.yml`.
+#
+# Required configuration:
+#   secrets.JOURNEY_ANTHROPIC_API_KEY  an Anthropic API key for the booted
+#     stack's agents. Named generically: any future keyed journey lane should
+#     reuse it rather than mint another. The job fails at its first step when
+#     it is missing, naming it — never a silent keyless run (the chain would
+#     only report NOT RUN, which is not evidence).
+#
+# "Green in CI" for this lane = a green dispatch run on the ref under test
+# (an RC tag before a release cut, or dev). Budget: boot ≈10 min + the six
+# legs ≈35–45 min (two legs each wait out the 180 s claim grace plus a cleanup
+# cycle of up to 300 s, by design — those constants ARE the product).
+name: recovery-journey
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Ref to boot and test (a release candidate tag, or dev)"
+        required: true
+        default: dev
+
+permissions:
+  contents: read
+
+concurrency:
+  group: recovery-journey-${{ inputs.ref }}
+  cancel-in-progress: false
+
+jobs:
+  recovery-journey:
+    name: recovery-journey
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Require the model credential
+        env:
+          JOURNEY_KEY: ${{ secrets.JOURNEY_ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$JOURNEY_KEY" ]; then
+            echo "::error title=JOURNEY_ANTHROPIC_API_KEY is not set::every J24 leg is a real model turn; without the secret the chain can only report NOT RUN, which is not evidence. A repo admin must create it (trinity-enterprise#905)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          submodules: false
+
+      - uses: actions/setup-python@v7
+        with:
+          # Must equal the image pin (#1891, test_1891_python_version_parity.py).
+          python-version: '3.13'
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Generate a throwaway admin password
+        run: |
+          set -euo pipefail
+          PASS="$(openssl rand -base64 24 | tr -d '/+=\n')Aa1!"
+          echo "::add-mask::$PASS"
+          echo "ADMIN_PASSWORD=$PASS" >> "$GITHUB_ENV"
+
+      - name: Boot the stack (pilot allowlist + model credential)
+        env:
+          JOURNEY_KEY: ${{ secrets.JOURNEY_ANTHROPIC_API_KEY }}
+        run: |
+          set -uo pipefail
+          cp .env.example .env
+          echo "ADMIN_PASSWORD=$ADMIN_PASSWORD" >> .env
+          echo "SECRET_KEY=$(openssl rand -hex 32)" >> .env
+          echo "TRINITY_DEFAULT_SYSTEM_MANIFEST=disabled" >> .env
+          echo "ANTHROPIC_API_KEY=$JOURNEY_KEY" >> .env
+          echo "PULL_MODE_PILOT_AGENTS=pytest-ephemeral-journey-b9pull" >> .env
+          ./scripts/deploy/start.sh || { echo "::error title=Stack failed to start::the chain never ran"; exit 1; }
+          for i in $(seq 1 120); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then exit 0; fi
+            sleep 2
+          done
+          echo "::error title=Backend never became healthy::/health did not answer within 240s"
+          exit 1
+
+      - name: Run the recovery chain (both phases)
+        env:
+          TRINITY_API_URL: http://localhost:8000
+          TRINITY_TEST_PASSWORD: ${{ env.ADMIN_PASSWORD }}
+        run: |
+          set -uo pipefail
+          rc=0
+          scripts/system/run_recovery.sh --report-dir "$RUNNER_TEMP/recovery-report" || rc=$?
+          for phase in phase1 phase2; do
+            if [ -f "$RUNNER_TEMP/recovery-report/$phase/chain-report.md" ]; then
+              cat "$RUNNER_TEMP/recovery-report/$phase/chain-report.md" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          exit "$rc"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: recovery-report
+          path: ${{ runner.temp }}/recovery-report
+          if-no-files-found: warn
+
+      - name: Stack logs on failure
+        if: failure()
+        run: docker compose logs --tail 300 backend || true
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans || true

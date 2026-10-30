@@ -34,10 +34,11 @@ coverage debt is queryable rather than rediscovered.
 | **J21** | A business action my agent asks another agent for runs only after the right person approves it, exactly once, and my agent is told how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j21_approval_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J22** | A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what. | user | local | live-stack | **no** | `tests/system_chains/test_j22_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J23** | My project's record shows an action approved inside it: who approved it and how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j23_approved_action_in_project_chain.py` | — | abilityai/trinity-enterprise#795 |
+| **J24** | My agents' work survives the platform failing under it — a cancel really ends it, a restart mid-turn neither loses the result nor mistimes it, and a rebuilt container keeps doing its job. | operator | local | live-stack | **no** | `tests/system_chains/test_j24_recovery_chain.py` | E-01, AC-01 | abilityai/trinity-enterprise#905 |
 
-**0 of 23 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**0 of 24 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
-_Harnesses not present in `tests/registry.json`: J20, J21, J22, J23._
+_Harnesses not present in `tests/registry.json`: J20, J21, J22, J23, J24._
 
 ## Variants
 

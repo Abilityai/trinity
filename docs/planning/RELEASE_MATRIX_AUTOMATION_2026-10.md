@@ -1,7 +1,7 @@
 # Release-test matrix → automation map (trinity-enterprise#905)
 
 Source: trinity-enterprise#847 (1.0 matrix, 31 rows, rc1→rc4) — its "Coverage by layer" table, per-row "Not covered" notes, and the rc3 recheck logs (B9: dolho 2026-10-13, pash PG recheck; B14: pash 2026-10-11).
-Status: DRAFT v0.1, 2026-10-29. Effort and target are proposals until reviewed. Work branch: `feature/ent905-release-matrix-automation`.
+Status: v0.2, 2026-10-30. Decisions D1/D2/D4 are taken (owner, 2026-10-30 — see the decision record); D3 and the "green in CI" reading await vybe on ent#905; D5 is new and open. Work branch: `feature/ent905-release-matrix-automation`.
 
 ## Lanes (where a suite runs)
 
@@ -27,7 +27,7 @@ Status: DRAFT v0.1, 2026-10-29. Effort and target are proposals until reviewed. 
 | ent#844 sweep cancels approvals by age | `tests/unit/test_ent844_expired_approval_outcome.py` + vitest `queueItemDetailExpired`, `operatorQueueOutcomeUnknown` | unit | public | none |
 | **t#3534 role card empty without `x-role`** | **NONE** | — | fix is in the private submodule (ent#818, bump PR t#3607) | write the regression in the private submodule's `tests/` — not in this repo |
 
-The three unit files for t#3588/3589/3590 satisfy AC line 1 on their own (a unit test is a named automated regression). Whether they are *enough* is a different question, answered by AC line 2 — see the decision record below.
+The three unit files for t#3588/3589/3590 satisfy AC line 1 on their own (a unit test is a named automated regression). Whether they are *enough* is a different question, answered by AC line 2 — see the decision record below. **AC line 1 is NOT yet satisfied as a whole:** the t#3534 row has neither a regression nor a "stays manual" reason until the private-submodule test is written — that row is the one outstanding item, not a footnote.
 
 ## Table A — release story
 
@@ -53,7 +53,7 @@ The three unit files for t#3588/3589/3590 satisfy AC line 1 on their own (a unit
 | B6 Git sync | fork-to-own with personal PAT, divergence >24 h, fetch-and-rebase refuses, sync health, bind button (t#3546) | `tests/git_sync/` nightly | extend `tests/git_sync/` with a token-bearing dispatch lane (pattern: `CHAIN_SKILLS_GITHUB_TOKEN`); divergence via `clockshift.py` | release-cut dispatch | M | t#2931 leg; a real external GitHub side |
 | B7 Projects | create, staff, task, verify, close as three identities; non-member cannot read | none on OSS CI | J22/J23 for the API path; private-submodule `tests/` for module internals | release-cut dispatch + private CI | M | three-identity UI (private-module UI not bootable on public e2e) |
 | B8 Metrics, widgets | push points, stop pushing, read stale (API); role card + widget with `dims:` (UI) | 16 unit; e2e `settings-retention-metric-rows`, `dashboard-*`; J12 | J12/J19 green; Playwright PHASE_28 `dims:` render | release-cut + nightly | S + M | — |
-| **B9 Pull dispatch, scheduler, loops** | legs 1–6 of the rc3 log: cancel push, cancel pull, watchdog claim across restart, restart mid sync turn → real duration, rm -f + /start rebuild keeps pull env, de-pilot drift recreate once; primary proofs: ids, cron, webhook idempotency, capacity, chain depth, loops, no replay, breakers | 40 unit; `tests/scheduler_tests/`; canary E-01/E-05; units t#3588/3589/3590 | **NEW recovery journey** (`tests/journeys/test_j24_*` or name TBD) — needs a real ≥60 s turn + `docker restart trinity-backend` + pull pilot with 3 workers ⇒ model credential ⇒ dispatch-only lane | release-cut dispatch | L | t#3306 cross-worker (needs >1 uvicorn worker); chain depth via schedule/session; t#3086 effect guard |
+| **B9 Pull dispatch, scheduler, loops** | legs 1–6 of the rc3 log: cancel push, cancel pull, watchdog claim across restart, restart mid sync turn → real duration, rm -f + /start rebuild keeps pull env, de-pilot drift recreate once; primary proofs: ids, cron, webhook idempotency, capacity, chain depth, loops, no replay, breakers | 40 unit; `tests/scheduler_tests/`; canary E-01/E-05; units t#3588/3589/3590 | **BUILT (all six legs): J24** `tests/system_chains/test_j24_recovery_chain.py`, two phases via `scripts/system/run_recovery.sh`, lane `.github/workflows/recovery-journey.yml` (needs `secrets.JOURNEY_ANTHROPIC_API_KEY` — D3); wiring pinned per-PR by `tests/unit/test_ent905_recovery_lane_parity.py` | release-cut dispatch | L (done) | t#3306 cross-worker (needs >1 uvicorn worker); chain depth via schedule/session; t#3086 effect guard |
 | B10 MCP server & A2A-in | caller turn carried; description cap 2,048; seat decisions own-agent only; agent key cannot reach sibling | 3 MCP test files; J10 agent-calls-agent; unit `test_ent629_agent_reach` | J10 green; `mcp-server-test.yml` unit for description cap | per-PR + release-cut | S | — |
 | B11 A2A & trusted networks | second instance over trusted network keyless; untrusted address refused; allow-list 403; exposure-off 404 | 10 unit | unit/integration for refusal matrix | per-PR | S | **multi-instance** (two Trinity hosts) — named manual; AAuth flag on; paid x402 |
 | B12 Auth, security, files | agent key: admin routes 403, credential files 403, leading slash denied; file browser UI | 11 unit; `tests/security/` nightly; `test_293_*` admin-gate guard | already covered server-side; Playwright PHASE_09 for browser | per-PR + nightly | S | — |
@@ -88,27 +88,29 @@ ent#905 acceptance has two independent lines. Line 1: every 1.0-round fix has a 
 - A pull pilot with 3 workers plus the de-pilot drift path.
 - Credentials are forbidden on `pull_request` (#1896) and on nightly (placeholder key). The only lane is `workflow_dispatch` with a repo secret — precedent `system-chains.yml` + `secrets.CHAIN_SKILLS_GITHUB_TOKEN`. So: a new workflow file, a new repo secret, and real tokens spent per run.
 
-**Open decisions** (owner: pavshulin; none taken yet).
+**Decision record** (owner: pavshulin).
 
-| # | Question | Options | Recommendation |
-|---|---|---|---|
-| D1 | Scope of the B9 journey | all six rc3 legs, or the three that carry the fixes (watchdog claim across restart; restart mid sync turn → real duration; rm -f + /start keeps pull env) | three first; cancel push / cancel pull / de-pilot recreate as a follow-up PR. Whether the issue author means all six is unconfirmed — ask on #905 |
-| D2 | Credential lane | dispatch-only with a repo secret now, or build a stub runtime (fake model, credential-free) first and unlock nightly | dispatch + secret now; stub runtime is its own M–L project that pays off across every keyed journey — file it separately |
-| D3 | Who provisions the secret | needs admin on the public repo to set the dispatch-lane model secret | ask early, in parallel with J02 work; it is the one blocker outside this branch |
-| D4 | Order of the two L items | B9 first or J02 (B14) first | J02 first — credential-free, no external blocker; B9 once the secret exists |
+| # | Question | Decision |
+|---|---|---|
+| D1 | Scope of the B9 journey | **DECIDED 2026-10-30: all six rc3 legs.** Building six removes the ambiguity instead of asking about it; the cost (≈2× the three-leg journey) was accepted. Shipped as J24. |
+| D2 | Credential lane | **DECIDED 2026-10-30: dispatch + repo secret** (`JOURNEY_ANTHROPIC_API_KEY`). The stub runtime (fake model, credential-free — would unlock nightly for every keyed journey) is its own M–L project; file it as a follow-up at close. |
+| D3 | Who provisions the secret | **OPEN — the one blocker outside this branch.** Needs a repo admin on `abilityai/trinity`; asked on ent#905. Until it exists, J24's CI green is a local-run evidence link. |
+| D4 | Order of the two L items | **DECIDED 2026-10-30: B9 first** (owner's call, reversing the v0.1 recommendation — the harness design was already in hand). J02 is next. |
+| D5 | **NEW:** where J02's OLD version comes from | checkout the previous tag and build from source (slow, hermetic), or pull the published GHCR image (fast, couples the test to the publish pipeline). Also: seed old-version data via the old API, or SQL against the old schema. Undecided — decide in the J02 PR, record here. |
 
-Note on "green in CI" for a dispatch lane: green when a person runs it on an RC tag, not per-PR. That matches the issue's "pre-release" wording.
+Note on "green in CI" for a dispatch lane: our reading is *green when a person runs it on an RC tag, not per-PR* — that matches the issue's "pre-release" wording, but it is the issue author's call, not this doc's: **asked on ent#905, unconfirmed.** It applies to J24 and to J02's dispatch leg alike; J02 additionally targets nightly if it fits the 45-minute budget, which makes its half of AC line 2 unambiguous whatever the answer.
 
-## Proposed order of implementation
+## Order of implementation (v0.2: 1 is done, 2–4 are this issue, 5+ are follow-ups)
 
-1. This doc + `docs/testing/STRATEGY.md` lanes table; the t#3534 regression in the private submodule.
-2. J02 upgrade harness + `upgrade-in-place.yml` — closes t#2341 scope as agreed there.
-3. B9 recovery journey + dispatch-only lane with a model secret — D1–D3 above first.
-4. B24 GET sweep (cheap, per-PR, retires a whole SMOKE row).
-5. API-level rows A3/B5, A7, B3, B21 in `tests/` root (nightly) — each a small PR.
-6. Playwright phases (B1, B2, B8, B16, B20) — one issue per row, after the above.
+1. ~~B9 recovery journey~~ — **done 2026-10-30, all six legs**: J24 (`tests/system_chains/test_j24_recovery_chain.py` + `scripts/system/run_recovery.sh` + `recovery-journey.yml` + the J24 catalog row, journey-tier stand-in and `test_ent905_recovery_lane_parity.py`). CI green blocked only on D3 (the secret).
+2. J02 upgrade harness + `upgrade-in-place.yml` — closes t#2341 scope as agreed there; nightly if ≤45 min, dispatch fallback (D5 first).
+3. The t#3534 regression in the private submodule (closes AC line 1) + `docs/testing/STRATEGY.md` lanes table.
+4. **AC line 3's artifact**: fill the retired-rows table below and publish it where the next RC's test plan lives — a pinned comment on the next RC's checklist issue (the ent#847 successor), linking back here. Without a named home that AC cannot be checked.
+5. Follow-up issues, filed at close so ent#905 can end: B24 GET sweep (cheap, per-PR, retires a whole SMOKE row); API-level rows A3/B5, A7, B3, B21 in `tests/` root (nightly), each a small PR; Playwright phases (B1, B2, B8, B16, B20), one issue per row; the D2 stub runtime.
 
 ## Rows retired for the next RC checklist (fill as suites go green)
+
+A row enters this table only with a green run link — code on a branch retires nothing.
 
 | Row | Retired by | Lane | Since |
 |---|---|---|---|
