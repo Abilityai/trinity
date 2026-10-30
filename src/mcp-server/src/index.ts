@@ -6,6 +6,7 @@
 
 import { createServer } from "./server.js";
 import { startExposedToolsReconciler } from "./tools/dynamic-agents.js";
+import { startWithSessionFront } from "./session-front.js";
 
 async function main() {
   console.log("Starting Trinity MCP Server...\n");
@@ -39,13 +40,22 @@ async function main() {
       // Bind to 0.0.0.0 to allow connections from outside the container
       const host = process.env.MCP_HOST || "0.0.0.0";
       console.log(`Starting HTTP stream server on ${host}:${port}...`);
-      server.start({
-        transportType: "httpStream",
-        httpStream: {
-          port,
-          host,
-        },
-      });
+      // #4060: keyed sessions survive a restart. Awaited so the listener
+      // capture window closes before anything else creates an HTTP server.
+      const front = await startWithSessionFront(
+        () =>
+          server.start({
+            transportType: "httpStream",
+            httpStream: {
+              port,
+              host,
+            },
+          }),
+        { secret: process.env.INTERNAL_API_SECRET || "", host, port }
+      );
+      // A reaped inner session is forgotten, so its key's next request revives it.
+      server.on("disconnect", (event: any) => front.innerClosed(event?.session?.sessionId));
+      console.log(`[#4060] MCP session revival: ${front.active ? "on" : "off"}`);
       console.log(`\nTrinity MCP Server running at http://localhost:${port}/mcp`);
       console.log(`Authentication: ${requireApiKey ? "API KEY REQUIRED" : "DISABLED (dev mode)"}`);
       console.log(`\nTo test with MCP Inspector:`);
