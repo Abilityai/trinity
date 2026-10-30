@@ -333,13 +333,19 @@ class CapacityManager:
         # autonomous triggers and every interactive trigger (#3114, #3127; a
         # pilot's /chat never calls acquire); it fails safe to push, so a
         # non-pilot's path is byte-for-byte unchanged.
-        from services.pull_pilot import pull_owns_dispatch
+        from services.pull_pilot import note_unreachable_pull_trigger, pull_owns_dispatch
 
         pull_exclusive = (
             overflow_policy == "queue_persistent"
             and overflow_payload is not None
             and pull_owns_dispatch(agent_name, overflow_payload.triggered_by)
         )
+        # #4105: `POST /task` pre-acquires here and hands `execute_task` a held
+        # slot, so this is the only place its pushed row on a pilot is visible.
+        # Logs once per (agent, trigger) for a trigger in no pull set; a no-op
+        # for every non-pilot.
+        if overflow_payload is not None and not pull_exclusive:
+            note_unreachable_pull_trigger(agent_name, overflow_payload.triggered_by)
 
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow
