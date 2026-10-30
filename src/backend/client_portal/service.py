@@ -2233,7 +2233,6 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
     first attempt is spawned before the turn runs — so it picks the
     opener-only prompt rather than formatting an empty block into the two-block
     one."""
-    import httpx
 
     from services import model_gateway
 

@@ -63,7 +63,7 @@
           <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Extraction runs on</p>
           <p class="mt-0.5 text-[12.5px] text-gray-500 dark:text-gray-400">
             Facts are extracted by a small model call after each run — the same door the conversation summaries and thread titles use. On the agent's subscription it
-            uses the agent's subscription or key inside its container; the platform key uses the
+            uses the agent's own subscription token, directly from the platform; the platform key uses the
             instance's Anthropic key.<template v-if="view.state !== 'loading' && !status.enabled"> Saved now, applies once the switch above is on.</template>
           </p>
           <p class="mt-1 min-h-[18px] text-[12.5px]" :class="extractorStatus.warn ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-gray-500 dark:text-gray-400'" data-testid="retrieval-memory-extractor-status">{{ extractorStatus.text }}</p>

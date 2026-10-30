@@ -90,7 +90,7 @@ describe('RetrievalMemoryPanel (Settings → General)', () => {
     expect(w.get('[data-testid="retrieval-memory-extractor-status"]').text()).toMatch(/No platform key — nothing is captured/)
   })
 
-  it('agent-only says only running agents capture', async () => {
+  it('subscription mode says only agents on a subscription are covered', async () => {
     api.get.mockResolvedValue({ data: platformStatus({ enabled: true, available: true, credential_mode: 'subscription' }) })
     const w = mount(RetrievalMemoryPanel)
     await flushPromises()

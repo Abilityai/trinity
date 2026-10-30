@@ -328,6 +328,59 @@ class TestCallers:
 # 4. Honest status and the owner's preview
 # --------------------------------------------------------------------------- #
 
+class TestHardening:
+    """The /review pass on PR #4115: a Credential never prints its token, the
+    knob refuses a fourth word with a named 422, and the compatibility skip
+    reason does not send an admin to add a key that would not be used."""
+
+    def test_the_repr_never_carries_the_secret(self):
+        cred = gw.Credential(kind=gw.KIND_SUBSCRIPTION, mode="auto", model=gw.MODEL_ON_SUBSCRIPTION,
+                             secret="sk-ant-oat01-test-token", subscription_id=7, reason="")
+        assert "sk-ant-oat01-test-token" not in repr(cred)
+        assert "sk-ant-oat01-test-token" not in str(cred)
+        assert "secret" not in cred.as_dict()
+
+    def test_the_knob_refuses_a_fourth_word(self, monkeypatch):
+        import asyncio, types
+        from routers.settings import generic as m
+        written = {}
+
+        async def _noop_audit(**_kwargs):
+            return None
+        monkeypatch.setattr(m, "assert_admin", lambda *_a, **_k: None)
+        monkeypatch.setattr(m.db, "set_setting", lambda k, v: written.setdefault(k, v) or {"key": k, "value": v, "description": None, "updated_at": None})
+        monkeypatch.setattr(m.platform_audit_service, "log", _noop_audit)
+        request = types.SimpleNamespace(client=types.SimpleNamespace(host="127.0.0.1"),
+                                        scope={"path": "/api/settings/" + gw.SETTING_CREDENTIAL},
+                                        state=types.SimpleNamespace())
+        user = types.SimpleNamespace(id=1, username="admin", role="admin", mcp_scope=None, agent_name=None)
+
+        def put(value):
+            try:
+                asyncio.run(m.update_setting(gw.SETTING_CREDENTIAL, types.SimpleNamespace(value=value, description=None), request, user))
+            except Exception as e:  # HTTPException from the real FastAPI
+                return getattr(e, "status_code", None) or (_ for _ in ()).throw(e)
+            return 200
+
+        assert put("container") == 422
+        assert written == {}
+        assert put("subscription") == 200
+        assert written == {gw.SETTING_CREDENTIAL: "subscription"}
+
+    def test_compatibility_names_the_real_reason(self, transport, key, agent, monkeypatch):
+        from services.compatibility import ai_checks, spec
+        ids = list(spec.AI_IDS)[:2]
+        # A subscription-mode agent whose token cannot be read, with a platform
+        # key present: not `no_api_key` — adding a key would not be used.
+        subscribed(monkeypatch, agent, token=None)
+        out = run(ai_checks.run_ai({"files": {}}, ids, agent_name=agent.name))
+        assert all(out[cid]["skip_reason"] == "no_credential" for cid in ids)
+        assert all(out[cid]["explanation"] for cid in ids)
+        key["key"] = ""
+        out = run(ai_checks.run_ai({"files": {}}, ids))
+        assert all(out[cid]["skip_reason"] == "no_api_key" for cid in ids)
+
+
 class TestStatusAndPreview:
     def test_platform_status_names_the_mode_and_the_key(self, memory_on, transport, key):
         key["key"] = ""

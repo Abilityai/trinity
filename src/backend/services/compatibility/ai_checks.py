@@ -24,7 +24,6 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-import httpx
 
 from services import model_gateway
 from . import spec
@@ -192,9 +191,15 @@ async def run_ai(snapshot: Dict[str, Any], ai_check_ids: List[str],
 
     credential = model_gateway.resolve(agent_name)
     if not credential.usable:
+        # `no_api_key` keeps its meaning (the install has no platform key);
+        # anything else — a subscription token the platform cannot read, a
+        # credential mode that excludes this agent — is `no_credential`, with
+        # the gateway's reason, so the panel does not send an admin to add a
+        # key that would not be used.
+        reason = "no_api_key" if not model_gateway.has_platform_key() else "no_credential"
         for cid in requested:
-            out[cid] = {"status": "skipped", "skip_reason": "no_api_key",
-                        "explanation": None, "confidence": None}
+            out[cid] = {"status": "skipped", "skip_reason": reason,
+                        "explanation": credential.reason, "confidence": None}
         return out
 
     # Group requested checks by category.

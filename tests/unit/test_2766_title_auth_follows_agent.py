@@ -23,6 +23,9 @@ TOKEN = "oat-agent-subscription-token"
 
 def _auth(agent="mira", *, sub_id=None, token=None, api_key=None, raises=False):
     class _DB:
+        def is_subscription_rate_limited(self, sid):
+            return False
+
         def get_agent_subscription_id(self, name):
             if raises:
                 raise RuntimeError("db down")

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -63,7 +63,7 @@ class Credential:
     kind: str                            # subscription | api_key | none
     mode: str                            # the knob that produced it
     model: Optional[str] = None
-    secret: Optional[str] = None         # never logged, never in as_dict()
+    secret: Optional[str] = field(default=None, repr=False)   # never logged, never in as_dict(), never in repr
     subscription_id: Optional[str] = None
     reason: Optional[str] = None         # why nobody, when kind == none
 
@@ -148,7 +148,7 @@ def resolve(agent_name: Optional[str] = None) -> Credential:
             db = _db()
             sub_id = db.get_agent_subscription_id(agent_name)
             if sub_id:
-                limited = bool(getattr(db, "is_subscription_rate_limited", lambda _s: False)(sub_id))
+                limited = bool(db.is_subscription_rate_limited(sub_id))
                 if limited:
                     sub_reason = "the agent's subscription is rate-limited right now"
                 else:
@@ -276,5 +276,4 @@ async def complete(purpose: str, prompt: str, *, agent_name: Optional[str] = Non
                                     timeout=timeout, model=model))
 
 
-__all__ = ["Credential", "complete", "first_text", "has_platform_key", "mode", "plan", "request", "resolve", "send",
-           "replace"]
+__all__ = ["Credential", "complete", "first_text", "has_platform_key", "mode", "plan", "request", "resolve", "send"]
