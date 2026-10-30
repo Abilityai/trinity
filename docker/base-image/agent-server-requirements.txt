@@ -10,9 +10,9 @@
 #
 # Floors must stay at or below the exact pins in agent-image-requirements.txt,
 # so a fresh container's repair is a no-op (tested).
-fastapi>=0.141.1
+fastapi>=0.162.0
 uvicorn>=0.54.0
 httpx>=0.28.1
-pydantic>=2.13.5
+pydantic>=2.14.1
 python-multipart>=0.0.32
 pyyaml>=6.0.3
