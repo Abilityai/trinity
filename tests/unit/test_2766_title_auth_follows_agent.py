@@ -34,7 +34,10 @@ def _auth(agent="mira", *, sub_id=None, token=None, api_key=None, raises=False):
     with patch.object(svc, "logger"), \
          patch("database.db", _DB(), create=True), \
          patch("services.settings_service.get_anthropic_api_key", return_value=api_key):
-        return svc._resolve_title_auth(agent)
+        # trinity-enterprise#1027: the resolver answers the platform's one model
+        # credential; the headers are what the request carries.
+        credential = svc._resolve_title_auth(agent)
+        return credential.headers() if credential else None
 
 
 # --- the regression ---------------------------------------------------------
@@ -81,8 +84,11 @@ def test_a_db_failure_keeps_the_derived_title_rather_than_raising():
 def test_the_mode_comes_from_the_platforms_one_derivation():
     """Not a second answer to 'what is this agent authenticated as' (#471)."""
     import inspect
-    src = inspect.getsource(svc._resolve_title_auth)
-    assert "derive_auth_mode" in src
+    from services import model_gateway
+    # The resolver is the gateway's (trinity-enterprise#1027), and the gateway
+    # names the mode through the one derivation rather than a second table.
+    assert "model_gateway.resolve" in inspect.getsource(svc._resolve_title_auth)
+    assert "derive_auth_mode" in inspect.getsource(model_gateway.resolve)
 
 
 # --- the health-record detail (#2766 second half) ---------------------------

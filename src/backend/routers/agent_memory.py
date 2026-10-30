@@ -42,7 +42,7 @@ from models import (
     MemoryFactOut,
     MemoryOptOutUpdate,
 )
-from services import memory_model, memory_service, memory_subject
+from services import memory_service, memory_subject, model_gateway
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 logger = logging.getLogger(__name__)
@@ -64,7 +64,7 @@ def _agent_status(agent_name: str) -> dict:
         "embedding_model": platform["embedding_model"],
         "fact_count": stats["count"],
         "last_retained_at": stats["last_retained_at"],
-        "extractor": memory_model.plan(agent_name).as_dict(),
+        "extractor": model_gateway.plan(agent_name),
     }
 
 
@@ -208,15 +208,15 @@ async def extract_preview_endpoint(
     transcript = memory_service.build_transcript(row, subject)
     if not transcript:
         raise HTTPException(status_code=422, detail={"code": "transcript_empty", "message": "Nothing to extract from: message, response and error are all blank."})
-    who = memory_model.plan(agent_name)
-    if who.effective == "none":
+    who = model_gateway.plan(agent_name)
+    if who["effective"] == "none":
         raise HTTPException(status_code=422, detail={
-            "code": "no_extractor", "reason": who.reason,
-            "message": f"Nothing would extract for this agent right now: {who.reason}.",
+            "code": "no_extractor", "reason": who["reason"],
+            "message": f"Nothing would extract for this agent right now: {who['reason']}.",
         })
     facts, screened = await memory_service._extract(agent_name, transcript, subject)
     return MemoryExtractPreviewOut(
         agent_name=agent_name, subject="person" if subject.is_person else "agent",
-        extractor=who.effective, runtime=who.runtime, facts=facts, screened=screened,
-        transcript_chars=len(transcript),
+        extractor=who["effective"], model=who["model"], subscription=who["subscription"],
+        facts=facts, screened=screened, transcript_chars=len(transcript),
     )

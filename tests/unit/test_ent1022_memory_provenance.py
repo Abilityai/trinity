@@ -14,8 +14,9 @@ scripted Haiku:
 3. Ranking is `cosine × recency` with a floor — relevance gates, recency only
    re-orders — through the leaf `services/memory_ranking`, with the operator
    knob `trinity_memory_recency_half_life_days` (0 = off).
-4. `anthropic_messages` pins the current Haiku, turns thinking off at low
-   effort, and reads the first TEXT block rather than `content[0]`.
+4. The model door (`model_gateway`, ent#1027) pins the current Haiku on the
+   platform key, turns thinking off at low effort, and reads the first TEXT
+   block rather than `content[0]`.
 
 Plus the dated dataset (`fixtures/ent1022_recency_dataset.json`) against the
 real model wherever it is cached — the same evaluation the backend image runs
@@ -38,7 +39,7 @@ from database import db
 from db.write_params import ExecutionResult, TaskExecutionFields
 from db_models import UserCreate
 from models import User
-from services import anthropic_messages as am
+from services import model_gateway as am   # the one model door (ent#1027)
 from services import memory_embeddings as me
 from services import memory_ranking as mr
 from services import memory_service as ms
@@ -71,11 +72,11 @@ class ScriptedHaiku:
         self.reconcile = reconcile
         self.prompts: list[tuple[str, str]] = []
 
-    async def complete(self, prompt, *, max_tokens=512, model=None, timeout=30.0, tag="x"):
-        self.prompts.append((tag, prompt))
-        if tag == "memory.extract":
+    async def complete(self, purpose, prompt, *, agent_name=None, max_tokens=512, timeout=30.0, model=None):
+        self.prompts.append((purpose, prompt))
+        if purpose == "memory.extract":
             return json.dumps(self.extract) if not callable(self.extract) else self.extract(prompt)
-        if tag == "memory.reconcile":
+        if purpose == "memory.reconcile":
             return json.dumps(self.reconcile) if self.reconcile is not None else None
         return None
 
@@ -89,7 +90,7 @@ def memory_on(monkeypatch):
     monkeypatch.setattr(me, "availability", lambda: (True, None))
     monkeypatch.setattr(me, "is_loaded", lambda: True)
     monkeypatch.setattr(ms, "_redis", lambda: None)
-    monkeypatch.setattr(am, "has_platform_key", lambda: True)
+    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-test-key")
     ms._scope_cache.clear()
     yield
     db.set_setting(ms.SETTING_ENABLED, "false")
@@ -423,12 +424,13 @@ class TestJournal:
 # 4. The model pin
 # --------------------------------------------------------------------------- #
 
-class TestAnthropicMessages:
+class TestModelDoor:
     def test_current_haiku_thinking_off_low_effort_and_first_text_block(self, monkeypatch):
-        """The request names the current Haiku, turns thinking off at low effort
-        (one-shot JSON — `max_tokens` must be the text budget), and the answer
-        is the first TEXT block even when a thinking block comes first."""
-        assert am.HAIKU_MODEL == "claude-haiku-5-5"
+        """On the platform key the request names the current Haiku, turns
+        thinking off at low effort (one-shot JSON — `max_tokens` must be the
+        text budget), and the answer is the first TEXT block even when a
+        thinking block comes first."""
+        assert am.MODEL_ON_API_KEY == "claude-haiku-5-5"
         sent = {}
 
         class FakeResponse:
@@ -454,7 +456,7 @@ class TestAnthropicMessages:
                 return FakeResponse()
         monkeypatch.setattr(am.httpx, "AsyncClient", FakeClient)
         monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-test-key")
-        out = run(am.complete("extract", max_tokens=800, tag="memory.extract"))
+        out = run(am.complete("memory.extract", "extract", max_tokens=800))
         assert out == '["a fact"]'
         assert sent["model"] == "claude-haiku-5-5" and sent["max_tokens"] == 800
         assert sent["thinking"] == {"type": "disabled"} and sent["output_config"] == {"effort": "low"}
@@ -482,7 +484,7 @@ class TestAnthropicMessages:
                 return FakeResponse()
         monkeypatch.setattr(am.httpx, "AsyncClient", FakeClient)
         monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-test-key")
-        assert run(am.complete("x")) == ""
+        assert run(am.complete("x", "x")) == ""
 
 
 # --------------------------------------------------------------------------- #

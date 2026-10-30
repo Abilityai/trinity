@@ -82,17 +82,3 @@ A Trinity **harness IS an `AgentRuntime`** — the pluggable execution engine in
 
 **Execution-ledger boundary (trinity-enterprise#643):** the always-tier `### Stay inside Trinity's execution ledger` section, placed directly before `### Nothing survives the end of your turn`, tells every agent not to run `claude`, `codex`, `gemini` or any other coding-agent CLI as a subprocess, directly or through scripts or wrappers, because a nested run escapes the execution ledger (cost attribution, autonomy gates, permission enforcement, audit). "Turn-scoped by design" is worded as **authorization, not storage**: credentials can be readable in the container (`ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` / `GEMINI_API_KEY` in the container env, a persisted Codex `auth.json`; GUARD-004 is not started), so the section never claims a nested CLI cannot authenticate. Its in-turn alternative is runtime-conditional through the `__CLI_IN_TURN_ALTERNATIVE__` marker and `_adapt_instructions_for_runtime`: Claude Code is offered its `Agent` subagent tool (also named `Task`) "where you have it", since a per-agent deny list or a task's `allowed_tools` can remove it; every other runtime is offered its own tools. Delegation goes through `chat_with_agent` with `parallel=true` for self-targeting or a `model` override (sequential mode queues on the target's own chat session, and `model` applies only in parallel mode) or `fan_out`; the ent#568 delegation contract is referenced, not restated. It is advisory: no deny pattern, denied tool or admission check. It is hard-coded until the ent#140 prompt-injection registry exists. A pull-claimed turn whose composition raises still runs with the caller prompt alone (`_compose_pull_system_prompt`'s pre-existing fallback, unchanged), so it does not carry this section. `tests/unit/test_ent643_platform_cli_boundary.py` pins every tier × runtime render, the 1,000-character budget, the false-claim list, each named tool and argument against `chat.ts`, the launcher names against `_AGENT_TOOLS` / `PLATFORM_KEPT_TOOLS` / `PLATFORM_DENIED_TOOLS`, and the runtime set against `CLAUDE_RUNTIME_NAMES`, all read by AST; and it drives the chat, push-task and pull-claim prompt helpers with the real composer.
 
-
-**One-shot completion door (trinity-enterprise#1027).** `POST /api/runtime/complete`
-(`agent_server/routers/runtime.py`) runs ONE prompt through the container's own
-runtime, non-interactively — `AgentRuntime.complete` on the adapter, with a
-minimal system prompt, no MCP servers, every tool denied, `--max-turns 1`, an
-empty working directory so no project `CLAUDE.md`, hook or `.mcp.json` is picked
-up, the subprocess in the process registry (the orphan sweep recognises it) and
-a bounded concurrency of two — and returns `{text, runtime, model, duration_ms}`. Claude Code implements it; Gemini CLI and Codex raise `RuntimeUnsupported` (→ 503 `unsupported`) until each has a verified tool-less one-shot.
-The credential is the container's own (`build_execution_env` over `.env`: the
-subscription token or the agent's key), which is the point: the backend's
-retrieval memory (`services/memory_model.py`) extracts facts here so the
-agent's quota pays for remembering its own work and the platform never needs
-an API key for it. Refusals are named: 503 `runtime_unavailable` / `unsupported`,
-429 `rate_limited`, 502 `auth_failure` / `runtime_error`, 504 `timeout`.

@@ -594,7 +594,8 @@ def _run_summarizer(monkeypatch, *, summary_out, messages, existing="- likes tea
             captured["prompt"] = json["messages"][0]["content"]
             return _Resp()
 
-    monkeypatch.setattr(pps.httpx, "AsyncClient", _Client)
+    from services import model_gateway as gw   # the summarizer's call goes through the one model door (ent#1027)
+    monkeypatch.setattr(gw.httpx, "AsyncClient", _Client)
     asyncio.run(pps.summarize_user_memory_background("analyst", "p@example.com", "s1"))
     return updates, captured
 

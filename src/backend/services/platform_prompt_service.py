@@ -712,7 +712,6 @@ def _seat_decisions_block(memory_record: dict) -> Optional[str]:
 # Background user-memory summarization (#895)
 # ---------------------------------------------------------------------------
 
-_SUMMARIZATION_MODEL = "claude-haiku-4-5-20251001"
 
 _SUMMARIZATION_PROMPT = """\
 You are a memory system. Given this conversation, extract a concise bullet list of facts \
@@ -752,13 +751,12 @@ async def summarize_user_memory_background(
     # Local imports to avoid an import cycle at module load:
     # platform_prompt_service is imported by routers that the settings
     # service may transitively pull in.
-    from services import anthropic_messages
+    from services import model_gateway
 
     try:
-        if not anthropic_messages.has_platform_key():
-            logger.warning(
-                "[MemSummarize] No ANTHROPIC_API_KEY configured, skipping summarization"
-            )
+        credential = model_gateway.resolve(agent_name)
+        if not credential.usable:
+            logger.warning("[MemSummarize] nobody to summarize for %s (%s), skipping", agent_name, credential.reason)
             return
 
         memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
@@ -800,10 +798,10 @@ async def summarize_user_memory_background(
             conversation=conversation_text,
         )
 
-        # trinity-enterprise#1022: the one Anthropic call, shared with the
-        # retrieval memory's extractor (`services/anthropic_messages.py`).
-        new_summary = await anthropic_messages.complete(
-            prompt, max_tokens=512, model=_SUMMARIZATION_MODEL, tag="MemSummarize"
+        # The platform's one model door (trinity-enterprise#1027): the agent's
+        # own subscription when it runs on one, the platform key otherwise.
+        new_summary = await model_gateway.complete(
+            "user_memory_summary", prompt, agent_name=agent_name, max_tokens=512, timeout=30.0,
         )
         if new_summary is None:
             return

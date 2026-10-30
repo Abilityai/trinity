@@ -61,12 +61,13 @@ never raising).
 2. Builds the transcript: the request's tail (last 4,000 chars) and the outcome,
    **credential-redacted** (`utils/credential_sanitizer.sanitize_text`) and
    margined (`│ `) like the summarizer's input.
-3. Brakes: someone must be able to extract (`memory_model.plan`, below); per-agent daily budget
+3. Brakes: a credential to extract with (`model_gateway.resolve`, below); per-agent daily budget
    (`trinity_memory_daily_retain_limit`, default 200 executions/24 h); per-scope
    Redis lease (`SET NX EX 60`, 3 × 2 s retries, then skip this turn);
    `asyncio.Semaphore(4)` per process; 20 s call timeout.
-4. **Extract** — one small model call through `services/memory_model.complete`
-   (who answers is below) → ≤ 10 one-line facts, each `sanitize_text`'d,
+4. **Extract** — one small model call through the platform's one model door,
+   `services/model_gateway.complete` (which credential and model is below) →
+   ≤ 10 one-line facts, each `sanitize_text`'d,
    clamped to 500 chars and screened by `user_memory_guard.prepare_summary`
    (a fact that trips a rule is dropped, the rule logged, and the candidate
    journaled as `screened`).
@@ -92,44 +93,36 @@ never raising).
    a fact", `op = none` beside its `neighbour_ids` is "what reconcile judged a
    duplicate".
 
-### Who extracts — `services/memory_model.py` (trinity-enterprise#1027)
-One decision, read by the capture seam, both status cards and the owner's
-preview. `plan(agent_name)` → `agent` (the agent's own runtime, headless inside
-its container — its subscription or its own key pays, the transcript never
-leaves the platform network), `platform` (the instance's Anthropic key through
-`anthropic_messages.complete`: `claude-haiku-5-5`, thinking off, low effort, the
-first TEXT block read — the same call the summarizer makes), or `none` with the
-reason. The knob is `trinity_memory_extractor` (Settings → General):
-`auto` (default — the agent when its container is running and its subscription
-is not rate-limited, the platform key otherwise, and the only mode that falls
-back mid-call), `agent` (the agent or nobody), `platform` (the key or nobody).
-The agent path is the agent-server door `POST /api/runtime/complete` over the
-internal-auth client: one prompt, the runtime's non-interactive mode, a
-minimal system prompt, no MCP servers, every tool denied, an empty working
-directory (no project `CLAUDE.md`, hooks or `.mcp.json`), the process in the
-registry so the orphan sweep never kills it, `{text, runtime, model,
-duration_ms}` back — behind `AgentRuntime.complete`, so the backend stays
-runtime-agnostic. Claude Code implements it (prompt on stdin, `--max-turns 1`,
-`--system-prompt`, `--strict-mcp-config`, every built-in tool in
-`--disallowedTools`, `--no-session-persistence`); Gemini CLI and Codex answer
-`503 unsupported` for now (neither has a clean tool-less one-shot without
-running the real binary), so in `auto` those agents extract on the platform key
-and in `agent` mode on nobody, which the status says. A stopped container is a
-skip (journal-less, logged), never a retry queue.
-
-Not the backend calling the Messages API with the stored subscription token:
-measured 2026-10-30, the gateway serves a completion on a setup token only when
-the request opens its system prompt with the Claude Code identity line (429
-`Error` without it, with the quota headers showing 3% used), i.e. impersonating
-the client the token was issued for. The headroom probe stays the only backend
-code that touches a setup token — and `check_token` reading that 429 as
-`rate_limited` for a healthy token is a known side effect.
+### Which credential — `services/model_gateway.py` (trinity-enterprise#1027)
+The backend's one model door, shared with the MEM-001 summarizer, Workspace
+thread titles and the compatibility AI checks (each had its own `httpx` call,
+credential lookup and request shape before). **The credential follows the
+agent** (#2766, #471's one derivation): a job attributed to an agent on a Claude
+subscription runs on that agent's own setup token — same credential, same bill
+as its chat — through the Messages API's OAuth beta; an agent on API-key auth,
+or a job with no agent behind it, runs on the instance's platform key; a
+subscription-mode agent whose token cannot be read answers nobody rather than
+borrowing an instance key it was never assigned. **The model follows the
+credential**: measured 2026-10-30 on a real setup token, plain Bearer with the
+OAuth beta, `claude-haiku-4-5` answers 200 while Haiku 5.5, Sonnet 4.6 / 5.5
+and Opus 4.6 / 5.5 answer 429 `Error` unless the request claims to be Claude
+Code — so a subscription always runs `MODEL_ON_SUBSCRIPTION` (Haiku 4.5) and
+never impersonates the client the token was issued for, and the platform key
+runs `MODEL_ON_API_KEY` (`claude-haiku-5-5`, thinking off, low effort, the first
+TEXT block read). The knob is `trinity_model_credential` (Settings → General):
+`auto` (default — the rule above; a subscription that is rate-limited, or
+answers 429 mid-call, steps aside to the platform key when there is one),
+`subscription` (the agent's subscription or nobody), `platform_key` (the key or
+nobody). Every answered call logs one bounded usage line (purpose, credential
+kind, model, tokens, latency); nothing in the agent container is involved.
 
 `POST …/retrieval-memory/extract-preview` (owner, person-only) runs one exchange
-through the real path on whatever would answer for that agent and returns the
-facts, the screened candidates and who answered, storing nothing — the owner's
-prompt-tuning tool and the eval's way (`MEMORY_EVAL_VIA_BACKEND`) to score the
-prompt on the runtime it will actually use.
+through the real path on whatever credential would answer for that agent and
+returns the facts, the screened candidates and who answered (`extractor`,
+`model`, `subscription`), storing nothing — the owner's prompt-tuning tool and
+the eval's way (`MEMORY_EVAL_VIA_BACKEND`) to score the prompt on a live agent;
+`MEMORY_EVAL_CREDENTIAL=subscription` scores it locally on the subscription
+shape and model.
 
 ## Recall
 `memory_service.recall(agent_name, user_email, query, execution_id=…)` is
@@ -204,8 +197,8 @@ Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
 | GET | `/api/agents/{name}/retrieval-memory/facts?user_email=&limit=&offset=` | OwnedAgentByName + `require_person` | the owner view (ent#962 readers rule) |
 | DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
 | GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget (422 otherwise) |
-| POST | `/api/agents/{name}/retrieval-memory/extract-preview` | OwnedAgentByName + `require_person` | one exchange through the real extraction on whatever would answer for this agent, nothing stored (ent#1027); 422 `memory_no_subject` / `transcript_empty` / `no_extractor` |
-| GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) — now with `extractor` and `platform_key` |
+| POST | `/api/agents/{name}/retrieval-memory/extract-preview` | OwnedAgentByName + `require_person` | one exchange through the real extraction on whatever credential would answer for this agent, nothing stored (ent#1027); 422 `memory_no_subject` / `transcript_empty` / `no_extractor` |
+| GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) — with `credential_mode` and `platform_key` |
 
 The switch is written through the generic `PUT /api/settings/trinity_memory_enabled`.
 
@@ -266,14 +259,18 @@ set does not exercise. Open: a real-row training split for that class, the
 10-fact cap, and facts over the 200-character ask (stored intact, the clamp is
 500; the judge counts them as format misses).
 
-**Who extracts (trinity-enterprise#1027).** `tests/unit/test_ent1027_memory_model.py`
-pins the plan matrix (mode × container tri-state × key, a rate-limited
-subscription stepping aside), `complete` (the door's request and answer, the
-`auto` fallback on 429 / 503 / unreachable, `agent` and `platform` never
-crossing over), the capture path storing a fact through the agent door with no
-platform key, the honest status on both cards and the owner preview door; the
-agent-server door itself is `tests/unit/test_ent1027_runtime_complete.py`
-(command shape, empty cwd, registry, error mapping).
+**The model door (trinity-enterprise#1027).** `tests/unit/test_ent1027_model_gateway.py`
+pins resolution (a subscription agent uses its own token even when a key
+exists, an unreadable token never borrows the key, a rate-limited subscription
+steps aside in `auto` only, the knob matrix, a db failure reads as nobody, the
+plan never carries the secret), the request (the platform-key one-shot shape,
+the plain subscription shape pinned to its model, the 429 fallback in `auto`
+only, failures as None, the first TEXT block, tools passing through), the four
+callers going through the door (memory captures on the subscription with no
+platform key, the summarizer, thread titles following the agent, the
+compatibility checks), the honest status on both cards and the owner preview.
+`test_2766_title_auth_follows_agent.py` keeps its #2766 pins against the
+gateway's resolver.
 
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * trinity-enterprise#1027 — the per-agent memory row says WHAT will extract
- * this agent's facts: its own runtime, the platform key, or nothing (and
+ * this agent's facts: its subscription, the platform key, or nothing (and
  * why). The text is read off `GET /api/agents/{name}/retrieval-memory`
  * `extractor`, so the real component is mounted (#2918).
  */
@@ -29,20 +29,20 @@ async function mountWith(extractor) {
 describe('RetrievalMemoryToggle — where extraction runs (ent#1027)', () => {
   beforeEach(() => { vi.clearAllMocks() })
 
-  it("names the agent's own runtime when that is what will extract", async () => {
-    const text = await mountWith({ mode: 'auto', effective: 'agent', runtime: 'claude-code', reason: null })
+  it("names the agent's subscription when that is what will extract", async () => {
+    const text = await mountWith({ mode: 'auto', effective: 'subscription', subscription: 'lilu-max', model: 'claude-haiku-4-5-20251001', reason: null })
     expect(text).toMatch(/4 facts/)
-    expect(text).toMatch(/extracts on claude-code/)
+    expect(text).toMatch(/extracts on subscription lilu-max/)
   })
 
   it('names the platform key when that is the fallback in effect', async () => {
-    const text = await mountWith({ mode: 'auto', effective: 'platform', runtime: null, reason: null })
+    const text = await mountWith({ mode: 'auto', effective: 'api_key', subscription: null, model: 'claude-haiku-5-5', reason: null })
     expect(text).toMatch(/extracts on the platform key/)
   })
 
   it('says nothing is captured, and why, when neither can answer', async () => {
-    const text = await mountWith({ mode: 'agent', effective: 'none', runtime: null, reason: 'agent is not running' })
-    expect(text).toMatch(/nothing captured — agent is not running/)
+    const text = await mountWith({ mode: 'subscription', effective: 'none', subscription: null, model: null, reason: 'the agent has no subscription assigned' })
+    expect(text).toMatch(/nothing captured — the agent has no subscription assigned/)
   })
 
   it('still renders the plain status when the backend sends no extractor field', async () => {

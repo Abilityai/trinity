@@ -14,7 +14,7 @@
         Everything an agent does leaves facts behind — what people told it, what was decided,
         what it attempted and how it ended — and the ones relevant to the next request are
         put back in front of it. Facts stay in this instance's own database; extraction runs
-        on the agent's own runtime or the platform Anthropic key (below). Off by default; each
+        on the agent's own subscription or the platform Anthropic key (below). Off by default; each
         agent can be kept out. While on, the
         multilingual embedding model adds about 600 MB of RAM to each backend worker.
       </p>
@@ -62,7 +62,7 @@
         <div class="min-w-0 sm:flex-1">
           <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Extraction runs on</p>
           <p class="mt-0.5 text-[12.5px] text-gray-500 dark:text-gray-400">
-            Facts are extracted by a small model call after each run. On the agent's own runtime it
+            Facts are extracted by a small model call after each run — the same door the conversation summaries and thread titles use. On the agent's subscription it
             uses the agent's subscription or key inside its container; the platform key uses the
             instance's Anthropic key.<template v-if="view.state !== 'loading' && !status.enabled"> Saved now, applies once the switch above is on.</template>
           </p>
@@ -75,16 +75,16 @@
           />
         </div>
         <BaseSelect
-          :model-value="status.extractor || 'auto'"
+          :model-value="status.credential_mode || 'auto'"
           :disabled="savingExtractor || view.state === 'loading'"
           size="sm"
           aria-label="Extraction runs on"
           data-testid="retrieval-memory-extractor"
           @update:model-value="setExtractor"
         >
-          <option value="auto">The agent's own runtime, platform key as fallback</option>
-          <option value="agent">The agent's own runtime only</option>
-          <option value="platform">Platform API key only</option>
+          <option value="auto">The agent's subscription when it has one, else the platform key</option>
+          <option value="subscription">Subscriptions only</option>
+          <option value="platform_key">Platform API key only</option>
         </BaseSelect>
       </div>
 
@@ -106,7 +106,7 @@ import { useSettingsStore } from '../../stores/settings'
 import { viewState } from '../../utils/loadingState'
 
 const settingsStore = useSettingsStore()
-const status = ref({ enabled: false, available: false, reason: null, fact_count: 0, extractor: 'auto', platform_key: false })
+const status = ref({ enabled: false, available: false, reason: null, fact_count: 0, credential_mode: 'auto', platform_key: false })
 const loading = ref(false)
 const hasLoaded = ref(false)
 const saving = ref(false)
@@ -118,11 +118,11 @@ const extractorError = ref('')
 // captures nothing is said in the warning tier; the slot is always one line.
 const extractorStatus = computed(() => {
   if (view.value.state === 'loading') return { text: '', warn: false }
-  const mode = status.value.extractor || 'auto'
-  if (mode === 'platform' && !status.value.platform_key) return { text: 'No platform key — nothing is captured', warn: true }
-  if (mode === 'agent') return { text: "Only running agents capture; a stopped agent's last run is skipped", warn: false }
-  if (mode === 'platform') return { text: 'Every capture uses the platform key', warn: false }
-  return { text: status.value.platform_key ? 'Running agents use their own runtime; the platform key covers the rest' : 'Running agents use their own runtime; no platform key to fall back on', warn: false }
+  const mode = status.value.credential_mode || 'auto'
+  if (mode === 'platform_key' && !status.value.platform_key) return { text: 'No platform key — nothing is captured', warn: true }
+  if (mode === 'subscription') return { text: 'Only agents on a subscription are covered; nothing is captured for the rest', warn: false }
+  if (mode === 'platform_key') return { text: 'Every call uses the platform key', warn: false }
+  return { text: status.value.platform_key ? 'Agents on a subscription use it; the platform key covers the rest' : 'Agents on a subscription use it; no platform key to fall back on', warn: false }
 })
 // Loading means "no data yet" (design-system p13/p14): a refresh after the
 // toggle swaps values in place and never replaces the status with a spinner.
@@ -163,7 +163,7 @@ async function setExtractor(value) {
   savingExtractor.value = true
   extractorError.value = ''
   try {
-    await settingsStore.updateSetting('trinity_memory_extractor', value)
+    await settingsStore.updateSetting('trinity_model_credential', value)
     await load()
   } catch (e) {
     extractorError.value = 'Could not change where extraction runs. The saved choice is shown.'

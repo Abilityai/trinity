@@ -7022,18 +7022,7 @@
       "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
     },
     {
-      "file": "unit/test_ent1027_runtime_complete.py",
-      "feature": "trinity-enterprise#1027",
-      "added": "2026-10-30",
-      "categories": [
-        "agent-server",
-        "memory",
-        "unit"
-      ],
-      "description": "Agent-server one-shot completion on the agent's own runtime (`POST /api/runtime/complete`, the in-container half of retrieval-memory extraction): the Claude command is one turn with the JSON envelope, the minimal system prompt replaced, no MCP servers and every built-in tool denied, the prompt on stdin; cwd is a fresh empty scratch dir (never the workspace) removed afterwards; the real process registry sees register then unregister; the result is credential-sanitised; rate limit → 429, auth failure → 502 auth_failure, non-zero exit / empty output / error envelope → classified; timeout → 504 with the process group killed; the ABC default and the Gemini/Codex runtimes answer RuntimeUnsupported → 503 unsupported; timeout clamped 5..600; the route is registered on the app."
-    },
-    {
-      "file": "unit/test_ent1027_memory_model.py",
+      "file": "unit/test_ent1027_model_gateway.py",
       "feature": "trinity-enterprise#1027",
       "added": "2026-10-30",
       "categories": [

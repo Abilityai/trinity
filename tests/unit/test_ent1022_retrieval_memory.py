@@ -24,7 +24,7 @@ from database import db
 from db.write_params import ExecutionResult
 from db_models import UserCreate
 from db.write_params import TaskExecutionFields
-from services import anthropic_messages as am
+from services import model_gateway as am   # the one model door (ent#1027); `am` kept as the suite's name for it
 from services import event_dispatch_service as eds
 from services import memory_embeddings as me
 from services import memory_service as ms
@@ -55,18 +55,18 @@ def hash_embed(texts):
 
 
 class ScriptedHaiku:
-    """`anthropic_messages.complete` with canned answers per tag."""
+    """`model_gateway.complete` with canned answers per purpose."""
 
     def __init__(self, extract=None, reconcile=None):
         self.extract = extract if extract is not None else []
         self.reconcile = reconcile
         self.prompts: list[tuple[str, str]] = []
 
-    async def complete(self, prompt, *, max_tokens=512, model=None, timeout=30.0, tag="x"):
-        self.prompts.append((tag, prompt))
-        if tag == "memory.extract":
+    async def complete(self, purpose, prompt, *, agent_name=None, max_tokens=512, timeout=30.0, model=None):
+        self.prompts.append((purpose, prompt))
+        if purpose == "memory.extract":
             return json.dumps(self.extract) if not callable(self.extract) else self.extract(prompt)
-        if tag == "memory.reconcile":
+        if purpose == "memory.reconcile":
             return json.dumps(self.reconcile) if self.reconcile is not None else None
         return None
 
@@ -79,7 +79,7 @@ def memory_on(monkeypatch):
     monkeypatch.setattr(me, "availability", lambda: (True, None))
     monkeypatch.setattr(me, "is_loaded", lambda: True)
     monkeypatch.setattr(ms, "_redis", lambda: None)   # no lease, DB-metered budget
-    monkeypatch.setattr(am, "has_platform_key", lambda: True)
+    monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "sk-test-key")
     ms._scope_cache.clear()
     yield
     db.set_setting(ms.SETTING_ENABLED, "false")
@@ -169,22 +169,21 @@ class TestSwitches:
         db.set_setting(ms.SETTING_ENABLED, "false")
 
     def test_status_is_honest_about_a_missing_platform_key(self, agent, memory_on, monkeypatch):
-        """Platform-only without a key captures nothing and says so; in `auto`
-        a running agent still extracts on its own runtime (ent#1027), so the
-        platform card names the extractor and the key instead of a blanket reason."""
-        from services import memory_model as mm
-        monkeypatch.setattr(am, "has_platform_key", lambda: False)
-        db.set_setting(mm.SETTING_EXTRACTOR, "platform")
+        """Platform-key-only without a key captures nothing and says so; in
+        `auto` an agent on a subscription still extracts on it (ent#1027), so
+        the platform card names the mode and the key instead of a blanket reason."""
+        monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: "")
+        db.set_setting(am.SETTING_CREDENTIAL, "platform_key")
         try:
             s = ms.status()
             assert s["enabled"] is True and s["available"] is True
             assert "no platform Anthropic key" in (s["reason"] or "")
-            assert s["extractor"] == "platform" and s["platform_key"] is False
-            db.set_setting(mm.SETTING_EXTRACTOR, "auto")
+            assert s["credential_mode"] == "platform_key" and s["platform_key"] is False
+            db.set_setting(am.SETTING_CREDENTIAL, "auto")
             s = ms.status()
-            assert s["reason"] is None and s["extractor"] == "auto"
+            assert s["reason"] is None and s["credential_mode"] == "auto"
         finally:
-            db.set_setting(mm.SETTING_EXTRACTOR, "")
+            db.set_setting(am.SETTING_CREDENTIAL, "")
 
 
 # --------------------------------------------------------------------------- #

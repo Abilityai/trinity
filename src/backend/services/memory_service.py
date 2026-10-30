@@ -41,8 +41,7 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from database import db
-from services import anthropic_messages
-from services import memory_model, memory_embeddings, memory_ranking, memory_subject, user_memory_guard
+from services import model_gateway, memory_embeddings, memory_ranking, memory_subject, user_memory_guard
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import iso_cutoff
 
@@ -225,9 +224,9 @@ def status() -> Dict[str, Any]:
         available, reason = False, error
     else:
         available, reason = loaded, None
-    extractor = memory_model.mode()
-    platform_key = anthropic_messages.has_platform_key()
-    if enabled and available and extractor == "platform" and not platform_key:
+    credential_mode = model_gateway.mode()
+    platform_key = model_gateway.has_platform_key()
+    if enabled and available and credential_mode == "platform_key" and not platform_key:
         # Recall still works (embeddings are local); capture cannot. In `auto`
         # a running agent still captures on its own runtime (ent#1027), so the
         # per-agent row says what each agent would do.
@@ -250,7 +249,7 @@ def status() -> Dict[str, Any]:
         "fact_count": stats["count"],
         "last_retained_at": stats["last_retained_at"],
         "daily_retain_limit": daily_retain_limit(),
-        "extractor": extractor,
+        "credential_mode": credential_mode,
         "platform_key": platform_key,
     }
 
@@ -517,7 +516,7 @@ async def _extract(agent_name: str, transcript: str, subject: memory_subject.Mem
         "the agent's own work, nobody in particular — record what was decided, what was attempted and how it ended"
     )
     prompt = _EXTRACT_PROMPT.format(scope_line=scope_line, transcript=transcript, max_facts=MAX_FACTS_PER_RETAIN)
-    raw = await memory_model.complete(agent_name, prompt, max_tokens=800, timeout=RETAIN_TIMEOUT_S, tag="memory.extract")
+    raw = await model_gateway.complete("memory.extract", prompt, agent_name=agent_name, max_tokens=800, timeout=RETAIN_TIMEOUT_S)
     parsed = _parse_json_array(raw)
     if parsed is None:
         if raw is not None:
@@ -549,7 +548,7 @@ async def _reconcile(agent_name: str, candidates: List[str], neighbours: List[Li
             blocks.append(f"- [{fact_id}]\n" + "\n".join(user_memory_guard.margin_lines(near_text)))
         blocks.append("")
     prompt = _RECONCILE_PROMPT.format(items="\n".join(blocks))
-    raw = await memory_model.complete(agent_name, prompt, max_tokens=1200, timeout=RETAIN_TIMEOUT_S, tag="memory.reconcile")
+    raw = await model_gateway.complete("memory.reconcile", prompt, agent_name=agent_name, max_tokens=1200, timeout=RETAIN_TIMEOUT_S)
     parsed = _parse_json_array(raw)
     ops: List[Dict[str, Any]] = [{"op": "ADD", "id": None, "text": c} for c in candidates]
     if parsed is None:
@@ -662,8 +661,8 @@ def _prepare(execution_id: str) -> Optional[Dict[str, Any]]:
     transcript = build_transcript(execution, subject)
     if not transcript:
         return None
-    who = memory_model.plan(agent_name)
-    if who.effective == "none":
+    who = model_gateway.resolve(agent_name)
+    if not who.usable:
         logger.info("[memory] nobody to extract (%s) — %s not captured", who.reason, execution_id)
         return None
     limit = daily_retain_limit()

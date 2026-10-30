@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from services.settings_service import get_anthropic_api_key
+from services import model_gateway
 from . import spec
 
 logger = logging.getLogger(__name__)
@@ -139,39 +139,22 @@ def _category_prompt(checks: List[spec.CheckDef], bundle: str) -> str:
 
 
 async def _call_category(
-    client: httpx.AsyncClient, api_key: str, checks: List[spec.CheckDef], bundle: str
+    credential: "model_gateway.Credential", checks: List[spec.CheckDef], bundle: str
 ) -> Dict[str, Dict[str, Any]]:
-    """One Anthropic call for one category; returns {check_id: {status, explanation, confidence}}.
+    """One model call for one category through the platform's one door
+    (trinity-enterprise#1027); returns {check_id: {status, explanation, confidence}}.
 
     Returns {} on any failure (caller turns missing ids into 'skipped').
     """
-    try:
-        resp = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": _MODEL,
-                "max_tokens": 1500,
-                "tools": [_TOOL],
-                "tool_choice": {"type": "tool", "name": "report_compatibility"},
-                "messages": [{"role": "user", "content": _category_prompt(checks, bundle)}],
-            },
-            timeout=_PER_CALL_TIMEOUT,
-        )
-    except (httpx.HTTPError, asyncio.TimeoutError) as e:
-        logger.warning("[compatibility] AI category call failed: %s", e)
-        return {}
-
-    if resp.status_code != 200:
-        logger.warning("[compatibility] AI category HTTP %s: %s", resp.status_code, resp.text[:200])
+    data = await model_gateway.request(
+        "compatibility_ai", credential=credential, prompt=_category_prompt(checks, bundle),
+        max_tokens=1500, timeout=_PER_CALL_TIMEOUT, model=_MODEL,
+        tools=[_TOOL], tool_choice={"type": "tool", "name": "report_compatibility"},
+    )
+    if data is None:
         return {}
 
     try:
-        data = resp.json()
         results: Dict[str, Dict[str, Any]] = {}
         for block in data.get("content", []):
             if block.get("type") != "tool_use":
@@ -195,17 +178,20 @@ async def _call_category(
         return {}
 
 
-async def run_ai(snapshot: Dict[str, Any], ai_check_ids: List[str]) -> Dict[str, Dict[str, Any]]:
+async def run_ai(snapshot: Dict[str, Any], ai_check_ids: List[str],
+                 agent_name: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
     """Evaluate the requested AI checks; returns {check_id: verdict}.
 
     A verdict is {status: pass|fail|skipped, explanation, confidence, skip_reason?}.
     Every requested id is present in the result (iterate-expected guarantee).
+    ``agent_name`` attributes the calls to the agent under review, so they run
+    on its own subscription when it has one (trinity-enterprise#1027).
     """
     requested = [cid for cid in ai_check_ids if cid in spec.BY_ID]
     out: Dict[str, Dict[str, Any]] = {}
 
-    api_key = get_anthropic_api_key()
-    if not api_key:
+    credential = model_gateway.resolve(agent_name)
+    if not credential.usable:
         for cid in requested:
             out[cid] = {"status": "skipped", "skip_reason": "no_api_key",
                         "explanation": None, "confidence": None}
@@ -219,9 +205,8 @@ async def run_ai(snapshot: Dict[str, Any], ai_check_ids: List[str]) -> Dict[str,
 
     bundle = _build_bundle(snapshot)
 
-    async with httpx.AsyncClient() as client:
-        tasks = [_call_category(client, api_key, checks, bundle) for checks in by_cat.values()]
-        category_results = await asyncio.gather(*tasks, return_exceptions=True)
+    tasks = [_call_category(credential, checks, bundle) for checks in by_cat.values()]
+    category_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     merged: Dict[str, Dict[str, Any]] = {}
     for res in category_results:

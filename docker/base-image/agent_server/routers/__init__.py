@@ -12,7 +12,6 @@ from .dashboard import router as dashboard_router
 from .skills import router as skills_router
 from .snapshot import router as snapshot_router
 from .brain_orb import router as brain_orb_router
-from .runtime import router as runtime_router
 
 __all__ = [
     "chat_router",
@@ -26,5 +25,4 @@ __all__ = [
     "skills_router",
     "snapshot_router",
     "brain_orb_router",
-    "runtime_router",
 ]

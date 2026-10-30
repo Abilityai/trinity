@@ -2075,9 +2075,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   facts in the platform DB (`agent_memory_facts`); the facts most relevant to
   the incoming request are recalled into the system prompt inside the ent#419
   envelope as a third section. Runtime-agnostic: backend seams, no harness
-  hooks; the one in-container piece is the runtime adapter's one-shot
-  completion door, one contract per runtime (Claude Code today; Gemini and
-  Codex answer `unsupported` and fall back to the platform key in `auto`).
+  hooks, nothing in the agent container.
 - **Switch**: `trinity_memory_enabled` (system setting, default `false`,
   Settings → General); per-agent opt-out `agent_ownership.memory_opt_out`.
   Fail-open everywhere: off / unavailable / error ⇒ the prompt is unchanged.
@@ -2090,21 +2088,24 @@ bounding the table. OSS-core (Workspace rule above). Flow:
 - **Capture**: one seam — `event_dispatch_service.spawn_task_terminal_event`
   (every CAS-won terminal). Credentials are redacted before extraction and
   before storage; every fact passes `user_memory_guard.prepare_summary`.
-  Brakes: someone to extract (below), a per-agent daily budget
+  Brakes: a credential to extract with (below), a per-agent daily budget
   (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
   a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
   on the live `text_hash`.
-- **Who extracts** (trinity-enterprise#1027): `services/memory_model.plan` —
-  the agent's own runtime, headless inside its container through the
-  agent-server door `POST /api/runtime/complete` (its subscription or key pays;
-  the transcript stays on the platform network), the platform Anthropic key, or
-  nobody with the reason. Knob `trinity_memory_extractor` (Settings → General):
-  `auto` (default — the agent when running and not rate-limited, else the key;
-  the only mode that falls back), `agent`, `platform`. Both status cards say
+- **Which credential** (trinity-enterprise#1027): every platform model call —
+  extraction and reconcile here, the MEM-001 summarizer, Workspace thread
+  titles, the compatibility AI checks — goes through the backend's one model
+  door, `services/model_gateway`. The credential follows the agent: a job
+  attributed to an agent on a Claude subscription runs on that agent's own
+  setup token (same bill as its chat), an agent on API-key auth or a job with
+  no agent behind it runs on the platform key, an unreadable token never
+  borrows the key. The model follows the credential: Haiku 4.5 on a
+  subscription (the one model the gateway serves plainly on a setup token),
+  Haiku 5.5 on the key; the backend never claims to be Claude Code. Knob
+  `trinity_model_credential` (Settings → General): `auto` (default, the only
+  mode that falls back), `subscription`, `platform_key`. Both status cards say
   who would answer; the owner can run one exchange through the real path with
-  `POST …/retrieval-memory/extract-preview`, nothing stored. The backend never
-  calls the Messages API with a subscription token (the gateway requires the
-  Claude Code identity for that; impersonation is not a seam).
+  `POST …/retrieval-memory/extract-preview`, nothing stored.
 - **Recall**: async, off the event loop; relevance gates (cosine ≥ 0.30),
   recency re-orders (`cosine × (0.6 + 0.4 × 0.5^(age/half-life))` over
   `updated_at`, half-life `trinity_memory_recency_half_life_days`, default 30,

@@ -267,7 +267,8 @@ def test_mem001_never_summarises_a_held_request(public, monkeypatch):
             return _Resp()
 
     monkeypatch.setattr(settings_service, "get_anthropic_api_key", lambda: "test-anthropic-key-placeholder")
-    monkeypatch.setattr(pps.httpx, "AsyncClient", _Client)
+    from services import model_gateway as gw   # the summarizer's call goes through the one model door (ent#1027)
+    monkeypatch.setattr(gw.httpx, "AsyncClient", _Client)
     asyncio.run(pps.summarize_user_memory_background(AGENT, "v@example.com", session.id))
     assert "what is my balance?" in captured["prompt"]
     assert HELD not in captured["prompt"] and NOTICE_HEAD not in captured["prompt"]

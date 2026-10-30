@@ -19,9 +19,9 @@
         <template v-else>
           On · {{ state.fact_count }} fact{{ state.fact_count === 1 ? '' : 's' }}
           <!-- trinity-enterprise#1027: what will extract this agent's next facts. -->
-          <template v-if="extractor.effective === 'agent'"> · extracts on {{ extractor.runtime || 'its own runtime' }}</template>
-          <template v-else-if="extractor.effective === 'platform'"> · extracts on the platform key</template>
-          <span v-else-if="extractor.effective === 'none'" class="text-status-warning-700 dark:text-status-warning-400"> · nothing captured — {{ extractor.reason || 'no runtime and no platform key' }}</span>
+          <template v-if="extractor.effective === 'subscription'"> · extracts on subscription {{ extractor.subscription || '' }}</template>
+          <template v-else-if="extractor.effective === 'api_key'"> · extracts on the platform key</template>
+          <span v-else-if="extractor.effective === 'none'" class="text-status-warning-700 dark:text-status-warning-400"> · nothing captured — {{ extractor.reason || 'no subscription and no platform key' }}</span>
         </template>
       </span>
     </template>

@@ -2226,8 +2226,9 @@ class MemoryExtractPreviewRequest(BaseModel):
 class MemoryExtractPreviewOut(BaseModel):
     agent_name: str
     subject: str                      # "agent" | "person"
-    extractor: str                    # "agent" | "platform"
-    runtime: Optional[str] = None
+    extractor: str                    # "subscription" | "api_key" — the credential that answered
+    model: Optional[str] = None
+    subscription: Optional[str] = None
     facts: list[str]
     screened: list[str]
     transcript_chars: int

@@ -1947,7 +1947,7 @@ _TITLE_MAX_TOKENS = 32
 # The OAuth beta header that lets a subscription token authenticate the Messages
 # API (the header Claude Code itself sends). Lets a subscription-only deployment —
 # which holds no ANTHROPIC_API_KEY — still generate titles (ent#186 follow-up).
-_OAUTH_BETA = "oauth-2025-04-20"
+from services.model_gateway import OAUTH_BETA as _OAUTH_BETA  # the gateway owns the header (ent#1027)
 
 # The two-block prompt: the client's message AND the agent's visible reply.
 #
@@ -2209,74 +2209,20 @@ def _scrub_title_detail(text: str) -> str:
     return re.sub(r"(sk-[A-Za-z0-9_\-]{8,}|sk-ant-[A-Za-z0-9_\-]{8,})", "[redacted]", text)
 
 
-def _resolve_title_auth(agent_name: str) -> dict | None:
-    """Pick the credential the title call authenticates with — **the one the
-    agent's own chat runs on** (#2766).
-
-    The credential FOLLOWS THE AGENT. `derive_auth_mode` is the platform's one
-    auth-mode derivation (#471), so this path speaks the same vocabulary as
-    `AgentAuthStatus` and the subscription-pressure batch rather than inventing
-    a second answer to "what is this agent authenticated as":
-
-    * ``subscription`` — the agent's OWN subscription OAuth token, via the
-      Messages-API OAuth beta header. Same credential, same bill as its chat.
-    * ``api_key`` — only then the instance key.
-    * ``not_configured`` — no credential; the caller keeps the derived title.
-
-    This precedence is INVERTED from the original, and the inversion is the
-    fix. The instance key used to win outright, so on a fleet where every agent
-    runs on a subscription, thread titles were billed to — and gated on — a
-    console account no agent was assigned. An unfunded or revoked instance key
-    then broke titles for agents that were otherwise completely healthy, which
-    is #2114's "a stale key shadows subscription auth" one layer up, on the
-    backend side.
-
-    A ``subscription``-mode agent whose token cannot be read returns **None**
-    rather than falling through to the instance key. Falling through is exactly
-    the shadowing this fixes: an instance key the agent was never assigned is
-    not a credential it holds, so a missing token is "no credential for this
-    agent", not "use someone else's".
-    """
-    from services.settings_service import get_anthropic_api_key
-    from services.subscription_service import derive_auth_mode
-    import database
-
-    base = {"anthropic-version": "2023-06-01", "content-type": "application/json"}
-
-    try:
-        db = database.db if hasattr(database, "db") else database.get_db()
-        sub_id = db.get_agent_subscription_id(agent_name)
-    except Exception as e:  # noqa: BLE001 — fail-soft, keep the derived title
-        logger.warning("portal title: subscription lookup failed for %s: %s", agent_name, e)
+def _resolve_title_auth(agent_name: str) -> "model_gateway.Credential | None":
+    """The credential the title call runs on — **the one the agent's own chat
+    runs on** (#2766), resolved by the platform's one model door
+    (`services/model_gateway.resolve`, trinity-enterprise#1027): the agent's
+    subscription, else the instance key for an api-key-mode agent, and None for
+    a subscription-mode agent whose token cannot be read — falling through to an
+    instance key the agent was never assigned is exactly the shadowing #2766
+    fixed. The gateway speaks `derive_auth_mode`'s vocabulary (#471)."""
+    from services import model_gateway
+    credential = model_gateway.resolve(agent_name)
+    if not credential.usable:
+        logger.debug("portal title: no credential for %s (%s) — keeping derived title", agent_name, credential.reason)
         return None
-
-    api_key = get_anthropic_api_key()
-    mode = derive_auth_mode(bool(sub_id), bool(api_key))
-
-    if mode == "subscription":
-        try:
-            token = db.get_subscription_token(sub_id)
-        except Exception as e:  # noqa: BLE001
-            logger.warning("portal title: subscription token unreadable for %s: %s", agent_name, e)
-            return None
-        if token:
-            return {**base, "authorization": f"Bearer {token}", "anthropic-beta": _OAUTH_BETA}
-        # Deliberately NOT the instance key — see the docstring.
-        logger.debug(
-            "portal title: %s is subscription-mode but its token is unreadable — "
-            "keeping derived title rather than billing an unassigned instance key",
-            agent_name,
-        )
-        return None
-
-    if mode == "api_key":
-        return {**base, "x-api-key": api_key}
-
-    logger.debug(
-        "portal title: no subscription and no ANTHROPIC_API_KEY for %s — keeping derived title",
-        agent_name,
-    )
-    return None
+    return credential
 
 
 async def _generate_thread_title(agent_name: str, client_message: str, reply: str) -> str | None:
@@ -2289,8 +2235,10 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
     one."""
     import httpx
 
-    headers = _resolve_title_auth(agent_name)
-    if not headers:
+    from services import model_gateway
+
+    credential = _resolve_title_auth(agent_name)
+    if not credential:
         _record_title_outcome("no_credential",
                               f"no ANTHROPIC_API_KEY and no subscription token for {agent_name}")
         return None
@@ -2306,20 +2254,15 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
             max_chars=_TITLE_MAX_CHARS,
             message=(client_message or "")[:_TITLE_INPUT_CHARS],
         )
-    try:
-        async with httpx.AsyncClient(timeout=_TITLE_TIMEOUT) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers=headers,
-                json={
-                    "model": _TITLE_MODEL,
-                    "max_tokens": _TITLE_MAX_TOKENS,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-    except Exception as e:  # noqa: BLE001 — fail-soft, fallback title stands
-        logger.warning("portal title generation request failed: %s", e)
-        _record_title_outcome("failed", f"request failed: {type(e).__name__}")
+    # The platform's one model door (trinity-enterprise#1027); `send` rather
+    # than `complete` so the health record keeps the upstream status and reason.
+    resp = await model_gateway.send(
+        credential,
+        credential.body(prompt=prompt, max_tokens=_TITLE_MAX_TOKENS, model=_TITLE_MODEL),
+        timeout=_TITLE_TIMEOUT,
+    )
+    if resp is None:
+        _record_title_outcome("failed", "request failed")
         return None
 
     if resp.status_code != 200:
@@ -2330,7 +2273,7 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
         _record_title_outcome("failed", _title_failure_detail(resp.status_code, resp.text))
         return None
     try:
-        text_out = (resp.json().get("content") or [{}])[0].get("text", "")
+        text_out = model_gateway.first_text(resp.json()) or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("portal title generation: unreadable response: %s", e)
         _record_title_outcome("failed", "unreadable response")

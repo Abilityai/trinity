@@ -54,7 +54,6 @@ from .headless_executor import (
 )
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
-from .runtime_complete import complete_claude
 from .stream_parser import process_stream_line
 from .subprocess_lifecycle import (
     _capture_pgid,
@@ -166,17 +165,6 @@ class ClaudeCodeRuntime(AgentRuntime):
         return await execute_claude_code(prompt, stream, model, system_prompt=system_prompt,
                                          execution_id=execution_id, isolated_session=isolated_session,
                                          auth_override=auth_override)
-
-    async def complete(
-        self,
-        prompt: str,
-        *,
-        model: Optional[str] = None,
-        timeout_seconds: int = 60,
-        execution_id: Optional[str] = None,
-    ) -> str:
-        """One tool-less turn on this container's credential (trinity-enterprise#1027)."""
-        return await complete_claude(prompt, model=model, timeout_seconds=timeout_seconds, execution_id=execution_id)
 
     async def execute_headless(
         self,
