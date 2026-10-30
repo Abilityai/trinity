@@ -1194,6 +1194,8 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1273,6 +1275,19 @@ class OperatorQueueOperations:
             for not_prefixed in self._request_id_not_prefixed_ci(owner_only_request_id_prefixes):
                 conds.append(or_(not_prefixed, operator_queue.c.agent_name.in_(owners))
                              if owners else not_prefixed)
+        # trinity-enterprise#980: an addressee-only row (a steward's proposal) is
+        # listed only to the person it is addressed to — its single addressee or
+        # one of its `resolved_to`, the same match as `addressed_to_email` above.
+        # Keyed on the addressee, NOT the agent's owner: the addressee need not
+        # own the agent, and its owner need not be able to open what it names.
+        if addressee_only_request_id_prefixes:
+            viewer = (addressee_email or "").strip().lower()
+            for not_prefixed in self._request_id_not_prefixed_ci(addressee_only_request_id_prefixes):
+                conds.append(or_(
+                    not_prefixed,
+                    func.lower(operator_queue.c.addressed_to_email) == viewer,
+                    self._resolved_to_contains(viewer),
+                ) if viewer else not_prefixed)
         return conds
 
     def count_items(self, **filters) -> int:
@@ -1317,6 +1332,8 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -1373,6 +1390,8 @@ class OperatorQueueOperations:
             exclude_request_id_prefixes=exclude_request_id_prefixes,
             owner_only_request_id_prefixes=owner_only_request_id_prefixes,
             owner_agent_names=owner_agent_names,
+            addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
+            addressee_email=addressee_email,
         )
         if conds is None:
             return []
