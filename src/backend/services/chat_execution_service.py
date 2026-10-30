@@ -2563,17 +2563,30 @@ async def _dispatch_async(
     )
 
     if cap_result.state == "queued_persistent":
-        logger.info(
-            f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
-        )
+        # #3625: on a pull pilot the queue is the only route, so "queued" says
+        # nothing about load. Reserve "at capacity" for a push overflow.
+        if cap_result.pull:
+            logger.info(
+                f"[Task Async] Agent '{name}' (pull) — execution {execution_id} "
+                f"queued for worker claim"
+            )
+            queued_message = (
+                f"Task queued for the worker pool of agent '{name}'. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
+        else:
+            logger.info(
+                f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
+            )
+            queued_message = (
+                f"Agent at capacity; task queued. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
         _queued_payload = {
             "status": "queued",
             "execution_id": execution_id,
             "agent_name": name,
-            "message": (
-                f"Agent at capacity; task queued. Poll GET "
-                f"/api/agents/{name}/executions/{execution_id} for results."
-            ),
+            "message": queued_message,
             "async_mode": True,
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
@@ -2625,14 +2638,16 @@ async def _dispatch_async(
     return _accepted_payload
 
 
-async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem):
+async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem, pull=False):
     """Sync backlog long-poll (#498): wait for the drain terminal, or reconstruct
     a minimal result from the row (non-drain terminal flip), translate failure,
     and build the response. Side effects were handled inside the drain — not repeated.
     """
     sync_wait_cap = 2 * sync_effective_timeout
+    # #3625: a pull pilot always queues; "at capacity" only on a push overflow.
+    queued_how = "(pull) —" if pull else "at capacity —"
     logger.info(
-        f"[Task Sync] Agent '{name}' at capacity — execution {execution_id} "
+        f"[Task Sync] Agent '{name}' {queued_how} execution {execution_id} "
         f"queued to backlog; long-polling up to {sync_wait_cap}s"
     )
     try:
@@ -2836,6 +2851,7 @@ async def _dispatch_sync(
             execution_id=execution_id,
             sync_effective_timeout=sync_effective_timeout,
             idem=idem,
+            pull=cap_result.pull,
         )
     return await _dispatch_sync_immediate(
         request=request,

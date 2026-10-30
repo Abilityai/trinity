@@ -658,22 +658,48 @@ class LoopService:
             })
 
         loop = db.get_loop(loop_id) or loop
-        stop_requested = bool(loop.get("stop_requested_at"))
-        deadline_passed = self._deadline_passed(loop)
+        if not succeeded:
+            logger.warning(
+                "[Loop] %s iteration %d failed (%s)",
+                loop_id, run_number, error or "task failed",
+            )
+        decision = self._post_run_decision(
+            loop, derived, run_number=run_number,
+            status="completed" if succeeded else "failed", response=response, error=error,
+        )
+        if decision is not None:
+            status_, reason, terminal_error = decision
+            await self._finalize(
+                loop, status=status_, stop_reason=reason, error=terminal_error,
+            )
+            return True
 
-        if succeeded:
+        await self._continue_or_finalize(loop_id)
+        return True
+
+    def _post_run_decision(
+        self, loop: dict, derived: "_DerivedState", *, run_number: int,
+        status: str, response: Optional[str], error: Optional[str],
+    ):
+        """The post-run gates for run ``run_number``, closed with ``status``.
+
+        Returns ``(status, stop_reason, error)`` to finalize the loop, or None
+        to fall through to the next-iteration gates. Read only from the loop row
+        and the run rows, so the park-sourced path can replay it (#4057): the
+        worker that closed the run may have died before applying it.
+        """
+        if status == "skipped":
+            # trinity-enterprise#751: only a run the skill gate held closes
+            # `skipped`, and a hold stops the loop.
+            return ("stopped", "approval_required", error)
+        if status == "completed":
             # Stop-signal is checked BEFORE no-progress and is deliberately
             # UNGUARDED, so it wins even over a pending stop or a passed
             # deadline. `terminal_status` stays "completed", which is what lets
             # the #1167 promotion below apply to it.
             stop_signal = loop.get("stop_signal")
             if stop_signal and stop_signal in (response or ""):
-                await self._finalize(
-                    loop,
-                    status=self._promote(loop, "completed", derived),
-                    stop_reason="stop_signal_matched",
-                )
-                return True
+                return (self._promote(loop, "completed", derived), "stop_signal_matched", None)
 
             # #1157: a pending user-stop or a passed deadline OUTRANKS
             # no_progress — fall through so the next-iteration gates label it
@@ -683,28 +709,55 @@ class LoopService:
             if (
                 threshold
                 and derived.repeat_count >= threshold
-                and not stop_requested
-                and not deadline_passed
+                and not loop.get("stop_requested_at")
+                and not self._deadline_passed(loop)
             ):
-                await self._finalize(
-                    loop, status="stopped", stop_reason="no_progress"
-                )
-                return True
-        else:
-            logger.warning(
-                "[Loop] %s iteration %d failed (%s)",
-                loop_id, run_number, error or "task failed",
-            )
-            decision = self._abort_after_failure(loop, derived, run_number, error)
-            if decision is not None:
-                status_, reason, terminal_error = decision
-                await self._finalize(
-                    loop, status=status_, stop_reason=reason, error=terminal_error,
-                )
-                return True
+                return ("stopped", "no_progress", None)
+            return None
+        return self._abort_after_failure(loop, derived, run_number, error)
 
-        await self._continue_or_finalize(loop_id)
-        return True
+    def _replay_last_close(self, loop: dict, runs: list, derived: "_DerivedState"):
+        """#4057: what the advance of the loop's newest closed run should have
+        done, for a dispatch that comes from a park.
+
+        `_close_run` closes run N, writes progress, then applies run N's
+        post-run gates. A worker that dies (or a write that faults) between the
+        close and those gates leaves no open run and no park; reconcile re-arms
+        the loop and the sweep dispatches through here. Re-derive run N's
+        progress (`last_response` for `{{previous_response}}`, `failed_runs`)
+        and decision from the run rows, so the outcome does not depend on which
+        worker reached the loop first. On a loop whose worker did apply them
+        this changes nothing: the rows give the same answer.
+
+        Returns ``(loop, decision)``.
+        """
+        closed = [r for r in runs if r.get("status") in ("completed", "failed", "skipped")]
+        if not closed:
+            return loop, None
+        last = max(closed, key=lambda r: r["run_number"])
+        if last["run_number"] != (loop.get("runs_completed") or 0):
+            return loop, None  # not the run this loop's advance claimed last
+        if last["status"] == "skipped":
+            return loop, self._post_run_decision(
+                loop, derived, run_number=last["run_number"], status="skipped",
+                response=last.get("response"), error=last.get("error"))
+        successes = [r for r in runs if r.get("status") == "completed"]
+        last_response = (max(successes, key=lambda r: r["run_number"]).get("response")
+                         if successes else loop.get("last_response"))
+        if (loop.get("last_response") != last_response
+                or (loop.get("failed_runs") or 0) != derived.failed_runs):
+            logger.warning(
+                "[Loop] %s run %d's progress was never written; restoring it from the run rows",
+                loop["id"], last["run_number"],
+            )
+            db.update_loop_progress(
+                loop["id"], runs_completed=last["run_number"],
+                last_response=last_response, failed_runs=derived.failed_runs,
+            )
+            loop = db.get_loop(loop["id"]) or loop
+        return loop, self._post_run_decision(
+            loop, derived, run_number=last["run_number"], status=last["status"],
+            response=last.get("response"), error=last.get("error"))
 
     async def _continue_or_finalize(self, loop_id: str, *, parked: bool = False) -> bool:
         """The old `for` loop's top-of-iteration gates, then dispatch.
@@ -735,6 +788,14 @@ class LoopService:
 
         runs = db.list_loop_runs(loop_id)
         derived = _DerivedState(runs)
+        if parked:
+            loop, decision = self._replay_last_close(loop, runs, derived)
+            if decision is not None:
+                status_, reason, terminal_error = decision
+                await self._finalize(
+                    loop, status=status_, stop_reason=reason, error=terminal_error,
+                )
+                return False
         next_run_number = (loop.get("runs_completed") or 0) + 1
 
         if next_run_number > loop["max_runs"]:
