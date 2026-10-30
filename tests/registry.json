@@ -1,15 +1,26 @@
 {
   "test_files": [
     {
-      "file": "unit/test_ent986_gemini_usage_statistics.py",
-      "feature": "trinity-enterprise#986",
-      "added": "2026-10-28",
+      "file": "unit/test_4085_scheduler_subscription_id.py",
+      "feature": "#4085",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "subscriptions"
+      ],
+      "description": "#4085: scheduler-created executions (cron, reminder, retry, skipped) snapshot the agent's live subscription assignment into schedule_executions.subscription_id and count toward SUB-004 window_5h/window_7d; no live assignment records NULL."
+    },
+    {
+      "file": "unit/test_4001_no_auto_maintenance.py",
+      "feature": "#4001",
+      "added": "2026-10-27",
       "categories": [
         "agent-server",
-        "gemini-runtime",
-        "git"
+        "git",
+        "unit"
       ],
-      "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
+      "description": "platform git children never start git auto-maintenance; stale maintenance.lock reaped"
     },
     {
       "file": "unit/test_4064_gemini_process_group.py",
@@ -2377,6 +2388,17 @@
       "description": "First-run default-system seeder (ent#124): the REAL bundled config/manifests/default-system.yaml validates through the executor's own parse_manifest/validate_manifest (acme trio, full-mesh, no schedules, no prompt) and every local: template it references exists in-tree (learnings 2026-07-23 blank-agent trap); durable default_system_seeded flag gating (deleted fleet never resurrected); persisted first_run_fresh verdict — computed once BEFORE Cornelius runs, persisted, reused on later passes (cross-pass count-poisoning bug), cornelius_seeded=true forces not-fresh (ent#107-era installs get no fleet), count failure defers without persisting; TRINITY_DEFAULT_SYSTEM_MANIFEST disable sentinels skip without burning the flag; override path used when set, unreadable override fails loudly (operator-queue alert, no bundled fallback, no flag); flag policy per deploy outcome: deployed/partial set flag (+partial alert), failed (0 created)/exception do NOT (retry-safe); existence backstop converges the flag without deploying when any {system}-{short} name is reserved (suffix double-seed guard for the fail-open lock); SETNX lock held->skip / winner deploys+releases; orchestrator never raises when Cornelius explodes. db/docker/redis/deploy_manifest seams patched; no Docker/backend."
     },
     {
+      "file": "unit/test_3254_housekeeping_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 (S5): the boot housekeeping alarms report through the #3246 platform alert seam, asserted as rows on a fresh database per test (db_harness). First-run seed: kind system_seed, one pending row per seed kind (failed, error, override-unreadable, partial, cornelius-failed) on trinity-system, updated in place (subject, seen_count, last_seen_at, 30-day deadline moved); a deployed/partial deploy or an existence-backstop converge ends failed/error/override-unreadable as the platform, only a complete fleet ends partial; a Cornelius created/already_exists ends cornelius-failed while every skip, create_* failure, missing result or raise does not; an inconclusive seed pass ends nothing. ent#615 token sweep: git_token_scrub_refused / git_token_scrub_unreadable, one row per agent, ended only by a successful sweep that read ROOT's repository (root_readable); zero refusals without that evidence end neither, including no repository at ROOT, which is also what a fallback ROOT reads. A person's acknowledgement through ask_service.answer stands and snoozes the next reading. Other shape: a fresh install whose first boot's seed fails files one row and the next boot's seed ends it. R1 key parity with the upgrade sweep's legacy parsers for all three kinds, including agent names that collide with the nested -unreadable- prefix (unreadable, unreadable-…), whose legacy refusal rows the parser tells apart by context, and the sweep then ends such a row beside the seam row. A missing Cornelius result ends nothing. No Docker, no Redis (exec, deploy and Cornelius stubbed)."
+    },
+    {
       "file": "unit/test_1809_image_drift_recreate.py",
       "feature": "#1809",
       "added": "2026-07-27",
@@ -3410,7 +3432,20 @@
         "reliability",
         "operator-queue"
       ],
-      "description": "#1834 refusal-alarm retry: a failed `create_operator_queue_item` is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning 'did not raise' under ON CONFLICT DO NOTHING; two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Doubles only, no backend."
+      "description": "#1834 refusal-alarm retry: a failed alarm write (since #3254 an `observe` that returns `failed`) is re-attempted every cycle for the life of the refusal episode (the memo used to be written before the attempt, permanently suppressing its own retry). Covers the retry through two REAL `_run_cleanup_inner` cycles (the issue's literal claim is 'no later CYCLE retries it'); never-give-up + escalate-exactly-once, with the budget read from `ALARM_ESCALATION_AGE_SECONDS` rather than hard-coded and the clock driven via the injectable `_RG._clock`; the transition ERROR still firing once per episode while retrying; freshness keyed on (window, REASON) so #1833's new signal is not swallowed; delivery meaning a delivered `platform_alerts.observe` outcome (created / updated / snoozed), never 'rows inserted' (#3254); two-worker convergence on one alarm; and both directions of the #1644 invariant that the queue item authorizes nothing. Since #3254 the alarm is written through the platform-alert seam on a real SQLite database of this file's own, with the fault injection and the attempt count at the seam's create; a delivered alarm is re-read once per refresh period (R9), not never."
+    },
+    {
+      "file": "unit/test_3254_retention_alert.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "unit",
+        "retention",
+        "reliability",
+        "operator-queue"
+      ],
+      "description": "#3254 (part 2 of #3246), the retention guard's refusal alarm on the platform-alert seam, against the unit island's real SQLite: the alarm is one row with subject `retention_refused:<setting>`, a second reading bumps `seen_count` and moves `last_seen_at` and the default-lifetime `expires_at`, and an allowed sweep through the real `_guard_allows` ends it as the platform (also after a restart, with nothing raised it writes nothing). The #1834 contract on the seam's outcomes: a `failed` reading is not delivery and is retried every cycle with one escalation; a `refused_unregistered` reading is not delivery either. R9: a delivered refusal is re-read once per `ALARM_REFRESH_SECONDS`, a failed refresh is retried next cycle with one WARNING and never the undelivered-alarm escalation, and the period is well inside the lifetime. A reason change rewrites the one row in both directions. After a person's ending through `ask_service.answer`, the same window snoozes (and that snoozed refresh is delivery, not retried every cycle), a different window files a fresh row, and the snooze is bounded; after a restart, a snoozed first reading is delivery too, with no false escalation. R1 legacy-id parity. Other shape, the clock 30 days ahead: a prune refused every 5-minute cycle for 30 simulated days keeps one pending row with a forward-moving deadline while the real expiry sweep runs."
     },
     {
       "file": "unit/test_2127_background_task_gate.py",
@@ -6527,6 +6562,18 @@
       "description": "The split guard (tests/module_split_guard.py, wired into tests/unit/conftest.py): a test that evicts pkg.mod from sys.modules and re-imports it leaves the PARENT PACKAGE ATTRIBUTE on the fresh copy while monkeypatch.delitem / patch.dict / a snapshot restore puts only the sys.modules entry back, so later tests patch one copy while code reads the other (#3272's 40 failures). Covers the rules on private module tables (only a split whose entry is still the pre-test module is healed, and back to the attribute's pre-test value; a replaced entry or a split on a module born in the test is reported once its file's fixtures have finished, never healed; collection-time splits are left alone, since healing them toward a test file's private copy broke ent692; stubs, Mock(spec=module) and the alembic.util-style same-name module are not splits; a lazy parent is read without its __getattribute__), unbind() and the conftest's own _POP_PREFIXES pops dropping the stale package binding, evict() through the real import system (both halves restored; a package takes its loaded submodules, #2859), and the wiring end to end: _split_guard_sample.py and _split_guard_sample_scoped.py run in a subprocess under the real conftest (victim passes, a module-scoped copy restored at file end fails nothing, a copy left in sys.modules errors at teardown) and with TRINITY_SPLIT_GUARD=off (the same victim fails on SPLIT-SENTINEL)."
     },
     {
+      "file": "unit/test_3298_stale_claim_reclaim.py",
+      "feature": "#3298",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "idempotency",
+        "unit"
+      ],
+      "description": "An in_flight idempotency claim left by a dead process, on real SQLite. Store: a claim returns its owner token and a duplicate sees the holder's; after a reclaim the original's late attach/complete/release changes nothing and the owner's own writes still land; a stale-token or completed-row reclaim matches nothing; a pre-#3298 token-less claim is still reclaimable. Admission through the real begin_task_idempotency/_reclaim_stale_claim: inside the lease (timeout + slot buffer) a retry is still 409; past it a claim with no run or an ended run is reclaimed and the retry dispatches; a running or succeeded run keeps its claim; the lease follows the agent's timeout; an unreadable timeout and a sched: key hold; two racing retries start one run; the slow original cannot complete over the reclaimer. Eleven of the seventeen fail on the pre-fix code."
+    },
+    {
       "file": "unit/test_3651_recovery_companion_close.py",
       "feature": "#3651",
       "added": "2026-10-22",
@@ -6684,6 +6731,30 @@
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
     },
     {
+      "file": "unit/test_3984_3849_not_a_credential_failure.py",
+      "feature": "#3984, #3849",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "agent",
+        "subscriptions",
+        "unit"
+      ],
+      "description": "Two agent failures no credential can fix never drive SUB-003. The agent's turn-limit 422 at caps 401 and 403 (CLI text and fallback, through the real _finalize_headless_result) no longer trips the bare 401/403 auth indicators; the API's 'Prompt is too long' 503 (current and pre-#3340 images) is not auth. classify_switch_failure returns None for both; execute_task calls the agent once with no walk, no legacy switch, no key fallback and no AUTH code; /chat never switches and codes agent_error; the pull terminal and #1083 callback do not count a prompt-length 503 as auth (the pull sink recodes a worker's `auth` prompt-length/model-rejection terminal to agent_error/model_unsupported, so the AUTH dispatch breaker never sees it and the row is not stored as [auth]); the TES path pins the exact error_code per row (max_turns for the 422s per #3988, agent_error for the 503s). Genuine auth (503, 401/403, auth text) and 429 keep their classification; the turn-limit marker is pinned to the agent's source and the scheduler mirror carries both lists. Mutations: dropping the call-site guards turns 8 red; dropping the turn-limit exclusion in is_auth_failure turns 7 red."
+    },
+    {
+      "file": "unit/test_3988_turn_limit_status.py",
+      "feature": "#3988",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "agent",
+        "executions",
+        "unit"
+      ],
+      "description": "A turn-limit failure reaches a sync /task caller as 422 with X-Trinity-Error-Code: max_turns, not 503 'agent may be unavailable'. MAX_TURNS is a TaskExecutionErrorCode (envelope contract §4); the pull worker's real failed body round-trips through the sink's [max_turns] row prefix; the #1083 callback maps terminal_reason max_turns to the code; execute_task codes the real agent 422 at caps 2 and 401 with no switch, for both the guardrail and the per-task (#2328) remedy wording (also through _map_task_failure), while a FastAPI-validation 422 (list detail, which used to crash the except-handler) stays uncoded. _map_task_failure answers 422 for the code even when the CLI text says 'timed out' or 'at capacity', and timeout/capacity/model/auth/uncoded failures keep 504/429/400/503/503. Mutations: each of the push branch, the 422 branch, the callback mapping, the list-detail fix and the shape check turns 1-4 tests red."
+    },
+    {
       "file": "unit/test_ent875_viewer_tier.py",
       "feature": "trinity-enterprise#875",
       "added": "2026-10-16",
@@ -6817,6 +6888,17 @@
       "description": "PUT /api/users/me/password through the real users router on real SQLite: success swaps the hash and returns a fresh token, the old session is refused at resolve_platform_user_unfloored and the fresh one kept, wrong current password 400 + its own pwchange bucket capped at 429, weak 422 with reasons, unchanged 422, an email-only account 409 never gains a password, a legacy plaintext hash 409, user/agent/system keys 403, no password in audit details, Redis down still changes and reports sessions not signed out. Boot on the raw SQLite cursor and the engine arm: an in-app change survives a restart, a new ADMIN_PASSWORD wins, an in-sync upgrade only gains a fingerprint, drift with no fingerprint re-applies as before, blank env writes nothing, padded ADMIN_USERNAME, corrupt/other-user fingerprints are absent. The env_apply_decision table. The fingerprint is omitted from GET /api/settings, absent on GET /{key}, refused on PUT/DELETE. Mutations: dropping the ENV_SKIP branch turns 4 boot tests red; dropping the cutoff check in resolve_platform_user_unfloored turns the auth-door test red. API keys: revoke_api_keys revokes the caller's user/ops keys and never an agent key or another admin's key; without it the keys stay and are counted; a refused change revokes nothing (scope-filter mutation turns 2 red). The voice socket refuses a signed-out token."
     },
     {
+      "file": "unit/test_3380_recovered_chat_reply.py",
+      "feature": "#3380",
+      "added": "2026-10-23",
+      "categories": [
+        "backend",
+        "reliability",
+        "unit"
+      ],
+      "description": "A watchdog-claimed /chat turn writes its reply into the chat thread, on real SQLite: schedule_executions.chat_session_id round-trips and the real prepare_chat_execution stamps the thread it logs the user message into; through the real cleanup_service._claim_retained_result (apply_result stood in by a CAS on the real row) a won SUCCESS writes exactly one assistant message equal to the persisted response (recovered notice included, cost carried); a lost CAS, a FAILED terminal, a row with no thread and a thread of another agent write nothing; a failing message write never unclaims the turn; the notice no longer says the thread may lack the reply. Mutation: dropping the reply write or the stamp turns one test red each."
+    },
+    {
       "file": "unit/test_ent830_idempotency_caller_scope.py",
       "feature": "trinity-enterprise#830",
       "added": "2026-10-23",
@@ -6883,7 +6965,7 @@
         "guardrails",
         "security"
       ],
-      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. Pins as CURRENT behaviour (known exposure, backend follow-up) that a turn-limit 422 at a cap of 401/403, per-task or guardrail, reads as auth on push through the real classify_switch_failure."
+      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. A turn-limit 422 at a cap of 401/403, per-task or guardrail, is a turn limit and not auth on push: is_turn_limit holds, is_auth_failure does not, and the real classify_switch_failure returns None (#3984, the inverse of the former known-exposure pin)."
     },
     {
       "file": "unit/test_3966_pre_check_schedule_context.py",
@@ -6895,6 +6977,38 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_4072_inbox_notice_wording.py",
+      "feature": "#4072",
+      "added": "2026-10-29",
+      "categories": [
+        "workspace",
+        "unit"
+      ],
+      "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "unit/test_ent529_follow_bundled_pin.py",
+      "feature": "trinity-enterprise#529",
+      "added": "2026-10-29",
+      "categories": [
+        "backend",
+        "unit",
+        "migration"
+      ],
+      "description": "The untouched seeded default skills source follows the platform's bundled pin on upgrade. Driven through skill_service.follow_bundled_pin with the real platform_audit_service building the audit row: an untouched seed behind the pin moves forward through the shared retarget reset (sha/status/error cleared, followed_from_ref/followed_at set, marker kept) with exactly one system audit row; the owner's AC2 ruling 'where it points decides' - a url/ref/ref_type change through PUT or apply (the MCP door) opts out for good, each door built so only the marker can stop the follow (url and ref_type go away and back); rename/priority never opt out; disable pauses and re-enable resumes; forward only on strict vX.Y.Z (downgrade, equal, branch, -rc1, mixed v/no-v, empty never move; v0.10.0 beats v0.9.0); another configured catalog or an empty env never moves; a lost CAS writes no audit row; a UNIQUE(url, ref) clash is a no-op. Seed: cursor and engine seeds mark the built-in URL, a fork seed does not. AC4 over a file:// upstream with ANNOTATED tags (#2550), both the update path and the lost-checkout clone path: the next sync is not refused as moved_tag and counts as a moved commit, and run_cycle re-injects with the new commit. The in-flight race both plan reviewers found: a sync admitted at the old tag that finishes after the follow must not stamp the old commit (record_sync scoped to the synced url/ref/ref_type). Backfill through the real SQLite migration on a pre-529 table: untouched seeds on every historical pin marked, toggles/renames in the audit do not opt out, audited retargets (PUT changed / apply named) and off-history/branch/fork/custom rows stay off, idempotent, and a fresh install records the migration on the second pass. Boot wiring pinned by AST: the follow is awaited before skills_sync_service.start(). Mutation-proved: dropping the marker clear (4 red), the follow reset (5), the sync scoping (1), the boot hook (1), the seed marker (14), the forward check (1) or the backfill audit filter (4). Review round on PR #4091: each of the seven compare-and-set conditions is pinned by a direct refusal test (mutation-proved one at a time); the per-source Sync route starts the fleet re-inject like Sync all, both routes driven after a real follow (automatic re-inject on, off, and an unmoved commit); and update_source re-decides an edit that lands across the follow (a stale save of the old ref is a retarget, a rename keeps the follow). Reviewer finding on PR #4091: a PUT that names url, ref or ref_type ends following even when the value is unchanged (the documented way to hold the current tag), while the moved-tag baseline survives that save and a declarative apply that only re-states the ref keeps following."
+    },
+    {
+      "file": "unit/test_ent986_gemini_usage_statistics.py",
+      "feature": "trinity-enterprise#986",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "git"
+      ],
+      "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
     }
   ]
 }

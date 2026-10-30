@@ -420,7 +420,7 @@ def test_two_different_messages_in_one_execution_produce_two_outbound_calls(monk
     monkeypatch.setattr(idem.db, "idempotency_claim", _claim, raising=False)
     monkeypatch.setattr(
         idem.db, "idempotency_complete",
-        lambda scope, key, execution_id, snapshot: store.__setitem__(key, snapshot),
+        lambda scope, key, execution_id, snapshot, **_: store.__setitem__(key, snapshot),
         raising=False,
     )
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
@@ -468,7 +468,7 @@ def test_the_same_label_within_one_execution_replays_without_a_second_call(monke
     monkeypatch.setattr(idem.db, "idempotency_claim", _claim, raising=False)
     monkeypatch.setattr(
         idem.db, "idempotency_complete",
-        lambda scope, key, execution_id, snapshot: store.__setitem__(key, snapshot),
+        lambda scope, key, execution_id, snapshot, **_: store.__setitem__(key, snapshot),
         raising=False,
     )
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
@@ -553,7 +553,7 @@ def test_a_failed_call_releases_the_claim_so_a_retry_is_possible(monkeypatch, en
     monkeypatch.setattr(idem.db, "idempotency_claim",
                         lambda scope, key: {"state": "new"}, raising=False)
     monkeypatch.setattr(idem.db, "idempotency_release",
-                        lambda scope, key: released.append(key), raising=False)
+                        lambda scope, key, **_: released.append(key), raising=False)
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
                         lambda eid, agent: {"id": eid} if eid else None)
 
@@ -1279,7 +1279,7 @@ def test_a_402_releases_the_claim_and_is_never_snapshotted(monkeypatch, endpoint
     monkeypatch.setattr(idem.db, "idempotency_claim",
                         lambda scope, key: {"state": "new"}, raising=False)
     monkeypatch.setattr(idem.db, "idempotency_release",
-                        lambda scope, key: released.append(key), raising=False)
+                        lambda scope, key, **_: released.append(key), raising=False)
     monkeypatch.setattr(idem.db, "idempotency_complete",
                         lambda *a, **k: completed.append(a), raising=False)
     monkeypatch.setattr(idem, "resolve_and_validate_execution",

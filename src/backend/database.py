@@ -458,11 +458,12 @@ _DEFAULT_SOURCE_SEED_NOTE = (
 def _default_skill_source_values():
     """The seed row, or None when seeding is disabled/misconfigured."""
     from config import (
+        BUNDLED_SKILL_SOURCE_URL,
         DEFAULT_SKILL_SOURCE_NAME,
         DEFAULT_SKILL_SOURCE_REF,
         DEFAULT_SKILL_SOURCE_URL,
     )
-    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY, SEED_CREATED_BY
 
     url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
     ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
@@ -479,7 +480,10 @@ def _default_skill_source_values():
         "enabled": 1,
         "priority": DEFAULT_SOURCE_PRIORITY,
         "last_sync_status": "never",
-        "created_by": "seed:ent237",
+        "created_by": SEED_CREATED_BY,
+        # trinity-enterprise#529: the built-in catalog follows the platform's
+        # pin on upgrade; a seed pointed at a fork does not.
+        "follows_bundled_pin": 1 if url == BUNDLED_SKILL_SOURCE_URL else 0,
     }
 
 
@@ -511,13 +515,14 @@ def _seed_fresh_install_skill_source(cursor, conn):
         cursor.execute(
             "INSERT OR IGNORE INTO skill_sources "
             "(id, name, url, ref, ref_type, is_default, enabled, priority, "
-            " last_sync_status, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " last_sync_status, created_by, follows_bundled_pin, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 values["id"], values["name"], values["url"], values["ref"],
                 values["ref_type"], values["is_default"], values["enabled"],
                 values["priority"], values["last_sync_status"],
-                values["created_by"], now, now,
+                values["created_by"], values["follows_bundled_pin"], now, now,
             ),
         )
         conn.commit()
@@ -1940,6 +1945,14 @@ class DatabaseManager:
         """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
         return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
 
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """#3380 — name the /chat thread this turn answers."""
+        return self._schedule_ops.set_execution_chat_session(execution_id, chat_session_id)
+
+    def get_execution_chat_session_id(self, execution_id: str):
+        """#3380 — the /chat thread a turn answers, or None."""
+        return self._schedule_ops.get_execution_chat_session_id(execution_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -3052,6 +3065,9 @@ class DatabaseManager:
 
     def update_skill_source(self, source_id: str, **fields):
         return self._skill_sources_ops.update_source(source_id, **fields)
+
+    def follow_skill_source_pin(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.follow_bundled_pin(source_id, **kwargs)
 
     def delete_skill_source(self, source_id: str):
         return self._skill_sources_ops.delete_source(source_id)
@@ -4440,6 +4456,10 @@ class DatabaseManager:
             agent_name, day_start_iso, limit
         )
 
+    def metric_point_usage(self, agent_name: str, metric: str, limit: int):
+        """`(count to limit, newest ts)` for one metric — the retire check (ent#1006)."""
+        return self._metric_point_ops.point_usage(agent_name, metric, limit)
+
     def latest_metric_points(
         self, agent_name: str, metric_names, per_metric_limit: int = 200
     ):
@@ -4497,17 +4517,21 @@ class DatabaseManager:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
-    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
-        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+        return self._idempotency_ops.attach_execution(scope, key, execution_id, claim_token=claim_token)
 
-    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot, *, claim_token=None) -> None:
         """Mark an idempotency claim completed and store the replay snapshot."""
-        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot, claim_token=claim_token)
 
-    def idempotency_release(self, scope: str, key: str) -> None:
+    def idempotency_release(self, scope: str, key: str, *, claim_token=None) -> None:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
-        return self._idempotency_ops.release(scope, key)
+        return self._idempotency_ops.release(scope, key, claim_token=claim_token)
+
+    def idempotency_reclaim_in_flight(self, scope: str, key: str, claim_token) -> bool:
+        """Compare-and-delete a stale in_flight claim still owned by claim_token (#3298)."""
+        return self._idempotency_ops.reclaim_in_flight(scope, key, claim_token)
 
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
