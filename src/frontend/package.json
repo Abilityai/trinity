@@ -21,35 +21,35 @@
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^5.5.0",
     "axios": "^1.20.0",
-    "chart.js": "^4.4.7",
+    "chart.js": "^4.6.1",
     "dompurify": "^3.4.11",
-    "js-yaml": "^5.4.3",
-    "marked": "^18.1.0",
-    "mermaid": "^12.1.0",
+    "js-yaml": "^5.5.0",
+    "marked": "^18.1.1",
+    "mermaid": "^12.2.0",
     "monaco-editor": "^0.57.0",
-    "pinia": "^4.0.3",
+    "pinia": "^4.1.0",
     "qrcode": "^1.5.4",
     "uplot": "^1.6.32",
-    "vue": "^3.5.43",
+    "vue": "^3.5.44",
     "vue-chartjs": "^5.3.4",
     "vue-router": "^5.4.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.64.0",
+    "@playwright/test": "^1.64.1",
     "@tailwindcss/typography": "^0.5.20",
     "@types/js-yaml": "^4.0.9",
     "@vitejs/plugin-vue": "^6.0.10",
     "@vue/test-utils": "^2.5.1",
     "autoprefixer": "^10.6.1",
     "jsdom": "^29.1.1",
-    "postcss": "^8.5.29",
+    "postcss": "^8.5.31",
     "tailwindcss": "^3.4.19",
-    "vite": "^8.3.4",
-    "vitest": "^5.0.3"
+    "vite": "^8.3.5",
+    "vitest": "^5.0.5"
   },
   "optionalDependencies": {
-    "@rollup/rollup-darwin-arm64": "^4.64.5",
-    "@rollup/rollup-linux-arm64-musl": "^4.64.5"
+    "@rollup/rollup-darwin-arm64": "^4.65.0",
+    "@rollup/rollup-linux-arm64-musl": "^4.65.0"
   },
   "overrides": {
     "dompurify": "^3.4.11"
