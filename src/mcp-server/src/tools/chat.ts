@@ -1098,6 +1098,25 @@ export function createChatTools(
 
         console.log(`[Fan-Out] ${sourceAgent || "user"} -> ${agent_name}: ${tasks.length} tasks (concurrency=${max_concurrency || 3})`);
 
+        // #3944 (the #3296 rule, for fan_out): the turn this fan-out is made
+        // from is part of its identity. The same batch from a LATER turn is new
+        // work that must run; only a repeat from the same turn (a transport
+        // retry) may replay. The turn is the PLATFORM-stamped one (#2392), read
+        // from the session as `chat_with_agent` reads it, and scoped to the
+        // retry chain's original execution so a scheduler retry replays
+        // attempt 1's batch instead of dispatching it again. No turn → nothing
+        // appended, so the key is byte-identical to before.
+        const session = context?.session as McpAuthContext | undefined;
+        const callerTurn =
+          session?.executionId && session.executionId !== MANUAL_EXECUTION_ID
+            ? session.executionId
+            : undefined;
+        const turnScope = await delegationTurnScope(
+          apiClient,
+          session?.scope === "agent" ? session.agentName : undefined,
+          callerTurn,
+        );
+
         // RELIABILITY-006 (#525): deterministic key over the whole fan-out so a
         // transport retry replays the original batch instead of re-dispatching.
         const idempotencyKey = deriveMcpIdempotencyKey([
@@ -1109,6 +1128,7 @@ export function createChatTools(
           // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
           // a sync call with the same tasks must not share its key.
           ...(async_mode ? ["async"] : []),
+          ...(turnScope ? [`turn:${turnScope}`] : []),
         ]);
 
         const response = await apiClient.fanOut(

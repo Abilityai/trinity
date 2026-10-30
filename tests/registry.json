@@ -6952,6 +6952,16 @@
         "unit"
       ],
       "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "../src/mcp-server/src/fan_out_turn_scope.test.ts",
+      "feature": "#3944",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "fan_out's Idempotency-Key is scoped to the caller's turn (the #3296 rule): same tasks from the same turn keep one key; from a different turn a different key; a scheduler retry derives attempt 1's key (delegationTurnScope); no turn (absent or manual) is byte-identical to the pre-#3944 key and reads no execution row; async mode keeps its own key with the turn appended; an unreadable row scopes to the turn and the call still goes out. Reverting the fix turns 4 of the 6 red."
     }
   ]
 }
