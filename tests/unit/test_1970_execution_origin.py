@@ -114,9 +114,15 @@ def _seed(db_path: Path) -> None:
             source_agent_name TEXT,
             source_mcp_key_id TEXT,
             source_mcp_key_name TEXT,
-            chain_depth INTEGER
+            chain_depth INTEGER,
+            subscription_id TEXT  -- #4085: snapshotted on every insert
         )
         """
+    )
+    conn.execute(
+        # #4085: create_execution snapshots the agent's subscription from here.
+        "CREATE TABLE agent_ownership (agent_name TEXT PRIMARY KEY, "
+        "subscription_id TEXT, deleted_at TEXT)"
     )
     conn.commit()
     conn.close()

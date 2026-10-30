@@ -395,25 +395,40 @@ async def sync_library(admin_user: User = Depends(require_admin)):
             detail=result.get("error", "Sync failed")
         )
 
-    fleet_spawned = False
-    if result.get("commit_changed"):
-        from services.settings_service import is_skills_auto_reinject_enabled
-        from services.skills_sync_service import skills_sync_service
-
-        if is_skills_auto_reinject_enabled():
-            # Strong ref so the task isn't garbage-collected mid-flight
-            # (the #1083 `_inflight` footgun).
-            task = asyncio.create_task(
-                skills_sync_service.run_fleet_reinject(
-                    commit_sha=result.get("commit_sha"), trigger="manual_sync"
-                )
-            )
-            _BACKGROUND_SWEEPS.add(task)
-            task.add_done_callback(_BACKGROUND_SWEEPS.discard)
-            fleet_spawned = True
-
-    result["fleet_reinject_started"] = fleet_spawned
+    result["fleet_reinject_started"] = _start_fleet_reinject_if_moved(
+        result, trigger="manual_sync"
+    )
     return result
+
+
+def _start_fleet_reinject_if_moved(result: dict, trigger: str) -> bool:
+    """Spawn the ent#236 fleet re-inject when a manual sync moved the library
+    commit and automatic re-inject is on. Returns whether it was started.
+
+    Shared by BOTH manual sync routes (trinity-enterprise#529). The per-source
+    route used to skip this, yet it records the new commit just the same, so
+    its sync spent the moved-commit signal: the next full sync or scheduled
+    cycle compared against that commit, saw nothing to propagate, and running
+    agents kept the previous tag's skills until they restarted. After a boot
+    follow of the bundled pin, that row's own Sync button is the likely click.
+    """
+    if not result.get("commit_changed"):
+        return False
+    from services.settings_service import is_skills_auto_reinject_enabled
+    from services.skills_sync_service import skills_sync_service
+
+    if not is_skills_auto_reinject_enabled():
+        return False
+    # Strong ref so the task isn't garbage-collected mid-flight
+    # (the #1083 `_inflight` footgun).
+    task = asyncio.create_task(
+        skills_sync_service.run_fleet_reinject(
+            commit_sha=result.get("commit_sha"), trigger=trigger
+        )
+    )
+    _BACKGROUND_SWEEPS.add(task)
+    task.add_done_callback(_BACKGROUND_SWEEPS.discard)
+    return True
 
 
 # ============================================================================
@@ -1250,7 +1265,10 @@ async def sync_skill_source(
     """Sync ONE source, leaving the others untouched.
 
     Human-only for the same reason as the full sweep above — this reaches the
-    same clone-and-re-inject machinery, just scoped to one source.
+    same clone-and-re-inject machinery, just scoped to one source: when the
+    source's commit moved and automatic re-inject is on, the fleet re-inject
+    starts in the background exactly as for the full sweep
+    (`_start_fleet_reinject_if_moved`, trinity-enterprise#529).
     """
     reject_agent_principal(admin_user)
 
@@ -1272,4 +1290,7 @@ async def sync_skill_source(
             status_code=409 if result.get("busy") else 400,
             detail=result.get("error", "Sync failed"),
         )
+    result["fleet_reinject_started"] = _start_fleet_reinject_if_moved(
+        result, trigger="manual_source_sync"
+    )
     return result

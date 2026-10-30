@@ -1423,11 +1423,12 @@ def _finalize_headless_result(
             # #2328: the caller's own tighter cap stopped the turn — raising the
             # guardrail would not have helped, so do not advise it. This wording
             # adds no number: the backend substring-matches the detail for
-            # "401"/"403" (failure_classifier.AUTH_INDICATORS). That does NOT make
-            # the 422 classifier-safe — error_msg is the CLI's own text and carries
-            # the turn count, so a cap of 401 or 403 (per-task or guardrail) still
-            # reads as an auth failure on push. The fix belongs in the backend
-            # classifier, which should never read a turn-limit 422 as auth.
+            # "401"/"403" (failure_classifier.AUTH_INDICATORS). error_msg is the
+            # CLI's own text and carries the turn count, so a cap of 401 or 403
+            # puts that number in the detail anyway; the backend classifier keys
+            # on this 422's "Task exceeded turn limit:" prefix
+            # (failure_classifier.is_turn_limit, #3984) and never reads it as auth.
+            # Keep that prefix on every wording.
             remedy = (
                 "The caller's per-task max_turns stopped this task, "
                 "below the agent's max_turns_task guardrail. Send a larger per-task max_turns "
