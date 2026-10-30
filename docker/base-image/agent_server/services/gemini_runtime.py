@@ -24,6 +24,7 @@ from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .execution_env import build_execution_env
+from .subprocess_lifecycle import _capture_pgid
 from .gemini_cli_args import (
     RESUME_MISSING_MARKER,
     build_chat_argv,
@@ -307,7 +308,14 @@ class GeminiRuntime(AgentRuntime):
                 text=True,
                 bufsize=1,  # Line buffered
                 env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
+                # #4064: lead its own process group, like Claude/Codex. Without
+                # it the child shared the agent server's group, and a terminate
+                # resolved its pgid to the server's own (the container's PID-1
+                # shell group), so a cancel could stop the whole container.
+                start_new_session=True,
             )
+            # #4064: capture now; after wait() reaps the child the pid is gone.
+            process_pgid = _capture_pgid(process)
             # #2433: Gemini never registered with the process registry, so every
             # Gemini turn longer than the watchdog's 60s grace was false-orphaned
             # by the backend (absent from /api/executions/running), and a cancel
@@ -316,7 +324,7 @@ class GeminiRuntime(AgentRuntime):
             # `finally` around the reader below.
             _registered_id = execution_id
             get_process_registry().register(
-                _registered_id, process, metadata={"type": "chat", "runtime": "gemini"}
+                _registered_id, process, metadata={"type": "chat", "runtime": "gemini", "pgid": process_pgid}
             )
 
             # Write prompt to stdin and close it.
@@ -334,10 +342,10 @@ class GeminiRuntime(AgentRuntime):
             except BaseException:
                 # #3408: since #3307 `unregister()` keeps a live child, so a
                 # write that fails while the child lives must end it first (no
-                # reader yet, stdin still open). PID ONLY: a Gemini child shares
-                # the agent server's process group (no start_new_session), so a
-                # group kill would signal the server itself. Off the event loop;
-                # `loop` is assigned only below.
+                # reader yet, stdin still open). The pid, not the group: since
+                # #4064 the child leads its own group, but the post-turn cgroup
+                # sweep already reaps descendants, so this path stays as #3408
+                # shaped it. Off the event loop; `loop` is assigned only below.
                 # Best-effort and logged, never raised: the caller must see the
                 # handoff error, and the pipes close even if the kill fails.
                 def _abort_handoff():
@@ -834,14 +842,16 @@ class GeminiRuntime(AgentRuntime):
                 text=True,
                 bufsize=1,
                 env=build_execution_env({EXECUTION_TAG_NAME: session_id}),
+                start_new_session=True,  # #4064: see the chat path above
             )
+            process_pgid = _capture_pgid(process)
             # #2433: register under the backend's execution id (`session_id` IS
             # `execution_id` when the backend supplied one) so the watchdog's
             # proof-of-life sees the run and a cancel-while-pending is consumed
             # at spawn. See the chat path above.
             _registered_id = session_id
             get_process_registry().register(
-                _registered_id, process, metadata={"type": "task", "runtime": "gemini"}
+                _registered_id, process, metadata={"type": "task", "runtime": "gemini", "pgid": process_pgid}
             )
 
             # Write prompt to stdin and close it.
@@ -857,8 +867,7 @@ class GeminiRuntime(AgentRuntime):
                 process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
-                # #3408: as on the chat path above. PID ONLY, never the group:
-                # it is the agent server's own.
+                # #3408: as on the chat path above: the pid, not the group.
                 def _abort_handoff():
                     try:
                         process.kill()
@@ -912,9 +921,9 @@ class GeminiRuntime(AgentRuntime):
                     # (the inner timeout and any per-line error). The waiter's
                     # `finally: unregister()` keeps a live child (#3307), so a
                     # raise with the child alive left its entry registered with
-                    # nothing to release it. Pid only: a Gemini child shares the
-                    # agent server's process group, so a group signal would hit
-                    # the server. An exit not observed keeps the entry, truthfully.
+                    # nothing to release it. The pid, as on the handoff path (the
+                    # cgroup sweep reaps descendants). An exit not observed keeps
+                    # the entry, truthfully.
                     try:
                         process.kill()
                         process.wait(timeout=2)

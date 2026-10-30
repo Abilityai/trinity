@@ -2838,6 +2838,39 @@ class FileUpdateRequest(BaseModel):
     content: str
 
 
+class MetricStatusValueInput(BaseModel):
+    """One allowed value of a `status` metric, as the declaration form sends it."""
+    model_config = ConfigDict(extra="forbid")
+    value: Optional[str] = Field(None, max_length=200)
+    color: Optional[str] = Field(None, max_length=32)
+    label: Optional[str] = Field(None, max_length=400)
+
+
+class MetricDeclarationRequest(BaseModel):
+    """A metric declared or edited from the UI (trinity-enterprise#1006).
+
+    Becomes one `template.yaml` `metrics:` entry. Bounds here only stop absurd
+    payloads; the real rules are `template_metrics`' and come back as named,
+    per-field errors. `base_hash` is the template hash the editor read
+    returned: a write against a file that has changed since is refused.
+    """
+    model_config = ConfigDict(extra="forbid")
+    base_hash: str = Field(..., min_length=64, max_length=64)
+    name: str = Field(..., max_length=200)
+    type: str = Field(..., max_length=64)
+    label: Optional[str] = Field(None, max_length=400)
+    description: Optional[str] = Field(None, max_length=2000)
+    unit: Optional[str] = Field(None, max_length=100)
+    cadence: Optional[str] = Field(None, max_length=64)
+    direction: Optional[str] = Field(None, max_length=32)
+    aggregation: Optional[str] = Field(None, max_length=32)
+    values: Optional[List[MetricStatusValueInput]] = Field(None, max_length=100)
+    dimensions: Optional[List[str]] = Field(None, max_length=50)
+    warning_threshold: Optional[float] = None
+    critical_threshold: Optional[float] = None
+    recorded_by: Optional[str] = Field(None, max_length=200)
+
+
 class CreateFolderRequest(BaseModel):
     """Request body for folder creation."""
     path: str
