@@ -4297,6 +4297,11 @@ export class TrinityClient {
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 
+  /** trinity-enterprise#980: the steward proposes people and owners; the creator approves once. */
+  async proposeProjectChanges(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/proposals"), turn, body);
+  }
+
   // --- Role assignments (trinity-enterprise#500) ----------------------------
 
   /**

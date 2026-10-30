@@ -223,9 +223,12 @@ class TestTheMachineView:
         # trinity-enterprise#901: and `agent_ending`, the ending the agent
         # authored (replaced | withdrawn | None) — a derived enum, never a column
         # and never PII; the agent reads it on its own readback, not this view.
-        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate", "agent_ending"}
+        # trinity-enterprise#980: and `addressed`, who a platform-raised approval
+        # waits on and whether this person may decide it (None on any other row).
+        assert set(row) == MACHINE_ROW_KEYS | WITHHELD | {"decided_by_options", "gate", "agent_ending", "addressed"}
         assert row["gate"] is None
         assert row["agent_ending"] is None
+        assert row["addressed"] is None
         assert (row["responded_by_email"], row["responded_by_id"], row["addressed_to_email"],
                 row["disposed_by_email"], row["resolved_to"]) == (
             OP_EMAIL, "7", FOR_EMAIL, OP_EMAIL, [RESOLVED_EMAIL])
