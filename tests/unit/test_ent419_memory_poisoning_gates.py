@@ -923,7 +923,9 @@ def test_the_screen_is_bounded_on_adversarial_input(text):
     guard.prepare_write(text)
     guard.prepare_write(text, previous=text)
     guard.envelope(text, text)
-    assert time.perf_counter() - start < 2.0
+    # #4113: [0] NFKC-expands to 144k characters and costs up to 2.1s of linear
+    # work on the slowest CI runners. 10s still fails a quadratic screen there.
+    assert time.perf_counter() - start < 10.0
 
 
 @settings(max_examples=200, deadline=None)
