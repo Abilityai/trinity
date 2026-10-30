@@ -39,6 +39,8 @@ The button at the bottom of the sidebar signs out. For a platform user it is lab
 
 The main app and every Workspace tab in the same browser share one platform sign-in, and open tabs follow it. Sign out and back in on one tab, and a Workspace tab left open from the old session picks up the new one instead of ending it. Sign out on one tab, and the other tabs drop the session too, without a background tab jumping to the sign-in page. A client signed in with an email code is not sent to the operator sign-in page just because the same browser also holds an expired operator login.
 
+If your Trinity session ends while a Workspace tab is open (it expired, the backend restarted, or your password was changed somewhere else), the tab takes you to the Trinity sign-in page, and signing in brings you back to the chat you were on. If it ended because you signed out in another tab, the Workspace tab stays where it is and shows its sign-in form. **Have a Trinity account? Sign in** under the form takes you to the Trinity sign-in and back to the same page.
+
 ### The layout
 
 Three columns on a desktop screen: the **sidebar** on the left, the **conversation** in the middle, and a **side panel** on the right (the rail, or the agent's canvas during a voice call). The seam beside the sidebar, and the one beside the rail while it is open, are drag handles — drag to resize, double-click to reset. The conversation takes whatever is left, and the panel's maximum follows the viewport, so a width set on a large screen is clamped on a smaller one. On a phone the sidebar becomes a drawer behind the **Menu** button, and the rail becomes a strip above the composer that opens a bottom sheet.

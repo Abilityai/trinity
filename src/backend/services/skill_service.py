@@ -33,7 +33,7 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from database import db
 from services.settings_service import get_skills_library_url, get_skills_library_branch, get_github_pat
@@ -214,6 +214,45 @@ def _scrub_pat(text: str) -> str:
 RECONCILE_ALARM_AGENT_NAME = "_skills-sync"
 
 
+def skills_alarm_last_read_before(kind: str, key: str, since: str, *,
+                                  row_reached: Optional[Callable[[Dict[str, Any]], bool]] = None,
+                                  ) -> bool:
+    """True when the `_skills-sync` host holds a pending `<kind>:<key>` row
+    whose LAST reading is older than `since` (ISO-8601 UTC) — the only kind of
+    row a recovery observed from `since` on may end (#3254, R10). With
+    `row_reached`, the row must also pass it: the caller's evidence must cover
+    what the row reports (the fleet sweep's agents).
+
+    The two skills alarms are raised and cleared by passes that can overlap: a
+    reconcile pass on one agent (the start path, a fleet sweep's prune, the
+    route), and fleet sweeps (every library sync that moves the commit spawns
+    one). An older pass that finishes last must not end a condition a newer
+    pass reported after it started. So a caller passes its own start time and
+    clears only on True. False when there is no pending row (nothing to end),
+    when the row was read at or after `since`, or when anything here cannot be
+    read: unknown is never evidence. Never raises.
+
+    Residual: this read and the platform's end are two statements, so a newer
+    reading that lands between them is still ended. Closing that needs the
+    seam's own end to carry the condition.
+    """
+    from services import platform_alerts
+    from utils.helpers import parse_iso_timestamp
+
+    try:
+        subject = platform_alerts.subject_for(kind, key)
+        cutoff = parse_iso_timestamp(since)
+        # The same indexed one-row lookup `platform_alerts.clear` makes — never
+        # a page of the host's queue, which orders by priority before its limit
+        # and could leave this row off the page.
+        row = db.find_pending_operator_queue_by_subject(RECONCILE_ALARM_AGENT_NAME, subject)
+        return (row is not None and parse_iso_timestamp(row["last_seen_at"]) < cutoff
+                and (row_reached is None or bool(row_reached(row))))
+    except Exception as e:  # noqa: BLE001 — unreadable: leave the alarm standing
+        logger.warning(f"could not read the {kind} alarm; leaving it standing: {e}")
+        return False
+
+
 def _read_last_fleet_reinject() -> Optional[Dict[str, Any]]:
     """The persisted last fleet re-inject report, or None. Never raises.
 
@@ -344,6 +383,92 @@ def apply_skill_source(
     raise DuplicateSkillSource(
         "the source changed concurrently while it was being applied; retry"
     )
+
+
+def _synced_target(src) -> Dict[str, Any]:
+    """Where a sync went, so its outcome lands only if the row still points
+    there (`SkillSourcesOperations.record_sync`, trinity-enterprise#529)."""
+    return {"url": src.url, "ref": src.ref, "ref_type": src.ref_type}
+
+
+# trinity-enterprise#529: the bundled pin and a followed ref are release tags.
+# Strict on purpose: `v0.6.0-rc1` is not a release, and `0.6.0` names a
+# different tag than `v0.6.0`, so either side failing to match means no move.
+_RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+
+
+def _release_version(ref: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    match = _RELEASE_TAG.fullmatch((ref or "").strip())
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _follow_bundled_pin_row() -> Optional[Dict[str, str]]:
+    """The synchronous half of `follow_bundled_pin`: decide, then move."""
+    from config import DEFAULT_SKILL_SOURCE_REF, DEFAULT_SKILL_SOURCE_URL
+
+    url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
+    pin = (DEFAULT_SKILL_SOURCE_REF or "").strip()
+    src = db.get_default_skill_source()
+    if not url or src is None or not src.follows_bundled_pin or not src.enabled:
+        return None
+    # Exact equality, not `_same_skills_repo`: the seed stored this literal, any
+    # admin url edit has already ended following, and the normalizer resolves
+    # DNS — at boot, and failing closed on a split-DNS install.
+    if src.url != url:
+        return None
+    current, bundled = _release_version(src.ref), _release_version(pin)
+    if current is None or bundled is None or bundled <= current:
+        return None
+    if db.follow_skill_source_pin(src.id, from_ref=src.ref, to_ref=pin, url=url) is None:
+        return None
+    return {"source_id": src.id, "from_ref": src.ref, "to_ref": pin}
+
+
+async def follow_bundled_pin() -> Optional[Dict[str, str]]:
+    """Move the untouched seeded default source to a newer bundled pin
+    (trinity-enterprise#529). Runs once per backend worker at boot, before the
+    skills auto-sync loop starts. Never raises.
+
+    The seed (ent#237) picks the catalog once; the catalog's version stays the
+    platform's call for an instance that kept the default. So when
+    `DEFAULT_SKILL_SOURCE_REF` is newer than the row's tag and the row still
+    points where the seed put it (`follows_bundled_pin`), the ref moves —
+    forward only, through the same reset an admin ref edit uses, so the next
+    sync fetches the new tag as a moved commit and the ent#236 fleet re-inject
+    fires as for any other.
+
+    Returns `{source_id, from_ref, to_ref}` when THIS call moved the row, else
+    None. The move is a compare-and-set, so with several workers exactly one
+    wins, and only the winner writes the audit row. The audit write is
+    best-effort; the row's `followed_from_ref` / `followed_at` are the durable
+    record.
+    """
+    try:
+        moved = await asyncio.to_thread(_follow_bundled_pin_row)
+    except Exception:  # noqa: BLE001 — boot must not depend on this
+        logger.warning("could not follow the bundled skills pin", exc_info=True)
+        return None
+    if moved is None:
+        return None
+    logger.info(
+        "skills library: default source %s followed the bundled pin %s -> %s",
+        moved["source_id"], moved["from_ref"], moved["to_ref"],
+    )
+    try:
+        from services.platform_audit_service import (
+            platform_audit_service, AuditEventType,
+        )
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="skill_source_follow_bundled_pin",
+            source="system",
+            target_type="skill_source",
+            target_id=moved["source_id"],
+            details={"from_ref": moved["from_ref"], "to_ref": moved["to_ref"]},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return moved
 
 
 def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
@@ -725,7 +850,9 @@ class SkillService:
                     "source_id": src.id, "name": src.name,
                     "success": False, "error": msg,
                 })
-                db.record_skill_source_sync(src.id, success=False, error=msg)
+                db.record_skill_source_sync(
+                    src.id, success=False, error=msg, **_synced_target(src)
+                )
                 continue
 
             try:
@@ -742,7 +869,9 @@ class SkillService:
                     "source_id": src.id, "name": src.name,
                     "success": False, "error": msg,
                 })
-                db.record_skill_source_sync(src.id, success=False, error=msg)
+                db.record_skill_source_sync(
+                    src.id, success=False, error=msg, **_synced_target(src)
+                )
                 continue
 
             clone_url, source_pat = self._clone_target(url, github_pat)
@@ -767,6 +896,7 @@ class SkillService:
                 success=bool(outcome.get("success")),
                 commit_sha=outcome.get("commit_sha"),
                 error=outcome.get("error"),
+                **_synced_target(src),
             )
             entry = {"source_id": src.id, "name": src.name}
             entry.update(outcome)
@@ -1386,6 +1516,11 @@ class SkillService:
                 "last_sync_status": src.last_sync_status,
                 "commit_sha": src.last_commit_sha,
                 "last_error": src.last_error,
+                # trinity-enterprise#529: whether the boot follow still moves
+                # this row, and its latest move (the Settings → Library line).
+                "follows_bundled_pin": src.follows_bundled_pin,
+                "followed_from_ref": src.followed_from_ref,
+                "followed_at": src.followed_at.isoformat() if src.followed_at else None,
                 # Skills this source actually WINS — what the operator can use
                 # from it, which is the number that matters when two sources
                 # overlap. Its total shipped count is on the source detail.
@@ -1561,20 +1696,57 @@ print(json.dumps(out))
         everything". Names are re-validated backend-side before use: this list
         comes from the agent's own filesystem, i.e. untrusted input that later
         reaches path math.
+
+        An ABSENT skills directory is an empty inventory (nothing is managed),
+        and so is an entry or marker that is simply not there. Only an entry
+        whose NAME could be a platform skill (`SKILL_NAME_RE`) is inspected at
+        all; anything else (`.cache`, a stray symlink) can never be managed and
+        is skipped unstat'ed, as it always was. Anything that could not be
+        INSPECTED is a failure and the script prints ``null``: a directory that
+        cannot be listed, or a candidate entry or marker whose stat fails (a
+        skills dir that lists but cannot be searched, a child dir with no
+        permissions). The script used to print ``[]`` for a failed listing, and
+        `os.path.isdir`/`isfile` turn a failed stat into False, so an
+        uninspectable inventory read as smaller than it is. A clean or
+        reconciled pass ends the reconcile-refusal alarm (#3254, R10) and lets
+        the gate reconcile drop unassigned defaults (`drop_after_prune`), so
+        "could not look" must never read as "nothing there".
         """
         script = f"""
-import json, os
+import json, os, re, stat
 base = os.path.expanduser("~/.claude/skills")
 meta_name = {json.dumps(pkg.META_FILENAME)}
-out = []
-try:
-    for name in os.listdir(base):
+skill_name = re.compile({json.dumps(pkg.SKILL_NAME_RE.pattern)})
+
+def mode_of(path):
+    # None: not there. Raises: could not look.
+    try:
+        return os.stat(path).st_mode
+    except FileNotFoundError:
+        return None
+
+def inventory():
+    try:
+        names = os.listdir(base)
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        if not skill_name.match(name):
+            continue
         d = os.path.join(base, name)
-        if os.path.isdir(d) and os.path.isfile(os.path.join(d, meta_name)):
+        mode = mode_of(d)
+        if mode is None or not stat.S_ISDIR(mode):
+            continue
+        meta = mode_of(os.path.join(d, meta_name))
+        if meta is not None and stat.S_ISREG(meta):
             out.append(name)
+    return sorted(out)
+
+try:
+    print(json.dumps(inventory()))
 except Exception:
-    pass
-print(json.dumps(sorted(out)))
+    print("null")
 """
         result = await self._run_agent_python(agent_name, script)
         if not isinstance(result, list):
@@ -2571,6 +2743,9 @@ print(json.dumps(out))
         Never raises: reconciliation is best-effort cleanup and must not be able
         to fail an agent start.
         """
+        from utils.helpers import utc_now_iso
+
+        started_at = utc_now_iso()   # the refusal clear's evidence floor (#3254)
         try:
             if assigned_names is None:
                 assigned_names = db.get_agent_skill_names(agent_name)
@@ -2578,10 +2753,19 @@ print(json.dumps(out))
 
             managed = await self._list_managed_skills(agent_name)
             if managed is None:
+                # Not silent (#3254 fresh review): an inventory that cannot be
+                # taken (one skill-named entry that cannot be listed or stat'ed,
+                # or a failed probe) blocks every pass on this agent — no prune,
+                # no gate drop, no refusal clear — until it can be taken again.
+                logger.warning(
+                    f"skill reconcile skipped for {agent_name}: its skills inventory "
+                    f"could not be inspected; nothing is pruned and an open refusal "
+                    f"alarm stays")
                 return {"status": "skipped", "reason": "inventory_unavailable"}
 
             orphans = sorted(set(managed) - assigned)
             if not orphans:
+                self._clear_reconcile_refusal(agent_name, started_at)
                 return {"status": "clean", "removed": 0}
 
             cap = _reconcile_max_removals()
@@ -2602,6 +2786,7 @@ print(json.dumps(out))
             await self._audit_removal(
                 agent_name, orphans, result, trigger="reconcile"
             )
+            self._clear_reconcile_refusal(agent_name, started_at)
             return {
                 "status": "reconciled",
                 "removed": result.get("skills_removed", 0),
@@ -2624,7 +2809,22 @@ print(json.dumps(out))
         operator-visible state, and G-04's lesson is that the "show them what
         would be deleted" instinct is how that state starts carrying content it
         shouldn't. The names are already available via the skills API.
+
+        #3254: one platform condition per refused agent,
+        `skills_reconcile_refused:<agent>` on the `_skills-sync` host. A repeat
+        refusal (each start of that agent, whatever its orphan count) updates
+        the one pending row in place — latest count, seen count, last-seen
+        time — where the old `skills-reconcile-{agent}-{count}` id filed a new
+        row whenever the count moved. The clear is `_clear_reconcile_refusal`.
+        The kind's 30-day net lifetime is the fallback for a clear lost to a
+        crash, and it also ends a refusal that nothing re-reads: the refusal is
+        read again only when that agent next starts, so one left running past
+        30 days with the refusal standing leaves the queue (accepted in the
+        #3254 plan). `observe` never raises and logs its own failure, and
+        nothing here retries: the next start re-reads it.
         """
+        from services import platform_alerts
+
         message = (
             f"[Skills] REFUSED reconcile for agent '{agent_name}': {orphan_count} "
             f"orphaned skill package(s) exceeds the per-agent cap of {cap}. Nothing "
@@ -2632,28 +2832,32 @@ print(json.dumps(out))
             f"in smaller batches or raise SKILLS_RECONCILE_MAX_REMOVALS (ent#236)."
         )
         logger.error(message)
-        try:
-            db.create_operator_queue_item(
-                RECONCILE_ALARM_AGENT_NAME,
-                {
-                    "id": f"skills-reconcile-{agent_name}-{orphan_count}",
-                    "type": "alert",
-                    "priority": "high",
-                    "title": f"Skill reconcile refused: {agent_name}",
-                    "question": message,
-                    "context": {
-                        "alert_type": "skills_reconcile_blast_radius",
-                        "agent_name": agent_name,
-                        "orphan_count": orphan_count,
-                        "cap": cap,
-                    },
-                    # Must stay NULL: `mark_operator_queue_expired` flips any
-                    # pending row past `expires_at` to `expired` every 5s.
-                    "expires_at": None,
-                },
-            )
-        except Exception as e:  # noqa: BLE001 — the alarm is decorative
-            logger.warning(f"could not raise skills reconcile alarm: {e}")
+        platform_alerts.observe(
+            RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused", agent_name,
+            priority="high",
+            title=f"Skill reconcile refused: {agent_name}",
+            question=message,
+            context={
+                "alert_type": "skills_reconcile_blast_radius",
+                "agent_name": agent_name,
+                "orphan_count": orphan_count,
+                "cap": cap,
+            },
+        )
+
+    def _clear_reconcile_refusal(self, agent_name: str, pass_started_at: str) -> None:
+        """The agent's orphan set is back under the cap — a "clean" or
+        "reconciled" pass — so the refusal no longer holds and the platform
+        ends its row (#3254). Only those two outcomes call this: a skipped pass
+        (unreadable inventory, a busy lock, an error) looked at nothing and is
+        not evidence of recovery (R10). A refusal read after this pass started
+        is newer than its evidence and stays (`skills_alarm_last_read_before`).
+        On an install that never raised the alarm this is one read and no
+        write. Never raises."""
+        from services import platform_alerts
+        if skills_alarm_last_read_before("skills_reconcile_refused", agent_name, pass_started_at):
+            platform_alerts.clear(RECONCILE_ALARM_AGENT_NAME, "skills_reconcile_refused",
+                                  agent_name)
 
     def _record_adoption_failure(
         self, url: str, message: str, *, steady_state: bool = False
