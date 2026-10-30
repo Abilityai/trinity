@@ -1,17 +1,6 @@
 {
   "test_files": [
     {
-      "file": "unit/test_4053_person_kind_never_platform_ended.py",
-      "feature": "#4053",
-      "added": "2026-10-29",
-      "categories": [
-        "unit",
-        "operator-queue",
-        "reliability"
-      ],
-      "description": "#4053: platform_alerts.clear/reconcile refuse every clears=\"person\" kind at runtime (ends nothing, returns 0, logs ERROR), however the kind is passed; the row stays pending; a hook kind still clears."
-    },
-    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -2975,6 +2964,17 @@
         "regression"
       ],
       "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
+    },
+    {
+      "file": "unit/test_4053_person_kind_never_platform_ended.py",
+      "feature": "#4053",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4053: platform_alerts.clear/reconcile refuse every clears=\"person\" kind at runtime (ends nothing, returns 0, logs ERROR), however the kind is passed; the row stays pending; a hook kind still clears."
     },
     {
       "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
