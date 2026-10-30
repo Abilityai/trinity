@@ -1,26 +1,6 @@
 {
   "test_files": [
     {
-      "file": "unit/test_3300_list_reports_agent_scope.py",
-      "feature": "#3300",
-      "added": "2026-10-30",
-      "categories": [
-        "backend",
-        "unit"
-      ],
-      "description": "GET /api/reports takes a narrowing-only agent_names applied in SQL before limit: with an agent key's reach saturated by a spawned child's newer reports, the page without agent_names is the child's, and with agent_names=[self, peer] the permitted peer's older reports are returned; it never widens (an unreachable name yields nothing); an admin is narrowed to exactly the names; it composes with ?agent=; omitted changes nothing; >500 names or a blank name is a named 422; the shared narrow_to_names helper only narrows. Ignoring agent_names in the route turns 7 of 10 red."
-    },
-    {
-      "file": "../src/mcp-server/src/tools/list_reports_scope.test.ts",
-      "feature": "#3300",
-      "added": "2026-10-30",
-      "categories": [
-        "mcp",
-        "unit"
-      ],
-      "description": "A broad list_reports under an agent key reads its permits strictly first and sends {self} ∪ permitted as agent_names; a page the backend narrowed comes back with exactly {count, reports}; a row the belt drops is reported as withheld + a warning; a failed permissions read is permissions_unavailable with nothing listed; a permit set past 500 is refused before sending; a user key and a scoped listing send no agent_names. Not sending agent_names, or a silent belt, each turns one red."
-    },
-    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -5903,6 +5883,26 @@
         "unit"
       ],
       "description": "trinity-enterprise#753: the agent_skill_gates table on both tracks (the registered SQLite entry run twice; the Alembic revision extends the single head), the PK in tables.py (ON CONFLICT on a tables.py-built database), the write merging unsent fields under the lock, writes only to a live agent, rename/soft-delete/purge through the AGENT_REFS cascade, facade signature parity, and the read seam: list_skill_gates skips tombstones and a failed read raises so read_gates refuses 503 (never {}); a gate written mixed-case holds through the real matcher."
+    },
+    {
+      "file": "unit/test_3300_list_reports_agent_scope.py",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "GET /api/reports takes a narrowing-only agent_names applied in SQL before limit: with an agent key's reach saturated by a spawned child's newer reports, the page without agent_names is the child's, and with agent_names=[self, peer] the permitted peer's older reports are returned; it never widens (an unreachable name yields nothing); an admin is narrowed to exactly the names; it composes with ?agent=; omitted changes nothing; >500 names or a blank name is a named 422; the shared narrow_to_names helper only narrows. Ignoring agent_names in the route turns 7 of 10 red."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/list_reports_scope.test.ts",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "A broad list_reports under an agent key reads its permits strictly first and sends {self} ∪ permitted as agent_names; a page the backend narrowed comes back with exactly {count, reports}; a row the belt drops is reported as withheld + a warning; a failed permissions read is permissions_unavailable with nothing listed; a permit set past 500 is refused before sending; a user key and a scoped listing send no agent_names. Not sending agent_names, or a silent belt, each turns one red."
     },
     {
       "file": "unit/test_ent753_gate_map_service.py",
