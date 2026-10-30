@@ -4198,7 +4198,7 @@ to localStorage in the clear.
   that predates this). `GET /api/rooms/{id}` leaves earlier messages out for that
   person and reports `history_from_seq`. Moving the floor to 0 is a recorded backscroll
   grant. Dual-track: SQLite migration `room_participant_visible_from` + Alembic
-  `0107_room_participant_visible_from`.
+  `0108_room_participant_visible_from`.
 - **FR-2 — Leaving ends access.** `POST /api/rooms/{id}/leave` (people only — an agent is
   removed by the moderator, never by itself). A person who left, or was removed, gets the
   room's uniform 404 and the room drops out of their list; the row keeps `left_at`, so the

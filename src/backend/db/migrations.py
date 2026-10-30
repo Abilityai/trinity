@@ -5406,7 +5406,7 @@ def _migrate_room_participant_visible_from(cursor, conn):
     ``enterprise_room_participants.visible_from_seq``: the first message seq
     this participant may read. ``DEFAULT 0`` keeps every existing row reading
     the whole transcript, which is what it read before. Additive. Idempotent.
-    Mirrored by Alembic 0107_room_participant_visible_from.
+    Mirrored by Alembic 0108_room_participant_visible_from.
     """
     _safe_add_column(
         cursor, "enterprise_room_participants", "visible_from_seq",
