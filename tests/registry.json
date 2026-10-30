@@ -1,17 +1,6 @@
 {
   "test_files": [
     {
-      "file": "unit/test_4052_conftest_name_pinned.py",
-      "feature": "#4052",
-      "added": "2026-10-29",
-      "categories": [
-        "unit",
-        "infrastructure",
-        "regression"
-      ],
-      "description": "#4052: a bare `from conftest import ...` in a unit file resolves to tests/conftest.py even with tests/unit at sys.path[0], and tests/unit/conftest.py is never executed a second time as top-level `conftest`."
-    },
-    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -912,6 +901,17 @@
         "unit"
       ],
       "description": "#3246 merge-train fix: the platform ending seam works from every thread origin — `platform_alerts.clear` / `observe` driven through `asyncio.to_thread` (the loop's default executor, which anyio does not own — the headroom sweep and the skills reconcile) still land the `platform_cleared` audit row and the `operator_queue_cancelled` / sync trigger with no 'could not schedule' warning; `spawn_on_loop` from the default executor and from a plain `threading.Thread` once the host loop is known; `main.py::lifespan` captures the host loop before any boot phase; with no running loop, no anyio portal and no live host loop it still raises loudly (never a silent no-op), and a captured loop that was closed is not a target. No Docker."
+    },
+    {
+      "file": "unit/test_4052_conftest_name_pinned.py",
+      "feature": "#4052",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4052: a bare `from conftest import ...` in a unit file resolves to tests/conftest.py even with tests/unit at sys.path[0], and tests/unit/conftest.py is never executed a second time as top-level `conftest`."
     },
     {
       "file": "unit/test_ent665_send_idempotency_key.py",
