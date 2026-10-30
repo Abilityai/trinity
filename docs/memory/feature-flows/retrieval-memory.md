@@ -195,6 +195,20 @@ rows, the journal's age pruning, the events route and its filters, the model
 pin and request shape, both migration tracks and cleanup parity; plus the
 dated dataset against the real model where it is cached.
 
+**Extraction quality (paid, by hand, never in CI).** `tests/unit/eval_ent1022_extraction_quality.py`
+runs the production path (`build_transcript` → `_extract` → the screen, and
+`_reconcile`) over `fixtures/ent1022_extraction_gold.json` — 43 synthetic,
+hand-labelled exchanges (preferences, decisions, deadlines, names, numbers,
+headless outcomes, failures, expect-empty chatter, prompt injection, credentials,
+clamp, multilingual) and 12 reconcile pairs — plus any file of real execution
+rows (`MEMORY_EVAL_PROD_ROWS`). A different model judges recall against the
+gold, grounding and worth of each extracted fact and what was missed; forbidden
+substrings and the screen are checked deterministically. Metrics stay atomic
+(recall / precision / specificity / leak / format / hallucination / missed),
+spend and the extractor's returned model are recorded, and
+`MEMORY_EVAL_DRY_RUN=1` proves the harness without a call. Run:
+`cd tests && MEMORY_EVAL_API_KEY=… python -m pytest unit/eval_ent1022_extraction_quality.py -p no:randomly -s -q`.
+
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for
 facts; cross-scope beyond the owner; the enterprise Workspace surface for the
