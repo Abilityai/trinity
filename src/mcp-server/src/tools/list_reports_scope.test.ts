@@ -16,7 +16,7 @@ import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { createReportTools, LIST_REPORTS_BELT_WARNING } from "./reports.js";
-import type { TrinityClient } from "../client.js";
+import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 
 const AGENT_CTX = {
@@ -118,5 +118,19 @@ describe("#3300 a broad agent-key listing narrows before the limit", () => {
     assert.equal(calls.length, 2);
     assert.equal(calls[0].agent_names, undefined);
     assert.equal(calls[1].agent_names, undefined);
+  });
+
+  it("the real client sends agent_names as a repeated query parameter", async () => {
+    const client = new TrinityClient("http://backend");
+    const targets: string[] = [];
+    (client as unknown as { request: (m: string, path: string) => Promise<unknown> }).request =
+      async (_m, path) => {
+        targets.push(path);
+        return [];
+      };
+    await client.listReports({ agent_names: ["a", "b"], limit: 5 } as never);
+    const query = new URL(targets[0], "http://backend").searchParams;
+    assert.deepEqual(query.getAll("agent_names"), ["a", "b"]);
+    assert.equal(query.get("limit"), "5");
   });
 });
