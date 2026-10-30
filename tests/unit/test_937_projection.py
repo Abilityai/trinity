@@ -228,7 +228,7 @@ def test_agent_summary_view_drops_quality_fields():
     agent = project_summary(full, machine=True)
     for k in ("quality_mean", "judge_human_agreement", "agreement_n"):
         assert k not in agent
-    assert agent["judged"] == 1 and agent["checks_passed_rate"] == 1.0
+    assert agent["judged"] == 1 and "checks_passed_rate" not in agent   # ent#939
     assert project_summary(full, machine=False) == full
 
 

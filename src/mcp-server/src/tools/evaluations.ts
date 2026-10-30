@@ -32,23 +32,24 @@ export function createEvaluationTools(client: TrinityClient, requireApiKey: bool
     getEvaluationSummary: {
       name: "get_evaluation_summary",
       description:
-        "Read how an agent's runs were graded over a window: runs evaluated and completed, " +
-        "completion_rate, runs that passed the deterministic Tier-0 gate and checks_passed_rate, " +
-        "per_check_fail (check id -> runs failing it), and up to 50 `failed` runs, each with " +
+        "Read what failed in an agent's runs over a window: runs evaluated and graded by the " +
+        "deterministic Tier-0 gate, per_check_fail (check id -> runs failing it), and up to 50 " +
+        "`failed` runs, each with " +
         "its execution_id, caller_agent, schedule_id, the playbook it invoked (where the fix " +
         "lives) and failed check ids with reason codes. `judge_failed` lists runs the judge " +
         "failed on a dimension (scope_fidelity, escalation_correctness, ...), by dimension name " +
         "only. Evidence text and judge reasons are never returned. " +
         "Scope: an agent key reads ITS OWN runs only; naming another agent returns zeros, " +
         "even one you may reach. `caller` keeps the runs that agent delegated to you. " +
-        "Omit `agent_name` to read yourself. An agent or machine key NEVER sees judge scores: " +
-        "`quality_mean`, `judge_human_agreement` and `agreement_n` are absent from its copy, " +
-        "by rule — absent does not mean ungraded. A person's key sees them. " +
+        "Omit `agent_name` to read yourself. An agent or machine key NEVER sees a score or a " +
+        "rate: `quality_mean`, `judge_human_agreement`, `agreement_n`, `completion_rate`, " +
+        "`checks_passed_rate`, `completed` and `passed` are absent from its copy, by rule — " +
+        "absent does not mean ungraded. A person's key sees them. " +
         "`period` is `day` (last 24 h), `week` (last 7 days, default) or `custom` with both " +
         "`since` and `until` (RFC 3339, at most 92 days apart). `truncated: true` means the " +
         "window held more runs than one read folds — narrow it before drawing a conclusion; " +
-        "`failed_truncated: true` means more failed runs exist than were listed. Rates are " +
-        "null, not 0, when nothing was counted. These are read-only; grades are written by " +
+        "`failed_truncated: true` means more failed runs exist than were listed. A person's " +
+        "rates are null, not 0, when nothing was counted. These are read-only; grades are written by " +
         "the platform, never by the graded agent.",
       parameters: z.object({
         agent_name: z
