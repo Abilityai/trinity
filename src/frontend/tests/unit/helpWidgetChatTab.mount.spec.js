@@ -18,7 +18,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import { createPinia, setActivePinia } from 'pinia'
 import { h } from 'vue'
 
-vi.mock('../../src/utils/websocket', () => ({ useWebSocket: () => ({ connect: vi.fn() }) }))
+vi.mock('../../src/utils/websocket', () => ({ useWebSocket: () => ({ followToken: vi.fn() }) }))
 
 import App from '../../src/App.vue'
 import { routes } from '../../src/router'

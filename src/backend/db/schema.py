@@ -1380,6 +1380,12 @@ TABLES = {
     # tab reads it from the assignment row, because the per-injection result
     # map is session-scoped and an operator who never sees it must still see
     # the conflict.
+    #
+    # trinity-enterprise#529: `follows_bundled_pin` is 1 while the seeded
+    # default still points where the platform put it (the seed sets it; an admin
+    # change to url/ref/ref_type clears it), and the boot follow moves such a
+    # row to a newer `DEFAULT_SKILL_SOURCE_REF`. `followed_from_ref` /
+    # `followed_at` record the latest follow for the Settings line.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,
@@ -1397,6 +1403,9 @@ TABLES = {
             created_by TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            follows_bundled_pin INTEGER NOT NULL DEFAULT 0,
+            followed_from_ref TEXT,
+            followed_at TEXT,
             UNIQUE(url, ref)
         )
     """,

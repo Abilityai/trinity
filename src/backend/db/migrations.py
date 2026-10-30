@@ -5790,6 +5790,70 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+# trinity-enterprise#529: which pre-existing rows are still the untouched bundled
+# seed, and so follow the platform's pin from now on. Shared verbatim by Alembic
+# 0107_skill_sources_follow_bundled_pin, so the two tracks cannot disagree.
+#
+# - The built-in catalog URL only: it is the only URL the seed ever wrote by
+#   default, and a fork may not carry the platform's next tag.
+# - A ref that was a bundled pin (`git log -G DEFAULT_SKILL_SOURCE_REF --
+#   config.py`: v0.1.0, v0.2.0, v0.3.0, v0.5.0). The list is frozen history.
+# - No `skill_source_update` audit row naming `ref`, `url` or `ref_type`: the
+#   PUT and apply routes record the field NAMES they were sent, so this keeps
+#   rows an admin retargeted and lets a toggle or a rename through ("where it
+#   points" decides, the owner's AC2 ruling). `enabled` is not checked: a
+#   disabled row is marked but stays paused, because the follow needs it on.
+#
+# Limits: the audit write is best-effort and audit rows are pruned after the
+# retention window, so a retarget whose row was lost and which landed on a
+# historical pin reads as untouched. Both routes audit the field NAMES they were
+# sent. For a PUT that is the runtime rule too (`update_source`: naming `ref`
+# ends following, even unchanged). A declarative `apply` (the MCP tools) that
+# re-states `ref` while changing only `priority` reads as touched here although
+# the runtime rule keeps it following (conservative: it stops, it never moves).
+SKILL_SOURCE_FOLLOW_BACKFILL_SQL = """
+    UPDATE skill_sources SET follows_bundled_pin = 1
+    WHERE is_default = 1
+      AND created_by = 'seed:ent237'
+      AND ref_type = 'tag'
+      AND url = 'github.com/abilityai/trinity-skills'
+      AND ref IN ('v0.1.0', 'v0.2.0', 'v0.3.0', 'v0.5.0')
+      AND NOT EXISTS (
+          SELECT 1 FROM audit_log a
+          WHERE a.target_type = 'skill_source'
+            AND a.target_id = skill_sources.id
+            AND a.event_action = 'skill_source_update'
+            AND (a.details LIKE '%"ref"%'
+                 OR a.details LIKE '%"url"%'
+                 OR a.details LIKE '%"ref_type"%')
+      )
+"""
+
+
+def _migrate_skill_sources_follow_bundled_pin(cursor, conn):
+    """trinity-enterprise#529 — the untouched default source follows the
+    platform's bundled pin. Adds the marker (`follows_bundled_pin`, set by the
+    seed, cleared by an admin retarget) and the latest-follow record
+    (`followed_from_ref`, `followed_at`), then backfills the marker for rows
+    seeded before it existed (`SKILL_SOURCE_FOLLOW_BACKFILL_SQL`). Mirrored by
+    Alembic 0107_skill_sources_follow_bundled_pin."""
+    _safe_add_column(
+        cursor, "skill_sources", "follows_bundled_pin",
+        "ALTER TABLE skill_sources ADD COLUMN follows_bundled_pin "
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor, "skill_sources", "followed_from_ref",
+        "ALTER TABLE skill_sources ADD COLUMN followed_from_ref TEXT",
+    )
+    _safe_add_column(
+        cursor, "skill_sources", "followed_at",
+        "ALTER TABLE skill_sources ADD COLUMN followed_at TEXT",
+    )
+    cursor.execute(SKILL_SOURCE_FOLLOW_BACKFILL_SQL)
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5966,5 +6030,6 @@ MIGRATIONS = [
     ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
     ("execution_chat_session_id", _migrate_execution_chat_session_id),
+    ("skill_sources_follow_bundled_pin", _migrate_skill_sources_follow_bundled_pin),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

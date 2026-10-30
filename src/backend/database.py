@@ -459,11 +459,12 @@ _DEFAULT_SOURCE_SEED_NOTE = (
 def _default_skill_source_values():
     """The seed row, or None when seeding is disabled/misconfigured."""
     from config import (
+        BUNDLED_SKILL_SOURCE_URL,
         DEFAULT_SKILL_SOURCE_NAME,
         DEFAULT_SKILL_SOURCE_REF,
         DEFAULT_SKILL_SOURCE_URL,
     )
-    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY, SEED_CREATED_BY
 
     url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
     ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
@@ -480,7 +481,10 @@ def _default_skill_source_values():
         "enabled": 1,
         "priority": DEFAULT_SOURCE_PRIORITY,
         "last_sync_status": "never",
-        "created_by": "seed:ent237",
+        "created_by": SEED_CREATED_BY,
+        # trinity-enterprise#529: the built-in catalog follows the platform's
+        # pin on upgrade; a seed pointed at a fork does not.
+        "follows_bundled_pin": 1 if url == BUNDLED_SKILL_SOURCE_URL else 0,
     }
 
 
@@ -512,13 +516,14 @@ def _seed_fresh_install_skill_source(cursor, conn):
         cursor.execute(
             "INSERT OR IGNORE INTO skill_sources "
             "(id, name, url, ref, ref_type, is_default, enabled, priority, "
-            " last_sync_status, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " last_sync_status, created_by, follows_bundled_pin, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 values["id"], values["name"], values["url"], values["ref"],
                 values["ref_type"], values["is_default"], values["enabled"],
                 values["priority"], values["last_sync_status"],
-                values["created_by"], now, now,
+                values["created_by"], values["follows_bundled_pin"], now, now,
             ),
         )
         conn.commit()
@@ -3088,6 +3093,9 @@ class DatabaseManager:
 
     def update_skill_source(self, source_id: str, **fields):
         return self._skill_sources_ops.update_source(source_id, **fields)
+
+    def follow_skill_source_pin(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.follow_bundled_pin(source_id, **kwargs)
 
     def delete_skill_source(self, source_id: str):
         return self._skill_sources_ops.delete_source(source_id)
