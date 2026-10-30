@@ -209,6 +209,24 @@ spend and the extractor's returned model are recorded, and
 `MEMORY_EVAL_DRY_RUN=1` proves the harness without a call. Run:
 `cd tests && MEMORY_EVAL_API_KEY=… python -m pytest unit/eval_ent1022_extraction_quality.py -p no:randomly -s -q`.
 
+Measured 2026-10-30 (Haiku 5.5 extractor, Opus 5.5 judge, 43 gold + 74 real rows +
+12 pairs, one rep; noise floor ±9 points at n=117, judge variance flips a
+borderline verdict between runs): the first prompt scored gold recall 100%,
+precision 88%, specificity 83%, zero leaks; real rows precision 89%,
+ungrounded 4%, and a quarter of the real rows hit the 10-fact cap. The two
+systematic defects were the request restated as its own fact beside the outcome
+(6 of 10 gold failures, 13 real-row facts) and routine no-op runs stored as
+facts. The prompt now folds an attempt into one entry, drops no-op runs and asks
+for careful attribution; retrained on gold only, it scores gold precision 98%
+and specificity 100% with recall held at 100%, and on the held-out real rows
+restated requests fall 13 → 4 and transient facts 7 → 2 with 12% fewer facts
+stored; headline precision is unchanged (89%) because the judge's remaining
+objections are inferred details on long legal / finance transcripts (dates read
+off filenames, "sent" for "drafted", the wrong party's intent), which the gold
+set does not exercise. Open: a real-row training split for that class, the
+10-fact cap, and facts over the 200-character ask (stored intact, the clamp is
+500; the judge counts them as format misses).
+
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for
 facts; cross-scope beyond the owner; the enterprise Workspace surface for the

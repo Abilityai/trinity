@@ -9,7 +9,14 @@ picks it up. It is run by hand, inside the unit island so the real
       python -m pytest unit/eval_ent1022_extraction_quality.py -p no:randomly -s -q
 
 Env:
-    MEMORY_EVAL_API_KEY     a funded Anthropic key (required; otherwise skipped)
+    MEMORY_EVAL_API_KEY     a funded Anthropic key (required; otherwise skipped).
+                            An OAuth token (``sk-ant-oat…``, a Claude subscription)
+                            also works: the harness then sends it as a Bearer with
+                            the OAuth beta and a one-line Claude Code identity
+                            ``system`` — the gateway refuses the token without
+                            it. The prompt under test is unchanged (it is the user
+                            message); the report names the auth shape so the
+                            confound is visible.
     MEMORY_EVAL_PROD_ROWS   optional JSON file of real execution rows
                             [{agent_name, execution_id, triggered_by, status,
                               message, response, error, source_user_email}]
@@ -121,6 +128,32 @@ class Ledger:
 LEDGER = Ledger()
 
 
+_OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
+
+
+def _auth_shape(key: Optional[str]) -> str:
+    return "oauth_bearer+identity_system" if (key or "").startswith("sk-ant-oat") else "api_key"
+
+
+def _apply_auth(headers: Dict[str, str], body: Dict[str, Any]) -> None:
+    """Rewrite one request in place for an OAuth token: Bearer auth, the OAuth
+    beta, and the identity line as ``system`` (prepended when a system is
+    already set). An API key passes through untouched."""
+    key = headers.get("x-api-key") or ""
+    if not key.startswith("sk-ant-oat"):
+        return
+    del headers["x-api-key"]
+    headers["Authorization"] = f"Bearer {key}"
+    headers["anthropic-beta"] = ",".join(x for x in [headers.get("anthropic-beta"), "oauth-2025-04-20"] if x)
+    system = body.get("system")
+    if not system:
+        body["system"] = _OAUTH_IDENTITY
+    elif isinstance(system, str):
+        body["system"] = [{"type": "text", "text": _OAUTH_IDENTITY}, {"type": "text", "text": system}]
+    else:
+        body["system"] = [{"type": "text", "text": _OAUTH_IDENTITY}, *system]
+
+
 def _recording_client(tag_holder: Dict[str, str]):
     """An ``httpx.AsyncClient`` subclass whose ``post`` records the response
     body into the ledger under the tag ``anthropic_messages.complete`` is
@@ -129,6 +162,8 @@ def _recording_client(tag_holder: Dict[str, str]):
 
     class Recording(httpx.AsyncClient):
         async def post(self, url, *, headers, json):  # noqa: A002 — the real signature
+            headers, json = dict(headers), dict(json)
+            _apply_auth(headers, json)
             attempts = 0
             while True:
                 attempts += 1
@@ -451,7 +486,7 @@ def _write_report(out: Path, rows: List[Dict[str, Any]], recon: List[Dict[str, A
     agg = _aggregate(rows)
     n = len(rows)
     lines = [f"# Retrieval-memory extraction quality — {settings['when']}", "",
-             f"extractor `{settings['extractor_model']}` (production request body) · judge `{settings['judge_model']}` · "
+             f"extractor `{settings['extractor_model']}` (production request body, auth `{settings.get('auth_shape', 'api_key')}`) · judge `{settings['judge_model']}` · "
              f"reps {settings['reps']} · dry-run {settings['dry']} · cases scored {n} · harness errors {len(errors)}", "",
              f"Noise floor on a pass-rate at n={n}: about ±{100 / (n ** 0.5):.0f} points (1/√n). Read differences smaller than that as noise.", "",
              "| corpus | cases | recall | precision | specificity | halluc. | leak cases | format ok | missed (judge) | extracted | screened |",
@@ -603,7 +638,7 @@ def test_extraction_quality(monkeypatch):
     recon = asyncio.run(run_all())
     (out / "reconcile.json").write_text(json.dumps(recon, indent=1, ensure_ascii=False), encoding="utf-8")
     settings = {"when": datetime.now(timezone.utc).isoformat(timespec="seconds"), "extractor_model": am.HAIKU_MODEL,
-                "judge_model": judge_model, "reps": reps, "dry": dry, **LEDGER.summary()}
+                "judge_model": judge_model, "reps": reps, "dry": dry, "auth_shape": _auth_shape(key), **LEDGER.summary()}
     (out / "_state.json").write_text(json.dumps({
         "metrics": [{"id": "recall", "label": "recall", "kind": "continuous"}, {"id": "precision", "label": "precision", "kind": "continuous"},
                     {"id": "specificity", "label": "specificity", "kind": "continuous"}, {"id": "leak", "label": "leak", "kind": "binary"},
