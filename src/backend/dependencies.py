@@ -779,7 +779,99 @@ async def get_current_user(request: Request, token: str = Depends(oauth2_scheme)
     """
     user = await resolve_platform_user_unfloored(request, token)
     enforce_operator_floor(request, user)
+    await admit_act_as(request, user)
     return user
+
+
+# trinity-enterprise#1024 — an admin's user MCP key acting on behalf of an agent.
+#
+# Operator ruling (2026-10-30): "admin user key should be able to do whatever it
+# wants." The agent-identity routes take their identity from the KEY so nothing
+# can be spoofed; this keeps that rule for every principal but one, and makes
+# the exception explicit rather than inferred from a path: the MCP sends this
+# header only when the caller names `agent_name`, and it is admitted only for a
+# `user`-scoped MCP key whose user is an admin. Everyone else who sends it gets a
+# named 403 saying why — never a silent fall-through to their own identity.
+ACT_AS_HEADER = "X-Trinity-Act-As-Agent"
+_ACT_AS_MAX_LEN = 128
+
+_ACT_AS_REFUSALS = {
+    "agent": "An agent key acts only as its own agent.",
+    "system": "The system key acts only as trinity-system.",
+    "connector": "A connector key is an end user's key and cannot act as an agent.",
+    "portal_delegate": "A portal_delegate key cannot act as an agent.",
+    "ops": "An ops key cannot act as an agent.",
+    "anonymous": "An anonymous session cannot act as an agent.",
+}
+
+
+def act_as_agent_of(current_user) -> Optional[str]:
+    """The agent this request acts on behalf of (ent#1024), or None."""
+    agent = getattr(current_user, "_act_as_agent", None)
+    return agent if isinstance(agent, str) and agent else None
+
+
+def _act_as_refusal(user) -> Optional[str]:
+    """None when `user` may act on behalf of an agent; else why not."""
+    scope = getattr(user, "mcp_scope", _SCOPE_ABSENT)
+    if scope is _SCOPE_ABSENT or scope is None:
+        return ("A browser session acts as its person. Use an admin's user-scoped "
+                "MCP key to act on behalf of an agent.")
+    if scope != "user":
+        return _ACT_AS_REFUSALS.get(scope, f"A '{scope}' key cannot act on behalf of an agent.")
+    if (getattr(user, "agent_name", None) or getattr(user, "connector_agent", None)
+            or getattr(user, "portal_delegate", False)):
+        return "This key is bound to an agent and cannot act on behalf of another."
+    if getattr(user, "role", None) != "admin":
+        return ("Only an admin's user key can act on behalf of an agent; "
+                "this key's user is not an admin.")
+    return None
+
+
+async def admit_act_as(request: Request, user: User) -> None:
+    """Admit `X-Trinity-Act-As-Agent` for an admin's user-scoped MCP key, or
+    refuse it with a named 403 (ent#1024). No header: nothing happens.
+
+    An admitted request writes ONE audit row naming both the acting user and the
+    agent, so an admin acting as an agent is never indistinguishable from the
+    agent itself. Best-effort, like every audit write: the request stands if the
+    row cannot be written. Whether the agent exists is the route's question —
+    its own access dependency answers the uniform 404 (Invariant #8)."""
+    headers = getattr(request, "headers", None)
+    raw = headers.get(ACT_AS_HEADER) if headers is not None else None
+    if raw is None:
+        return
+    name = raw.strip()
+    if not name or len(name) > _ACT_AS_MAX_LEN:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "act_as_invalid",
+                    "message": f"{ACT_AS_HEADER} must name one agent (1-{_ACT_AS_MAX_LEN} characters)."},
+        )
+    why = _act_as_refusal(user)
+    if why is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "act_as_not_permitted", "message": why},
+        )
+    user._act_as_agent = name
+    try:
+        from services.platform_audit_service import AuditEventType, platform_audit_service
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="acted_as_agent",
+            source="mcp",
+            actor_user=user,
+            actor_agent_name=name,
+            mcp_key_id=getattr(user, "mcp_key_id", None),
+            mcp_key_name=getattr(user, "mcp_key_name", None),
+            target_type="agent",
+            target_id=name,
+            details={"agent_name": name, "acted_by": f"user:{user.id}",
+                     "method": request.method.upper(), "path": request.scope.get("path")},
+        )
+    except Exception:  # noqa: BLE001 — an audit write never fails the request
+        logger.warning("[ent#1024] acted_as_agent audit row skipped", exc_info=True)
 
 
 async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
@@ -2147,6 +2239,8 @@ def get_self_acting_agent(
     is_self = (
         (scope == "agent" and bool(agent) and agent == name)
         or (scope == "system" and not agent and name == SYSTEM_AGENT_NAME)
+        # ent#1024: an admin's user key, admitted to act for exactly this agent.
+        or act_as_agent_of(current_user) == name
     )
     if not is_self:
         raise HTTPException(
@@ -2155,7 +2249,8 @@ def get_self_acting_agent(
                 "code": "agent_identity_required",
                 "message": (
                     "Only the agent itself can do this, with its own key; "
-                    "use the operator queue routes to read another agent's asks"
+                    "use the operator queue routes to read another agent's asks. "
+                    "An admin's user key can act on behalf of an agent: pass agent_name."
                 ),
             },
         )
@@ -2758,7 +2853,9 @@ def assert_own_agent(
     instead, for a router whose access dependency answers a uniform 404 and
     whose self refusal must stay byte-identical to it.
     """
-    caller = agent_principal_name(current_user)
+    # ent#1024: an admin acting on behalf of an agent is held to that agent the
+    # way the agent's own key is.
+    caller = agent_principal_name(current_user) or act_as_agent_of(current_user)
     if caller is None or caller == agent_name:
         return
     if refusal is not None:

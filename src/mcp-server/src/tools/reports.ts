@@ -13,7 +13,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { accessDenied, resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, accessDenied, actingClient, resolveActingAgent } from "../access.js";
 
 
 /**
@@ -75,8 +75,8 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
    * and metrics tools (#2975; it admits the platform orchestrator's
    * system-scoped key, which carries `trinity-system`, and nothing else).
    */
-  const getAgentName = (authContext: McpAuthContext | undefined): string =>
-    resolveActingAgent(authContext, "The report tool");
+  const getAgentName = (authContext: McpAuthContext | undefined, requested?: string): string =>
+    resolveActingAgent(authContext, "The report tool", requested);
 
   /**
    * Agent-to-agent READ gate (mirrors operator_queue.ts / executions.ts).
@@ -120,6 +120,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         "leads found, emails sent, deals progressed, KPI snapshots, weekly summaries, health rollups. " +
         "The report is persisted and shown on your agent's Reports tab and the fleet Reports view.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         report_type: z.string().describe(
           "Namespaced report type, lower_snake segments joined by '.', " +
           "e.g. 'recon.weekly_summary', 'prospector.leads_found', 'ops.daily_health', 'custom.notes'."
@@ -176,6 +177,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
       }),
       execute: async (
         params: {
+          agent_name?: string;
           report_type: string;
           title: string;
           payload: Record<string, unknown>;
@@ -190,11 +192,11 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
 
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -202,6 +204,7 @@ export function createReportTools(client: TrinityClient, requireApiKey: boolean)
             2
           );
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
 
         console.log(`[report] ${agentName}: ${params.report_type} - ${params.title}`);
 

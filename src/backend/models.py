@@ -509,6 +509,11 @@ class User(BaseModel):
     # the request, never from a token, and never serialized. Read by the viewer
     # helpers, which narrow a shared person's turn to that person's rows.
     _acting_execution_id: Optional[str] = PrivateAttr(default=None)
+    # trinity-enterprise#1024: the agent an ADMIN's user-scoped MCP key acts on
+    # behalf of, admitted from `X-Trinity-Act-As-Agent` by
+    # `dependencies.admit_act_as` and by nothing else. Private and never
+    # serialized, like the turn above; read through `act_as_agent_of`.
+    _act_as_agent: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):

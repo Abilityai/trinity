@@ -6963,6 +6963,28 @@
         "unit"
       ],
       "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "unit/test_ent1024_admin_acts_as_agent.py",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+    },
+    {
+      "file": "../src/mcp-server/src/act_as_agent.test.ts",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "security",
+        "unit"
+      ],
+      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
     }
   ]
 }
