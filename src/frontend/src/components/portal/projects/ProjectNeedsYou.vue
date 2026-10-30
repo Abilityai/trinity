@@ -64,19 +64,21 @@
           class="rounded-xl border border-gray-200 dark:border-gray-750 px-3 py-2.5"
           :data-testid="`project-ask-row-${row.id}`"
         >
-          <div class="flex items-center gap-2 min-w-0">
-            <!-- The Inbox row's shape: the agent keeps its width (to 60%), the
-                 rest truncates. -->
-            <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100">{{ row.agent_name }}</span>
-            <span class="shrink-0 text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400">{{ kindLabel(row.kind) }}</span>
-            <!-- #2915 / ent#610 B5: the Workspace's coarse sync badge, only
-                 while pending — the same rule as the ask card's header. -->
-            <BaseBadge
-              v-if="row.status === 'pending' && workspaceAskBadge(row.ask)"
-              :variant="workspaceAskBadge(row.ask).variant"
-              dot
-              :title="workspaceAskBadge(row.ask).title"
-            >{{ workspaceAskBadge(row.ask).label }}</BaseBadge>
+          <div class="flex items-center gap-2 min-w-0" :data-testid="`project-ask-head-${row.id}`">
+            <!-- The Inbox row's shape, made to fit the narrow side column
+                 (#3994 — all three spans were shrink-0, so the row overflowed
+                 its card). The time never shrinks. The kind label has a zero
+                 basis capped at its content, so it only takes what is left
+                 over and gives way first; the agent name (to 60%) shrinks only
+                 once the label is gone. Both carry their full text on hover. -->
+            <span
+              class="min-w-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100"
+              :title="row.agent_name"
+            >{{ row.agent_name }}</span>
+            <span
+              class="min-w-0 flex-[1_1_0%] max-w-max truncate text-xs uppercase tracking-wide text-gray-500 dark:text-gray-400"
+              :title="kindLabel(row.kind)"
+            >{{ kindLabel(row.kind) }}</span>
             <span
               class="ml-auto shrink-0 text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400"
               :title="absolute(row.at)"
@@ -88,6 +90,20 @@
             <AskMarkdown :text="row.title" inline />
           </p>
           <div class="mt-1.5 flex flex-wrap items-center gap-3">
+            <!-- #2915 / ent#610 B5: the Workspace's coarse sync badge, only
+                 while pending — the same rule as the ask card's header. It sits
+                 on this wrapping line, as on the Inbox row, not on the first
+                 one: "Changed by the agent" is ~156px, wider than the whole
+                 first line leaves in the narrow column (#3994). Wider than the
+                 card it truncates; the full reason is on its title. -->
+            <BaseBadge
+              v-if="row.status === 'pending' && workspaceAskBadge(row.ask)"
+              :variant="workspaceAskBadge(row.ask).variant"
+              dot
+              class="min-w-0 max-w-full"
+              :title="workspaceAskBadge(row.ask).title"
+              :data-testid="`project-ask-badge-${row.id}`"
+            ><span class="min-w-0 truncate">{{ workspaceAskBadge(row.ask).label }}</span></BaseBadge>
             <BaseButton
               :ref="(el) => setAnswerRef(row.id, el)"
               size="sm"

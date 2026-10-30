@@ -563,11 +563,35 @@ def _switch_failure_kind(
     #3012: a worker older than #3012 reports a model the CLI refused as 503 →
     ``auth``. No subscription can fix that, so the text overrides the code.
     """
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import (
+        is_model_rejection,
+        is_prompt_too_long,
+        is_turn_limit,
+    )
 
     if is_model_rejection(error_text):
         return None
+    # #3984 / #3849: a worker reports the agent's prompt-length 503 as `auth`;
+    # no credential changes a turn cap or a prompt's length.
+    if is_turn_limit(error_text) or is_prompt_too_long(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
+
+
+def _recode_credential_independent_auth(error_code: str, error_text: str) -> str:
+    """The code a worker's ``auth`` terminal really carries, from its text.
+
+    Mirrors ``execution_envelope.terminal_from_callback_payload`` (#1083): a
+    model rejection is ``model_unsupported`` (#3012), a prompt-length refusal
+    ``agent_error`` (#3849); anything else keeps ``auth``.
+    """
+    from services.failure_classifier import is_model_rejection, is_prompt_too_long
+
+    if is_model_rejection(error_text):
+        return "model_unsupported"
+    if is_prompt_too_long(error_text):
+        return "agent_error"
+    return error_code
 
 
 def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
@@ -726,6 +750,14 @@ def apply_task_result(
     if _staged:
         content = scrub_text(_staged, content)
         execution_log = scrub_obj(_staged, execution_log)
+
+    # #3849 / #3012: a worker labels the agent's prompt-length 503 (and a
+    # pre-#3012 image's model rejection) `auth`. No credential fixes either, so
+    # recode from the text — as the #1083 callback does — before the AUTH
+    # dispatch breaker counts it or the row is stored as `[auth] …`. FAILED only:
+    # the cancelled-but-auth trust guard below keeps the worker's own label.
+    if status == "failed" and (error_code or "").strip().lower() == "auth":
+        error_code = _recode_credential_independent_auth(error_code, content or "")
 
     # Map the typed reply status → row status (mirror the #1083 3-way map). An
     # auth failure the agent mislabels "cancelled" must NOT become a clean cancel
