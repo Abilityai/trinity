@@ -220,6 +220,8 @@ CREATE TABLE schedule_executions (
                                                  -- NULL = no evidence, never "verified healthy"
     chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
                                                  -- Stamped 1 + MAX(caller's running depths) on agent-principal children
+    chat_session_id TEXT,                        -- #3380: the /chat thread this turn answers (NULL = not a /chat turn);
+                                                 -- read by the #2944 watchdog claim to write the recovered reply
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
@@ -917,6 +919,7 @@ CREATE TABLE idempotency_keys (
     response_snapshot TEXT,          -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,                 -- #3298: in_flight owner token; writes are CAS on it
     PRIMARY KEY (scope, idempotency_key)
 );
 CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);

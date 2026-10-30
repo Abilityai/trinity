@@ -503,6 +503,12 @@ class User(BaseModel):
     # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
     # an agent key's fleet reach. Private, never serialized; None until read.
     _fleet_reach: Optional[set] = PrivateAttr(default=None)
+    # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
+    # key's request carried (#2392) — the turn the agent is acting in. Private
+    # like the reach set: written only by `dependencies.record_acting_turn`, from
+    # the request, never from a token, and never serialized. Read by the viewer
+    # helpers, which narrow a shared person's turn to that person's rows.
+    _acting_execution_id: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -2829,6 +2835,39 @@ class FileUpdateRequest(BaseModel):
     content: str
 
 
+class MetricStatusValueInput(BaseModel):
+    """One allowed value of a `status` metric, as the declaration form sends it."""
+    model_config = ConfigDict(extra="forbid")
+    value: Optional[str] = Field(None, max_length=200)
+    color: Optional[str] = Field(None, max_length=32)
+    label: Optional[str] = Field(None, max_length=400)
+
+
+class MetricDeclarationRequest(BaseModel):
+    """A metric declared or edited from the UI (trinity-enterprise#1006).
+
+    Becomes one `template.yaml` `metrics:` entry. Bounds here only stop absurd
+    payloads; the real rules are `template_metrics`' and come back as named,
+    per-field errors. `base_hash` is the template hash the editor read
+    returned: a write against a file that has changed since is refused.
+    """
+    model_config = ConfigDict(extra="forbid")
+    base_hash: str = Field(..., min_length=64, max_length=64)
+    name: str = Field(..., max_length=200)
+    type: str = Field(..., max_length=64)
+    label: Optional[str] = Field(None, max_length=400)
+    description: Optional[str] = Field(None, max_length=2000)
+    unit: Optional[str] = Field(None, max_length=100)
+    cadence: Optional[str] = Field(None, max_length=64)
+    direction: Optional[str] = Field(None, max_length=32)
+    aggregation: Optional[str] = Field(None, max_length=32)
+    values: Optional[List[MetricStatusValueInput]] = Field(None, max_length=100)
+    dimensions: Optional[List[str]] = Field(None, max_length=50)
+    warning_threshold: Optional[float] = None
+    critical_threshold: Optional[float] = None
+    recorded_by: Optional[str] = Field(None, max_length=200)
+
+
 class CreateFolderRequest(BaseModel):
     """Request body for folder creation."""
     path: str
@@ -4239,6 +4278,12 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
+    # webhook (its creator, the agent owner, an admin). Computed server-side by
+    # the same predicate the webhook routes enforce — the client has no numeric
+    # user id to compare an owner id against, and the creator's id is not exposed.
+    # Defaults False: a response built without the predicate claims nothing.
+    can_manage_webhook: bool = False
 
     class Config:
         from_attributes = True
