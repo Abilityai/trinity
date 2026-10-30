@@ -169,7 +169,7 @@ Every refusal is recorded in the audit log as a refusal, not as a successful cal
 
 ### Receipts
 
-A **receipt** is what a chat tool returns when it has handed the work to the agent but cannot hand you the reply: an `execution_id` and a `status` of `accepted` (an async call), `queued` (the agent was at capacity and the task was queued) or `queued_timeout` (the call outlived `MCP_CHAT_TIMEOUT_MS`, default 25 s, or the platform's own wait, and the run is still going). The work is running. Read its outcome with `get_execution_result(agent_name, execution_id)` and never re-send the same message; the receipt's `message` says exactly that.
+A **receipt** is what a chat tool returns when it has handed the work to the agent but cannot hand you the reply: an `execution_id` and a `status` of `accepted` (an async call), `queued` (the agent was at capacity, or it is a pull-mode agent, which queues every task for its workers) or `queued_timeout` (the call outlived `MCP_CHAT_TIMEOUT_MS`, default 25 s, or the platform's own wait, and the run is still going). The work is running. Read its outcome with `get_execution_result(agent_name, execution_id)` and never re-send the same message; the receipt's `message` says exactly that.
 
 When the caller is an agent serving a Slack, Telegram or Workspace conversation, a receipt can also carry `report_back`:
 

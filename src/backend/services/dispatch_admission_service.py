@@ -408,7 +408,8 @@ async def admit_chat_request(
             idem=idem,
             execution_id=chat_execution_id,
             capacity_result=AcquireResult(
-                state="queued_persistent", execution_id=chat_execution_id
+                state="queued_persistent", execution_id=chat_execution_id,
+                pull=True,
             ),
             capacity=None,
             queue_result=queue_result,
