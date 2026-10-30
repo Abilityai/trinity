@@ -276,6 +276,12 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     return _build_claim_response(row, cap=cap)
 
 
+_TERMINAL_STATUSES = frozenset({
+    TaskExecutionStatus.SUCCESS, TaskExecutionStatus.FAILED,
+    TaskExecutionStatus.CANCELLED, TaskExecutionStatus.SKIPPED,
+})
+
+
 async def open_claim_activity(execution_id: str) -> Optional[str]:
     """#3932: open the claimed turn's CHAT_START activity. Push opens it at
     dispatch (``execute_task`` step 3); a pull row is queued before that step,
@@ -287,10 +293,16 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
     the reaper closes the dead attempt's bar by id, possibly after this claim,
     so reusing it would leave the live attempt with none. Best-effort: never
     blocks the claim.
+
+    #3982: terminate can win the status CAS between the claim and the insert,
+    find no bar to close, and leave this one ``started`` until the 120-minute
+    sweep fabricates its duration. So a terminal row opens nothing, and a row
+    that turns terminal during the insert gets its bar closed here (the close
+    is a CAS, so racing terminate's own close is a no-op).
     """
     try:
         row = db.get_execution(execution_id)
-        if row is None:
+        if row is None or row.status in _TERMINAL_STATUSES:
             return None
         if not row.redelivery_count and db.get_open_activity_id_for_execution(execution_id):
             return None
@@ -300,7 +312,7 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
             meta = {}
         from services.task_execution_service import start_dispatch_activity
 
-        return await start_dispatch_activity(
+        activity_id = await start_dispatch_activity(
             agent_name=row.agent_name,
             message=row.message,
             execution_id=execution_id,
@@ -313,6 +325,11 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
                 "redelivery_count": row.redelivery_count or 0,
             },
         )
+        after = db.get_execution(execution_id)
+        if activity_id and after is not None and after.status in _TERMINAL_STATUSES:
+            await activity_service.close_execution_activity(
+                execution_id, after.status, activity_id=activity_id)
+        return activity_id
     except Exception as e:  # noqa: BLE001 — a claim must never fail on the timeline
         logger.warning("[#3932] could not open the claim activity for %s: %s",
                        execution_id, type(e).__name__)
