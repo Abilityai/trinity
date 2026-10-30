@@ -248,6 +248,11 @@
   "tier": "accessor",
   "via": "create_agent_folder_logic"
  },
+ "agent_files.py::declare_metric": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/metrics/declarations",
+  "tier": "owner"
+ },
  "agent_files.py::delete_agent_file_endpoint": {
   "method": "DELETE",
   "path": "/api/agents/{agent_name}/files",
@@ -346,6 +351,16 @@
   "tier": "accessor",
   "via": "get_folder_consumers_logic"
  },
+ "agent_files.py::get_metric_declarations": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/metrics/declarations",
+  "tier": "owner"
+ },
+ "agent_files.py::get_metric_references": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/metrics/declarations/{metric_name}/references",
+  "tier": "owner"
+ },
  "agent_files.py::grant_agent_peer_skill": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/peer-skills/{target}/{skill}",
@@ -382,6 +397,11 @@
   "reason": "owner/admin check in the logic",
   "tier": "owner",
   "via": "remove_agent_permission_logic"
+ },
+ "agent_files.py::retire_metric_declaration": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/metrics/declarations/{metric_name}",
+  "tier": "owner"
  },
  "agent_files.py::revoke_agent_peer_skill": {
   "method": "DELETE",
@@ -425,6 +445,11 @@
   "reason": "owner/admin check in the logic",
   "tier": "owner",
   "via": "update_agent_folders_logic"
+ },
+ "agent_files.py::update_metric_declaration": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/metrics/declarations/{metric_name}",
+  "tier": "owner"
  },
  "agent_mcp_key.py::get_agent_mcp_key_endpoint": {
   "method": "GET",

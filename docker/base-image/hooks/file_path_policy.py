@@ -118,7 +118,10 @@ SYSTEM_PATTERNS = (
 )
 # The agent's standing instructions, per runtime (ent#164, ent#820). Only the
 # agent's own top-level files count: a `docs/CLAUDE.md` is an ordinary file.
-INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md")
+# `template.yaml` joins them (ent#1006): its `metrics:` block is what the UI
+# declaration form edits, so it takes the same owner tier as CLAUDE.md and the
+# generic Files write is not a back door around the form's gate.
+INSTRUCTION_FILES = ("CLAUDE.md", "CLAUDE.local.md", "AGENTS.md", "GEMINI.md", "template.yaml")
 INSTRUCTION_DIRS = (".claude",)
 INSTRUCTION_NESTED_FILES = (".gemini/GEMINI.md",)
 SKILLS_DIR = ".claude/skills"

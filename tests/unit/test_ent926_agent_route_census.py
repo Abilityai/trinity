@@ -328,10 +328,16 @@ def _creator_gated_unnamed_routes():
         for n in ast.walk(tree):
             if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            # The gate may sit on a handler argument or in the decorator's
+            # `dependencies=[...]` (PR #3778 review); scan both.
+            scopes = [n.args] + [
+                kw.value for d in n.decorator_list if isinstance(d, ast.Call)
+                for kw in d.keywords if kw.arg == "dependencies"
+            ]
             gated = any(
                 isinstance(c, ast.Call) and getattr(c.func, "id", getattr(c.func, "attr", None)) == "require_role"
                 and c.args and isinstance(c.args[0], ast.Constant) and c.args[0].value == "creator"
-                for c in ast.walk(n.args)
+                for scope in scopes for c in ast.walk(scope)
             )
             if not gated:
                 continue
