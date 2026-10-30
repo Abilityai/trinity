@@ -108,8 +108,13 @@
             · window capped at 5,000 runs — narrow the period
           </span>
         </div>
-        <EvalKpiRow :kpis="store.kpis" />
-        <EvalAgentTable :rows="store.agentRows" @select="store.setAgent" />
+        <EvalKpiRow :kpis="judgeOn ? [...store.kpis, ...store.judgeKpis] : store.kpis" />
+        <EvalAgentTable
+          :rows="store.agentRows"
+          :show-quality="judgeOn"
+          :calibrated="store.calibration.calibrated"
+          @select="store.setAgent"
+        />
         <EvalTrend
           :agent="store.agent"
           :chart="store.trendChart"
@@ -159,10 +164,14 @@ import EvalPairs from './evaluations/EvalPairs.vue'
 import EvalTrend from './evaluations/EvalTrend.vue'
 import { useEvaluationsStore, PERIODS } from '../stores/evaluations'
 import { useAuthStore } from '../stores/auth'
+import { useEnterpriseStore } from '../stores/enterprise'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
 
 const store = useEvaluationsStore()
 const authStore = useAuthStore()
+const enterpriseStore = useEnterpriseStore()
+// ent#938 C5 (ruled 2026-10-29): the judge tiles and column are enterprise.
+const judgeOn = computed(() => enterpriseStore.isEntitled('eval_judge'))
 const route = useRoute()
 const router = useRouter()
 

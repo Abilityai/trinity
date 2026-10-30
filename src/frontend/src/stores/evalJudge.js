@@ -2,7 +2,9 @@
  * Eval judge policy — the Settings › Judge tab's store (trinity-enterprise#936).
  *
  * Reads and replaces the platform policy through the admin-only, entitlement-
- * gated `/api/enterprise/eval-judge/settings` route. The server validates the
+ * gated `/api/enterprise/eval-judge/settings` route. Also the operator's thumb
+ * on one run (ent#938 C4) — the human calibration sample the judge's agreement
+ * is measured against — through the person-only, owner-tier rating route. The server validates the
  * whole document and refuses by name; `REFUSALS` turns each code into a sentence
  * that says what to change.
  */
@@ -12,6 +14,11 @@ import api from '../api'
 import { apiErrorMessage } from '../utils/apiError'
 
 export const SETTINGS_URL = '/api/enterprise/eval-judge/settings'
+export const ratingUrl = (agent, executionId) =>
+  `/api/enterprise/eval-judge/agents/${encodeURIComponent(agent)}/executions/${encodeURIComponent(executionId)}/rating`
+// ent#938 T4: below this many person-rated runs the agreement is "uncalibrated".
+export const AGREEMENT_FLOOR = 20
+export const MAX_REASON = 500
 
 export const REFUSALS = {
   agent_default_unknown: 'Choose whether agents are judged by default.',
@@ -112,6 +119,47 @@ export const useEvalJudgeStore = defineStore('evalJudge', () => {
     }
   }
 
+  // The rating of the run on screen. `ratingAvailable` goes false on a 404 or
+  // 403: this caller does not operate the agent, so the control is not shown.
+  const ratingKey = ref('')
+  const rating = ref(null)            // { rating: 'up'|'down'|null, reason }
+  const ratingAvailable = ref(false)
+  const ratingSaving = ref(false)
+  const ratingError = ref(null)
+
+  async function loadRating(agent, executionId) {
+    const key = `${agent}/${executionId}`
+    ratingKey.value = key
+    rating.value = null
+    ratingError.value = null
+    try {
+      const r = await api.get(ratingUrl(agent, executionId))
+      if (ratingKey.value !== key) return
+      rating.value = r.data
+      ratingAvailable.value = true
+    } catch {
+      if (ratingKey.value === key) ratingAvailable.value = false
+    }
+  }
+
+  async function rate(agent, executionId, value, reason) {
+    ratingSaving.value = true
+    ratingError.value = null
+    try {
+      const body = { rating: value, ...(reason && reason.trim() ? { reason: reason.trim() } : {}) }
+      const r = await api.post(ratingUrl(agent, executionId), body)
+      if (ratingKey.value === `${agent}/${executionId}`) rating.value = r.data
+      return true
+    } catch (e) {
+      ratingError.value = apiErrorMessage(e, "Your rating wasn't saved")
+      return false
+    } finally {
+      ratingSaving.value = false
+    }
+  }
+
   return { policy, allowlist, loading, hasLoaded, error, saving, saveError, savedAt, load, save,
-    clearSaveError: () => { saveError.value = null } }
+    clearSaveError: () => { saveError.value = null },
+    rating, ratingAvailable, ratingSaving, ratingError, loadRating, rate,
+    clearRatingError: () => { ratingError.value = null } }
 })

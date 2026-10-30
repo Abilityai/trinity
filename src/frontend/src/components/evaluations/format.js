@@ -4,6 +4,9 @@
  */
 export const fmtRate = (v) => (typeof v === 'number' ? `${(v * 100).toFixed(1)}%` : '—')
 
+/** A judge's quality (0–1 on the row) out of 5, as the execution page reads it. */
+export const fmtQuality = (q) => (typeof q === 'number' ? `${(q * 5).toFixed(1)} / 5` : '—')
+
 /** A signed delta with its unit; `null` reads "—" (no previous window to compare). */
 export function fmtDelta(d, unit = 'pts') {
   if (typeof d !== 'number') return '—'

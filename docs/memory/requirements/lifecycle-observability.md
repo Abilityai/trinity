@@ -1133,8 +1133,9 @@ prompts or calls a model.
 Operator-facing read surface over the ent#935/#937 primitives — one tab, no new aggregate
 route, no direct table reads. Tier-0 blocks are OSS-core (AGENT_EVAL_STRATEGY §10: a read
 surface over an OSS primitive is an OSS primitive); the calibration pieces (judged-quality
-column, judge–human agreement tile, the rating affordance) wait on the OSS-vs-enterprise
-placement ruling and are not built until it lands.
+column, judge–human agreement tile, the rating affordance) are enterprise (ruled
+2026-10-29): rendered only where the judge module is entitled, with the agreement floor
+(T4) at 20 person-rated runs — below it the agreement and quality read "uncalibrated".
 
 - **FR-15 — The tab and its audience**: `/operations?tab=evaluations` renders
   `components/EvaluationsPanel.vue` from `views/Operations.vue`. The audience is the
@@ -1171,7 +1172,7 @@ placement ruling and are not built until it lands.
   (even one owned by an admin) get the empty series (never a 403); the tab tells an admin
   no fleet point is written yet, and anyone else that the fleet series is admin-only and to
   pick an agent. The chart caption states the one-day lag and the day the series
-  starts. The agreement floor (ruling T4) lands later, with the agreement tile.
+  starts. The agreement floor (ruling T4) is 20 person-rated runs, on the agreement tile.
 
 ### Addendum C — Pair evaluation: the caller→callee edge (trinity-enterprise#940)
 
