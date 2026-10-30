@@ -35,6 +35,7 @@ if str(_BASE_IMAGE) not in sys.path:
     sys.path.insert(0, str(_BASE_IMAGE))
 
 from agent_server.utils import orphan_allowlist as oa  # noqa: E402
+from services.compatibility.collector import _FIXED_FILES  # noqa: E402
 from services.compatibility.static_checks import run_static  # noqa: E402
 from services.compatibility import spec  # noqa: E402
 
@@ -232,6 +233,12 @@ def _f014(content):
 
 def test_f014_registered():
     assert spec.BY_ID["F-014"].type == "static"
+
+
+def test_the_collector_reads_setup_status_with_its_content():
+    """Without this entry the file never reaches a snapshot, so F-014 skips on
+    every agent and reads as "image predates #4002"."""
+    assert (".trinity/setup-status.json", True) in _FIXED_FILES
 
 
 def test_f014_missing_file_skips():
