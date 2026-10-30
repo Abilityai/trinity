@@ -2178,19 +2178,17 @@ class EvaluationRunRows(BaseModel):
 
 class EvaluationSummary(BaseModel):
     """One fold of Tier-0-graded runs (ent#937). A machine principal's copy
-    has no `quality_mean` / `judge_human_agreement` / `agreement_n` — absent
-    by rule, not null-as-ungraded."""
+    has no `quality_mean` / `judge_human_agreement` / `agreement_n` and no
+    rate or success counter (`completed`, `completion_rate`, `passed`,
+    `checks_passed_rate`, ent#939) — absent by rule, not null-as-ungraded, so
+    they ride as extras rather than declared fields."""
     model_config = ConfigDict(extra="allow")
     evaluated: int
-    completed: int
-    completion_rate: Optional[float] = None
     graded: int
-    passed: int
-    checks_passed_rate: Optional[float] = None
     per_check_fail: Dict[str, int] = {}
     judged: int
     # ent#940 — the edge checks of the pair rows, on `by=pair` only (TD-6).
-    # A machine's copy holds the counts only (`PAIR_MACHINE_KEYS`).
+    # A machine's copy holds the sample size and failures (`PAIR_MACHINE_KEYS`).
     pair: Optional[Dict[str, Any]] = None
 
 

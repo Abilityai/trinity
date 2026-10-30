@@ -260,8 +260,13 @@ on the new routes *and* the existing `GET /evaluations`, `GET /evaluations/{id}`
 `GET /agents/{name}/evaluations` and the execution read. An out-of-scope agent reads as
 zeros (the same body as "no runs"), so there is no existence oracle. A **machine
 principal never receives a judge's score**: `quality_mean`, `judge_human_agreement`
-and `agreement_n` are absent from its copy (absent by rule, not null-as-ungraded), and
-the trend refuses `eval.quality_mean` / `eval.judge_human_agreement` for it. The
+and `agreement_n` are absent from its copy (absent by rule, not null-as-ungraded) —
+**nor any rate** (ent#939, ruled 2026-10-29): `completion_rate`, `checks_passed_rate`
+and the `completed` / `passed` counters they are rebuilt from are absent too (`RATE_KEYS`;
+`EvaluationSummary` declares only `evaluated`, `graded`, `per_check_fail`, `judged`, so
+the withheld keys ride as extras and never serialise as null). The trend serves a machine
+the sample-size series only (`MACHINE_METRICS`: `eval.evaluated`, `eval.graded`,
+`eval.judged`, `eval.pair_graded`) and refuses every other metric. The
 evaluator column is projected through an allowlist (`platform:tier0`,
 `platform:tier1:*` pass; `kind:rest` → `kind`; no colon → `unknown`, ent#781). A
 `role=user` key gets 403 `workspace_only` (no route is `@workspace_route`).
@@ -429,7 +434,8 @@ retry chain (`retry_of_execution_id`) is one dispatch.
 
 **Who sees what.** By `by=pair` a person reads a pair only when both sides are
 visible; an agent key reads the pairs it is caller or callee of. A machine
-principal gets the pair block's counts only (`PAIR_MACHINE_KEYS`) — check ids
+principal gets the pair block's sample size and failures only (`PAIR_MACHINE_KEYS`:
+`pair_graded`, `pair_per_check_fail`; no pass count or rate, ent#939) — check ids
 and reason codes, never evidence, latency or cost, never quality. `by=agent`
 carries no pair rates (TD-6): an agent sees what to fix, not a pair score — and
 only its own: a callee's `failed` list never carries the caller's edge failure.

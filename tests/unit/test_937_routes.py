@@ -366,24 +366,28 @@ def test_trend_refuses_a_score_metric_to_a_machine_and_unknown_metrics(client):
     r = client.get("/api/evaluations/trend",
                    params={"metric": "eval.quality_mean", "agent": "agent-a"})
     assert r.status_code == 422 and r.json()["detail"]["code"] == "unknown_metric"
+    # ent#939: a rate, or a success count a rate is rebuilt from, is a person's.
+    r = client.get("/api/evaluations/trend",
+                   params={"metric": "eval.checks_passed_rate", "agent": "agent-a"})
+    assert r.status_code == 422 and r.json()["detail"]["code"] == "unknown_metric"
     r = client.get("/api/evaluations/trend", params={"metric": "cpu", "agent": "agent-a"})
     assert r.status_code == 422 and "cpu" not in r.text
     # Naming no series is the fleet series since ent#938 — never an agent key's.
-    r = client.get("/api/evaluations/trend", params={"metric": "eval.passed"})
+    r = client.get("/api/evaluations/trend", params={"metric": "eval.graded"})
     assert r.status_code == 200 and r.json()["points"] == []
-    r = client.get("/api/evaluations/trend", params={"metric": "eval.passed", "caller": "agent-a"})
+    r = client.get("/api/evaluations/trend", params={"metric": "eval.graded", "caller": "agent-a"})
     assert r.status_code == 422 and r.json()["detail"]["code"] == "invalid_series"
 
 
 def test_trend_pair_for_agent_key_needs_self_on_a_side(client):
-    _point("eval.passed", {"caller": "agent-a", "callee": "agent-b"}, 3, 1)
+    _point("eval.pair_graded", {"caller": "agent-a", "callee": "agent-b"}, 3, 1)
     client.as_user(_agent_key("agent-b"))
     r = client.get("/api/evaluations/trend", params={
-        "metric": "eval.passed", "caller": "agent-a", "callee": "agent-b"})
+        "metric": "eval.pair_graded", "caller": "agent-a", "callee": "agent-b"})
     assert [p["value"] for p in r.json()["points"]] == [3]
     client.as_user(_agent_key("agent-c"))
     r = client.get("/api/evaluations/trend", params={
-        "metric": "eval.passed", "caller": "agent-a", "callee": "agent-b"})
+        "metric": "eval.pair_graded", "caller": "agent-a", "callee": "agent-b"})
     assert r.json()["points"] == []
 
 

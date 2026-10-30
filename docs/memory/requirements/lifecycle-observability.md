@@ -1166,8 +1166,8 @@ placement ruling and are not built until it lands.
   over-cap per-agent retry see one agent's rows, so they write no fleet point and an
   over-cap day is a gap. `GET /api/evaluations/trend` naming neither `agent=` nor a pair
   reads it (every per-agent/pair key absent) and hands it only to the two readers it names —
-  an admin person, or the system key (counts only; a judge-score metric stays a 422 for a
-  machine). A person scoped to fewer agents, every agent key, and any other machine key
+  an admin person, or the system key (sample-size series only; a rate, success-count or
+  judge-score metric is a 422 for a machine, ent#939 FR-21). A person scoped to fewer agents, every agent key, and any other machine key
   (even one owned by an admin) get the empty series (never a 403); the tab tells an admin
   no fleet point is written yet, and anyone else that the fleet series is admin-only and to
   pick an agent. The chart caption states the one-day lag and the day the series
@@ -1242,8 +1242,8 @@ it on the integration branch. Neither exists yet.
   handling of the edge, so it appears as caller in `pair_failed` and never in the
   callee's `failed` list (nor on `/evaluations/failed` outside `by=pair`); a person
   reads the edge failures through `by=pair` (an agent key sees only its own side). A machine principal
-  reads the pair block's counts only (`pair_graded`, `pair_passed`,
-  `pair_checks_passed_rate`, `pair_per_check_fail`), check ids and reason codes, never
+  reads the pair block's sample size and failures only (`pair_graded`,
+  `pair_per_check_fail`; no rate since ent#939 FR-21), check ids and reason codes, never
   evidence or quality; the evaluator projects as `platform:tier0:pair`. Scorecard (FR-13)
   gains `eval.pair_graded`, `eval.pair_passed`, `eval.pair_checks_passed_rate` on pair
   series only.
@@ -1299,8 +1299,14 @@ Read-only over the ent#937 window rows; nothing here writes an evaluation.
   Tier-0 check. Cost has no runs to list (422).
 - **FR-21 — The agent's own view**: the ent#937 summary (MCP `get_evaluation_summary`) adds
   the playbook each failed run invoked and `judge_failed` — runs the judge failed on a
-  dimension, by dimension name only. Never a score, a rate it did not already read, or a
-  judge's reason.
+  dimension, by dimension name only. Never a score, a rate, or a judge's reason.
+  **Ruled 2026-10-29 — no rate on any machine read**: a machine principal's summary and
+  aggregate copy drop `completion_rate`, `checks_passed_rate` and the success counters a
+  rate is rebuilt from (`completed`, `passed`; on the pair block `pair_passed`,
+  `pair_checks_passed_rate`) — absent by rule, beside the judge-score keys. It keeps the
+  sample size (`evaluated`, `graded`, `judged`, `pair_graded`) and the failures by check
+  id. The trend serves a machine the sample-size series only (`MACHINE_METRICS`); every
+  rate and success series is a 422 for it.
 - **FR-22 — Workspace**: the role card read (`GET /api/enterprise/client-portal/agents/
   {name}/role`) carries `behavior` on every card, role or not: a tone per indicator
   (`good` ≥ 85 %, `watch` below, `unknown` under the floor) and the run count, never a

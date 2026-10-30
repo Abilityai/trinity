@@ -46,11 +46,14 @@ _VERDICTS = ("pass", "fail", "n/a")
 _IDENTITY_FREE_KIND = re.compile(r"[a-z0-9_-]+")
 # Aggregate keys that carry a judge's score — absent from an agent's view.
 QUALITY_KEYS = ("quality_mean", "judge_human_agreement", "agreement_n")
-# What a machine reads of the pair block (ent#940): counts by check id, as it
-# reads the Tier-0 counts. The latency / cost / round-trip measures are an
-# operator's — a number an agent could optimise is not a finding.
-PAIR_MACHINE_KEYS = ("pair_graded", "pair_passed", "pair_checks_passed_rate",
-                     "pair_per_check_fail")
+# A rate and the success counters it is rebuilt from — never on a machine's
+# copy (ent#939: an agent sees its failed checks, no agent-visible scalar).
+RATE_KEYS = ("completion_rate", "checks_passed_rate", "completed", "passed")
+# What a machine reads of the pair block (ent#940): the sample size and the
+# failures by check id, as it reads the Tier-0 block. The rate, latency, cost
+# and round-trip measures are an operator's — a number an agent could
+# optimise is not a finding (ent#939).
+PAIR_MACHINE_KEYS = ("pair_graded", "pair_per_check_fail")
 PAIR_LATENCY_KEYS = ("dispatch_to_start", "start_to_end", "end_to_first_read")
 
 
@@ -370,11 +373,12 @@ def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
 
 
 def project_summary(summary: dict, *, machine: bool) -> dict:
-    """An aggregate for one reader: a machine never reads a judge's score,
-    and of the pair block only the counts (`PAIR_MACHINE_KEYS`)."""
+    """An aggregate for one reader: a machine never reads a judge's score or
+    a rate (`RATE_KEYS`), and of the pair block only the sample size and its
+    failures (`PAIR_MACHINE_KEYS`) — the failed checks, never a scalar."""
     if not machine:
         return summary
-    out = {k: v for k, v in summary.items() if k not in QUALITY_KEYS}
+    out = {k: v for k, v in summary.items() if k not in QUALITY_KEYS + RATE_KEYS}
     if isinstance(out.get("pair"), dict):
         out["pair"] = {k: v for k, v in out["pair"].items() if k in PAIR_MACHINE_KEYS}
     return out
@@ -527,6 +531,10 @@ EVAL_PAIR_METRICS = frozenset({"eval.pair_checks_passed_rate", "eval.pair_graded
 EVAL_METRICS = EVAL_RATE_METRICS + EVAL_COUNT_METRICS
 # A judge's score as a series — never served to a machine.
 QUALITY_METRICS = frozenset({"eval.quality_mean", "eval.judge_human_agreement"})
+# The series a machine may read: sample sizes only (ent#939 — every rate, and
+# every success count a rate is rebuilt from, is a person's).
+MACHINE_METRICS = frozenset({"eval.evaluated", "eval.graded", "eval.judged",
+                             "eval.pair_graded"})
 MAX_TREND_DAYS = 92
 
 
@@ -536,7 +544,7 @@ class MetricError(ValueError):
 
 def trend_metric(metric: str, *, machine: bool) -> str:
     """The metric if this reader may read it; a closed enum, never echoed."""
-    if metric not in EVAL_METRICS or (machine and metric in QUALITY_METRICS):
+    if metric not in EVAL_METRICS or (machine and metric not in MACHINE_METRICS):
         raise MetricError("metric is not an evaluation scorecard metric")
     return metric
 
