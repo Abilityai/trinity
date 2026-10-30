@@ -204,8 +204,10 @@ def _producer_files():
 
 def _emitted_triggers() -> dict:
     """`{trigger: [site, ...]}` for every string a producer writes as
-    `triggered_by` — a `triggered_by=` keyword or a `triggered_by = ...`
-    assignment, both arms of a conditional expression included. Module
+    `triggered_by` — a `triggered_by=` keyword, a `triggered_by = ...`
+    assignment, a `"triggered_by":` dict entry, a `triggered_by` parameter
+    default, or a `return` inside a function whose name contains `trigger`;
+    both arms of a conditional expression included. Module
     constants named like a trigger are resolved across all scanned modules, so
     an imported constant counts. `track_activity(...)` is skipped: its
     `triggered_by` tags an activity, not an execution row."""
@@ -243,19 +245,45 @@ def _emitted_triggers() -> dict:
                 if name == "track_activity":
                     skip.update(id(k) for k in node.keywords)
         for node in ast.walk(tree):
-            expr = None
+            exprs = []
             if isinstance(node, ast.keyword) and node.arg == "triggered_by" and id(node) not in skip:
-                expr = node.value
+                exprs.append(node.value)
             elif isinstance(node, ast.Assign) and any(
                 isinstance(t, ast.Name) and t.id == "triggered_by" for t in node.targets
             ):
-                expr = node.value
-            if expr is None:
-                continue
+                exprs.append(node.value)
+            elif isinstance(node, ast.Dict):
+                # `{"triggered_by": "webhook", ...}` handed to a row writer.
+                exprs += [
+                    v for k, v in zip(node.keys, node.values)
+                    if isinstance(k, ast.Constant) and k.value == "triggered_by"
+                ]
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                # `def f(..., triggered_by: str = "manual")`.
+                args = node.args
+                pos = args.posonlyargs + args.args
+                exprs += [
+                    d for a, d in zip(pos[len(pos) - len(args.defaults):], args.defaults)
+                    if a.arg == "triggered_by"
+                ]
+                exprs += [
+                    d for a, d in zip(args.kwonlyargs, args.kw_defaults)
+                    if a.arg == "triggered_by" and d is not None
+                ]
+                # A helper that computes the trigger (`chat_signals.chat_trigger`):
+                # its bare string / constant / conditional returns. Route
+                # handlers named `trigger_*` return dicts, which are skipped.
+                if "trigger" in node.name.lower():
+                    exprs += [
+                        r.value for r in ast.walk(node)
+                        if isinstance(r, ast.Return)
+                        and isinstance(r.value, (ast.Constant, ast.Name, ast.IfExp))
+                    ]
             # A pass-through (`triggered_by=row["triggered_by"]`) names the
             # field, not a value.
-            for v in values(expr) - {"triggered_by"}:
-                found.setdefault(v, []).append(f"{path.relative_to(_REPO)}:{node.lineno}")
+            for expr in exprs:
+                for v in values(expr) - {"triggered_by"}:
+                    found.setdefault(v, []).append(f"{path.relative_to(_REPO)}:{node.lineno}")
     return found
 
 
@@ -268,7 +296,8 @@ def test_every_emitted_trigger_is_in_a_pull_set_or_documented_as_excluded():
 
     emitted = _emitted_triggers()
     # Never pass on an empty or truncated scan.
-    floor = {"self_task", "skill_gate", "retry", "schedule", "event", "fan_out", "a2a"}
+    floor = {"self_task", "skill_gate", "retry", "schedule", "event", "fan_out", "a2a",
+             "chat", "webhook", "manual"}
     assert floor <= set(emitted), sorted(floor - set(emitted))
 
     for trigger, reason in PULL_UNPULLED_TRIGGERS.items():
