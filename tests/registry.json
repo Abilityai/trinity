@@ -6963,6 +6963,26 @@
         "unit"
       ],
       "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "unit/test_3300_list_reports_agent_scope.py",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "GET /api/reports takes a narrowing-only agent_names applied in SQL before limit: with an agent key's reach saturated by a spawned child's newer reports, the page without agent_names is the child's, and with agent_names=[self, peer] the permitted peer's older reports are returned; it never widens (an unreachable name yields nothing); an admin is narrowed to exactly the names; it composes with ?agent=; omitted changes nothing; >500 names or a blank name is a named 422; the shared narrow_to_names helper only narrows. Ignoring agent_names in the route turns 7 of 10 red."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/list_reports_scope.test.ts",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "A broad list_reports under an agent key reads its permits strictly first and sends {self} ∪ permitted as agent_names; a page the backend narrowed comes back with exactly {count, reports}; a row the belt drops is reported as withheld + a warning; a failed permissions read is permissions_unavailable with nothing listed; a permit set past 500 is refused before sending; a user key and a scoped listing send no agent_names. Not sending agent_names, or a silent belt, each turns one red."
     }
   ]
 }

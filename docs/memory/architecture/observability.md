@@ -104,7 +104,9 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
-  `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
+  `accessible_agent_names` + `_narrow_to_agent` (admin = all). `GET /api/reports` also takes a
+  narrowing-only, repeated `agent_names` (≤500, no blanks → named 422; #3300,
+  `agent_service.helpers.narrow_to_names`) applied in SQL before `limit`. Renderers (`components/reports/`)
   pick by `display_hint` → `report_type` prefix → fallback, with a shape check per hint.
 - **Three renderer surfaces, a per-surface fallback** (#2162): Agent Detail, the Operations fleet tab,
   and the **Workspace agent page** all mount the same `ReportRenderer`. The third was added
@@ -126,7 +128,9 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
   access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
   MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪
-  permitted`, the #1104 rule), and a denied `get_report` returns "Report not found" so the
+  permitted`, the #1104 rule) — on a broad read by reading the permits first (strict) and
+  sending them as `agent_names`, so the page is cut over the rows the tool keeps (#3300; the
+  post-filter is a belt whose drops come back as `withheld` + a warning), and a denied `get_report` returns "Report not found" so the
   backend's deliberate 404-not-403 id-privacy choice isn't widened for agent keys. Closes
   the write-only loop: an agent can continue a series instead of duplicating it.
 - **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
