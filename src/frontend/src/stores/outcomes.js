@@ -15,6 +15,31 @@ export const BASE = '/api/enterprise/eval-outcomes'
 export const PROJECTS_URL = `${BASE}/projects`
 export const PROPOSALS_URL = `${BASE}/proposals`
 export const ANALYSES_URL = `${BASE}/analyses`
+export const REGISTRIES_URL = `${BASE}/registries`
+// The server's cap and shape (registry.py MAX_REPOS / _REPO_RE), checked here
+// first so a typo is named before the round trip.
+export const MAX_TRACKERS = 20
+export const REPO_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
+/** A registries read as the card renders it: a malformed body reads as "none". */
+export function normalizeTrackers(d) {
+  const list = (v) => (Array.isArray(v) ? v.filter((r) => typeof r === 'string') : [])
+  return { repos: list(d?.repos), source: ['setting', 'env'].includes(d?.source) ? d.source : 'none',
+    env_default: list(d?.env_default) }
+}
+
+/** Lines of a tracker draft → `{ repos, error }`; blank lines are ignored. */
+export function parseTrackers(text) {
+  const repos = []
+  for (const line of String(text || '').split(/[\n,]/)) {
+    const r = line.trim()
+    if (!r) continue
+    if (!REPO_RE.test(r)) return { repos, error: `"${r.slice(0, 100)}" is not owner/repo — for example acme/roadmap.` }
+    if (!repos.includes(r)) repos.push(r)
+  }
+  if (repos.length > MAX_TRACKERS) return { repos, error: `At most ${MAX_TRACKERS} trackers.` }
+  return { repos, error: null }
+}
 export const STATUSES = ['proposed', 'accepted', 'rejected', 'shipped']
 // Weeks of history read for the trend: the current record and the ones before it.
 export const HISTORY_WEEKS = 8
@@ -40,6 +65,11 @@ export const useOutcomesStore = defineStore('outcomes', () => {
   const ownerFilter = ref('')
   const acting = ref('')           // proposal id with a verb in flight
   const actionError = ref(null)
+  // The GitHub trackers the fleet read uses (`{repos, source, env_default}`).
+  const trackers = ref(null)
+  const trackersError = ref(null)
+  const trackersSaving = ref(false)
+  const trackersSaveError = ref(null)
 
   const projects = computed(() => overview.value?.projects || [])
   const fleet = computed(() => overview.value?.fleet || null)
@@ -123,6 +153,34 @@ export const useOutcomesStore = defineStore('outcomes', () => {
     }
   }
 
+  async function loadTrackers() {
+    try {
+      const r = await api.get(REGISTRIES_URL)
+      trackers.value = normalizeTrackers(r.data)
+      trackersError.value = null
+    } catch (e) {
+      trackersError.value = apiErrorMessage(e, "Couldn't load the tracker list")
+    }
+  }
+
+  async function writeTrackers(call) {
+    trackersSaving.value = true
+    trackersSaveError.value = null
+    try {
+      const r = await call()
+      trackers.value = normalizeTrackers(r.data)
+      return true
+    } catch (e) {
+      trackersSaveError.value = apiErrorMessage(e, "The tracker list wasn't saved")
+      return false
+    } finally {
+      trackersSaving.value = false
+    }
+  }
+
+  const saveTrackers = (repos) => writeTrackers(() => api.put(REGISTRIES_URL, { repos }))
+  const resetTrackers = () => writeTrackers(() => api.delete(REGISTRIES_URL))
+
   const decide = (id, decision, reason = '') =>
     act(id, 'decision', { decision, ...(reason ? { reason } : {}) })
   const markShipped = (id) => act(id, 'shipped')
@@ -130,7 +188,9 @@ export const useOutcomesStore = defineStore('outcomes', () => {
   return {
     overview, history, proposals, loading, hasLoaded, error, statusFilter, ownerFilter, acting, actionError,
     projects, fleet, priorFleet, priorByProject, fleetHistory, counts, owners, visibleProposals,
-    load, setStatus, setOwner, decide, markShipped,
+    trackers, trackersError, trackersSaving, trackersSaveError,
+    load, setStatus, setOwner, decide, markShipped, loadTrackers, saveTrackers, resetTrackers,
     clearActionError: () => { actionError.value = null },
+    clearTrackersSaveError: () => { trackersSaveError.value = null },
   }
 })

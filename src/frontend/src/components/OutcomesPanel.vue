@@ -80,6 +80,10 @@
         />
       </div>
     </div>
+
+    <!-- The tracker list is configuration, so it shows before the first
+         record too: adding a repo is the next step from the empty state. -->
+    <OutcomesTrackers v-if="view.state === 'ready' || view.state === 'empty'" class="mt-6" />
   </div>
 </template>
 
@@ -92,6 +96,7 @@ import LoadFailed from './LoadFailed.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import OutcomesProjects from './outcomes/OutcomesProjects.vue'
 import OutcomesProposals from './outcomes/OutcomesProposals.vue'
+import OutcomesTrackers from './outcomes/OutcomesTrackers.vue'
 import OutcomesTrend from './outcomes/OutcomesTrend.vue'
 import { useOutcomesStore } from '../stores/outcomes'
 import { viewState, staleBannerMessage } from '../utils/loadingState'
