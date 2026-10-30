@@ -5811,6 +5811,52 @@ def _migrate_agent_ownership_memory_opt_out(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_memory_provenance(cursor, conn):
+    """trinity-enterprise#1022 — fact provenance: the journal and the last writer.
+
+    ``agent_memory_fact_events`` is one append-only row per thing that happened
+    to a fact or to a candidate that never became one (add / update / delete /
+    none / screened / prune / recall / forget), keyed to the execution that did
+    it; ``agent_memory_facts.updated_by_execution_id`` is the last run that
+    rewrote or retired the row. Schema is also in db/schema.py for fresh
+    installs; mirrored by Alembic revision 0110_agent_memory_provenance.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_memory_facts",
+        "updated_by_execution_id",
+        "ALTER TABLE agent_memory_facts ADD COLUMN updated_by_execution_id TEXT",
+    )
+    cursor.execute("PRAGMA table_info(agent_memory_fact_events)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                fact_id TEXT,
+                op TEXT NOT NULL,
+                execution_id TEXT,
+                candidate_text TEXT,
+                previous_text TEXT,
+                neighbour_ids TEXT,
+                score REAL,
+                actor TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+        "ON agent_memory_fact_events(agent_name, fact_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+        "ON agent_memory_fact_events(agent_name, execution_id)"
+    )
+    conn.commit()
+    print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+
 # trinity-enterprise#529: which pre-existing rows are still the untouched bundled
 # seed, and so follow the platform's pin from now on. Shared verbatim by Alembic
 # 0107_skill_sources_follow_bundled_pin, so the two tracks cannot disagree.
@@ -6054,4 +6100,5 @@ MIGRATIONS = [
     ("skill_sources_follow_bundled_pin", _migrate_skill_sources_follow_bundled_pin),
     ("agent_memory_facts", _migrate_agent_memory_facts),
     ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
+    ("agent_memory_provenance", _migrate_agent_memory_provenance),
 ]

@@ -9,6 +9,7 @@ calls:
 * ``PUT  …``            — the per-agent opt-out (a grant; owner + human-only, #2996).
 * ``GET  …/facts``      — the owner view of one scope's facts (ent#962's readers rule).
 * ``DELETE …/facts/{id}`` — forget one fact (soft delete, recorded with who).
+* ``GET  …/events``     — the journal: what happened to a fact, or in one execution.
 
 The platform switch itself is ``trinity_memory_enabled`` through the generic
 settings door; ``GET /api/settings/memory`` (admin) reports the platform status.
@@ -30,7 +31,8 @@ from dependencies import (
     reject_agent_principal,
     require_person,
 )
-from models import MemoryFactOut, MemoryOptOutUpdate
+from db.memory_facts import EVENT_OPS
+from models import MemoryFactEventOut, MemoryFactOut, MemoryOptOutUpdate
 from services import memory_service, memory_subject
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
@@ -126,6 +128,10 @@ async def forget_retrieval_memory_fact_endpoint(
     deleted_by = getattr(current_user, "email", None) or getattr(current_user, "username", None) or "owner"
     if not db.soft_delete_memory_fact(fact_id, agent_name, deleted_by=str(deleted_by)):
         raise HTTPException(status_code=404, detail="Fact not found")
+    try:
+        db.insert_memory_fact_events([{"agent_name": agent_name, "fact_id": fact_id, "op": "forget", "actor": str(deleted_by)}])
+    except Exception:  # noqa: BLE001 — the journal is bookkeeping, never a failure
+        logger.debug("[memory] forget not journaled for %s", fact_id)
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="retrieval_memory_forget",
@@ -136,3 +142,27 @@ async def forget_retrieval_memory_fact_endpoint(
         details={"fact_id": fact_id},
     )
     return {"agent_name": agent_name, "fact_id": fact_id, "forgotten": True}
+
+
+@router.get("/{agent_name}/retrieval-memory/events", response_model=list[MemoryFactEventOut])
+async def list_retrieval_memory_events_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: User = Depends(require_person),
+    fact_id: str | None = Query(default=None, description="One fact's lineage"),
+    execution_id: str | None = Query(default=None, description="Everything one execution did to the memory"),
+    op: str | None = Query(default=None, description="One op: " + ", ".join(EVENT_OPS)),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """The owner view of the journal, newest first: how a fact came to read the
+    way it does (``fact_id``), or what one run proposed, stored, merged, retired
+    or recalled (``execution_id``). Narrow by ``op`` to, say, every candidate
+    the screen dropped."""
+    reject_agent_principal(current_user)
+    if op is not None and op.lower() not in EVENT_OPS:
+        raise HTTPException(status_code=422, detail={"code": "invalid_op", "message": "op must be one of " + ", ".join(EVENT_OPS)})
+    rows = await asyncio.to_thread(
+        db.list_memory_fact_events, agent_name, fact_id=fact_id or None, execution_id=execution_id or None,
+        op=op, limit=limit, offset=offset,
+    )
+    return [MemoryFactEventOut(**{k: row.get(k) for k in MemoryFactEventOut.model_fields}) for row in rows]

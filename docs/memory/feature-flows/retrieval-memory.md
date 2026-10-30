@@ -66,23 +66,60 @@ never raising).
    Redis lease (`SET NX EX 60`, 3 × 2 s retries, then skip this turn);
    `asyncio.Semaphore(4)` per process; 20 s call timeout.
 4. **Extract** — one Haiku call on the platform key (`services/anthropic_messages.complete`,
-   the same call the summarizer makes) → ≤ 10 one-line facts, each `sanitize_text`'d,
+   the same call the summarizer makes; `claude-haiku-5-5`, thinking off, low
+   effort, the first TEXT block read) → ≤ 10 one-line facts, each `sanitize_text`'d,
    clamped to 500 chars and screened by `user_memory_guard.prepare_summary`
-   (a fact that trips a rule is dropped and the rule logged).
-5. Embeds the candidates; finds each one's neighbours (cosine ≥ 0.60) in the scope.
+   (a fact that trips a rule is dropped, the rule logged, and the candidate
+   journaled as `screened`).
+5. Embeds the candidates; finds each one's neighbours (plain cosine ≥ 0.60 —
+   no recency here, whether two facts say the same thing has nothing to do
+   with when) in the scope.
 6. **Reconcile** — one Haiku call when any candidate has neighbours: ADD /
    UPDATE id / DELETE id / NONE. An id not in that candidate's neighbour set is
    refused → NONE. A missing or unreadable answer means "nothing is a duplicate".
 7. Applies the ops; the partial unique index on `(agent_name, user_email, text_hash)
    WHERE deleted_at IS NULL` makes a two-worker duplicate an IntegrityError the
-   writer catches. Prunes the scope to 2,000 live facts (oldest never-recalled first).
+   writer catches. UPDATE and DELETE stamp `updated_by_execution_id` (the fact's
+   `execution_id` stays where it was born). Prunes the scope to 2,000 live facts
+   (oldest never-recalled first).
+8. **Journals** every one of those — `add` / `update` / `delete` / `none` /
+   `screened` / `prune` — as one `agent_memory_fact_events` row keyed to the
+   execution, with the candidate the extractor proposed, the text it replaced
+   and the neighbour ids the reconciler was shown; then drops this agent's
+   journal rows older than 90 days. Recall adds a `recall` row per hit (with the
+   cosine and the asking execution when known), forget a `forget` row with who.
+   The journal is append-only and is what the extraction prompt is tuned
+   against: `op = screened` is "what the extractor proposed that never became
+   a fact", `op = none` beside its `neighbour_ids` is "what reconcile judged a
+   duplicate".
 
 ## Recall
-`memory_service.recall(agent_name, user_email, query)` is **async** and runs the
-query embedding + the cosine ranking under `asyncio.to_thread` — never on the
-event loop. Top 5 above 0.30 cosine, within 1,500 chars; the scope's matrix is
-cached per process keyed on `(count, max(updated_at))`; hits bump
-`recall_count` / `last_recalled_at` (production is ent#634's readout corpus).
+`memory_service.recall(agent_name, user_email, query, execution_id=…)` is
+**async** and runs the query embedding + the ranking under `asyncio.to_thread`
+— never on the event loop. Ranking is `services/memory_ranking.py`, a leaf
+(numpy only): **relevance gates, recency re-orders.** A fact needs cosine ≥ 0.30
+to be recalled at all; the survivors are ordered by
+`cosine × (0.6 + 0.4 × 0.5^(age_days / half_life))` over `updated_at`, so the
+newer wording of a superseded fact ranks first even when the old wording
+matches the query somewhat better, while an old fact never loses more than
+40 % — a fact at cosine ≥ 0.5 never falls below the 0.30 gate line, so a fresh
+weak match never beats a stale strong one. Half-life default 30 days, operator knob
+`trinity_memory_recency_half_life_days` (`0` = plain cosine). Top 5 within
+1,500 chars; the scope's matrix is cached per process keyed on
+`(count, max(updated_at))`; hits bump `recall_count` / `last_recalled_at`
+(production is ent#634's readout corpus) and journal a `recall` row.
+
+`recall` returns the lines the prompt sees — `(2026-10-21, scheduled run) …`,
+the fact's last revision date and the kind of run it came from, so the model
+can weigh staleness itself; execution ids stay out of the prompt (noise to the
+model, a copy-back hazard). `recall_records` returns the records (`id`, `text`,
+`source`, `created_at`, `updated_at`, `relevance`, `score`).
+
+The dated dataset `tests/unit/fixtures/ent1022_recency_dataset.json` pins the
+behaviour against the real model: `tests/unit/ent1022_recency_eval.py` runs it
+offline inside the backend image (`PYTHONPATH=/app python …`) and as the
+`test_real_model_recency_dataset` case wherever the model is cached, scoring
+every query with recency on and off so the report shows what the weight changed.
 
 Rendering: `user_memory_guard.envelope(notes, summary, retrieved=…)` adds a
 third section `### Retrieved for this request` inside the same nonce frame.
@@ -115,8 +152,11 @@ lazily — with ONNX intra-op threads = 1. Unavailable ⇒ `embed` returns None,
 `agent_memory_facts` — `db/schema.py`, `db/tables.py`, SQLite migration
 `agent_memory_facts`, Alembic `0108_agent_memory_facts`; `agent_ownership.memory_opt_out`
 — SQLite `agent_ownership_memory_opt_out`, Alembic `0109_agent_ownership_memory_opt_out`.
+`agent_memory_fact_events` (the journal) and `agent_memory_facts.updated_by_execution_id`
+— SQLite `agent_memory_provenance`, Alembic `0110_agent_memory_provenance`.
 `db/memory_facts.py::MemoryFactOperations`, `db/agent_settings/memory.py::MemoryOptOutMixin`.
-Forget is a soft delete with `deleted_by`.
+Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
+(`db/agent_cleanup.py` `AGENT_REFS`).
 
 ## API — `routers/agent_memory.py` (`# mcp: none`)
 | Method | Path | Gate | What |
@@ -124,7 +164,8 @@ Forget is a soft delete with `deleted_by`.
 | GET | `/api/agents/{name}/retrieval-memory` | AuthorizedAgentByName + `assert_own_agent` | status (a use) |
 | PUT | `/api/agents/{name}/retrieval-memory` | OwnedAgentByName + `require_person` | `{opt_out}` — audit-logged |
 | GET | `/api/agents/{name}/retrieval-memory/facts?user_email=&limit=&offset=` | OwnedAgentByName + `require_person` | the owner view (ent#962 readers rule) |
-| DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged |
+| DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
+| GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget (422 otherwise) |
 | GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) |
 
 The switch is written through the generic `PUT /api/settings/trinity_memory_enabled`.
@@ -146,8 +187,17 @@ ids, the duplicate index, the daily budget, the lease, ranking/threshold/budget/
 counters, recall off the loop, fail-open, envelope and copy-back, route gates,
 dependency-pin parity, sovereignty pins, both migration tracks; plus a
 real-model check where the model is cached.
+`tests/unit/test_ent1022_memory_provenance.py` — the ranking leaf (weight shape,
+gate vs re-order, old-strong beats fresh-weak, recency off), the rendered line
+and `recall_records`, the half-life knob, the journal for every op with the
+execution and the previous text, the last-writer stamp, recall/prune/forget
+rows, the journal's age pruning, the events route and its filters, the model
+pin and request shape, both migration tracks and cleanup parity; plus the
+dated dataset against the real model where it is cached.
 
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for
 facts; cross-scope beyond the owner; the enterprise Workspace surface for the
-owner view (ent#962); backfill of historical chat.
+owner view and the journal (ent#962); backfill of historical chat; an `as_of`
+date the extractor reads off the exchange itself (relative dates in the fact
+text still rot — the rendered stamp is the revision date, not the event's).

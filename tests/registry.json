@@ -7009,6 +7009,17 @@
         "unit"
       ],
       "description": "Retrieval memory (MEM-002): the platform switch and per-agent opt-out, the whose-memory table over the execution row, the ONE capture seam in spawn_task_terminal_event, scope isolation both directions with the owner folded into the agent scope, credential redaction before extraction and storage, the ent#419 screen on facts, reconcile ops with out-of-set ids refused, the partial unique index, the daily budget and the lease, recall ranking/threshold/budget/counters off the event loop, fail-open on an unavailable embedder or store, the envelope's third section and the copy-back drop, human-only route gates, dependency-pin parity, offline/egress pins, and both migration tracks."
+    },
+    {
+      "file": "unit/test_ent1022_memory_provenance.py",
+      "feature": "trinity-enterprise#1022",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
     }
   ]
 }

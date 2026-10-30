@@ -120,6 +120,11 @@ def facts(agent_name, scope):
     return [r["text"] for r in db.list_memory_facts(agent_name, scope, with_embedding=False)]
 
 
+def recalled(agent_name, email, query, **kw):
+    """The recalled facts' bare texts (recall() itself renders a date/source prefix)."""
+    return [r["text"] for r in run(ms.recall_records(agent_name, email, query, **kw))]
+
+
 # --------------------------------------------------------------------------- #
 # Switches
 # --------------------------------------------------------------------------- #
@@ -258,7 +263,7 @@ class TestCapture:
         assert facts(agent.name, "alice@example.com") == ["Alice prefers reports on Friday mornings"]
         assert facts(agent.name, ms.AGENT_SCOPE) == []
         query = "reports on Friday mornings?"
-        assert run(ms.recall(agent.name, "alice@example.com", query)) == ["Alice prefers reports on Friday mornings"]
+        assert recalled(agent.name, "alice@example.com", query) == ["Alice prefers reports on Friday mornings"]
         # another person, and the agent's own runs, never see it
         assert run(ms.recall(agent.name, "bob@example.com", query)) == []
         assert run(ms.recall(agent.name, None, query)) == []
@@ -371,7 +376,7 @@ class TestRecall:
 
     def test_ranking_threshold_budget_and_usage_counters(self, agent, memory_on):
         self._seed(agent, ["Reports go out on Friday mornings", "Office is in Kyiv", "The cat likes tuna"])
-        got = run(ms.recall(agent.name, None, "when do reports go out"))
+        got = recalled(agent.name, None, "when do reports go out")
         assert got[0] == "Reports go out on Friday mornings"
         assert "The cat likes tuna" not in got            # below the threshold
         tiny = run(ms.recall(agent.name, None, "when do reports go out", max_chars=10))
@@ -396,7 +401,7 @@ class TestRecall:
             calls.append(getattr(fn, "__name__", repr(fn)))
             return await real(fn, *a, **kw)
         monkeypatch.setattr(asyncio, "to_thread", spy)
-        assert run(ms.recall(agent.name, None, "reports")) == ["Reports go out on Friday"]
+        assert recalled(agent.name, None, "reports") == ["Reports go out on Friday"]
         assert "_recall_sync" in calls
 
     def test_fail_open_when_the_embedder_is_unavailable(self, agent, memory_on, monkeypatch):

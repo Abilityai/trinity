@@ -997,6 +997,7 @@ agent_memory_facts = Table(
     Column("embedding_model", Text, nullable=False),
     Column("source", Text, nullable=False),
     Column("execution_id", Text),
+    Column("updated_by_execution_id", Text),   # the last run that rewrote or retired it (provenance)
     Column("recall_count", Integer, server_default="0"),
     Column("last_recalled_at", Text),
     Column("created_at", Text, nullable=False),
@@ -1010,6 +1011,29 @@ agent_memory_facts = Table(
         sqlite_where=text("deleted_at IS NULL"),
         postgresql_where=text("deleted_at IS NULL"),
     ),
+)
+
+# trinity-enterprise#1022: the fact journal — one row per thing that happened to a
+# fact (or to a candidate that never became one), keyed to the execution that
+# did it. Append-only; the lineage behind every live fact and the corpus the
+# extraction prompt is tuned against. See the note in db/schema.py.
+agent_memory_fact_events = Table(
+    "agent_memory_fact_events",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("user_email", Text, nullable=False, server_default=""),
+    Column("fact_id", Text),
+    Column("op", Text, nullable=False),
+    Column("execution_id", Text),
+    Column("candidate_text", Text),
+    Column("previous_text", Text),
+    Column("neighbour_ids", Text),
+    Column("score", Float),
+    Column("actor", Text),
+    Column("created_at", Text, nullable=False),
+    Index("idx_agent_memory_fact_events_fact", "agent_name", "fact_id", "created_at"),
+    Index("idx_agent_memory_fact_events_execution", "agent_name", "execution_id"),
 )
 
 # ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.

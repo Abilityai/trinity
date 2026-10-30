@@ -562,8 +562,10 @@ CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(a
 fact; `user_email = ''` is the agent scope, shared with the owner; never NULL so the
 partial unique index holds on both engines; `embedding` is a float32 LE vector,
 `BLOB` on SQLite / `BYTEA` on PostgreSQL via `to_postgres_table_ddl`; forget is a
-soft delete recording who; Alembic `0107`. `agent_ownership.memory_opt_out INTEGER
-DEFAULT 0` is the per-agent opt-out, Alembic `0108`.)
+soft delete recording who; Alembic `0108`. `agent_ownership.memory_opt_out INTEGER
+DEFAULT 0` is the per-agent opt-out, Alembic `0109`. `updated_by_execution_id` is the
+last run that rewrote or retired the row — `execution_id` stays the run it was born
+in — and `agent_memory_fact_events` below is the journal; both Alembic `0110`.)
 ```sql
 CREATE TABLE agent_memory_facts (
     id TEXT PRIMARY KEY,
@@ -575,6 +577,7 @@ CREATE TABLE agent_memory_facts (
     embedding_model TEXT NOT NULL,
     source TEXT NOT NULL,
     execution_id TEXT,
+    updated_by_execution_id TEXT,
     recall_count INTEGER DEFAULT 0,
     last_recalled_at TEXT,
     created_at TEXT NOT NULL,
@@ -584,6 +587,32 @@ CREATE TABLE agent_memory_facts (
 );
 CREATE INDEX idx_agent_memory_facts_scope ON agent_memory_facts(agent_name, user_email, deleted_at);
 CREATE UNIQUE INDEX idx_agent_memory_facts_live_hash ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL;
+```
+
+**agent_memory_fact_events** (trinity-enterprise#1022 — the retrieval-memory journal: one
+append-only row per op on a fact or on a candidate that never became one — `add` /
+`update` / `delete` / `none` / `screened` / `prune` / `recall` / `forget` — keyed to the
+execution that did it, with the candidate the extractor proposed, the text it replaced
+and the neighbour ids the reconciler was shown; `score` is the recall cosine; `actor` the
+person who forgot. Rows older than 90 days are dropped per agent at the next retain.
+Written only by `services/memory_service.py` and the forget route; `AgentRef(…, CASCADE)`.)
+```sql
+CREATE TABLE agent_memory_fact_events (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    fact_id TEXT,
+    op TEXT NOT NULL,
+    execution_id TEXT,
+    candidate_text TEXT,
+    previous_text TEXT,
+    neighbour_ids TEXT,
+    score REAL,
+    actor TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_agent_memory_fact_events_fact ON agent_memory_fact_events(agent_name, fact_id, created_at);
+CREATE INDEX idx_agent_memory_fact_events_execution ON agent_memory_fact_events(agent_name, execution_id);
 ```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by

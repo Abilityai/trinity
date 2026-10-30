@@ -1217,12 +1217,35 @@ TABLES = {
             embedding_model TEXT NOT NULL,
             source TEXT NOT NULL,
             execution_id TEXT,
+            updated_by_execution_id TEXT,
             recall_count INTEGER DEFAULT 0,
             last_recalled_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             deleted_at TEXT,
             deleted_by TEXT
+        )
+    """,
+
+    # trinity-enterprise#1022: the fact journal. One row per op on a fact or on a
+    # candidate that never became one (add / update / delete / none / screened /
+    # prune / recall / forget), keyed to the execution that did it, with the
+    # candidate the extractor proposed, the text it replaced and the neighbours
+    # the reconciler was shown. Append-only; pruned by age, never edited.
+    "agent_memory_fact_events": """
+        CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL DEFAULT '',
+            fact_id TEXT,
+            op TEXT NOT NULL,
+            execution_id TEXT,
+            candidate_text TEXT,
+            previous_text TEXT,
+            neighbour_ids TEXT,
+            score REAL,
+            actor TEXT,
+            created_at TEXT NOT NULL
         )
     """,
 
@@ -2501,6 +2524,10 @@ INDEXES = [
     "ON agent_memory_facts(agent_name, user_email, deleted_at)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
     "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+    "ON agent_memory_fact_events(agent_name, fact_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+    "ON agent_memory_fact_events(agent_name, execution_id)",
 
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",

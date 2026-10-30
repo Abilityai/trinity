@@ -2092,11 +2092,23 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
   a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
   on the live `text_hash`.
-- **Recall**: async, off the event loop; top 5 above 0.30 cosine within 1,500
-  chars; hits bump usage counters. Local ONNX embeddings (`fastembed`,
-  multilingual MiniLM, baked into the backend image, offline at runtime).
-- **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…`
-  (owner + human-only); forget is a recorded soft delete.
+- **Recall**: async, off the event loop; relevance gates (cosine ≥ 0.30),
+  recency re-orders (`cosine × (0.6 + 0.4 × 0.5^(age/half-life))` over
+  `updated_at`, half-life `trinity_memory_recency_half_life_days`, default 30,
+  `0` = off); top 5 within 1,500 chars; hits bump usage counters. Each recalled
+  line carries its revision date and the kind of run it came from
+  (`(2026-10-21, scheduled run) …`), never an execution id. Local ONNX
+  embeddings (`fastembed`, multilingual MiniLM, baked into the backend image,
+  offline at runtime).
+- **Provenance**: every fact keeps the execution it was born in and the last
+  one that rewrote or retired it; `agent_memory_fact_events` journals every
+  add / update / delete / none / screened / prune / recall / forget with the
+  execution, the proposed candidate, the replaced text and the neighbours
+  shown — the lineage behind each fact and the corpus the extraction prompt
+  is tuned against (90-day retention per agent).
+- **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
+  `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
+  soft delete.
 - **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
 
 ## 6. Activity Monitoring

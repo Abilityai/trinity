@@ -3230,8 +3230,8 @@ class DatabaseManager:
     def update_memory_fact_text(self, fact_id: str, agent_name: str, **kwargs) -> bool:
         return self._memory_fact_ops.update_memory_fact_text(fact_id, agent_name, **kwargs)
 
-    def soft_delete_memory_fact(self, fact_id: str, agent_name: str, *, deleted_by: str) -> bool:
-        return self._memory_fact_ops.soft_delete_memory_fact(fact_id, agent_name, deleted_by=deleted_by)
+    def soft_delete_memory_fact(self, fact_id: str, agent_name: str, *, deleted_by: str, execution_id=None) -> bool:
+        return self._memory_fact_ops.soft_delete_memory_fact(fact_id, agent_name, deleted_by=deleted_by, execution_id=execution_id)
 
     def mark_memory_facts_recalled(self, fact_ids, *, agent_name: str) -> None:
         return self._memory_fact_ops.mark_memory_facts_recalled(fact_ids, agent_name=agent_name)
@@ -3244,6 +3244,15 @@ class DatabaseManager:
 
     def memory_fact_stats(self, agent_name=None) -> dict:
         return self._memory_fact_ops.memory_fact_stats(agent_name)
+
+    def insert_memory_fact_events(self, rows) -> int:
+        return self._memory_fact_ops.insert_memory_fact_events(rows)
+
+    def list_memory_fact_events(self, agent_name: str, **kwargs):
+        return self._memory_fact_ops.list_memory_fact_events(agent_name, **kwargs)
+
+    def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
+        return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
     def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
         return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)

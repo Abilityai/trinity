@@ -41,7 +41,7 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from database import db
-from services import anthropic_messages, memory_embeddings, memory_subject, user_memory_guard
+from services import anthropic_messages, memory_embeddings, memory_ranking, memory_subject, user_memory_guard
 from utils.credential_sanitizer import sanitize_text
 from utils.helpers import iso_cutoff
 
@@ -54,6 +54,8 @@ DEFAULT_DAILY_LIMIT = 200
 AGENT_SCOPE = ""
 
 RECALL_K = 5
+SETTING_RECENCY_HALF_LIFE = "trinity_memory_recency_half_life_days"   # 0 = recency off
+EVENT_RETENTION_DAYS = 90        # the journal follows the executions it points at, roughly
 RECALL_MAX_CHARS = 1500
 RECALL_MIN_SCORE = 0.30      # calibrated on the default model: unrelated queries top out ~0.15
 NEIGHBOUR_MIN_SCORE = 0.60   # near-duplicates hand off to reconcile: paraphrases score 0.67–0.95
@@ -131,6 +133,42 @@ def daily_retain_limit() -> int:
     except Exception:  # noqa: BLE001
         return DEFAULT_DAILY_LIMIT
     return max(0, value)
+
+
+def recency_half_life_days() -> float:
+    """The recency half-life in days (``trinity_memory_recency_half_life_days``);
+    the module default when unset or unreadable, 0 switches recency off."""
+    try:
+        value = float(str(db.get_setting_value(SETTING_RECENCY_HALF_LIFE, default="") or "").strip() or
+                      memory_ranking.RECENCY_HALF_LIFE_DAYS)
+    except Exception:  # noqa: BLE001
+        return memory_ranking.RECENCY_HALF_LIFE_DAYS
+    return max(0.0, value)
+
+
+# How a fact's `source` (the execution's `triggered_by`) reads inside the prompt.
+_SOURCE_LABELS = {
+    "schedule": "scheduled run", "manual": "manual run", "webhook": "webhook run",
+    "agent": "agent-to-agent run", "mcp": "MCP call", "self_task": "self-dispatched task",
+    "loop": "loop run", "fan_out": "fan-out run", "reminder": "reminder", "event": "event",
+    "system": "system run", "public": "chat", "user": "chat", "chat": "chat",
+    "slack": "Slack chat", "telegram": "Telegram chat", "whatsapp": "WhatsApp chat",
+}
+
+
+def source_label(source: Optional[str]) -> str:
+    key = (source or "").strip().lower()
+    return _SOURCE_LABELS.get(key) or (key.replace("_", " ") if key and key != "unknown" else "earlier run")
+
+
+def render_fact_line(record: Dict[str, Any]) -> str:
+    """One recalled fact as the prompt sees it: ``(2026-10-21, scheduled run) …``.
+    The date is the fact's last revision, so a merged fact carries its newest
+    stamp; execution ids stay out — noise to the model, a copy-back hazard."""
+    text = str(record.get("text") or "").strip()
+    stamp = str(record.get("updated_at") or record.get("created_at") or "")[:10]
+    label = source_label(record.get("source"))
+    return f"({stamp}, {label}) {text}" if stamp else f"({label}) {text}"
 
 
 def is_enabled(agent_name: str) -> bool:
@@ -220,13 +258,15 @@ def on_startup() -> None:
 # --------------------------------------------------------------------------- #
 
 _cache_lock = threading.Lock()
-_scope_cache: Dict[Tuple[str, str], Tuple[Tuple[int, Optional[str]], List[str], List[str], Any]] = {}
+_scope_cache: Dict[Tuple[str, str], Tuple[Tuple[int, Optional[str]], List[str], List[str], Any, List[Dict[str, Any]]]] = {}
 _SCOPE_CACHE_MAX = 64
 
 
 def _scope_matrix(agent_name: str, scope: str):
-    """``(ids, texts, matrix)`` for the scope, from a per-process cache keyed on
-    the scope's ``(count, max(updated_at))`` fingerprint."""
+    """``(ids, texts, matrix, records)`` for the scope, from a per-process cache
+    keyed on the scope's ``(count, max(updated_at))`` fingerprint. ``records``
+    carries each fact's ``updated_at`` / ``source`` (never the embedding) for
+    the recency weight and the rendered line."""
     import numpy as np
 
     fingerprint = db.memory_scope_fingerprint(agent_name, scope)
@@ -234,11 +274,11 @@ def _scope_matrix(agent_name: str, scope: str):
     with _cache_lock:
         cached = _scope_cache.get(key)
     if cached and cached[0] == fingerprint:
-        return cached[1], cached[2], cached[3]
+        return cached[1], cached[2], cached[3], cached[4]
     if fingerprint[0] == 0:
-        return [], [], None
+        return [], [], None, []
     rows = db.list_memory_facts(agent_name, scope, limit=SCOPE_READ_CAP, with_embedding=True)
-    ids, texts, vectors = [], [], []
+    ids, texts, vectors, records = [], [], [], []
     for row in rows:
         vec = memory_embeddings.from_bytes(row["embedding"])
         if vec.shape[0] != memory_embeddings.EMBED_DIM:
@@ -246,60 +286,82 @@ def _scope_matrix(agent_name: str, scope: str):
         ids.append(row["id"])
         texts.append(row["text"])
         vectors.append(vec)
+        records.append({k: row.get(k) for k in ("id", "text", "source", "created_at", "updated_at", "execution_id")})
     matrix = np.vstack(vectors) if vectors else None
     with _cache_lock:
         if len(_scope_cache) >= _SCOPE_CACHE_MAX:
             _scope_cache.pop(next(iter(_scope_cache)))
-        _scope_cache[key] = (fingerprint, ids, texts, matrix)
-    return ids, texts, matrix
+        _scope_cache[key] = (fingerprint, ids, texts, matrix, records)
+    return ids, texts, matrix, records
 
 
-def _rank(query_vec, ids, texts, matrix, *, k: int, min_score: float) -> List[Tuple[str, str, float]]:
-    import numpy as np
-
-    if matrix is None or not ids:
-        return []
-    scores = matrix @ np.asarray(query_vec, dtype="<f4")
-    order = np.argsort(-scores)[:k]
-    return [(ids[i], texts[i], float(scores[i])) for i in order if float(scores[i]) >= min_score]
+def _rank(query_vec, ids, texts, matrix, *, k: int, min_score: float, records=None, half_life_days: float = 0.0):
+    """``memory_ranking.rank`` over the scope: plain cosine for the reconcile
+    step's neighbour search, cosine × recency (over ``updated_at``) for recall."""
+    stamps = [r.get("updated_at") or r.get("created_at") for r in records] if records and half_life_days > 0 else None
+    return memory_ranking.rank(query_vec, ids, texts, matrix, k=k, min_score=min_score,
+                               updated_at=stamps, half_life_days=half_life_days)
 
 
-def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: int) -> List[Tuple[str, str]]:
+def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: int,
+                 execution_id: Optional[str] = None) -> List[Dict[str, Any]]:
     vectors = memory_embeddings.embed([query[:QUERY_CLAMP]])
     if not vectors:
         return []
-    ids, texts, matrix = _scope_matrix(agent_name, scope)
-    picked: List[Tuple[str, str]] = []
+    ids, texts, matrix, records = _scope_matrix(agent_name, scope)
+    by_id = {r["id"]: r for r in records}
+    picked: List[Dict[str, Any]] = []
     budget = max_chars
-    for fact_id, text, _score in _rank(vectors[0], ids, texts, matrix, k=k, min_score=RECALL_MIN_SCORE):
-        if len(text) > budget:
+    for ranked in _rank(vectors[0], ids, texts, matrix, k=k, min_score=RECALL_MIN_SCORE,
+                        records=records, half_life_days=recency_half_life_days()):
+        if len(ranked.text) > budget:
             break
-        picked.append((fact_id, text))
-        budget -= len(text)
+        record = dict(by_id.get(ranked.fact_id) or {"id": ranked.fact_id, "text": ranked.text})
+        record["relevance"], record["score"] = ranked.relevance, ranked.score
+        picked.append(record)
+        budget -= len(ranked.text)
     if picked:
         try:
-            db.mark_memory_facts_recalled([fact_id for fact_id, _ in picked], agent_name=agent_name)
-        except Exception as e:  # noqa: BLE001 — counters are bookkeeping, never a failure
-            logger.debug("[memory] recall counters not updated: %s", e)
+            db.mark_memory_facts_recalled([r["id"] for r in picked], agent_name=agent_name)
+            db.insert_memory_fact_events([
+                {"agent_name": agent_name, "user_email": scope, "fact_id": r["id"], "op": "recall",
+                 "execution_id": execution_id, "score": r["relevance"]}
+                for r in picked
+            ])
+        except Exception as e:  # noqa: BLE001 — counters and the journal are bookkeeping, never a failure
+            logger.debug("[memory] recall bookkeeping not written: %s", e)
     return picked
 
 
-async def recall(
+async def recall_records(
     agent_name: str, user_email: Optional[str], query: Optional[str], *,
-    k: int = RECALL_K, max_chars: int = RECALL_MAX_CHARS,
-) -> List[str]:
+    k: int = RECALL_K, max_chars: int = RECALL_MAX_CHARS, execution_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """The facts most relevant to ``query`` in the person's scope (the agent
-    scope for the owner or for no person). ``[]`` when off, unavailable, empty
-    or on any error — the caller renders today's block unchanged."""
+    scope for the owner or for no person), as records: ``id``, ``text``,
+    ``source``, ``created_at``, ``updated_at``, ``relevance`` (the cosine the
+    gate saw) and ``score`` (what the order used). ``[]`` when off, unavailable,
+    empty or on any error — the caller renders today's block unchanged."""
     if not query or not str(query).strip() or not is_enabled(agent_name):
         return []
     try:
         scope = await asyncio.to_thread(scope_for, agent_name, user_email)
-        picked = await asyncio.to_thread(_recall_sync, agent_name, scope, str(query), k=k, max_chars=max_chars)
-        return [text for _id, text in picked]
+        return await asyncio.to_thread(_recall_sync, agent_name, scope, str(query), k=k, max_chars=max_chars,
+                                       execution_id=execution_id)
     except Exception as e:  # noqa: BLE001 — fail-open: no memory this turn
         logger.warning("[memory] recall failed for %s: %s", agent_name, type(e).__name__)
         return []
+
+
+async def recall(
+    agent_name: str, user_email: Optional[str], query: Optional[str], *,
+    k: int = RECALL_K, max_chars: int = RECALL_MAX_CHARS, execution_id: Optional[str] = None,
+) -> List[str]:
+    """``recall_records`` rendered for the prompt, one line per fact:
+    ``(2026-10-21, scheduled run) …`` — the date and the kind of run the fact
+    came from, so the model can weigh staleness itself."""
+    return [render_fact_line(r) for r in
+            await recall_records(agent_name, user_email, query, k=k, max_chars=max_chars, execution_id=execution_id)]
 
 
 async def task_memory_block(agent_name: str, execution_id: Optional[str], message: Optional[str]) -> Optional[str]:
@@ -324,7 +386,7 @@ async def task_memory_block(agent_name: str, execution_id: Optional[str], messag
         firer = (getattr(execution, "source_user_email", None) or "").strip().lower()
         if firer and firer != (await asyncio.to_thread(owner_email, agent_name)):
             return None
-        retrieved = await recall(agent_name, None, message)
+        retrieved = await recall(agent_name, None, message, execution_id=execution_id)
         if not retrieved:
             return None
         from services.platform_prompt_service import format_agent_memory_block
@@ -434,7 +496,10 @@ def build_transcript(execution: Any, subject: memory_subject.MemorySubject) -> O
     return "\n".join(lines)
 
 
-async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> List[str]:
+async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> Tuple[List[str], List[str]]:
+    """``(facts, screened)``: the candidates that passed normalisation and the
+    raw strings the screen dropped (clamped), so the journal can show what the
+    extractor proposed that never became a fact."""
     scope_line = (
         "a specific person this agent serves — record facts about them and their work"
         if subject.is_person else
@@ -446,15 +511,20 @@ async def _extract(transcript: str, subject: memory_subject.MemorySubject) -> Li
     if parsed is None:
         if raw is not None:
             logger.info("[memory] extractor returned no JSON array")
-        return []
+        return [], []
     facts: List[str] = []
+    screened: List[str] = []
     seen: set = set()
     for item in parsed[:MAX_FACTS_PER_RETAIN]:
         text = normalize_fact(item)
-        if text and fact_hash(text) not in seen:
+        if text is None:
+            if isinstance(item, str) and item.strip():
+                screened.append(sanitize_text(_CONTROL.sub("", item))[:FACT_CLAMP])
+            continue
+        if fact_hash(text) not in seen:
             seen.add(fact_hash(text))
             facts.append(text)
-    return facts
+    return facts, screened
 
 
 async def _reconcile(candidates: List[str], neighbours: List[List[Tuple[str, str]]]) -> List[Dict[str, Any]]:
@@ -552,6 +622,17 @@ def _budget_exceeded(agent_name: str, limit: int) -> bool:
     return db.count_memory_retains_since(agent_name, iso_cutoff(hours=24)) >= limit
 
 
+def _journal_screened(agent_name: str, scope: str, execution_id: str, screened: Sequence[str]) -> None:
+    try:
+        db.insert_memory_fact_events([
+            {"agent_name": agent_name, "user_email": scope, "op": "screened", "execution_id": execution_id,
+             "candidate_text": raw}
+            for raw in screened
+        ])
+    except Exception as e:  # noqa: BLE001
+        logger.debug("[memory] journal not written for %s: %s", execution_id, e)
+
+
 def _prepare(execution_id: str) -> Optional[Dict[str, Any]]:
     """Everything retain needs that touches the DB, on a worker thread:
     the row, the subject, the scope, the transcript, the key and the budget.
@@ -581,34 +662,68 @@ def _prepare(execution_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _apply(agent_name: str, scope: str, source: str, execution_id: str,
-           candidates: List[str], vectors: List[List[float]], ops: List[Dict[str, Any]]) -> Tuple[int, int]:
-    """Write the reconciled ops and prune the scope, on a worker thread."""
+           candidates: List[str], vectors: List[List[float]], ops: List[Dict[str, Any]],
+           neighbours: Optional[List[List[Tuple[str, str]]]] = None,
+           screened: Sequence[str] = ()) -> Tuple[int, int]:
+    """Write the reconciled ops, journal every one of them (and the candidates
+    the screen dropped), prune the scope, on a worker thread."""
+    neighbours = neighbours or [[] for _ in candidates]
+    existing = {fid: text for near in neighbours for fid, text in near}
+    events: List[Dict[str, Any]] = [
+        {"agent_name": agent_name, "user_email": scope, "op": "screened", "execution_id": execution_id,
+         "candidate_text": raw}
+        for raw in screened
+    ]
     stored = 0
     for i, op in enumerate(ops):
         text = op.get("text")
+        near_ids = json.dumps([fid for fid, _ in neighbours[i]]) if i < len(neighbours) and neighbours[i] else None
+        event = {"agent_name": agent_name, "user_email": scope, "op": op["op"].lower(),
+                 "execution_id": execution_id, "candidate_text": candidates[i], "neighbour_ids": near_ids,
+                 "fact_id": op.get("id")}
         if op["op"] == "ADD" and text:
             vec = vectors[i] if text == candidates[i] else (memory_embeddings.embed([text]) or [None])[0]
             if vec is None:
                 continue
-            if db.insert_memory_fact(
+            fact_id = db.insert_memory_fact(
                 agent_name=agent_name, user_email=scope, text=text, text_hash=fact_hash(text),
                 embedding=memory_embeddings.to_bytes(vec), embedding_model=memory_embeddings.MODEL_NAME,
                 source=source, execution_id=execution_id,
-            ):
+            )
+            if fact_id:
                 stored += 1
+                event["fact_id"] = fact_id
+            else:
+                event["op"] = "none"   # the unique index said the scope already holds it
         elif op["op"] == "UPDATE" and text and op.get("id"):
             vec = (memory_embeddings.embed([text]) or [None])[0]
             if vec is None:
                 continue
+            event["previous_text"] = existing.get(op["id"])
             if db.update_memory_fact_text(
                 op["id"], agent_name, text=text, text_hash=fact_hash(text),
-                embedding=memory_embeddings.to_bytes(vec),
+                embedding=memory_embeddings.to_bytes(vec), updated_by_execution_id=execution_id,
             ):
                 stored += 1
+            else:
+                event["op"] = "none"
         elif op["op"] == "DELETE" and op.get("id"):
-            db.soft_delete_memory_fact(op["id"], agent_name, deleted_by="reconcile")
+            event["previous_text"] = existing.get(op["id"])
+            if not db.soft_delete_memory_fact(op["id"], agent_name, deleted_by="reconcile", execution_id=execution_id):
+                event["op"] = "none"
+        events.append(event)
     pruned = db.prune_memory_scope(agent_name, scope, cap=SCOPE_CAP)
-    return stored, pruned
+    events.extend(
+        {"agent_name": agent_name, "user_email": scope, "op": "prune", "execution_id": execution_id,
+         "fact_id": fid, "previous_text": text}
+        for fid, text in pruned
+    )
+    try:
+        db.insert_memory_fact_events(events)
+        db.prune_memory_fact_events(agent_name, before_iso=iso_cutoff(hours=24 * EVENT_RETENTION_DAYS))
+    except Exception as e:  # noqa: BLE001 — the journal is bookkeeping, never a failure
+        logger.debug("[memory] journal not written for %s: %s", execution_id, e)
+    return stored, len(pruned)
 
 
 async def retain_execution(execution_id: str) -> None:
@@ -637,23 +752,26 @@ async def _retain_execution(execution_id: str) -> None:
             logger.info("[memory] scope busy for %ds — %s not captured", int(LEASE_RETRIES * LEASE_RETRY_S), execution_id)
             return
     try:
-        candidates = await _extract(transcript, subject)
+        candidates, screened = await _extract(transcript, subject)
         if not candidates:
+            if screened:
+                await asyncio.to_thread(_journal_screened, agent_name, scope, execution_id, screened)
             return
         vectors = await asyncio.to_thread(memory_embeddings.embed, candidates)
         if not vectors:
             logger.info("[memory] embeddings unavailable — %s not captured", execution_id)
             return
-        ids, texts, matrix = await asyncio.to_thread(_scope_matrix, agent_name, scope)
+        ids, texts, matrix, _records = await asyncio.to_thread(_scope_matrix, agent_name, scope)
         neighbours = [
-            [(fid, text) for fid, text, _s in _rank(vec, ids, texts, matrix, k=5, min_score=NEIGHBOUR_MIN_SCORE)]
+            [(r.fact_id, r.text) for r in _rank(vec, ids, texts, matrix, k=5, min_score=NEIGHBOUR_MIN_SCORE)]
             for vec in vectors
         ]
         ops = (await _reconcile(candidates, neighbours)) if any(neighbours) else [
             {"op": "ADD", "id": None, "text": c} for c in candidates
         ]
         source = subject.triggered_by or "unknown"
-        stored, pruned = await asyncio.to_thread(_apply, agent_name, scope, source, execution_id, candidates, vectors, ops)
+        stored, pruned = await asyncio.to_thread(_apply, agent_name, scope, source, execution_id, candidates, vectors, ops,
+                                                 neighbours, screened)
         logger.info(
             "[memory] %s: %d candidate(s), %d stored, %d pruned (%s scope, %s)",
             execution_id, len(candidates), stored, pruned, "person" if subject.is_person else "agent", source,

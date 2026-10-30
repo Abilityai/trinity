@@ -17,7 +17,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
+# The current Haiku. Thinking is on by default on this generation, so the
+# request turns it off and runs at low effort: these are one-shot JSON
+# extractions, and `max_tokens` must stay the text budget, not a thinking one.
+HAIKU_MODEL = "claude-haiku-5-5"
 _API_URL = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 
@@ -53,6 +56,8 @@ async def complete(
                 json={
                     "model": model,
                     "max_tokens": max_tokens,
+                    "thinking": {"type": "disabled"},
+                    "output_config": {"effort": "low"},
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
@@ -64,7 +69,17 @@ async def complete(
         return None
     try:
         data = response.json()
-        return (data.get("content", [{}])[0].get("text", "") or "").strip()
+        # The first TEXT block — never content[0] blindly, which is a thinking
+        # block on a model that reasons before it answers. A block that carries
+        # text but declares no type (older shapes) still counts.
+        blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
+        for block in blocks:
+            if block.get("type") == "text":
+                return (block.get("text") or "").strip()
+        for block in blocks:
+            if block.get("type") is None and isinstance(block.get("text"), str):
+                return block["text"].strip()
+        return ""
     except Exception as e:  # noqa: BLE001
         logger.error("[%s] Anthropic API response unreadable: %s", tag, e)
         return None
