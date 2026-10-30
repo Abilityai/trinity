@@ -904,6 +904,59 @@ export const useAgentsStore = defineStore('agents', {
       })
     },
 
+    // Declaring metrics from the UI (trinity-enterprise#1006). Every write
+    // edits the agent's template.yaml `metrics:` block and carries the
+    // template hash the read returned; the backend refuses a stale one with
+    // `template_changed`. Errors are rethrown for the form to show inline.
+    async getMetricDeclarations(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/metrics/declarations`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async declareMetric(name, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/metrics/declarations`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async updateMetricDeclaration(name, metric, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async getMetricReferences(name, metric) {
+      const authStore = useAuthStore()
+      const response = await axios.get(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}/references`,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async retireMetricDeclaration(name, metric, baseHash, { acknowledgeReferences = false } = {}) {
+      const authStore = useAuthStore()
+      const response = await axios.delete(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        {
+          headers: authStore.authHeader,
+          params: { base_hash: baseHash, acknowledge_references: acknowledgeReferences }
+        }
+      )
+      return response.data
+    },
+
     // Agent Dashboard Actions
     async getAgentDashboard(name) {
       return dedupe(`agentDashboard:${name}`, async () => {
