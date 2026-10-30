@@ -10,7 +10,7 @@ could miss a newer open run whose terminal was lost.
 
 One decision, shared by the runtime (`LoopOperations.rearm_lost_dispatch`) and
 the one-time cleanup (SQLite `loop_runs_stale_duplicates` + Alembic
-`0105_loop_runs_stale_duplicates`). Pure: no database access and no imports,
+`0108_loop_runs_stale_duplicates`). Pure: no database access and no imports,
 so both migration tracks can load it.
 """
 from typing import Iterable, Mapping, Set

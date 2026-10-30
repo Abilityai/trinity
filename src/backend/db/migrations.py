@@ -5798,7 +5798,7 @@ def _migrate_loop_runs_stale_duplicates(cursor, conn):
     """#4058 — close the stale `running` loop-run rows the pre-#4023 race left
     (`run_loop_runs_stale_cleanup`). On a fresh install the tables do not exist
     yet on the first pass, and there is nothing to clean. Mirrored by the
-    Alembic revision 0105_loop_runs_stale_duplicates."""
+    Alembic revision 0108_loop_runs_stale_duplicates."""
     cursor.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
         "AND name IN ('agent_loops', 'agent_loop_runs')"
