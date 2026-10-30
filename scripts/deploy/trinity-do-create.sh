@@ -152,6 +152,32 @@ SSH_ARGS=()
 # (macOS's /bin/bash is 3.2) calls an EMPTY array unbound, so an account with no
 # SSH keys died here, after every question had been answered.
 
+# The droplet boots with no admin (#3799), so every exit from here on tells the
+# operator to claim it: Trinity can start even when this script gives up. The
+# EXIT trap covers the exits `set -e` takes when `droplet create --wait` or
+# `droplet list` fails after DigitalOcean has accepted the create.
+CLAIM_SHOWN=
+claim_warning() {
+    CLAIM_SHOWN=1
+    cat >&2 <<CLAIM
+  Open $1 and create your admin account (email and password).
+  Until you do, the first person to open that address can create it.
+  If you see a sign-in page instead of that form, someone got there
+  first: destroy the droplet and run this again.
+CLAIM
+}
+# shellcheck disable=SC2329  # invoked by the EXIT trap below
+_claim_on_exit() {
+    local rc=$?
+    rm -f "$USER_DATA"
+    if [ "$rc" -ne 0 ] && [ -z "$CLAIM_SHOWN" ]; then
+        printf '\nThe droplet may have been created. Check https://cloud.digitalocean.com/droplets\n\n' >&2
+        claim_warning "https://<the droplet's IP>, if it exists,"
+        printf '\n' >&2
+    fi
+}
+trap _claim_on_exit EXIT  # replaces the cleanup trap above and keeps its rm
+
 printf '\n  Creating the droplet...\n' >&2
 doctl compute droplet create "$DROPLET_NAME" \
     --image "$IMAGE" --size "$SIZE" --region "$REGION" \
@@ -161,17 +187,6 @@ doctl compute droplet create "$DROPLET_NAME" \
 
 IP="$(doctl compute droplet list "$DROPLET_NAME" \
       --format PublicIPv4 --no-header | tail -1 | tr -d '[:space:]')"
-# The droplet boots with no admin (#3799), so every exit after this point tells
-# the operator to claim it: Trinity can start even when this script gives up.
-claim_warning() {
-    cat >&2 <<CLAIM
-  Open $1 and create your admin account (email and password).
-  Until you do, the first person to open that address can create it.
-  If you see a sign-in page instead of that form, someone got there
-  first: destroy the droplet and run this again.
-CLAIM
-}
-
 if [ -z "$IP" ]; then
     printf '\nThe droplet was created but has no public IP yet. Check https://cloud.digitalocean.com/droplets\n\n' >&2
     claim_warning "https://<the droplet's IP>, once it has one,"

@@ -115,7 +115,7 @@ Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the
 
 **Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. Never delete that `DATABASE_URL=` line: on the hosted compose file an *absent* line selects the bundled PostgreSQL — which is empty — and only an *empty* line keeps SQLite. See [Single Server → Database backend](single-server.md#database-backend).
 
-On a Marketplace Droplet whose admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
+On a Marketplace Droplet or a droplet made by the DigitalOcean install script, where the admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
 
 ### Step 4: Restart Platform Services
 

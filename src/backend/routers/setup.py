@@ -27,7 +27,7 @@ in, and disappears for installs where it had nothing left to do.
 
 trinity-enterprise#580 makes that first case a product path, not a leftover: a
 marketplace one-click image boots with `ADMIN_PASSWORD` deliberately blank
-(`ADMIN_PASSWORD_SOURCE=browser`, set only by the image's first boot), so the
+(`ADMIN_PASSWORD_SOURCE=browser`, set by the provisioning listed below), so the
 first person to open the instance creates the admin here — no terminal. #2381's
 invariant is untouched: this still never renders over an existing admin; the
 marketplace path simply no longer pre-provisions one. The residual — the window

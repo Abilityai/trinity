@@ -98,6 +98,8 @@ _STUB_DOCTL = """#!/bin/bash
 # `account get` succeeds, there are no SSH keys, `droplet create` records the
 # user-data file it was given, and `droplet list` has no IP, so the script
 # stops at "no public IP yet" instead of polling for 15 minutes.
+# STUB_IP makes `droplet list` print an address; STUB_CREATE_RC / STUB_LIST_RC
+# make those calls fail after the create has been accepted.
 if [ "$1 $2 $3" = "compute droplet create" ]; then
     while [ $# -gt 0 ]; do
         if [ "$1" = "--user-data-file" ]; then
@@ -105,18 +107,36 @@ if [ "$1 $2 $3" = "compute droplet create" ]; then
         fi
         shift
     done
+    exit "${STUB_CREATE_RC:-0}"
+fi
+if [ "$1 $2 $3" = "compute droplet list" ]; then
+    [ -n "${STUB_IP:-}" ] && echo "$STUB_IP"
+    exit "${STUB_LIST_RC:-0}"
 fi
 exit 0
 """
 
+# `curl` answers with STUB_CURL_RC. `date` returns the start time for the
+# deadline and the first loop check, then a time past the 15-minute deadline,
+# so the poll loop runs exactly one round.
+_STUB_CURL = '#!/bin/bash\nexit "${STUB_CURL_RC:-0}"\n'
+_STUB_DATE = """#!/bin/bash
+echo x >> "$CAPTURE.date"
+if [ "$(wc -l < "$CAPTURE.date")" -le 2 ]; then echo 1000; else echo 999999; fi
+"""
+_STUB_SLEEP = "#!/bin/bash\nexit 0\n"
+
 
 def _run_installer(tmp_path: Path, *, snap: bool, stdin: str, home: bool = True,
-                   image_tag: str = "v0.9.5-rc2") -> subprocess.CompletedProcess:
+                   image_tag: str = "v0.9.5-rc2",
+                   env_extra: dict | None = None) -> subprocess.CompletedProcess:
     stub_dir = tmp_path / ("snapd/bin" if snap else "bin")
     stub_dir.mkdir(parents=True)
-    stub = stub_dir / "doctl"
-    stub.write_text(_STUB_DOCTL)
-    stub.chmod(0o755)
+    for name, body in (("doctl", _STUB_DOCTL), ("curl", _STUB_CURL),
+                       ("date", _STUB_DATE), ("sleep", _STUB_SLEEP)):
+        stub = stub_dir / name
+        stub.write_text(body)
+        stub.chmod(0o755)
     for d in ("home", "tmp"):
         (tmp_path / d).mkdir()
     env = {
@@ -127,6 +147,7 @@ def _run_installer(tmp_path: Path, *, snap: bool, stdin: str, home: bool = True,
     }
     if home:
         env["HOME"] = str(tmp_path / "home")
+    env.update(env_extra or {})
     return subprocess.run(
         ["bash", str(_SCRIPT)], input=stdin, env=env,
         capture_output=True, text=True, timeout=60,
@@ -230,11 +251,35 @@ def test_no_admin_password_reaches_the_droplets_user_data(tmp_path: Path) -> Non
     every boot, pickles it into obj.pkl, and the metadata service serves it for
     the droplet's life, so no shred can keep a password in it from leaking. The
     installer asks for none, and first boot leaves the admin to /setup."""
-    proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS)
+    proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS,
+                          env_extra={"ADMIN_PASSWORD": "Sentinel-3799-pw"})
     assert "no public IP yet" in proc.stderr, proc.stderr
     assert "choose a password" not in proc.stderr.lower(), "the installer still asks for a password"
     # The droplet exists and boots with no admin, so this exit also says to claim it.
     assert "create your admin account" in proc.stderr, proc.stderr
     user_data = (tmp_path / "user-data.sh").read_text()
     assert "ADMIN_PASSWORD=" not in user_data, "an admin password is in the user-data"
+    assert "Sentinel-3799-pw" not in user_data, "the operator's ADMIN_PASSWORD reached the user-data"
     assert "export ADMIN_PASSWORD_SOURCE=browser" in user_data
+
+
+# Every exit after the droplet exists must tell the operator to claim it: the
+# droplet boots with no admin, and the first visitor to /setup becomes admin.
+@pytest.mark.parametrize(
+    "env_extra, rc",
+    [
+        ({"STUB_IP": "203.0.113.7", "STUB_CURL_RC": "0"}, 0),
+        ({"STUB_IP": "203.0.113.7", "STUB_CURL_RC": "7"}, 1),
+        ({"STUB_CREATE_RC": "1"}, 1),
+        ({"STUB_LIST_RC": "1"}, 1),
+    ],
+    ids=["ready", "timeout", "create-wait-fails", "list-fails"],
+)
+def test_every_exit_after_create_says_to_claim_the_droplet(
+    tmp_path: Path, env_extra: dict, rc: int
+) -> None:
+    proc = _run_installer(tmp_path, snap=False, stdin=_ANSWERS, env_extra=env_extra)
+    assert proc.returncode == rc, proc.stderr
+    assert proc.stderr.count("create your admin account") == 1, proc.stderr
+    if "STUB_IP" in env_extra:  # the script's own warning, naming the address
+        assert "may have been created" not in proc.stderr, proc.stderr

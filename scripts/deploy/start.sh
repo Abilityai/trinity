@@ -1001,8 +1001,8 @@ fi
 # generate a strong one and surface it in the final summary so an agent-run
 # install never hard-stops on a TTY.
 #
-# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which only
-# a marketplace first boot sets. There the blank IS the point — no admin is
+# One deliberate exception (ent#580): ADMIN_PASSWORD_SOURCE=browser, which a
+# marketplace first boot and the DigitalOcean script install (#3799) set. There the blank IS the point — no admin is
 # provisioned, and the first person to open the instance creates it at /setup,
 # no terminal involved. The marker is persisted to `.env` because this script is
 # also the documented UPDATE path (`start.sh --hosted`, often --unattended): a
