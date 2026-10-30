@@ -449,6 +449,45 @@ class TestClaimActivity:
         assert states[live] == "completed"
         assert sorted(states.values()) == ["cancelled", "completed"]
 
+    def test_terminated_before_open_opens_nothing(self, seed_agent, enqueue):
+        """#3982: terminate won the CAS before the opener read the row."""
+        import asyncio
+        from services import pull_coordination_service as pcs
+
+        seed_agent("alpha")
+        eid = enqueue("alpha")
+        pcs.claim_next_task("alpha", "alpha#w1")
+        _hrun("UPDATE schedule_executions SET status = 'cancelled' WHERE id = :e", e=eid)
+
+        assert asyncio.run(pcs.open_claim_activity(eid)) is None
+        assert self._dispatch_rows(eid) == []
+
+    def test_terminate_inside_the_open_leaves_no_started_bar(
+        self, seed_agent, enqueue, monkeypatch
+    ):
+        """#3982: terminate lands after the opener's read, before its insert.
+        Its close finds no bar; the opener must close the one it writes."""
+        import asyncio
+        from models import TaskExecutionStatus
+        from services import task_execution_service as tes
+        from services import pull_coordination_service as pcs
+        from services.activity_service import activity_service
+
+        seed_agent("alpha")
+        eid = enqueue("alpha")
+        pcs.claim_next_task("alpha", "alpha#w1")
+        real_start = tes.start_dispatch_activity
+
+        async def terminate_then_start(**kwargs):
+            _hrun("UPDATE schedule_executions SET status = 'cancelled' WHERE id = :e", e=eid)
+            await activity_service.close_execution_activity(
+                eid, TaskExecutionStatus.CANCELLED)
+            return await real_start(**kwargs)
+
+        monkeypatch.setattr(tes, "start_dispatch_activity", terminate_then_start)
+        asyncio.run(pcs.open_claim_activity(eid))
+        assert [r[1] for r in self._dispatch_rows(eid)] == ["cancelled"]
+
     def test_unknown_execution_opens_nothing(self, seed_agent):
         import asyncio
         from services import pull_coordination_service as pcs

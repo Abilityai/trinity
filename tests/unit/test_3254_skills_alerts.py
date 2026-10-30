@@ -19,6 +19,7 @@ driven through the code paths that call them in production:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shutil
 import subprocess
@@ -362,6 +363,36 @@ class TestReconcileRefusal:
         assert [(r["id"], r["status"], r["disposed_by"]) for r in _rows(db, self.SUBJECT)] == [
             (row["id"], "acknowledged", "person")]       # snoozed: no new row in any status
 
+    @pytest.mark.parametrize("next_count", [25, 49, 12], ids=["same", "under-double", "fewer"])
+    def test_after_a_persons_ending_a_refusal_not_twice_as_large_stays_snoozed(
+            self, db, svc, clock, next_count):
+        """#4048: the snooze holds for a same-or-better reading (and for a rise
+        short of doubling, so a few more orphans do not re-file)."""
+        self._reconcile(svc, 25)
+        [row] = _pending(db, self.SUBJECT)
+        _answer(db, row)
+
+        clock.advance(days=1)
+        assert self._reconcile(svc, next_count)["status"] == "refused"
+        assert [r["id"] for r in _rows(db, self.SUBJECT)] == [row["id"]]
+
+    @pytest.mark.parametrize("next_count", [50, 400], ids=["doubled", "sixteen-fold"])
+    def test_after_a_persons_ending_a_refusal_that_at_least_doubled_files_a_new_row(
+            self, db, svc, clock, next_count):
+        """#4048: a 25-orphan refusal acknowledged, then a 400-orphan one a day
+        later, filed nothing for 7 days. A refusal at least twice as large is
+        worse and files at once, carrying counts only."""
+        self._reconcile(svc, 25)
+        [row] = _pending(db, self.SUBJECT)
+        _answer(db, row)
+
+        clock.advance(days=1)
+        assert self._reconcile(svc, next_count)["status"] == "refused"
+        [new] = _pending(db, self.SUBJECT)
+        assert new["id"] != row["id"]
+        assert new["context"]["orphan_count"] == next_count
+        assert "orphan-" not in new["question"] and "orphan-" not in json.dumps(new["context"])
+
     def test_an_older_pass_that_finishes_last_never_ends_a_newer_refusal(self, db, svc, clock):
         """Passes on one agent overlap: the start path, the fleet sweep's prune
         and the reconcile route each run one. P1 finds 3 orphans and starts
@@ -658,6 +689,34 @@ class TestFleetReinject:
         sweep({"a1": self.BAD})
         assert [(r["id"], r["status"], r["disposed_by"]) for r in _rows(db, self.SUBJECT)] == [
             (row["id"], "acknowledged", "person")]       # snoozed: no new row in any status
+
+    @pytest.mark.parametrize("next_outcomes", [
+        {"a1": BAD, "a2": BAD},
+        {"a1": BAD, "a2": OK},
+    ], ids=["same-agents", "fewer-agents"])
+    def test_after_a_persons_ending_the_same_or_fewer_failed_agents_stay_snoozed(
+            self, db, sweep, clock, next_outcomes):
+        sweep({"a1": self.BAD, "a2": self.BAD})
+        [row] = _pending(db, self.SUBJECT)
+        _answer(db, row)
+
+        clock.advance(days=1)
+        sweep(next_outcomes)
+        assert [r["id"] for r in _rows(db, self.SUBJECT)] == [row["id"]]
+
+    def test_after_a_persons_ending_a_sweep_failing_a_new_agent_files_a_new_row(
+            self, db, sweep, clock):
+        """#4048: a sweep that fails for a different set of agents filed
+        nothing for 7 days. An agent the ended reading did not name is worse."""
+        sweep({"a1": self.BAD, "a2": self.OK})
+        [row] = _pending(db, self.SUBJECT)
+        _answer(db, row)
+
+        clock.advance(days=1)
+        sweep({"a1": self.OK, "a2": self.BAD})
+        [new] = _pending(db, self.SUBJECT)
+        assert new["id"] != row["id"]
+        assert new["context"]["agents"] == ["a2"]
 
     def test_r1_the_legacy_row_derives_the_subject_the_seam_files(self, db, sweep):
         from services import platform_alerts as pa

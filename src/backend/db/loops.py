@@ -11,7 +11,7 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
-from sqlalchemy import select, insert, update, func, and_
+from sqlalchemy import select, insert, update, func, and_, or_
 
 from .engine import get_engine
 from .tables import agent_loops, agent_loop_runs
@@ -227,13 +227,26 @@ class LoopOperations:
         path can omit it. `last_response` carries the last *successful* response
         even on a tolerated-failure iteration (continue mode), preserving
         `{{previous_response}}` semantics.
+
+        #4057: never moves a loop backwards. A write for a run older than the
+        loop's `runs_completed` (a slow worker landing after a park-sourced
+        dispatch already advanced the loop) writes nothing: its
+        `last_response` and `failed_runs` are as stale as its run number.
         """
         values: dict = {"runs_completed": runs_completed, "last_response": last_response}
         if failed_runs is not None:
             values["failed_runs"] = failed_runs
         stmt = (
             update(agent_loops)
-            .where(agent_loops.c.id == loop_id)
+            .where(
+                and_(
+                    agent_loops.c.id == loop_id,
+                    or_(
+                        agent_loops.c.runs_completed.is_(None),
+                        agent_loops.c.runs_completed <= runs_completed,
+                    ),
+                )
+            )
             .values(**values)
         )
         with get_engine().begin() as conn:

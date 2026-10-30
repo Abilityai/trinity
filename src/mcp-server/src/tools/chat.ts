@@ -164,7 +164,7 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
   if (r.status === "accepted") {
     lead = `Accepted by '${agent}' as ${id} — it may still be running or already done.`;
   } else if (r.status === "queued") {
-    lead = `Queued on '${agent}' as ${id} while it was at capacity — it may have run since.`;
+    lead = `Queued on '${agent}' as ${id} — it may have run since.`;
   } else if (r.status === "queued_timeout" && !String(r.message ?? "").includes("Do not re-send:")) {
     lead = `The platform stopped waiting for ${id} on '${agent}' — it may still be running.`;
   } else {
