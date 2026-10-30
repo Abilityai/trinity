@@ -425,6 +425,45 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       },
     },
 
+    // ================================================================ ent#980
+    propose_project_changes: {
+      name: "propose_project_changes",
+      description:
+        "As a project's steward, propose the people part you can't change yourself: members to add, " +
+        "other agents to add, a new steward, who can open it, and an owner per task. People are work " +
+        "emails or canon roles written role:<id> (the people who hold the role when it is approved). " +
+        "It goes to the project's creator as ONE decision in their Inbox; Approve applies exactly what " +
+        "you proposed, once, and Decline applies nothing (their reason appears in the project log and " +
+        "as last_proposal on get_project). One proposal waits at a time: check pending_proposal on " +
+        "get_project or get_steward_digest first; re-sending the same change is refused " +
+        "`already_pending`. Adding an agent someone else owns still needs its owner's yes. Needs the " +
+        "project-management permission (`project_management_not_permitted` otherwise).",
+      parameters: z.object({
+        project_id: projectId,
+        members: z.array(z.string().min(1).max(320)).max(20).optional()
+          .describe("Work emails or role:<id>, e.g. ['alex@example.com', 'role:compliance-lead']."),
+        agents: z.array(z.string().min(1).max(128)).max(10).optional().describe("Agent names to add to the project."),
+        steward: z.object({ kind: z.enum(["person", "agent"]), ref: z.string().min(1).max(320) }).optional()
+          .describe("A new steward: a person's work email, or an agent name."),
+        visibility: z.enum(["members", "company"]).optional()
+          .describe("members: only members can open it; company: everyone at the company can."),
+        task_owners: z.array(z.object({
+          task_id: taskId,
+          owner: z.string().min(1).max(320).describe("A work email or role:<id>."),
+        })).max(25).optional(),
+        note: z.string().max(500).optional().describe("One or two lines on why, shown to the creator."),
+      }),
+      execute: async (p: { project_id: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
+        try {
+          const { project_id, ...rest } = p;
+          const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
+          return ok(await getClient(context?.session).proposeProjectChanges(project_id, body, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
     // ========================================================================
     set_project_health: {
       name: "set_project_health",
