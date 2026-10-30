@@ -135,6 +135,10 @@ RUNTIME_ENDPOINT_KEYS = {
         "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
         "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE",
         "ANTHROPIC_UNIX_SOCKET",
+        # The CLI's fallback when ANTHROPIC_BASE_URL is empty (its Files API
+        # calls, with the auth headers), so pinning one without the other
+        # opens the second.
+        "CLAUDE_CODE_API_BASE_URL",
     }),
     "codex": frozenset({
         "CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE",

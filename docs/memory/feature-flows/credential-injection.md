@@ -465,7 +465,8 @@ fails if the agent image calls a backend path the app does not register.
    `execution_env.ROUTING_KEYS` + `RUNTIME_ENDPOINT_KEYS`): proxy names in both
    cases, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSL_CERT_FILE` on
    every runtime, plus the runtime's own endpoint names on that runtime only
-   (`ANTHROPIC_BASE_URL` and the other `ANTHROPIC_*` base URLs on Claude Code, the
+   (`ANTHROPIC_BASE_URL`, its fallback `CLAUDE_CODE_API_BASE_URL` and the other
+   `ANTHROPIC_*` base URLs on Claude Code, the
    `CODEX_*` URL overrides on Codex, `GOOGLE_GEMINI_BASE_URL` and friends on
    Gemini). A Claude agent's `.env` keeps `OPENAI_BASE_URL`. A value in the
    container baseline still applies. The WARN names the key and says it decides

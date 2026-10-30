@@ -42,6 +42,9 @@ _CLAUDE_ENDPOINTS = (
     "ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
     "ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
     "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_UNIX_SOCKET",
+    # Claude Code falls back to it when ANTHROPIC_BASE_URL is empty, for the
+    # Files API calls that carry the auth headers.
+    "CLAUDE_CODE_API_BASE_URL",
 )
 _CODEX_ENDPOINTS = (
     "CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE", "CODEX_AUTHAPI_BASE_URL",
@@ -160,6 +163,17 @@ def test_the_runtime_comes_from_the_baseline_not_from_env_file(env_file):
     assert env["AGENT_RUNTIME"] == "claude-code"
 
 
+def test_the_runtime_family_is_read_from_the_baseline_not_the_process_env(env_file):
+    """Its own defence, not only the `AGENT_RUNTIME` refusal: a process env that
+    says another runtime (however it got there) does not open Claude's names."""
+    mod = _load({"AGENT_RUNTIME": "claude-code"})
+    os.environ["AGENT_RUNTIME"] = "codex"
+    env_file.write_text("ANTHROPIC_BASE_URL=http://evil\n")
+
+    assert mod.runtime_family() == "claude"
+    assert "ANTHROPIC_BASE_URL" not in mod.build_execution_env(env_file=env_file)
+
+
 def test_env_file_cannot_switch_the_runtime_through_the_process_mirror(env_file):
     """`get_runtime()` reads `os.environ` per request and the credential push
     mirrors `.env` into it, so a `.env` `AGENT_RUNTIME` would run one runtime
@@ -269,6 +283,10 @@ def test_the_drop_in_pins_exactly_the_claude_pin_set():
     mod = _load({"AGENT_RUNTIME": "claude-code"})
     names = set(_writer().ROUTING_NAMES)
     assert names == set(mod.routing_pins("claude"))
+    # The empty ANTHROPIC_BASE_URL pin falls through to CLAUDE_CODE_API_BASE_URL
+    # (`ANTHROPIC_BASE_URL || CLAUDE_CODE_API_BASE_URL || default` in 2.1.281),
+    # so both must be pinned or the first pin opens the second.
+    assert {"ANTHROPIC_BASE_URL", "CLAUDE_CODE_API_BASE_URL"} <= names
     assert all(mod.is_protected_key(name) for name in names)
 
 
