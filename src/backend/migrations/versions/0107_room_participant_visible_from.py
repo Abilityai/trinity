@@ -5,16 +5,16 @@ first message seq the participant may read. ``server_default`` 0 keeps every
 existing row reading the whole transcript. PostgreSQL half of the dual-track
 pair; the SQLite half is ``db/migrations.py::room_participant_visible_from``.
 
-Revision ID: 0106_room_participant_visible_from
-Revises: 0104_agent_sync_state_git_stats_at
+Revision ID: 0107_room_participant_visible_from
+Revises: 0106_execution_chat_session_id
 Create Date: 2026-10-26
 """
 from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "0106_room_participant_visible_from"
-down_revision = "0104_agent_sync_state_git_stats_at"
+revision = "0107_room_participant_visible_from"
+down_revision = "0106_execution_chat_session_id"
 branch_labels = None
 depends_on = None
 
