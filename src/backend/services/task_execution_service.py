@@ -3228,7 +3228,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=f"{error_msg}{walk_trail}",
-            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / None
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / MAX_TURNS (422, #3988) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors
