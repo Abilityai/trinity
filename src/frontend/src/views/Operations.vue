@@ -183,6 +183,12 @@
         <NotificationsPanel />
       </div>
 
+      <!-- Anomalies Tab (trinity-enterprise#74) — admin on an entitled install;
+           the API guards it (admin + person + entitlement), this mirrors it. -->
+      <div v-if="activeTab === 'anomalies' && tabAllowed('anomalies')">
+        <AnomalyIncidentsPanel />
+      </div>
+
       <!-- Health Tab (admin-only — fleet monitoring) -->
       <div v-if="activeTab === 'health' && isAdmin">
         <MonitoringPanel />
@@ -271,6 +277,7 @@ import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
 import EvaluationsPanel from '../components/EvaluationsPanel.vue'
 import OutcomesPanel from '../components/OutcomesPanel.vue'
+import AnomalyIncidentsPanel from '../components/anomaly/AnomalyIncidentsPanel.vue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import BoundedRegion from '../components/BoundedRegion.vue'
@@ -280,6 +287,7 @@ import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
 import { pendingResponsesPhrase, resolvedPhrase } from '../utils/operatorQueueRead'
 import { useEnterpriseStore } from '../stores/enterprise'
+import { useAnomalyDetectionStore } from '../stores/anomalyDetection'
 import { isWorkspaceOnlyRole } from '../utils/workspaceOnly'
 
 const route = useRoute()
@@ -289,6 +297,7 @@ const notificationsStore = useNotificationsStore()
 const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 const enterpriseStore = useEnterpriseStore()
+const anomalyStore = useAnomalyDetectionStore()
 
 const isAdmin = computed(() => authStore.role === 'admin')
 // ent#837's floor: operator, creator, admin. `authStore.role` defaults to
@@ -331,7 +340,7 @@ function dismissStaleQueue() {
 
 // Health is admin-only; Evaluations (ent#938) is operator-floor. A principal
 // below a tab's gate must not reach it even via deep link.
-const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'evaluations', 'outcomes', 'reports', 'resolved']
+const VALID_TABS = ['needs-response', 'anomalies', 'notifications', 'health', 'executions', 'evaluations', 'outcomes', 'reports', 'resolved']
 const OPERATOR_TABS = ['needs-response', 'notifications', 'resolved']
 // Gated tabs, as data: tab id → the predicate that admits the current role.
 // The strip, the render slot, `resolveTab` and the role watch all read this
@@ -342,6 +351,9 @@ const TAB_GATES = {
   // ent#941: the fleet record spans every project, so admin-only, and only
   // where the eval_outcomes module is entitled.
   outcomes: () => isAdmin.value && enterpriseStore.isEntitled('eval_outcomes'),
+  // ent#74 (ruled 2026-10-29): every agent's anomaly incidents, admin-only
+  // like the module's API, and only where anomaly_detection is entitled.
+  anomalies: () => isAdmin.value && enterpriseStore.isEntitled('anomaly_detection'),
 }
 const tabAllowed = (id) => !(id in TAB_GATES) || TAB_GATES[id]()
 
@@ -383,6 +395,9 @@ const subtitle = computed(() => {
   if (activeTab.value === 'outcomes') {
     return 'How projects executed each week, and the improvements proposed from it'
   }
+  if (activeTab.value === 'anomalies') {
+    return 'Scheduled runs that departed from their baseline, across every agent'
+  }
 
   const queueCount = operatorQueueStore.pendingCount
   const notifCount = notificationsStore.pendingCount
@@ -412,6 +427,7 @@ const subtitle = computed(() => {
 // appearing does not make the strip overflow one tab too late.
 const visibleTabs = computed(() => [
   { id: 'needs-response', label: 'Needs Response', badge: operatorQueueStore.pendingCount || undefined },
+  ...(tabAllowed('anomalies') ? [{ id: 'anomalies', label: 'Anomalies', badge: anomalyStore.openCount || undefined }] : []),
   { id: 'notifications', label: 'Notifications', badge: notificationsStore.pendingCount || undefined },
   ...(tabAllowed('health') ? [{ id: 'health', label: 'Health' }] : []),
   { id: 'executions', label: 'Executions' },
@@ -523,6 +539,11 @@ async function confirmClearAll() {
 // the profile lands, so a deep-linked admin or operator first resolves to the
 // default tab).
 // The entitlement list lands asynchronously too (ent#941's Outcomes gate).
+// ent#74: the Anomalies badge counts open incidents once the tab is admitted.
+watch(() => tabAllowed('anomalies'), (allowed) => {
+  if (allowed && activeTab.value !== 'anomalies') anomalyStore.loadOpenCount()
+}, { immediate: true })
+
 watch([() => authStore.role, () => enterpriseStore.enterpriseFeatures], () => {
   const wanted = route.query.tab
   if (!tabAllowed(activeTab.value)) {
