@@ -2992,6 +2992,40 @@ export class TrinityClient {
     );
   }
 
+  /**
+   * Search the agent's retrieval memory (trinity-enterprise#1028). The scope —
+   * the person the execution serves, or the agent's own work on a headless run
+   * — is resolved server-side from `execution_id`, never from the caller.
+   */
+  async searchMemory(
+    agentName: string,
+    data: {
+      execution_id: string;
+      query: string;
+      k?: number;
+    }
+  ): Promise<{
+    agent_name: string;
+    scope: "agent" | "person";
+    hits: Array<{
+      id: string;
+      text: string;
+      line: string;
+      source: string;
+      execution_id: string | null;
+      created_at: string;
+      updated_at: string | null;
+      relevance: number;
+      score: number;
+    }>;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/retrieval-memory/search`,
+      data
+    );
+  }
+
   // ============================================================================
   // Seat Decision Record (trinity-enterprise#638, R25)
   // ============================================================================

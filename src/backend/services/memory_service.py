@@ -57,6 +57,7 @@ RECALL_K = 5
 SETTING_RECENCY_HALF_LIFE = "trinity_memory_recency_half_life_days"   # 0 = recency off
 EVENT_RETENTION_DAYS = 90        # the journal follows the executions it points at, roughly
 RECALL_MAX_CHARS = 1500
+SEARCH_K_MAX = 50            # the agent / owner search door's cap (trinity-enterprise#1028)
 RECALL_MIN_SCORE = 0.30      # calibrated on the default model: unrelated queries top out ~0.15
 NEIGHBOUR_MIN_SCORE = 0.60   # near-duplicates hand off to reconcile: paraphrases score 0.67–0.95
 QUERY_CLAMP = 2000
@@ -307,8 +308,12 @@ def _rank(query_vec, ids, texts, matrix, *, k: int, min_score: float, records=No
                                updated_at=stamps, half_life_days=half_life_days)
 
 
-def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: int,
-                 execution_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: Optional[int],
+                 execution_id: Optional[str] = None, op: str = "recall") -> List[Dict[str, Any]]:
+    """The ranked facts for ``query`` in one scope. ``max_chars`` bounds the
+    prompt block (None = unbounded, the search door); ``op`` is the journal row
+    each hit leaves — a ``search`` row also carries the query, so the owner can
+    see what was looked up."""
     vectors = memory_embeddings.embed([query[:QUERY_CLAMP]])
     if not vectors:
         return []
@@ -318,18 +323,20 @@ def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: 
     budget = max_chars
     for ranked in _rank(vectors[0], ids, texts, matrix, k=k, min_score=RECALL_MIN_SCORE,
                         records=records, half_life_days=recency_half_life_days()):
-        if len(ranked.text) > budget:
+        if budget is not None and len(ranked.text) > budget:
             break
         record = dict(by_id.get(ranked.fact_id) or {"id": ranked.fact_id, "text": ranked.text})
         record["relevance"], record["score"] = ranked.relevance, ranked.score
         picked.append(record)
-        budget -= len(ranked.text)
+        if budget is not None:
+            budget -= len(ranked.text)
     if picked:
         try:
             db.mark_memory_facts_recalled([r["id"] for r in picked], agent_name=agent_name)
+            looked_up = sanitize_text(query)[:FACT_CLAMP] if op == "search" else None
             db.insert_memory_fact_events([
-                {"agent_name": agent_name, "user_email": scope, "fact_id": r["id"], "op": "recall",
-                 "execution_id": execution_id, "score": r["relevance"]}
+                {"agent_name": agent_name, "user_email": scope, "fact_id": r["id"], "op": op,
+                 "execution_id": execution_id, "score": r["relevance"], "candidate_text": looked_up}
                 for r in picked
             ])
         except Exception as e:  # noqa: BLE001 — counters and the journal are bookkeeping, never a failure
@@ -355,6 +362,30 @@ async def recall_records(
     except Exception as e:  # noqa: BLE001 — fail-open: no memory this turn
         logger.warning("[memory] recall failed for %s: %s", agent_name, type(e).__name__)
         return []
+
+
+async def search_records(
+    agent_name: str, user_email: Optional[str], query: Optional[str], *,
+    k: int = 10, execution_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """The search door (trinity-enterprise#1028): ``recall_records`` without
+    the prompt-block budget and past the recall tail (``k`` ≤ ``SEARCH_K_MAX``),
+    each record also carrying ``line`` (the rendered prompt form), each hit
+    journaled as a ``search`` row with the query. ``[]`` when off, unavailable,
+    empty or on any error."""
+    if not query or not str(query).strip() or not is_enabled(agent_name):
+        return []
+    k = max(1, min(int(k), SEARCH_K_MAX))
+    try:
+        scope = await asyncio.to_thread(scope_for, agent_name, user_email)
+        records = await asyncio.to_thread(_recall_sync, agent_name, scope, str(query), k=k, max_chars=None,
+                                          execution_id=execution_id, op="search")
+    except Exception as e:  # noqa: BLE001 — fail-open: an empty answer, never a 500 on the agent's turn
+        logger.warning("[memory] search failed for %s: %s", agent_name, type(e).__name__)
+        return []
+    for record in records:
+        record["line"] = render_fact_line(record)
+    return records
 
 
 async def recall(

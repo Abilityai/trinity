@@ -2092,6 +2092,15 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
   a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
   on the live `text_hash`.
+- **Search** (trinity-enterprise#1028): the same store and ranking on demand,
+  past the injected tail — the owner through `GET …/retrieval-memory/search`
+  (person-only, scope by email), the agent through MCP `search_memory` →
+  `POST …/retrieval-memory/search`, the scope read off the execution it names
+  by the whose-memory rule (a person's turn → their scope; a headless run → the
+  agent scope; anonymous / group → refused with the reason), an agent key only
+  for its own agent. Up to 50 hits, each with the rendered line, relevance and
+  score; every hit journaled as a `search` row carrying the query. Off or
+  unavailable is a named refusal, never an empty answer.
 - **Recall**: async, off the event loop; relevance gates (cosine ≥ 0.30),
   recency re-orders (`cosine × (0.6 + 0.4 × 0.5^(age/half-life))` over
   `updated_at`, half-life `trinity_memory_recency_half_life_days`, default 30,

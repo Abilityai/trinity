@@ -35,6 +35,7 @@ const voice = createVoiceReplyTools(fake, false);
 // its own.)
 const SELF_FENCED: Tool[] = [
   memory.writeUserMemory,
+  memory.searchMemory,
   reminders.setReminder,
   reminders.listReminders,
   reminders.cancelReminder,

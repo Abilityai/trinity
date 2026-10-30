@@ -7020,6 +7020,17 @@
         "unit"
       ],
       "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
+    },
+    {
+      "file": "unit/test_ent1028_memory_search.py",
+      "feature": "trinity-enterprise#1028",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "Retrieval-memory search: `search_records` ranks past the recall tail with no prompt budget and journals every hit as a `search` row carrying the query; the owner GET door (person-only, scope by email, 422 query_empty / invalid_email / memory_off); the agent POST door (MCP search_memory) resolving the scope off the execution by the whose-memory rule — agent scope on a headless run, the served person's scope on a person turn, 422 memory_no_subject with the reason otherwise — refusing an agent key that names another agent, a missing or foreign execution, and capping k through the model."
     }
   ]
 }

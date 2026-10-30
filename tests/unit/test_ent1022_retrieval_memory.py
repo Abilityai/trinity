@@ -518,9 +518,12 @@ class TestRoutesAndPins:
             require_person(agent_key)
         assert getattr(err.value, "status_code", None) == 403
 
-    def test_router_declares_no_mcp_surface(self):
+    def test_router_declares_its_mcp_surface(self):
+        """Invariant #13: the one agent-callable door (`search_memory`,
+        trinity-enterprise#1028) is named in the header; the owner-tier routes
+        stay UI-only."""
         first = (REPO / "src/backend/routers/agent_memory.py").read_text().splitlines()[0]
-        assert first.startswith("# mcp: none")
+        assert first.startswith("# mcp: memory.ts (search_memory)")
 
     def test_dependency_pins_match_image_and_environment(self):
         """CI-consumed pin: the Dockerfile and requirements-test must name the

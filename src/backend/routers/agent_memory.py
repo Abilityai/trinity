@@ -1,4 +1,4 @@
-# mcp: none — owner-tier configuration and the owner view of a person's facts; UI-only (trinity-enterprise#1022)
+# mcp: memory.ts (search_memory) — the agent door; the owner-tier configuration and views are UI-only (trinity-enterprise#1022, #1028)
 """Retrieval memory per agent (trinity-enterprise#1022, MEM-002).
 
 Four routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
@@ -10,6 +10,9 @@ calls:
 * ``GET  …/facts``      — the owner view of one scope's facts (ent#962's readers rule).
 * ``DELETE …/facts/{id}`` — forget one fact (soft delete, recorded with who).
 * ``GET  …/events``     — the journal: what happened to a fact, or in one execution.
+* ``GET  …/search``     — the owner's search over one scope (trinity-enterprise#1028).
+* ``POST …/search``     — the agent door: MCP ``search_memory``, the scope read off the
+  execution row by the whose-memory rule, never from the caller.
 
 The platform switch itself is ``trinity_memory_enabled`` through the generic
 settings door; ``GET /api/settings/memory`` (admin) reports the platform status.
@@ -27,12 +30,21 @@ from dependencies import (
     AuthorizedAgentByName,
     CurrentUser,
     OwnedAgentByName,
+    assert_agent_access,
     assert_own_agent,
+    get_current_user,
     reject_agent_principal,
     require_person,
 )
 from db.memory_facts import EVENT_OPS
-from models import MemoryFactEventOut, MemoryFactOut, MemoryOptOutUpdate
+from models import (
+    MemoryFactEventOut,
+    MemoryFactOut,
+    MemoryOptOutUpdate,
+    MemorySearchHit,
+    MemorySearchRequest,
+    MemorySearchResponse,
+)
 from services import memory_service, memory_subject
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
@@ -166,3 +178,95 @@ async def list_retrieval_memory_events_endpoint(
         op=op, limit=limit, offset=offset,
     )
     return [MemoryFactEventOut(**{k: row.get(k) for k in MemoryFactEventOut.model_fields}) for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Search (trinity-enterprise#1028)
+# --------------------------------------------------------------------------- #
+
+def _query_or_422(q: str | None) -> str:
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail={"code": "query_empty", "message": "Give a few words to look for: a name, a deadline, a decision, a past outcome."})
+    return query
+
+
+def _memory_on_or_4xx(agent_name: str) -> None:
+    """422 when retrieval memory is off for this agent (the platform switch or
+    the per-agent opt-out), 503 when it is on but the embedder is not there —
+    an honest refusal rather than an empty answer that reads as 'nothing matched'."""
+    if not memory_service.is_enabled(agent_name):
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_off",
+            "message": "Retrieval memory is off for this agent (Settings → General → Retrieval memory, or the agent's own Memory setting).",
+        })
+    platform = memory_service.status()
+    if not platform["available"]:
+        raise HTTPException(status_code=503, detail={"code": "memory_unavailable", "message": platform["reason"] or "embedding model not loaded"})
+
+
+def _hit(record: dict) -> MemorySearchHit:
+    return MemorySearchHit(
+        id=record["id"], text=record["text"], line=record.get("line") or memory_service.render_fact_line(record),
+        source=record.get("source") or "", execution_id=record.get("execution_id"),
+        created_at=record.get("created_at"), updated_at=record.get("updated_at"),
+        relevance=float(record.get("relevance") or 0.0), score=float(record.get("score") or 0.0),
+    )
+
+
+@router.get("/{agent_name}/retrieval-memory/search", response_model=list[MemorySearchHit])
+async def search_retrieval_memory_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: User = Depends(require_person),
+    q: str = Query(..., description="What to look for"),
+    k: int = Query(default=10, ge=1, le=memory_service.SEARCH_K_MAX),
+    user_email: str | None = Query(default=None, description="A person's scope; omitted = the agent scope"),
+):
+    """The owner's search over one scope: the same store, ranking and recency
+    weight the prompt gets, past the injected tail. Every hit is journaled as a
+    ``search`` row with the query."""
+    reject_agent_principal(current_user)
+    query = _query_or_422(q)
+    email = None
+    if user_email:
+        email = user_email.strip().lower()
+        if not memory_subject.looks_like_email(email):
+            raise HTTPException(status_code=422, detail={"code": "invalid_email", "message": "user_email is not an email address"})
+    _memory_on_or_4xx(agent_name)
+    records = await memory_service.search_records(agent_name, email, query, k=k)
+    return [_hit(r) for r in records]
+
+
+@router.post("/{agent_name}/retrieval-memory/search", response_model=MemorySearchResponse)
+async def search_retrieval_memory_agent_endpoint(
+    agent_name: str,
+    body: MemorySearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """The agent door (MCP ``search_memory``). The scope is the one the
+    execution serves — the person on a person turn, the agent's own work on a
+    headless run — read off the row by ``memory_subject``; a run that serves no
+    one is refused with the reason. An agent-scoped key may only search its own
+    agent (trinity-enterprise#840), checked first so a key outside its reach
+    gets the same refusal."""
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only search its own agent's memory")
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
+    query = _query_or_422(body.query)
+    execution = db.get_execution(body.execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if execution.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
+    subject = memory_subject.resolve(execution)
+    if subject.kind == memory_subject.SKIP:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_no_subject", "reason": subject.reason,
+            "message": ("This run serves no one whose memory can be searched: an anonymous public turn, a group "
+                        f"conversation, or a '{subject.triggered_by}' trigger. Memory is searched on a person's "
+                        "verified turn or on the agent's own headless runs."),
+        })
+    _memory_on_or_4xx(agent_name)
+    records = await memory_service.search_records(agent_name, subject.user_email, query, k=body.k,
+                                                  execution_id=body.execution_id)
+    return MemorySearchResponse(agent_name=agent_name, scope="person" if subject.is_person else "agent",
+                                hits=[_hit(r) for r in records])

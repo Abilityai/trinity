@@ -104,6 +104,10 @@
     <!-- trinity-enterprise#1022: keep this one agent out of retrieval memory. -->
     <SettingsSection title="Memory" description="What this agent carries from one run to the next.">
       <RetrievalMemoryToggle :agent-name="agentName" :notify="notify" />
+      <!-- trinity-enterprise#1028: the owner's search over the same store the agent recalls from. -->
+      <div class="px-4 py-3">
+        <RetrievalMemorySearch :agent-name="agentName" :notify="notify" />
+      </div>
     </SettingsSection>
   </div>
 </template>
@@ -118,6 +122,7 @@ import { useAgentRestartStore } from '../../stores/agentRestart'
 import SettingsSection from './SettingsSection.vue'
 import SettingRow from './SettingRow.vue'
 import RetrievalMemoryToggle from './RetrievalMemoryToggle.vue'
+import RetrievalMemorySearch from './RetrievalMemorySearch.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import GuardrailsPanel from '../GuardrailsPanel.vue'
