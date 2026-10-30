@@ -1,7 +1,7 @@
 # mcp: memory.ts (search_memory) — the agent door; the owner-tier configuration and views are UI-only (trinity-enterprise#1022, #1028)
 """Retrieval memory per agent (trinity-enterprise#1022, MEM-002).
 
-Four routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
+Six routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
 clearly apart from ``/user-memory``, the MEM-001 write door the agent itself
 calls:
 
@@ -233,7 +233,13 @@ async def search_retrieval_memory_endpoint(
         if not memory_subject.looks_like_email(email):
             raise HTTPException(status_code=422, detail={"code": "invalid_email", "message": "user_email is not an email address"})
     _memory_on_or_4xx(agent_name)
-    records = await memory_service.search_records(agent_name, email, query, k=k)
+    try:
+        records = await memory_service.search_records(agent_name, email, query, k=k)
+    except memory_service.MemorySearchError:
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Memory search could not be answered — the embedder or the store did not respond. Try again; if it persists, check Settings → General → Retrieval memory.",
+        })
     return [_hit(r) for r in records]
 
 
@@ -266,7 +272,13 @@ async def search_retrieval_memory_agent_endpoint(
                         "verified turn or on the agent's own headless runs."),
         })
     _memory_on_or_4xx(agent_name)
-    records = await memory_service.search_records(agent_name, subject.user_email, query, k=body.k,
-                                                  execution_id=body.execution_id)
+    try:
+        records = await memory_service.search_records(agent_name, subject.user_email, query, k=body.k,
+                                                      execution_id=body.execution_id)
+    except memory_service.MemorySearchError:
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Memory search could not be answered — the embedder or the store did not respond. Try again; if it persists, check Settings → General → Retrieval memory.",
+        })
     return MemorySearchResponse(agent_name=agent_name, scope="person" if subject.is_person else "agent",
                                 hits=[_hit(r) for r in records])

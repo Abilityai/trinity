@@ -184,7 +184,7 @@ Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
 | PUT | `/api/agents/{name}/retrieval-memory` | OwnedAgentByName + `require_person` | `{opt_out}` — audit-logged |
 | GET | `/api/agents/{name}/retrieval-memory/facts?user_email=&limit=&offset=` | OwnedAgentByName + `require_person` | the owner view (ent#962 readers rule) |
 | DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
-| GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget (422 otherwise) |
+| GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget/search (422 otherwise) |
 | GET | `/api/agents/{name}/retrieval-memory/search?q=&k=&user_email=` | OwnedAgentByName + `require_person` | the owner's search over one scope (ent#1028): hits with `line`, `relevance`, `score`, provenance; 422 `query_empty` / `invalid_email` / `memory_off`, 503 `memory_unavailable` |
 | POST | `/api/agents/{name}/retrieval-memory/search` | `assert_own_agent` + `assert_agent_access` (the agent door, MCP `search_memory`) | `{execution_id, query, k≤50}` — the scope read off the execution by the whose-memory rule; 422 `memory_no_subject` with the reason when the run serves no one |
 | GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) |

@@ -136,6 +136,33 @@ class TestSearchService:
         assert run(ms.search_records(agent.name, "ann@example.com", "invoice PDF", k=10)) == []
 
 
+    def test_an_owners_search_is_a_look_not_a_use(self, agent, memory_on):
+        """The recall counter orders the cap-prune (least-recalled first), so an
+        owner typing in the search box must not shelter what they searched for;
+        an agent's search inside a run counts, as recall does."""
+        fid = seed(agent, "Deploys go to staging first")
+        count = lambda: next(f["recall_count"] for f in db.list_memory_facts(agent.name, "") if f["id"] == fid)
+        assert count() == 0
+        run(ms.search_records(agent.name, None, "staging deploy", k=5))
+        assert count() == 0
+        run(ms.search_records(agent.name, None, "staging deploy", k=5, execution_id=uuid.uuid4().hex))
+        assert count() == 1
+
+    def test_a_broken_embedder_is_a_named_refusal_not_an_empty_answer(self, agent, memory_on, monkeypatch):
+        from routers.agent_memory import search_retrieval_memory_endpoint
+        seed(agent, "Deploys go to staging first")
+
+        def boom(_texts):
+            raise RuntimeError("onnx session gone")
+        monkeypatch.setattr(me, "embed", boom)
+        with pytest.raises(ms.MemorySearchError):
+            run(ms.search_records(agent.name, None, "staging deploy", k=5))
+        with pytest.raises(HTTPException) as err:
+            run(search_retrieval_memory_endpoint(agent_name=agent.name, current_user=person(agent), q="staging deploy", k=5, user_email=None))
+        assert err.value.status_code == 503 and err.value.detail["code"] == "memory_unavailable"
+        assert "onnx" not in str(err.value.detail)
+
+
 # --------------------------------------------------------------------------- #
 # The owner door
 # --------------------------------------------------------------------------- #

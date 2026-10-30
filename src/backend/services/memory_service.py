@@ -332,7 +332,11 @@ def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: 
             budget -= len(ranked.text)
     if picked:
         try:
-            db.mark_memory_facts_recalled([r["id"] for r in picked], agent_name=agent_name)
+            # An owner typing in the search box (no execution behind it) is
+            # looking, not using: the recall counter feeds the cap-prune order,
+            # so bumping it would shelter whatever the owner searched for.
+            if execution_id is not None or op != "search":
+                db.mark_memory_facts_recalled([r["id"] for r in picked], agent_name=agent_name)
             looked_up = sanitize_text(query)[:FACT_CLAMP] if op == "search" else None
             db.insert_memory_fact_events([
                 {"agent_name": agent_name, "user_email": scope, "fact_id": r["id"], "op": op,
@@ -364,6 +368,11 @@ async def recall_records(
         return []
 
 
+class MemorySearchError(RuntimeError):
+    """A search could not be answered (embedder or store); the doors turn it
+    into 503 `memory_unavailable`. Carries the exception class name only."""
+
+
 async def search_records(
     agent_name: str, user_email: Optional[str], query: Optional[str], *,
     k: int = 10, execution_id: Optional[str] = None,
@@ -380,9 +389,13 @@ async def search_records(
         scope = await asyncio.to_thread(scope_for, agent_name, user_email)
         records = await asyncio.to_thread(_recall_sync, agent_name, scope, str(query), k=k, max_chars=None,
                                           execution_id=execution_id, op="search")
-    except Exception as e:  # noqa: BLE001 — fail-open: an empty answer, never a 500 on the agent's turn
+    except Exception as e:  # noqa: BLE001
+        # Recall stays fail-open (never a 500 on the agent's turn); a search is
+        # answered to its caller, so a broken embedder or store is a named
+        # refusal the doors turn into 503 `memory_unavailable`, never an empty
+        # answer that reads as "nothing matched".
         logger.warning("[memory] search failed for %s: %s", agent_name, type(e).__name__)
-        return []
+        raise MemorySearchError(type(e).__name__) from e
     for record in records:
         record["line"] = render_fact_line(record)
     return records
