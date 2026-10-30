@@ -113,8 +113,8 @@ lazily — with ONNX intra-op threads = 1. Unavailable ⇒ `embed` returns None,
 
 ## Data
 `agent_memory_facts` — `db/schema.py`, `db/tables.py`, SQLite migration
-`agent_memory_facts`, Alembic `0107_agent_memory_facts`; `agent_ownership.memory_opt_out`
-— SQLite `agent_ownership_memory_opt_out`, Alembic `0108_agent_ownership_memory_opt_out`.
+`agent_memory_facts`, Alembic `0108_agent_memory_facts`; `agent_ownership.memory_opt_out`
+— SQLite `agent_ownership_memory_opt_out`, Alembic `0109_agent_ownership_memory_opt_out`.
 `db/memory_facts.py::MemoryFactOperations`, `db/agent_settings/memory.py::MemoryOptOutMixin`.
 Forget is a soft delete with `deleted_by`.
 

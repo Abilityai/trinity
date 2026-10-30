@@ -550,8 +550,8 @@ class TestRoutesAndPins:
         names = [n for n, _ in MIGRATIONS]
         assert "agent_memory_facts" in names and "agent_ownership_memory_opt_out" in names
         versions = REPO / "src/backend/migrations/versions"
-        assert (versions / "0107_agent_memory_facts.py").exists()
-        assert (versions / "0108_agent_ownership_memory_opt_out.py").exists()
+        assert (versions / "0108_agent_memory_facts.py").exists()
+        assert (versions / "0109_agent_ownership_memory_opt_out.py").exists()
         assert "BYTEA" in schema.to_postgres_table_ddl(schema.TABLES["agent_memory_facts"])
 
 

@@ -685,7 +685,10 @@ async def _schedule_staggered_services() -> None:
     async def _start_skills_sync_delayed():
         await asyncio.sleep(11)
         try:
+            from services import skill_service as _skill_service_boot
             from services.skills_sync_service import skills_sync_service
+            # ent#529: before the first cycle, so it fetches the new pin. Never raises.
+            await _skill_service_boot.follow_bundled_pin()
             skills_sync_service.start()
             logger.info("Skills library sync service started (staggered +11s)")
         except Exception as e:

@@ -1144,10 +1144,29 @@ CREATE TABLE skill_sources (
     last_commit_sha TEXT,                -- the pin comparison's durable side (tag sources)
     last_error TEXT,
     created_at TEXT NOT NULL,
-    created_by TEXT
+    created_by TEXT,                     -- 'seed:ent237' on the bundled seed
+    follows_bundled_pin INTEGER NOT NULL DEFAULT 0,  -- trinity-enterprise#529
+    followed_from_ref TEXT,              -- latest boot follow: the ref it moved from
+    followed_at TEXT                     -- … and when
 );
 CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
 ```
+
+**Following the bundled pin** (trinity-enterprise#529; SQLite
+`skill_sources_follow_bundled_pin` + Alembic `0107_skill_sources_follow_bundled_pin`).
+`follows_bundled_pin` is 1 while the seeded default still points where the platform put it:
+the seed writes it for the built-in catalog URL only, and `update_source` writes 0 when
+an edit names `url`, `ref` or `ref_type`, even unchanged (`apply` passes only the fields
+that differ). The boot follow moves only such a row to a newer
+`DEFAULT_SKILL_SOURCE_REF`, through a compare-and-set UPDATE whose WHERE carries every
+eligibility predicate. Pre-existing rows were classified by
+`db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL`, the one statement both tracks execute
+(built-in URL, a historical bundled pin, no `skill_source_update` audit row naming
+`ref`/`url`/`ref_type`). The Alembic revision uses `ADD COLUMN IF NOT EXISTS` because
+`0001_baseline` builds a fresh database from the current DDL. `record_sync` also takes the
+synced `url`/`ref`/`ref_type` and writes only while the row still matches, so a sync in
+flight across a retarget cannot stamp the old commit onto the new ref. Flow:
+[skills-library-sync.md](../feature-flows/skills-library-sync.md).
 
 `agent_skills.source_id` records which source an assignment resolved from — recorded, not
 keyed (the UNIQUE stays `(agent_name, skill_name)`, since two sources' copies cannot

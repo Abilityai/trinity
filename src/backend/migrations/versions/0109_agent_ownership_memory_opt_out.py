@@ -5,17 +5,17 @@ memory globally; this column lets an owner keep one agent out once the platform
 is on. Default 0 = follows the platform.
 
 Mirrors the SQLite ``agent_ownership_memory_opt_out`` migration. Chained after
-0107 so the version-line keeps ONE head (#2068).
+0108 so the version-line keeps ONE head (#2068).
 
-Revision ID: 0108_agent_ownership_memory_opt_out
-Revises: 0107_agent_memory_facts
+Revision ID: 0109_agent_ownership_memory_opt_out
+Revises: 0108_agent_memory_facts
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0108_agent_ownership_memory_opt_out"
-down_revision = "0107_agent_memory_facts"
+revision = "0109_agent_ownership_memory_opt_out"
+down_revision = "0108_agent_memory_facts"
 branch_labels = None
 depends_on = None
 

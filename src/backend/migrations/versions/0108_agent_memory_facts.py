@@ -8,15 +8,15 @@ IntegrityError the writer catches. Forget is a soft delete that records who.
 
 Mirrors the SQLite ``agent_memory_facts`` migration.
 
-Revision ID: 0107_agent_memory_facts
-Revises: 0106_execution_chat_session_id
+Revision ID: 0108_agent_memory_facts
+Revises: 0107_skill_sources_follow_bundled_pin
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0107_agent_memory_facts"
-down_revision = "0106_execution_chat_session_id"
+revision = "0108_agent_memory_facts"
+down_revision = "0107_skill_sources_follow_bundled_pin"
 branch_labels = None
 depends_on = None
 
