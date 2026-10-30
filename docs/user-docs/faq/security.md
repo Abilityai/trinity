@@ -56,7 +56,7 @@ No. The audit log is append-only at the database level: entries can never be mod
 
 ## How long does my login session last?
 
-Login tokens (JWTs) are valid for 7 days, and all tokens are invalidated whenever the backend restarts, so you re-login after an upgrade. Logging out revokes your token immediately on the server side — a stolen token dies with your session instead of living out its remaining days. MCP API keys don't expire on restart; you revoke them explicitly from key management. See [Authentication](../api-reference/authentication.md).
+Login tokens (JWTs) are valid for 7 days, and all tokens are invalidated whenever the backend restarts, so you re-login after an upgrade. When a session ends while you are on a page, Trinity sends you to the login page and, once you sign in, back to that page. Logging out revokes your token immediately on the server side — a stolen token dies with your session instead of living out its remaining days. MCP API keys don't expire on restart; you revoke them explicitly from key management. See [Authentication](../api-reference/authentication.md).
 
 ## Why does my login script get a 403 even though the password is right?
 
