@@ -6998,6 +6998,30 @@
         "migration"
       ],
       "description": "The untouched seeded default skills source follows the platform's bundled pin on upgrade. Driven through skill_service.follow_bundled_pin with the real platform_audit_service building the audit row: an untouched seed behind the pin moves forward through the shared retarget reset (sha/status/error cleared, followed_from_ref/followed_at set, marker kept) with exactly one system audit row; the owner's AC2 ruling 'where it points decides' - a url/ref/ref_type change through PUT or apply (the MCP door) opts out for good, each door built so only the marker can stop the follow (url and ref_type go away and back); rename/priority never opt out; disable pauses and re-enable resumes; forward only on strict vX.Y.Z (downgrade, equal, branch, -rc1, mixed v/no-v, empty never move; v0.10.0 beats v0.9.0); another configured catalog or an empty env never moves; a lost CAS writes no audit row; a UNIQUE(url, ref) clash is a no-op. Seed: cursor and engine seeds mark the built-in URL, a fork seed does not. AC4 over a file:// upstream with ANNOTATED tags (#2550), both the update path and the lost-checkout clone path: the next sync is not refused as moved_tag and counts as a moved commit, and run_cycle re-injects with the new commit. The in-flight race both plan reviewers found: a sync admitted at the old tag that finishes after the follow must not stamp the old commit (record_sync scoped to the synced url/ref/ref_type). Backfill through the real SQLite migration on a pre-529 table: untouched seeds on every historical pin marked, toggles/renames in the audit do not opt out, audited retargets (PUT changed / apply named) and off-history/branch/fork/custom rows stay off, idempotent, and a fresh install records the migration on the second pass. Boot wiring pinned by AST: the follow is awaited before skills_sync_service.start(). Mutation-proved: dropping the marker clear (4 red), the follow reset (5), the sync scoping (1), the boot hook (1), the seed marker (14), the forward check (1) or the backfill audit filter (4). Review round on PR #4091: each of the seven compare-and-set conditions is pinned by a direct refusal test (mutation-proved one at a time); the per-source Sync route starts the fleet re-inject like Sync all, both routes driven after a real follow (automatic re-inject on, off, and an unmoved commit); and update_source re-decides an edit that lands across the follow (a stale save of the old ref is a retarget, a rename keeps the follow). Reviewer finding on PR #4091: a PUT that names url, ref or ref_type ends following even when the value is unchanged (the documented way to hold the current tag), while the moved-tag baseline survives that save and a declarative apply that only re-states the ref keeps following."
+    },
+    {
+      "file": "unit/test_ent701_room_people.py",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace",
+        "rooms"
+      ],
+      "description": "The edition-agnostic half of a room holding more than one person, over a real SQLite built from the platform DDL: a person seated mid-conversation reads from their join point (visible_from_seq, incremental reads too) until a backscroll grant moves the floor to 0; seat_person refuses an agent; a person who left gets the uniform 404 on read and post and the room drops out of their list, the roster keeps who left and the room says so, and they can be seated again; a moderator cannot strand other people; an agent cannot leave; a non-member gets the 404; the payload names the reader (you) and offers seating (can_seat_people) only to a platform moderator of an open room on an entitled install, never to a collaborator or an outside-client moderator; the turn prompt names two or more people present and the collaborator's limits, a departed person is not counted, and a seated colleague keeps the room internal; an @mention of a seated person becomes a tag, never a wake, and a mention that cannot be tagged never fails the message."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalRoomPeople.mount.spec.js",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
     }
   ]
 }

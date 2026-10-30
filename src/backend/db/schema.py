@@ -763,7 +763,7 @@ TABLES = {
             room_id TEXT NOT NULL,
             kind TEXT NOT NULL,                        -- agent | user | workspace_user
             identity TEXT NOT NULL,                    -- agent name, user id, or verified email
-            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator
+            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator | collaborator
             joined_at TEXT NOT NULL,
             left_at TEXT,
             -- THE delta-injection cursor: the highest seq this participant has seen.
@@ -772,6 +772,10 @@ TABLES = {
             -- Session-tab cold-fallback counter.
             cached_session_id TEXT,
             consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- trinity-enterprise#701: the first seq a PERSON may read. 0 = the
+            -- whole transcript (the creator, every row before #701); a person
+            -- seated mid-conversation starts at the seq after the last message.
+            visible_from_seq INTEGER NOT NULL DEFAULT 0,
             UNIQUE(room_id, kind, identity)
         )
     """,

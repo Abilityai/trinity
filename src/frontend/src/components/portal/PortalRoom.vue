@@ -32,9 +32,9 @@
         <!-- ent#473: the room's name, renameable in place by any human member. -->
         <PortalEditableTitle
           :value="room?.name || ''"
-          placeholder="Chat"
+          placeholder="Room"
           :rename="rename ? saveName : null"
-          label="Rename this chat"
+          label="Rename this room"
           text-class="font-semibold text-sm"
         />
         <div class="flex items-center gap-1 mt-0.5">
@@ -76,16 +76,41 @@
           :starred="starred"
           @toggle="$emit('toggle-star', { id: roomId, is_room: true, starred })"
         />
+        <!-- trinity-enterprise#701: who is in the room, one fixed-size control
+             whatever the count (principle 30); the list opens below. -->
         <button
-          v-if="!isClosed"
-          class="px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition"
+          v-if="room"
+          ref="peopleToggle"
+          :class="HEADER_ACTION_CLASS"
+          :aria-expanded="peopleOpen ? 'true' : 'false'"
+          title="People in this room"
+          data-testid="room-people-toggle"
+          @click="peopleOpen = !peopleOpen; addOpen = false"
+          :aria-label="`People in this room: ${peopleCount}`"
+        >
+          <!-- Phone width keeps the room's title readable: an icon + the count. -->
+          <svg class="sm:hidden w-4 h-4 inline -mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.36-1.86M17 20H7m10 0v-2c0-.66-.13-1.28-.36-1.86M7 20H2v-2a3 3 0 015.36-1.86M7 20v-2c0-.66.13-1.28.36-1.86m0 0a5 5 0 019.28 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+          <span class="hidden sm:inline">People · </span>{{ peopleCount }}
+        </button>
+        <button
+          v-if="!isClosed && !roomGone"
+          :class="HEADER_ACTION_CLASS"
           title="Add another agent to this conversation"
-          @click="addOpen = !addOpen"
+          @click="addOpen = !addOpen; peopleOpen = false"
         >+ Add agent</button>
         <!-- ent#625: the theme switch, filled by the shell (see PortalConversation). -->
         <slot name="header-end" />
       </div>
     </header>
+
+    <PortalRoomPeople
+      v-if="peopleOpen"
+      :room-id="roomId"
+      :room="room"
+      @changed="load({ full: true })"
+      @left="(id) => emit('left-room', id)"
+      @close="closePeople"
+    />
 
     <!-- Add-agent picker (AC#3) -->
     <div v-if="addOpen" class="shrink-0 border-b border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950 px-4 py-2">
@@ -114,6 +139,14 @@
     <div ref="scrollEl" class="flex-1 min-h-0 overflow-y-auto px-3 sm:px-6 py-5" @scroll.passive="onTranscriptScroll">
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto space-y-6">
         <p v-if="loading" class="text-center text-sm text-gray-400">Loading…</p>
+        <!-- trinity-enterprise#701: the room answered "not found" — the reader
+             left it, was removed, or was never in it. Say so and offer the way
+             out, rather than an empty room with a live composer. -->
+        <div v-else-if="roomGone" class="py-16 text-center space-y-3" data-testid="room-gone">
+          <p class="text-sm font-medium">You're no longer in this room.</p>
+          <p class="text-xs">You may have left it, or been removed by the person who manages it.</p>
+          <BaseButton variant="secondary" size="sm" @click="emit('left-room', roomId)">Back to chats</BaseButton>
+        </div>
 
         <div v-for="m in messages" :key="m.seq">
           <!-- A system line is the room narrating itself: a join, a budget
@@ -279,7 +312,7 @@
              The condition is therefore stated rather than inherited. A `v-else`
              is a promise about the neighbour above it, and this neighbourhood
              has broken that promise three times. -->
-        <form v-if="!isClosed" @submit.prevent="send">
+        <form v-if="!isClosed && !roomGone" @submit.prevent="send">
           <!-- #2662: the same composer shell as the 1:1 thread — field on top,
                controls in a row inside it. The two composers are the same
                markup in two files (the #2211 lesson recorded in
@@ -398,6 +431,7 @@ import { usePortalWorkStore } from '@/stores/portalWork'
 import { liveElapsedSeconds, liveItemsForRoom, soleStoppableItem } from './portalWork'
 import { resolveActivityText } from '@/utils/workActivity'
 import PortalAvatar from './PortalAvatar.vue'
+import PortalRoomPeople from './PortalRoomPeople.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -452,7 +486,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project', 'left-room'])
 
 const store = useClientPortalStore()
 
@@ -493,7 +527,21 @@ const {
   scrollToLatest,
   reset: resetFollowing,
 } = useStickToBottom(scrollEl)
+// The header's text actions (People, + Add agent) share one recipe.
+const HEADER_ACTION_CLASS = 'px-2 py-1.5 rounded-lg text-xs font-medium text-action-primary-600 hover:bg-gray-100 dark:hover:bg-gray-800 transition'
 const addOpen = ref(false)
+// trinity-enterprise#701: the people panel, and how many people are present.
+const peopleOpen = ref(false)
+const peopleToggle = ref(null)
+// Close from the panel's own ✕ or Esc; focus goes back to the control that
+// opened it, so a keyboard user is not left on a removed element.
+function closePeople() {
+  peopleOpen.value = false
+  nextTick(() => peopleToggle.value?.focus())
+}
+// trinity-enterprise#701: the room is gone for this reader (a 404 on load).
+const roomGone = ref(false)
+const peopleCount = computed(() => (room.value?.people || []).filter((p) => !p.left_at).length || 1)
 const adding = ref(false)
 const addError = ref(null)
 
@@ -897,9 +945,12 @@ function onDocClick(e) {
 }
 
 function isMine(m) {
-  // Anything not an agent and not the room itself is this client — the room is
-  // per-client here, so a human sender is the caller.
-  return m.sender_kind !== 'agent' && m.kind !== 'system'
+  if (m.sender_kind === 'agent' || m.kind === 'system') return false
+  // trinity-enterprise#701: a room can hold more than one person, so "a human
+  // sender" is no longer "the caller" — the server names who is reading.
+  const you = room.value?.you
+  if (you) return m.sender_kind === you.kind && m.sender_identity === you.identity
+  return true
 }
 
 // Only ONE load at a time. The 3s poll can otherwise overlap a send() or
@@ -925,7 +976,8 @@ async function load({ full = false } = {}) {
     if (full) await pinToBottom()
     else if (incoming.length) await onMessagesArrived(incoming.length)
   } catch (err) {
-    if (full) sendError.value = 'Could not load this conversation.'
+    if (full && err?.response?.status === 404) { roomGone.value = true; room.value = null }
+    else if (full) sendError.value = 'Could not load this conversation.'
   } finally {
     loading_ = false
     loading.value = false
@@ -997,7 +1049,7 @@ function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
     // Nothing to wait for once the room is closed.
-    if (!isClosed.value && !document.hidden) load()
+    if (!isClosed.value && !roomGone.value && !document.hidden) load()
   }, POLL_MS)
 }
 function stopPolling() {
