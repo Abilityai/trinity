@@ -24,8 +24,15 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { ACT_AS_PARAM_DESCRIPTION, resolveActingAgent } from "../access.js";
+
+/** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
+class ActAsRefusal extends Error {}
 
 function parseError(error: unknown): { status?: number; code?: string; message: string; detailIsString: boolean } {
+  if (error instanceof ActAsRefusal) {
+    return { code: "act_as_refused", message: error.message, detailIsString: false };
+  }
   const rawMessage = error instanceof Error ? error.message : String(error);
   const status = error instanceof ApiError ? error.status : undefined;
   const m = rawMessage.match(/^API error \(\d+\): ([\s\S]*)$/);
@@ -52,7 +59,7 @@ function parseError(error: unknown): { status?: number; code?: string; message: 
 
 function explain(status: number | undefined, code: string | undefined, detailIsString: boolean): string {
   if (status === 403 && code === "agent_key_required") {
-    return "These tools act as an agent; call them from an agent context (an agent-scoped key).";
+    return "These tools act as an agent; call them from an agent context (an agent-scoped key), or pass agent_name with an admin's user key.";
   }
   if (status === 403 && code === "external_audience") {
     return "Project tools are for internal conversations; someone outside the company is in this one. Don't share project details here.";
@@ -79,6 +86,26 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       return userClient;
     }
     return client;
+  };
+
+  /**
+   * trinity-enterprise#1024: the client a project tool calls with. A user key
+   * acts for the named agent (`X-Trinity-Act-As-Agent`; the backend admits only
+   * an admin's user key) and is told to pass `agent_name` without one; an agent
+   * key acts as itself and may not name another. One rule, `resolveActingAgent`.
+   */
+  const clientFor = (context: { session?: McpAuthContext } | undefined, requested?: string): TrinityClient => {
+    const session = context?.session;
+    const base = getClient(session);
+    const named = typeof requested === "string" && requested.trim() !== "";
+    if (session?.scope !== "user" && !named) return base;
+    let agent: string;
+    try {
+      agent = resolveActingAgent(session, "The project tools", requested);
+    } catch (e) {
+      throw new ActAsRefusal(e instanceof Error ? e.message : String(e));
+    }
+    return session?.scope === "user" ? base.asAgent(agent) : base;
   };
 
   /** A write or read refusal as a structured result — never a throw. */
@@ -111,10 +138,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "List the Workspace projects you are working on: each project's id, name, goal, status, " +
         "steward and tracker link. Only projects your owner approved you for are listed. When a " +
         "conversation starts with a '[Project]' line, it names one of these projects by id.",
-      parameters: z.object({}),
-      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
+      execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await getClient(context?.session).listMyProjects(turnOf(context));
+          const projects = await clientFor(context, params.agent_name).listMyProjects(turnOf(context));
           return JSON.stringify({ enabled: true, count: projects.length, projects }, null, 2);
         } catch (e) {
           const { status, code, message, detailIsString } = parseError(e);
@@ -136,11 +165,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "people's chats are private, so they appear only as a count. Use the id from the " +
         "'[Project]' line at the top of the conversation, or from list_projects.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef."),
       }),
-      execute: async (params: { project_id: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (params: { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const project = await getClient(context?.session).getMyProject(params.project_id, turnOf(context));
+          const project = await clientFor(context, params.agent_name).getMyProject(params.project_id, turnOf(context));
           return JSON.stringify({ success: true, ...(project as object) }, null, 2);
         } catch (e) {
           const { status, code, message, detailIsString } = parseError(e);
@@ -170,12 +200,13 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
         "a title, status, owner, the executing agent and priority.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
       }),
-      execute: async (p: { project_id: string; status?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; status?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const tasks = await getClient(context?.session).listProjectTasks(p.project_id, p.status || "open", turnOf(context));
+          const tasks = await clientFor(context, p.agent_name).listProjectTasks(p.project_id, p.status || "open", turnOf(context));
           return ok({ count: tasks.length, tasks });
         } catch (e) {
           return fail(e);
@@ -191,6 +222,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "objective and a definition of done (a checklist). It gets the next id (T-NNN). Priority is " +
         "set by people only; your tasks start at p2.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         title: z.string().min(1).max(200),
         objective: z.string().max(4000).optional(),
@@ -200,11 +232,11 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         assignee: z.string().max(320).optional().describe("The agent doing the work, if not you."),
         waiting_on: z.string().max(320).optional(),
       }),
-      execute: async (p: Record<string, string> & { project_id: string }, context?: { session?: McpAuthContext }) => {
-        const { project_id, assignee, ...rest } = p;
+      execute: async (p: Record<string, string> & { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, assignee, agent_name: _actAs, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await getClient(context?.session).createProjectTask(project_id, body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).createProjectTask(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -220,6 +252,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "then verifies it and sets 'done'. A done task can only be reopened by a person. You cannot " +
         "change priority. Any 'note' is appended to the task's log.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         task_id: taskId,
         status: statusEnum.optional(),
@@ -232,11 +265,11 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         context: z.string().max(4000).optional(),
         note: z.string().max(4000).optional().describe("Appended to the task log; your done claim when moving to pending-verification."),
       }),
-      execute: async (p: Record<string, string> & { project_id: string; task_id: string }, context?: { session?: McpAuthContext }) => {
-        const { project_id, task_id, assignee, ...rest } = p;
+      execute: async (p: Record<string, string> & { project_id: string; task_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, task_id, assignee, agent_name: _actAs, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
-          return ok(await getClient(context?.session).updateProjectTask(project_id, task_id, body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).updateProjectTask(project_id, task_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -247,10 +280,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     add_project_task_note: {
       name: "add_project_task_note",
       description: "Append a note to a task's log (progress, a waiting-on, a hand-off). The log is append-only.",
-      parameters: z.object({ project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
-      execute: async (p: { project_id: string; task_id: string; body: string }, context?: { session?: McpAuthContext }) => {
+      parameters: z.object({ agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION), project_id: projectId, task_id: taskId, body: z.string().min(1).max(4000) }),
+      execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await getClient(context?.session).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -264,10 +297,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "Read a project's log: the decisions, deliverables, task changes, blockers and hand-offs that " +
         "people and agents recorded, oldest first within the page. get_project already includes the " +
         "latest 20; use this for more.",
-      parameters: z.object({ project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
-      execute: async (p: { project_id: string; limit?: number }, context?: { session?: McpAuthContext }) => {
+      parameters: z.object({ agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION), project_id: projectId, limit: z.number().int().min(1).max(200).optional() }),
+      execute: async (p: { project_id: string; limit?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const entries = await getClient(context?.session).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
+          const entries = await clientFor(context, p.agent_name).getProjectLog(p.project_id, p.limit ?? 50, turnOf(context));
           return ok({ count: entries.length, entries });
         } catch (e) {
           return fail(e);
@@ -283,15 +316,16 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "reads first. Write ONE entry per outcome — a decision made, a deliverable finished, a blocker, a " +
         "hand-off — never one per turn, and never a transcript. Task status changes are logged for you.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         kind: z.enum(["decision", "deliverable", "blocker", "handoff", "note"]),
         body: z.string().min(1).max(4000).describe("What happened and what it means, in a few sentences."),
         task_id: z.string().max(16).optional().describe("The task this concerns, if any."),
       }),
-      execute: async (p: { project_id: string; kind: string; body: string; task_id?: string }, context?: { session?: McpAuthContext }) => {
-        const { project_id, ...body } = p;
+      execute: async (p: { project_id: string; kind: string; body: string; task_id?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+        const { project_id, agent_name: _actAs, ...body } = p;
         try {
-          return ok(await getClient(context?.session).addProjectLogEntry(project_id, body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).addProjectLogEntry(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -307,13 +341,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "chat that is already on the project is found without this). Only your own items, and only on " +
         "a project you are working on. Sharing with outside clients is a person's decision, not yours.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         kind: z.enum(["file", "report", "decision", "ask"]),
         target_id: z.string().min(1).max(128).describe("The file, report, decision or ask id."),
       }),
-      execute: async (p: { project_id: string; kind: string; target_id: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; kind: string; target_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await getClient(context?.session).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).linkToProject(p.project_id, { kind: p.kind, target_id: p.target_id }, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -328,10 +363,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
         "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Start a " +
         "stewarding run here, then record health with set_project_health.",
-      parameters: z.object({}),
-      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
+      execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const projects = await getClient(context?.session).getStewardDigest(turnOf(context));
+          const projects = await clientFor(context, params.agent_name).getStewardDigest(turnOf(context));
           return JSON.stringify({ success: true, count: projects.length, projects }, null, 2);
         } catch (e) {
           return fail(e);
@@ -350,15 +387,16 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
         "Returns the project; work on it with the task and log tools.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         name: z.string().min(1).max(200).describe("Short project name, e.g. 'Q4 launch'."),
         goal: z.string().min(1).max(2000).describe("What done looks like, in a sentence or two."),
         tracker_url: z.string().max(2000).optional().describe("An external tracker for its tasks, if it has one."),
       }),
-      execute: async (p: { name: string; goal: string; tracker_url?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { name: string; goal: string; tracker_url?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           const body: Record<string, unknown> = { name: p.name, goal: p.goal };
           if (p.tracker_url) body.tracker_url = p.tracker_url;
-          return ok({ project: await getClient(context?.session).createProjectAsAgent(body, turnOf(context)) });
+          return ok({ project: await clientFor(context, p.agent_name).createProjectAsAgent(body, turnOf(context)) });
         } catch (e) {
           return fail(e);
         }
@@ -375,11 +413,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "second import of the same folder is refused. Needs the project-management permission; " +
         "your owner becomes the project's creator, you its steward.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
       }),
-      execute: async (p: { path: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { path: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok({ project: await getClient(context?.session).importProjectAsAgent(p.path, turnOf(context)) });
+          return ok({ project: await clientFor(context, p.agent_name).importProjectAsAgent(p.path, turnOf(context)) });
         } catch (e) {
           return fail(e);
         }
@@ -400,6 +439,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "`already_pending`. Adding an agent someone else owns still needs its owner's yes. Needs the " +
         "project-management permission (`project_management_not_permitted` otherwise).",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         members: z.array(z.string().min(1).max(320)).max(20).optional()
           .describe("Work emails or role:<id>, e.g. ['alex@example.com', 'role:compliance-lead']."),
@@ -414,11 +454,11 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         })).max(25).optional(),
         note: z.string().max(500).optional().describe("One or two lines on why, shown to the creator."),
       }),
-      execute: async (p: { project_id: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; agent_name?: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
         try {
-          const { project_id, ...rest } = p;
+          const { project_id, agent_name: _actAs, ...rest } = p;
           const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
-          return ok(await getClient(context?.session).proposeProjectChanges(project_id, body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).proposeProjectChanges(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
@@ -433,13 +473,14 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "line saying why. It shows on the project and in the list, and is added to the project log. " +
         "Update it at least every two weeks, and whenever it changes.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         state: z.enum(["on-track", "at-risk", "off-track"]),
         note: z.string().max(280).optional().describe("One line: why, e.g. 'Vendor two weeks late.'"),
       }),
-      execute: async (p: { project_id: string; state: string; note?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; state: string; note?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok(await getClient(context?.session).setProjectHealth(
+          return ok(await clientFor(context, p.agent_name).setProjectHealth(
             p.project_id, { state: p.state, note: p.note ?? "" }, turnOf(context)));
         } catch (e) {
           return fail(e);

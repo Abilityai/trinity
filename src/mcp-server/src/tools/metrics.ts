@@ -24,7 +24,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, actingClient, resolveActingAgent } from "../access.js";
 
 /** Kept in step with `models.METRIC_BATCH_MAX_POINTS`; the backend enforces. */
 const MAX_POINTS = 1000;
@@ -91,7 +91,8 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
   const getAgentName = (
     authContext: McpAuthContext | undefined,
     toolName: string,
-  ): string => resolveActingAgent(authContext, `The ${toolName} tool`);
+    requested?: string,
+  ): string => resolveActingAgent(authContext, `The ${toolName} tool`, requested);
 
   return {
     // ========================================================================
@@ -116,6 +117,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "(from your Execution Context block) so a re-delivered turn replays instead of " +
         "recording twice — without it, and without `ts`, a retry is a new observation.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         points: z
           .array(
             z.object({
@@ -176,6 +178,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
       }),
       execute: async (
         params: {
+          agent_name?: string;
           points: Array<{
             metric: string;
             value: number | string;
@@ -188,11 +191,11 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
 
         let agentName: string;
         try {
-          agentName = getAgentName(authContext, "record_metrics");
+          agentName = getAgentName(authContext, "record_metrics", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -200,6 +203,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             2,
           );
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
 
         console.log(`[record_metrics] ${agentName}: ${params.points.length} point(s)`);
 
@@ -420,17 +424,19 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "an empty answer is never ambiguous. `findings` covers only the objectives returned " +
         "to you — another role's YAML mistake is not yours to fix. Only your own objectives; " +
         "there is no agent parameter.",
-      parameters: z.object({}),
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        _params: Record<string, never>,
+        params: { agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
 
         let agentName: string;
         try {
-          agentName = getAgentName(authContext, "get_objectives");
+          agentName = getAgentName(authContext, "get_objectives", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -438,6 +444,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             2,
           );
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
 
         try {
           const result = await apiClient.getAgentObjectives(agentName);
@@ -466,17 +473,19 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "Returns what changed: created / updated / revived / retired, plus any type change " +
         "that was REFUSED (a metric's type is frozen once points exist under its name; to " +
         "change the shape, rename the metric).",
-      parameters: z.object({}),
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        _params: Record<string, never>,
+        params: { agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
 
         let agentName: string;
         try {
-          agentName = getAgentName(authContext, "refresh_metric_definitions");
+          agentName = getAgentName(authContext, "refresh_metric_definitions", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -484,6 +493,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
             2,
           );
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
 
         try {
           const result = await apiClient.refreshMetricDefinitions(agentName);

@@ -638,10 +638,26 @@ export class TrinityClient {
   private token?: string;
   private username?: string;
   private password?: string;
+  /** trinity-enterprise#1024: the agent an admin's user key acts on behalf of.
+   * Set only on a clone from `asAgent`, never on a shared client. */
+  private actAsAgent?: string;
 
   constructor(baseUrl: string = "http://localhost:8000", token?: string) {
     this.baseUrl = baseUrl.replace(/\/$/, ""); // Remove trailing slash
     this.token = token;
+  }
+
+  /**
+   * trinity-enterprise#1024: a copy of this client whose every request carries
+   * `X-Trinity-Act-As-Agent: <agentName>`. A CLONE, so the shared base client
+   * (non-key mode) never carries one tool call's target into another's. The
+   * backend admits the header only for an admin's user-scoped key.
+   */
+  asAgent(agentName: string): TrinityClient {
+    const clone = Object.create(Object.getPrototypeOf(this)) as TrinityClient;
+    Object.assign(clone, this);
+    clone.actAsAgent = agentName;
+    return clone;
   }
 
   /**
@@ -760,6 +776,10 @@ export class TrinityClient {
         if (key.toLowerCase() === "authorization") continue;
         headers[key] = value;
       }
+    }
+    // trinity-enterprise#1024: after the per-call headers, so none can drop it.
+    if (this.actAsAgent) {
+      headers["X-Trinity-Act-As-Agent"] = this.actAsAgent;
     }
 
     // #905: forward a caller-supplied correlation id. The backend's

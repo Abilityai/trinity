@@ -261,9 +261,9 @@ describe("trinity-enterprise#611 get_my_ask", () => {
     assert.equal(out.disposition, "cancelled");
   });
 
-  it("declares no agent-target parameter — there is nothing to spoof", () => {
+  it("declares no agent-target parameter beyond the act-as agent_name (ent#1024)", () => {
     const tool = makeGetMyAsk(recordingClient().fake);
-    assert.deepEqual(Object.keys((tool.parameters as any).shape), ["request_id"]);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["agent_name", "request_id"]);
   });
 
   it("the system key reads as the agent it was minted for", async () => {
@@ -354,17 +354,26 @@ describe("trinity-enterprise#611 ask_operator", () => {
 
   it("forwards only the declared fields, whatever else the arguments carry", async () => {
     const { fake, calls } = raisingClient();
-    const stray = { ...ASK, agent_name: "sibling", channel: "file", raised_by: "gate" };
+    // agent_name naming itself is harmless and never travels in the body (ent#1024).
+    const stray = { ...ASK, agent_name: "self", channel: "file", raised_by: "gate" };
     await makeAskOperator(fake).execute(stray as any, agentCtx("self"));
     assert.deepEqual(calls, [["self", ASK]]);
   });
 
-  it("declares no agent-target parameter — there is nothing to spoof", () => {
+  it("an agent key naming a sibling is refused, and nothing is raised (ent#1024)", async () => {
+    const { fake, calls } = raisingClient();
+    const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, agent_name: "sibling" } as any, agentCtx("self")));
+    assert.equal(out.success, false);
+    assert.match(out.error, /acts only as 'self'/);
+    assert.deepEqual(calls, []);
+  });
+
+  it("declares no agent-target parameter beyond the act-as agent_name (ent#1024)", () => {
     const tool = makeAskOperator(raisingClient().fake);
     const keys = Object.keys((tool.parameters as any).shape);
-    assert.ok(!keys.some((k) => /agent/.test(k)), `unexpected agent-shaped parameter: ${keys}`);
+    assert.ok(!keys.some((k) => /agent/.test(k) && k !== "agent_name"), `unexpected agent-shaped parameter: ${keys}`);
     assert.deepEqual(keys.sort(), [
-      "context", "expires_at", "options", "priority", "proposal", "question",
+      "agent_name", "context", "expires_at", "options", "priority", "proposal", "question",
       "replaces", "request_id", "supersedes_expired", "title", "to", "type",
     ]);
   });
@@ -588,16 +597,16 @@ describe("trinity-enterprise#901 withdraw_ask", () => {
   it("forwards only {reason} in the body, whatever else the arguments carry", async () => {
     const { fake, calls } = withdrawingClient();
     const stray = {
-      request_id: "deploy-1", reason: "moot", agent_name: "sibling",
+      request_id: "deploy-1", reason: "moot", agent_name: "self",
       replaced_by: "x", disposed_by: "person", status: "answered",
     };
     await makeWithdrawAsk(fake).execute(stray as any, agentCtx("self"));
     assert.deepEqual(calls, [["self", "deploy-1", { reason: "moot" }]]);
   });
 
-  it("declares request_id and reason only — there is nothing to spoof", () => {
+  it("declares request_id, reason and the act-as agent_name only (ent#1024)", () => {
     const tool = makeWithdrawAsk(withdrawingClient().fake);
-    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["reason", "request_id"]);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["agent_name", "reason", "request_id"]);
   });
 
   it("the system key withdraws as the agent it was minted for", async () => {

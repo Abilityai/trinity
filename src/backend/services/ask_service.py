@@ -737,6 +737,7 @@ def raise_ask(
             "type": norm["type"],
             "to_role": to_role,
             **({"replaces": replaced["id"]} if replaced else {}),
+            **_acted_by(actor_user),
         },
     }]
     trigger = _broadcast_payload({"type": "operator_queue_new",
@@ -1153,6 +1154,7 @@ def withdraw(agent_name: str, request_id: str, reason: Any, *,
             "agent_name": agent_name,
             "request_id": row["request_id"],
             "has_reason": True,
+            **_acted_by(actor_user),
         },
     }]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
@@ -1365,6 +1367,18 @@ def _conflict_code(row: Dict[str, Any]) -> str:
     """Why an answer's compare-and-set lost. Still `pending` means the deadline
     refused it (the respond predicate's only other clause)."""
     return "expired" if row.get("status") == "pending" else "not_pending"
+
+
+def _acted_by(actor_user: Any) -> Dict[str, Any]:
+    """`{"acted_by": "user:<id>"}` when an admin's user key acted on behalf of
+    the agent (trinity-enterprise#1024), else nothing — so the agent's own rows
+    keep exactly their shape, and an admin acting as an agent never reads as the
+    agent. An id, never text (the audit-row rule above)."""
+    from dependencies import act_as_agent_of
+
+    if actor_user is not None and act_as_agent_of(actor_user):
+        return {"acted_by": f"user:{actor_user.id}"}
+    return {}
 
 
 def _actor_fields(actor: Actor) -> Dict[str, Any]:
