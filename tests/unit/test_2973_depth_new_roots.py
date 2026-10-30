@@ -524,7 +524,12 @@ def test_2973_scheduler_manual_trigger_stamps_the_depth(tmp_path):
         "status TEXT, started_at TEXT, message TEXT, triggered_by TEXT, model_used TEXT, "
         "attempt_number INTEGER, retry_of_execution_id TEXT, source_user_id INTEGER, "
         "source_user_email TEXT, source_agent_name TEXT, source_mcp_key_id TEXT, "
-        "source_mcp_key_name TEXT, chain_depth INTEGER)"
+        "source_mcp_key_name TEXT, chain_depth INTEGER, subscription_id TEXT)"
+    )
+    # #4085: create_execution snapshots the agent's subscription from here.
+    conn.execute(
+        "CREATE TABLE agent_ownership (agent_name TEXT PRIMARY KEY, "
+        "subscription_id TEXT, deleted_at TEXT)"
     )
     conn.commit()
     conn.close()

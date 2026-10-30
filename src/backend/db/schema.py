@@ -305,6 +305,9 @@ TABLES = {
             -- ent#862: AAuth peer identity that triggered this execution,
             -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
             a2a_caller_identity TEXT,
+            -- #3380: the /chat thread this turn answers, so a watchdog-claimed
+            -- result can still write its reply there. NULL = not a /chat turn.
+            chat_session_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -1344,6 +1347,12 @@ TABLES = {
     # tab reads it from the assignment row, because the per-injection result
     # map is session-scoped and an operator who never sees it must still see
     # the conflict.
+    #
+    # trinity-enterprise#529: `follows_bundled_pin` is 1 while the seeded
+    # default still points where the platform put it (the seed sets it; an admin
+    # change to url/ref/ref_type clears it), and the boot follow moves such a
+    # row to a newer `DEFAULT_SKILL_SOURCE_REF`. `followed_from_ref` /
+    # `followed_at` record the latest follow for the Settings line.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,
@@ -1361,6 +1370,9 @@ TABLES = {
             created_by TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            follows_bundled_pin INTEGER NOT NULL DEFAULT 0,
+            followed_from_ref TEXT,
+            followed_at TEXT,
             UNIQUE(url, ref)
         )
     """,
@@ -2040,6 +2052,9 @@ TABLES = {
             response_snapshot TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            -- #3298: the claimer's owner token; attach/complete/release are
+            -- compare-and-set on it, so a reclaimed claim's late writer is a no-op.
+            claim_token TEXT,
             PRIMARY KEY (scope, idempotency_key)
         )
     """,

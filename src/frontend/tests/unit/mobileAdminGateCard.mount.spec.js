@@ -34,9 +34,9 @@ const item = (canDecide) => ({
 
 let wrapper
 
-async function mountView(canDecide) {
+async function mountView(canDecide, build = item) {
   http.get.mockImplementation((url) => {
-    if (url === '/api/operator-queue') return Promise.resolve({ data: { items: [item(canDecide)], count: 1 } })
+    if (url === '/api/operator-queue') return Promise.resolve({ data: { items: [build(canDecide)], count: 1 } })
     if (url === '/api/notifications') return Promise.resolve({ data: { items: [], count: 0 } })
     return Promise.reject(new Error(`unexpected ${url}`))
   })
@@ -69,5 +69,34 @@ describe('/m — the gated-skill approval card', () => {
     expect(card.find('[data-testid="gate-card-waiting-on"]').exists()).toBe(false)
     await options[1].trigger('click')
     expect(card.find('[data-testid="queue-note"]').attributes('placeholder')).toContain('Reason (optional)')
+  })
+})
+
+// trinity-enterprise#980: any platform-raised approval addressed to someone else
+// (a project steward's proposal waits on the project's creator), not only a skill gate.
+const proposal = (canDecide) => ({
+  id: 'g1', agent_name: 'compliance-steward', type: 'approval', priority: 'medium', raised_by: 'gate',
+  title: "Approve compliance-steward's changes to “SOC 2 compliance”", question: 'The steward proposes the changes below.',
+  options: ['Approve', 'Decline'], decided_by_options: true, status: 'pending',
+  created_at: '2026-10-27T08:00:00Z', expires_at: '2026-11-03T08:00:00Z',
+  proposal: { 'Add members': 'bob@example.com' }, gate: null,
+  addressed: { waiting_on: ['alice@example.com'], can_decide: canDecide },
+})
+
+describe('/m — an approval addressed to someone else (ent#980)', () => {
+  beforeEach(() => { vi.clearAllMocks(); document.body.innerHTML = '' })
+  afterEach(() => { wrapper?.unmount(); wrapper = null })
+
+  it('reads who it waits on and offers no options', async () => {
+    const card = await mountView(false, proposal)
+    expect(card.find('[data-testid="queue-addressed-waiting"]').text()).toContain('alice@example.com')
+    expect(card.find('[data-testid="queue-proposal"]').exists()).toBe(true)
+    expect(card.findAll('[data-testid="queue-option"]')).toHaveLength(0)
+  })
+
+  it('the addressee gets the options and no waiting line', async () => {
+    const card = await mountView(true, proposal)
+    expect(card.find('[data-testid="queue-addressed-waiting"]').exists()).toBe(false)
+    expect(card.findAll('[data-testid="queue-option"]').map((b) => b.text())).toEqual(['Approve', 'Decline'])
   })
 })
