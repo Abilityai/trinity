@@ -47,6 +47,10 @@
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300">{{ fmtRate(row.completionRate) }}</td>
             <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300" data-testid="eval-agent-passed">{{ fmtRate(row.checksPassedRate) }}</td>
             <td class="px-4 py-2 text-right tabular-nums" :class="deltaTone(row.delta)" data-testid="eval-agent-delta">{{ fmtDelta(row.delta) }}</td>
+            <td v-if="showQuality" class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-300" data-testid="eval-agent-quality">
+              {{ fmtQuality(row.qualityMean) }}
+              <span v-if="row.qualityMean != null && !calibrated" class="block text-xs text-gray-500 dark:text-gray-400">uncalibrated</span>
+            </td>
             <td class="px-4 py-2 text-gray-700 dark:text-gray-300" data-testid="eval-agent-topcheck">
               <span v-if="row.topFailedCheck" class="font-mono text-xs">{{ row.topFailedCheck.id }} <span class="text-gray-500 dark:text-gray-400">×{{ row.topFailedCheck.count }}</span></span>
               <span v-else class="text-gray-500 dark:text-gray-400">—</span>
@@ -60,22 +64,27 @@
 
 <script setup>
 import { ref, computed } from 'vue'
-import { fmtRate, fmtDelta, deltaTone } from './format'
+import { fmtRate, fmtDelta, deltaTone, fmtQuality } from './format'
 
 const props = defineProps({
   /** `store.agentRows` — already in the default (worst-first) order. */
   rows: { type: Array, required: true },
+  /** The judged-quality column — only where eval_judge is entitled (ent#938 C5). */
+  showQuality: { type: Boolean, default: false },
+  /** Enough person-rated runs that the judge's quality is calibrated. */
+  calibrated: { type: Boolean, default: false },
 })
 defineEmits(['select'])
 
-const COLUMNS = [
+const COLUMNS = computed(() => [
   { id: 'agent', label: 'Agent', sortable: true },
   { id: 'evaluated', label: 'Evaluated', sortable: true, numeric: true },
   { id: 'completionRate', label: 'Completed', sortable: true, numeric: true },
   { id: 'checksPassedRate', label: 'Checks passed', sortable: true, numeric: true },
   { id: 'delta', label: 'Δ vs previous', sortable: true, numeric: true },
+  ...(props.showQuality ? [{ id: 'qualityMean', label: 'Judged quality', sortable: true, numeric: true }] : []),
   { id: 'topFailedCheck', label: 'Top failed check' },
-]
+])
 
 // `null` sort key = the store's own order. A rate of `null` (nothing graded)
 // always sorts last, whichever direction.

@@ -343,9 +343,15 @@ window and a day with no point is a gap, never 0 %; switching agents drops the p
 agent's line rather than showing it as this one's. `?agent=` deep-links both ways
 (other query keys kept). The empty state links to the Executions tab.
 
-**Deliberately absent** (waiting on the placement ruling): the C4/C5 blocks, a
-judged-quality column, and the agreement tile with its T4 floor — the store reads no
-`quality_mean` / `judge_human_agreement` / `agreement_n`.
+**Calibration (C4/C5) — enterprise, ruled 2026-10-29.** Part of the managed grading
+experience above, so the OSS tab renders it only where the judge module is entitled
+(`isEntitled('eval_judge')`): two more KPI tiles (`store.judgeKpis` — judged runs, and
+judge–person agreement from `judge_human_agreement` / `agreement_n`, which reads
+"uncalibrated · n of 20 person-rated runs" below the T4 floor `AGREEMENT_FLOOR = 20`,
+shown and never hidden), a "Judged quality" column (`quality_mean` out of 5, marked
+"uncalibrated" below the floor), and on the execution page a person's thumb on the run
+(`ExecutionRating.vue`) that writes the `operator:` rating `human_labels` reads. The
+rating route belongs to the private module; the control shows only when it answers.
 
 ## Pair evaluation — the caller→callee edge (ent#940)
 

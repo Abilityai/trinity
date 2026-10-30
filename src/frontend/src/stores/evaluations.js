@@ -17,6 +17,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '../api'
+import { AGREEMENT_FLOOR } from './evalJudge'
 import { apiErrorMessage } from '../utils/apiError'
 
 export const AGGREGATE_URL = '/api/evaluations/aggregate'
@@ -162,8 +163,8 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
   const evaluatedCount = computed(() => aggregate.value?.total?.evaluated ?? 0)
   const invalidPeriod = computed(() => errorCode.value === 'invalid_period')
 
-  // KPI row (C2). No judge-quality or agreement tile: those wait on the
-  // calibration placement decision (ent#938 ruling addendum).
+  // KPI row (C2). The judge tiles are `judgeKpis`, shown only where the
+  // eval_judge module is entitled (ruled 2026-10-29: calibration is enterprise).
   const kpis = computed(() => {
     const t = aggregate.value?.total
     if (!t) return []
@@ -175,6 +176,29 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
         delta: p ? rateDelta(t.completion_rate, p.completion_rate) : null },
       { id: 'checks_passed_rate', label: 'Checks passed', value: t.checks_passed_rate ?? null, rate: true,
         delta: p ? rateDelta(t.checks_passed_rate, p.checks_passed_rate) : null },
+    ]
+  })
+
+  // ent#938 C5 / ent#936: how far the judge can be trusted this window. Below
+  // AGREEMENT_FLOOR person-rated runs its quality reads "uncalibrated" —
+  // shown, never hidden.
+  const calibration = computed(() => {
+    const t = aggregate.value?.total || {}
+    const n = t.agreement_n ?? 0
+    return { agreement: t.judge_human_agreement ?? null, rated: n, calibrated: n >= AGREEMENT_FLOOR }
+  })
+  const judgeKpis = computed(() => {
+    const t = aggregate.value?.total
+    if (!t) return []
+    const p = prevAggregate.value?.total
+    const c = calibration.value
+    return [
+      { id: 'judged', label: 'Judged runs', value: t.judged ?? 0, rate: false,
+        delta: p ? (t.judged ?? 0) - (p.judged ?? 0) : null },
+      { id: 'agreement', label: 'Judge–person agreement', value: c.agreement, rate: true,
+        note: c.calibrated
+          ? `over ${c.rated} person-rated runs`
+          : `uncalibrated · ${c.rated} of ${AGREEMENT_FLOOR} person-rated runs` },
     ]
   })
 
@@ -247,6 +271,8 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
         checksPassedRate: g.checks_passed_rate ?? null,
         delta: prev ? rateDelta(g.checks_passed_rate, prev.checks_passed_rate) : null,
         topFailedCheck: topFailedCheck(g.per_check_fail),
+        judged: g.judged ?? 0,
+        qualityMean: g.quality_mean ?? null,
       }
     })
     return rows.sort((a, b) => {
@@ -415,7 +441,7 @@ export const useEvaluationsStore = defineStore('evaluations', () => {
     failed, failedLoading, failedLoaded, failedError, failedHasMore, pair,
     pairsAggregate, pairsError, pairRows, perCheck,
     trend, trendLoading, trendLoaded, trendError, trendChart,
-    evaluatedCount, invalidPeriod, kpis, agentRows,
+    evaluatedCount, invalidPeriod, kpis, judgeKpis, calibration, agentRows,
     load, loadFailed, loadMoreFailed, loadPairs, loadTrend, setPair,
     setPeriod, setCustomRange, setAgent, clearError,
   }
