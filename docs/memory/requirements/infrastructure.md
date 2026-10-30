@@ -106,7 +106,7 @@
 - **Description**: `startup.sh` runs `~/.trinity/setup.sh` after the agent server starts, so the orphan sweep is live during the install.
 - **Key Features**:
   - The sweep allowlist protects the exact cmdline `bash /home/developer/.trinity/setup.sh` and its descendant tree (`_PLATFORM_TREE_PATTERNS`, `orphan_allowlist.py`), with no user allow file. Leftovers reparent to PID 1 after it exits and are reaped.
-  - The default `TMPDIR` (`/home/developer/.tmp`, #1098) is emptied at every boot, before anything uses it. A custom `TMPDIR` is not touched.
+  - The default `TMPDIR` (`/home/developer/.tmp`, #1098) is emptied at every boot, before anything uses it, except `codex/`: that is the default `CODEX_HOME`, which holds a ChatGPT-plan `codex login` and the Codex thread store. A custom `TMPDIR` is not touched.
   - `startup.sh` writes `~/.trinity/setup-status.json` (`exit_code`, `started_at`, `finished_at`) after the hook and removes it when there is no hook. Compatibility check **F-014** (SOFT) fails on a non-zero exit and skips when the file is absent.
 - **Tests**: `tests/unit/test_4002_setup_hook_tmpdir.py`
 

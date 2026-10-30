@@ -139,6 +139,27 @@ def test_default_tmpdir_is_emptied(tmp_path):
     assert "TMPDIR" in out and "2 entries" in out
 
 
+def test_default_tmpdir_keeps_the_codex_login(tmp_path):
+    # ~/.tmp/codex is the default CODEX_HOME: a ChatGPT-plan `codex login`
+    # lives there and must survive a restart.
+    scratch = tmp_path / ".tmp"
+    (scratch / "codex").mkdir(parents=True)
+    (scratch / "codex" / "auth.json").write_text('{"tokens": {}}')
+    (scratch / "pip-build-abc").mkdir()
+    out = _run(_tmpdir_block(), tmp_path, {}).stdout
+    assert (scratch / "codex" / "auth.json").read_text() == '{"tokens": {}}'
+    assert not (scratch / "pip-build-abc").exists()
+    assert "1 entries" in out
+
+
+def test_default_tmpdir_with_only_codex_logs_nothing(tmp_path):
+    scratch = tmp_path / ".tmp"
+    (scratch / "codex").mkdir(parents=True)
+    out = _run(_tmpdir_block(), tmp_path, {}).stdout
+    assert (scratch / "codex").is_dir()
+    assert "cleared" not in out
+
+
 def test_default_tmpdir_set_explicitly_is_emptied(tmp_path):
     scratch = tmp_path / ".tmp"
     scratch.mkdir()

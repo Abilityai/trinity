@@ -74,12 +74,15 @@ mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/nul
 # #4002: the default TMPDIR is platform scratch on the persistent volume; build
 # leftovers (pip/npm/CUDA wheels) would otherwise pile up across restarts. Empty
 # it here, before the agent server or setup.sh can use it. A custom TMPDIR is
-# operator-chosen and may hold data, so it is left alone.
+# operator-chosen and may hold data, so it is left alone. `codex` is kept: it is
+# the default CODEX_HOME, which holds a ChatGPT-plan `codex login` and the
+# thread store `codex exec resume` reads.
 if [ "${AGENT_TMPDIR}" = "/home/developer/.tmp" ]; then
-    _tmp_n=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l | tr -d ' ')
+    _tmp_n=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex 2>/dev/null | wc -l | tr -d ' ')
     if [ "${_tmp_n:-0}" -gt 0 ]; then
-        _tmp_size=$(du -sh "${AGENT_TMPDIR}" 2>/dev/null | cut -f1)
-        find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+        _tmp_size=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec du -sk {} + 2>/dev/null \
+            | awk '{s += $1} END {print s "K"}')
+        find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec rm -rf {} + 2>/dev/null || true
         echo "TMPDIR: cleared ${_tmp_n} entries (${_tmp_size:-?}) from ${AGENT_TMPDIR}"
     fi
     unset _tmp_n _tmp_size

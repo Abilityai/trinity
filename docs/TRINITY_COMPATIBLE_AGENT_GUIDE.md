@@ -2339,6 +2339,7 @@ pip install --user opencv-python moviepy
 2. **Keep setup.sh idempotent**: Use `-y` flags, check if already installed
 3. **Minimize apt-get**: Each install adds startup time
 4. **Document dependencies**: List required packages in README.md
+5. **Do not `exec` the last step**: the platform protects the running `setup.sh` from the orphan sweep by its command line, and `exec` replaces that command line, so a long final install can be killed
 
 ---
 
