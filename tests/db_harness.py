@@ -39,6 +39,8 @@ instead of ``db_backend``.
 from __future__ import annotations
 
 import os
+import shutil
+from pathlib import Path
 
 import pytest
 from sqlalchemy import text
@@ -94,8 +96,52 @@ def bootstrap_schema() -> None:
         init_schema_postgres(engine)
 
 
-def _activate_backend(backend: str, tmp_path, monkeypatch) -> None:
-    """Point the engine at `backend` and build a fresh schema."""
+# #4096: one schema build per worker process, copied per test. `init_schema`
+# is pure DDL (no seed rows, no timestamps), so the copy is content-identical
+# to a fresh build — and it is what made `db_backend` cost ~330ms per test,
+# 36% of the unit suite's phase time. Module-global rather than a session
+# fixture so `_activate_backend` stays a plain function; xdist gives every
+# worker its own process AND its own `tmp_path_factory` basetemp, so the
+# template is never shared across workers.
+_SQLITE_TEMPLATE: Path | None = None
+
+
+def sqlite_template(tmp_path_factory) -> Path:
+    """The per-process SQLite schema template, built on first use."""
+    global _SQLITE_TEMPLATE
+    if _SQLITE_TEMPLATE is not None and _SQLITE_TEMPLATE.exists():
+        return _SQLITE_TEMPLATE
+
+    from db.engine import dispose_engines
+
+    template = Path(tmp_path_factory.mktemp("db-template")) / "trinity.db"
+    saved = {k: os.environ.get(k) for k in ("TRINITY_DB_PATH", "DATABASE_URL")}
+    os.environ["TRINITY_DB_PATH"] = str(template)
+    os.environ.pop("DATABASE_URL", None)
+    try:
+        dispose_engines()
+        bootstrap_schema()
+    finally:
+        # Close the engine so the file is complete before anyone copies it,
+        # then put the environment back exactly as it was.
+        dispose_engines()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    _SQLITE_TEMPLATE = template
+    return template
+
+
+def _activate_backend(backend: str, tmp_path, monkeypatch, tmp_path_factory=None) -> None:
+    """Point the engine at `backend` and give the test a fresh schema.
+
+    With `tmp_path_factory` (the two fixtures below pass it) the SQLite schema
+    is a copy of the per-process template; a direct caller that omits it
+    (test_ent695_apply_engine builds a second world mid-test) gets the full
+    `init_schema` build, same result, ~300ms slower.
+    """
     from db.engine import dispose_engines
 
     if backend == SQLITE:
@@ -103,7 +149,10 @@ def _activate_backend(backend: str, tmp_path, monkeypatch) -> None:
         monkeypatch.setenv("TRINITY_DB_PATH", str(db_path))
         monkeypatch.delenv("DATABASE_URL", raising=False)
         dispose_engines()
-        bootstrap_schema()
+        if tmp_path_factory is None:
+            bootstrap_schema()
+        else:
+            shutil.copyfile(sqlite_template(tmp_path_factory), db_path)
     elif backend == POSTGRES:
         monkeypatch.setenv("DATABASE_URL", os.environ["TEST_POSTGRES_URL"])
         dispose_engines()
@@ -114,16 +163,17 @@ def _activate_backend(backend: str, tmp_path, monkeypatch) -> None:
 
 
 @pytest.fixture(params=available_backends())
-def db_backend(request, tmp_path, monkeypatch):
+def db_backend(request, tmp_path, monkeypatch, tmp_path_factory):
     """Parametrized DB backend.
 
     Yields the backend name (``"sqlite"`` / ``"postgres"``) after pointing the
-    engine at it and building a fresh schema. Disposes cached engines on
-    teardown so the next test/param starts clean.
+    engine at it and giving the test a fresh schema (a copy of the per-process
+    template on SQLite, #4096). Disposes cached engines on teardown so the
+    next test/param starts clean.
     """
     from db.engine import dispose_engines
 
-    _activate_backend(request.param, tmp_path, monkeypatch)
+    _activate_backend(request.param, tmp_path, monkeypatch, tmp_path_factory)
     try:
         yield request.param
     finally:
@@ -131,13 +181,13 @@ def db_backend(request, tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def sqlite_only_backend(tmp_path, monkeypatch):
+def sqlite_only_backend(tmp_path, monkeypatch, tmp_path_factory):
     """SQLite-only variant for tests that are inherently SQLite-specific
     (e.g. the SQLite migration runner). Mirrors ``db_backend`` but never
     parametrizes onto PostgreSQL."""
     from db.engine import dispose_engines
 
-    _activate_backend(SQLITE, tmp_path, monkeypatch)
+    _activate_backend(SQLITE, tmp_path, monkeypatch, tmp_path_factory)
     try:
         yield SQLITE
     finally:
