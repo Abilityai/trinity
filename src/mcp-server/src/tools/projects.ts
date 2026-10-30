@@ -439,6 +439,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "`already_pending`. Adding an agent someone else owns still needs its owner's yes. Needs the " +
         "project-management permission (`project_management_not_permitted` otherwise).",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         members: z.array(z.string().min(1).max(320)).max(20).optional()
           .describe("Work emails or role:<id>, e.g. ['alex@example.com', 'role:compliance-lead']."),
@@ -453,11 +454,11 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         })).max(25).optional(),
         note: z.string().max(500).optional().describe("One or two lines on why, shown to the creator."),
       }),
-      execute: async (p: { project_id: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; agent_name?: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
         try {
-          const { project_id, ...rest } = p;
+          const { project_id, agent_name: _actAs, ...rest } = p;
           const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
-          return ok(await getClient(context?.session).proposeProjectChanges(project_id, body, turnOf(context)));
+          return ok(await clientFor(context, p.agent_name).proposeProjectChanges(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }
