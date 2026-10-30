@@ -707,7 +707,7 @@ def _classify_agent_http_failure(
     older agent image answers it 503), the agent answered 503 → AUTH,
     429 → BILLING, never answered → NETWORK, any other agent status →
     AGENT_ERROR."""
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import is_model_rejection, is_prompt_too_long
 
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
@@ -715,6 +715,10 @@ def _classify_agent_http_failure(
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
     if agent_status_code == 403:
         return TaskExecutionErrorCode.TURN_REFUSED
+    # #3849: the API refused the prompt's length — a 503 from the agent, but
+    # not a credential fault.
+    if is_prompt_too_long(error_msg):
+        return TaskExecutionErrorCode.AGENT_ERROR
     if agent_status_code == 503:
         return TaskExecutionErrorCode.AUTH
     if agent_status_code == 429:
@@ -842,7 +846,11 @@ async def _apply_sub003_autoswitch(
             )
         raise ChatDispatchError(429, error_msg, headers=code_headers)
 
-    if agent_status_code == 503 or is_auth_failure(error_msg):
+    from services.failure_classifier import is_prompt_too_long, is_turn_limit
+
+    # #3984 / #3849: no credential changes a turn cap or a prompt's length.
+    credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+    if not credential_independent and (agent_status_code == 503 or is_auth_failure(error_msg)):
         try:
             switch_result = await handle_subscription_failure(
                 agent_name=name,
@@ -2448,7 +2456,12 @@ _SYNC_BACKLOG_TERMINAL = (
 
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+    422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
+    refused, #3012) / 503. Raises ChatDispatchError.
+
+    #3988: the turn limit answers 422 — the agent's own status — and always
+    carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
+    from the 422 this route already answers for invalid input (#2806).
 
     #2661: releases the idempotency claim before raising. Both sync branches
     call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
@@ -2469,6 +2482,13 @@ def _map_task_failure(name, result, *, idem):
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
+        if getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MAX_TURNS.value
+        ):
+            # #3988: checked before the prose matches below — the detail carries
+            # the CLI's raw text, and a "timed out" in it would answer 504, which
+            # the MCP client reads as its own wait running out.
+            raise ChatDispatchError(422, result.error, headers=code_headers)
         if "at capacity" in (result.error or "") or getattr(
             getattr(result, "error_code", None), "value", None
         ) == TaskExecutionErrorCode.CAPACITY.value:
