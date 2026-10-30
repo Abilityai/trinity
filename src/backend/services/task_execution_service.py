@@ -286,8 +286,15 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # was missing all along stays silent whenever the first attempt failed
     # before reaching the agent (capacity, timeout) and only the retry got far
     # enough to show it.
+    #
+    # #4105: `self_task` is the `agent` case with the caller and the target the
+    # same agent. Its reply goes back to that agent (and, if a chat session was
+    # named, into it after the fact), so no person reads it live. `skill_gate`
+    # is the `operator_response` shape: the wake of a requester after someone
+    # else decided its gated request, run with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response", "operator_ending", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry", "self_task",
+     "skill_gate"}
 )
 
 

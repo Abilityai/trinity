@@ -1,0 +1,63 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-30",
+  "mode": "daily",
+  "scope": "diff",
+  "counts_as_full_run": false,
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "all rows",
+      "verdict": "not reachable (diff touches no pins, images, lockfiles or compose)"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": 0,
+    "changed_response_text": [
+      "POST /api/agents/{name}/task async 202 (pull pilot)"
+    ],
+    "new_agent_context_ingress": 0,
+    "mcp_tools_changed": [
+      "chat_with_agent receipt lead text"
+    ]
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Phases 3-6 not run: no dependency, CI, Docker or webhook files in the diff",
+    "No Docker pass (diff run; no image-affecting change)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes in diff)",
+    "changed_manifests": []
+  },
+  "filter_stats": {
+    "candidates": 1,
+    "dropped_below_gate": 1,
+    "dropped_reason": "202 message distinguishes pull vs push config to a caller already authorized on the agent; status=queued already implied it; pilot membership is non-secret operator config"
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "new": 0,
+    "resolved": 0,
+    "persistent": "n/a (diff run)"
+  }
+}
