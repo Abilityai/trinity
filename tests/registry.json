@@ -1,16 +1,6 @@
 {
   "test_files": [
     {
-      "file": "../src/mcp-server/src/fan_out_turn_scope.test.ts",
-      "feature": "#3944",
-      "added": "2026-10-30",
-      "categories": [
-        "mcp",
-        "unit"
-      ],
-      "description": "fan_out's Idempotency-Key is scoped to the caller's turn (the #3296 rule): same tasks from the same turn keep one key; from a different turn a different key; a scheduler retry derives attempt 1's key (delegationTurnScope); no turn (absent or manual) is byte-identical to the pre-#3944 key and reads no execution row; async mode keeps its own key with the turn appended; an unreadable row scopes to the turn and the call still goes out. Reverting the fix turns 4 of the 6 red."
-    },
-    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -4966,6 +4956,16 @@
         "git"
       ],
       "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
+    },
+    {
+      "file": "../src/mcp-server/src/fan_out_turn_scope.test.ts",
+      "feature": "#3944",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "fan_out's Idempotency-Key is scoped to the caller's turn (the #3296 rule): same tasks from the same turn keep one key; from a different turn a different key; a scheduler retry derives attempt 1's key (delegationTurnScope); no turn (absent or manual) is byte-identical to the pre-#3944 key and reads no execution row; async mode keeps its own key with the turn appended; an unreadable row scopes to the turn and the call still goes out. Reverting the fix turns 4 of the 6 red."
     },
     {
       "file": "unit/test_ent465_suggestions.py",
