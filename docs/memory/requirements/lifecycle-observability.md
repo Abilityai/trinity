@@ -1209,7 +1209,9 @@ it on the integration branch. Neither exists yet.
   had a receipt → `fail: resent_after_receipt`) and `wrong_route` (the callee answered
   "Unknown command" or the peer-grant policy wrote a `skill_not_granted` refusal for the
   run; library-catalog membership is evidence only, since workspace playbooks are never in
-  it; prose intent → `skip: not_a_playbook`). Signal checks (recorded, never in the
+  it — **ruled 2026-10-29: an off-catalog playbook stays evidence (`in_catalog: false`),
+  never a fail**, because catalogs drift and a workspace pick is often legitimate; prose
+  intent → `skip: not_a_playbook`). Signal checks (recorded, never in the
   headline): `failed_with_side_effects` (a failed callee run with attributable receipts —
   window-matched reports never count) and `rework_bounds` (round trips on this edge
   against the p95 of the same caller→callee→playbook series' earlier caller turns; fewer
