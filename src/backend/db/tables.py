@@ -1171,6 +1171,12 @@ skill_sources = Table(
     Column("created_by", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
+    # trinity-enterprise#529: 1 while the seeded default still points where the
+    # platform put it; the boot follow moves only such a row, and records the
+    # move in the two columns after it.
+    Column("follows_bundled_pin", Integer),
+    Column("followed_from_ref", Text),
+    Column("followed_at", Text),
 )
 
 agent_tags = Table(

@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4085_scheduler_subscription_id.py",
+      "feature": "#4085",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "subscriptions"
+      ],
+      "description": "#4085: scheduler-created executions (cron, reminder, retry, skipped) snapshot the agent's live subscription assignment into schedule_executions.subscription_id and count toward SUB-004 window_5h/window_7d; no live assignment records NULL."
+    },
+    {
       "file": "unit/test_4001_no_auto_maintenance.py",
       "feature": "#4001",
       "added": "2026-10-27",
@@ -6720,28 +6731,28 @@
       "description": "Every MCP tool whose backend route is self-fenced (write_user_memory, set_reminder, list_reminders, cancel_reminder, record_decision, list_seat_decisions, send_voice_reply) describes its agent_name parameter as for a user-scoped key only, naming another agent refused, never as an override an agent key may use."
     },
     {
-      "file": "unit/test_ent701_room_people.py",
-      "feature": "trinity-enterprise#701",
-      "added": "2026-10-26",
+      "file": "unit/test_3984_3849_not_a_credential_failure.py",
+      "feature": "#3984, #3849",
+      "added": "2026-10-27",
       "categories": [
         "backend",
-        "unit",
-        "workspace",
-        "rooms"
+        "agent",
+        "subscriptions",
+        "unit"
       ],
-      "description": "The edition-agnostic half of a room holding more than one person, over a real SQLite built from the platform DDL: a person seated mid-conversation reads from their join point (visible_from_seq, incremental reads too) until a backscroll grant moves the floor to 0; seat_person refuses an agent; a person who left gets the uniform 404 on read and post and the room drops out of their list, the roster keeps who left and the room says so, and they can be seated again; a moderator cannot strand other people; an agent cannot leave; a non-member gets the 404; the payload names the reader (you) and offers seating (can_seat_people) only to a platform moderator of an open room on an entitled install, never to a collaborator or an outside-client moderator; the turn prompt names two or more people present and the collaborator's limits, a departed person is not counted, and a seated colleague keeps the room internal; an @mention of a seated person becomes a tag, never a wake, and a mention that cannot be tagged never fails the message."
+      "description": "Two agent failures no credential can fix never drive SUB-003. The agent's turn-limit 422 at caps 401 and 403 (CLI text and fallback, through the real _finalize_headless_result) no longer trips the bare 401/403 auth indicators; the API's 'Prompt is too long' 503 (current and pre-#3340 images) is not auth. classify_switch_failure returns None for both; execute_task calls the agent once with no walk, no legacy switch, no key fallback and no AUTH code; /chat never switches and codes agent_error; the pull terminal and #1083 callback do not count a prompt-length 503 as auth (the pull sink recodes a worker's `auth` prompt-length/model-rejection terminal to agent_error/model_unsupported, so the AUTH dispatch breaker never sees it and the row is not stored as [auth]); the TES path pins the exact error_code per row (max_turns for the 422s per #3988, agent_error for the 503s). Genuine auth (503, 401/403, auth text) and 429 keep their classification; the turn-limit marker is pinned to the agent's source and the scheduler mirror carries both lists. Mutations: dropping the call-site guards turns 8 red; dropping the turn-limit exclusion in is_auth_failure turns 7 red."
     },
     {
-      "file": "../src/frontend/tests/unit/portalRoomPeople.mount.spec.js",
-      "feature": "trinity-enterprise#701",
-      "added": "2026-10-26",
+      "file": "unit/test_3988_turn_limit_status.py",
+      "feature": "#3988",
+      "added": "2026-10-27",
       "categories": [
-        "frontend",
-        "unit",
-        "ui",
-        "workspace"
+        "backend",
+        "agent",
+        "executions",
+        "unit"
       ],
-      "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
+      "description": "A turn-limit failure reaches a sync /task caller as 422 with X-Trinity-Error-Code: max_turns, not 503 'agent may be unavailable'. MAX_TURNS is a TaskExecutionErrorCode (envelope contract §4); the pull worker's real failed body round-trips through the sink's [max_turns] row prefix; the #1083 callback maps terminal_reason max_turns to the code; execute_task codes the real agent 422 at caps 2 and 401 with no switch, for both the guardrail and the per-task (#2328) remedy wording (also through _map_task_failure), while a FastAPI-validation 422 (list detail, which used to crash the except-handler) stays uncoded. _map_task_failure answers 422 for the code even when the CLI text says 'timed out' or 'at capacity', and timeout/capacity/model/auth/uncoded failures keep 504/429/400/503/503. Mutations: each of the push branch, the 422 branch, the callback mapping, the list-detail fix and the shape check turns 1-4 tests red."
     },
     {
       "file": "unit/test_ent875_viewer_tier.py",
@@ -6954,7 +6965,7 @@
         "guardrails",
         "security"
       ],
-      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. Pins as CURRENT behaviour (known exposure, backend follow-up) that a turn-limit 422 at a cap of 401/403, per-task or guardrail, reads as auth on push through the real classify_switch_failure."
+      "description": "#2328: a per-task max_turns may only tighten the agent's turn guardrail. Drives the real _setup_headless_command (argv after --max-turns): absent -> guardrail, tighter -> per-task, equal/larger/0/negative/non-integer (\"7\", 3.5, True) -> guardrail; fresh install (no runtime override; baseline only, nothing readable, corrupt runtime file) resolves a per-task 10000 to the default. The real _finalize_headless_result 422 names the per-task cap when it bound (also after the #1025 snapshot), keeps the max_turns_task advice when the guardrail bound, and its own wording adds no number the auth classifier reads. A turn-limit 422 at a cap of 401/403, per-task or guardrail, is a turn limit and not auth on push: is_turn_limit holds, is_auth_failure does not, and the real classify_switch_failure returns None (#3984, the inverse of the former known-exposure pin)."
     },
     {
       "file": "unit/test_3966_pre_check_schedule_context.py",
@@ -6976,6 +6987,41 @@
         "unit"
       ],
       "description": "The inbox-files notice composed by collect_inbox_context reads as shared context, not a fresh upload: the document and offered-image branches hedge provenance, make use conditional on the latest request and never claim the person has uploaded/sent the files; the attached-image branch keeps its pinned needles and is hedged too; each document carries its age from uploaded_at via _age_phrase (fixed injected clock, \"\" on a missing or unreadable value). Twenty of the 26 fail on the pre-fix code; the rest are regression guards (listing always present, byte-identical across messages, directory/names/sizes kept, #728 on both image branches)."
+    },
+    {
+      "file": "unit/test_ent529_follow_bundled_pin.py",
+      "feature": "trinity-enterprise#529",
+      "added": "2026-10-29",
+      "categories": [
+        "backend",
+        "unit",
+        "migration"
+      ],
+      "description": "The untouched seeded default skills source follows the platform's bundled pin on upgrade. Driven through skill_service.follow_bundled_pin with the real platform_audit_service building the audit row: an untouched seed behind the pin moves forward through the shared retarget reset (sha/status/error cleared, followed_from_ref/followed_at set, marker kept) with exactly one system audit row; the owner's AC2 ruling 'where it points decides' - a url/ref/ref_type change through PUT or apply (the MCP door) opts out for good, each door built so only the marker can stop the follow (url and ref_type go away and back); rename/priority never opt out; disable pauses and re-enable resumes; forward only on strict vX.Y.Z (downgrade, equal, branch, -rc1, mixed v/no-v, empty never move; v0.10.0 beats v0.9.0); another configured catalog or an empty env never moves; a lost CAS writes no audit row; a UNIQUE(url, ref) clash is a no-op. Seed: cursor and engine seeds mark the built-in URL, a fork seed does not. AC4 over a file:// upstream with ANNOTATED tags (#2550), both the update path and the lost-checkout clone path: the next sync is not refused as moved_tag and counts as a moved commit, and run_cycle re-injects with the new commit. The in-flight race both plan reviewers found: a sync admitted at the old tag that finishes after the follow must not stamp the old commit (record_sync scoped to the synced url/ref/ref_type). Backfill through the real SQLite migration on a pre-529 table: untouched seeds on every historical pin marked, toggles/renames in the audit do not opt out, audited retargets (PUT changed / apply named) and off-history/branch/fork/custom rows stay off, idempotent, and a fresh install records the migration on the second pass. Boot wiring pinned by AST: the follow is awaited before skills_sync_service.start(). Mutation-proved: dropping the marker clear (4 red), the follow reset (5), the sync scoping (1), the boot hook (1), the seed marker (14), the forward check (1) or the backfill audit filter (4). Review round on PR #4091: each of the seven compare-and-set conditions is pinned by a direct refusal test (mutation-proved one at a time); the per-source Sync route starts the fleet re-inject like Sync all, both routes driven after a real follow (automatic re-inject on, off, and an unmoved commit); and update_source re-decides an edit that lands across the follow (a stale save of the old ref is a retarget, a rename keeps the follow). Reviewer finding on PR #4091: a PUT that names url, ref or ref_type ends following even when the value is unchanged (the documented way to hold the current tag), while the moved-tag baseline survives that save and a declarative apply that only re-states the ref keeps following."
+    },
+    {
+      "file": "unit/test_ent701_room_people.py",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace",
+        "rooms"
+      ],
+      "description": "The edition-agnostic half of a room holding more than one person, over a real SQLite built from the platform DDL: a person seated mid-conversation reads from their join point (visible_from_seq, incremental reads too) until a backscroll grant moves the floor to 0; seat_person refuses an agent; a person who left gets the uniform 404 on read and post and the room drops out of their list, the roster keeps who left and the room says so, and they can be seated again; a moderator cannot strand other people; an agent cannot leave; a non-member gets the 404; the payload names the reader (you) and offers seating (can_seat_people) only to a platform moderator of an open room on an entitled install, never to a collaborator or an outside-client moderator; the turn prompt names two or more people present and the collaborator's limits, a departed person is not counted, and a seated colleague keeps the room internal; an @mention of a seated person becomes a tag, never a wake, and a mention that cannot be tagged never fails the message."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalRoomPeople.mount.spec.js",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
     }
   ]
 }

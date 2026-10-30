@@ -1710,12 +1710,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `@/api` here would put a second credential decision in this file for a
     // single diagnostic.
     //
-    // /review correction: an earlier version of this note claimed `@/api` would
-    // bounce an operator on a 401 where `portalHttp` would not. It would not —
-    // `portalHttp`'s own 401 handler calls `_onPlatformSessionLost` for exactly
-    // a platform session, which logs out and pushes `/login`. The difference is
-    // a router push versus `@/api`'s hard `window.location.href`, so the choice
-    // stands but the reason recorded for it did not.
+    // Not the bounce: since #2791 `@/api` and `portalHttp` report a 401 to the
+    // same handler (`notifyPlatformUnauthorized`), and neither hard-navigates.
+    // A dead platform session ends the same way through either — `/login`,
+    // carrying this page to come back to (#3444).
     //
     // Fail-soft on purpose: the caller treats any refusal as "no notice". The
     // endpoint is `assert_admin`-gated, which is the authority; the client-side

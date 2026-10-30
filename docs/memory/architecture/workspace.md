@@ -98,7 +98,12 @@ source guard says so, because the first cut of this fix guarded `auth.js` alone 
 the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
 belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
 (`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
-of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. A
+`logout` verdict sends the page it happened on as `/login?redirect=` (`loginLocation`,
+#3444) — on the Workspace too, so an operator whose token died mid-chat comes back to the
+chat; a session ended in another tab still never navigates, and the Workspace sign-in card
+offers "Have a Trinity account? Sign in" to the same return path whenever no platform
+session is held (#3466). The
 logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
 ordering means storage is already empty by then. The Workspace veto in the verdict reads
 the **per-tab** portal token from the store, not shared `localStorage`, so a client
@@ -290,9 +295,10 @@ cleared from three sites (the next turn-done, `onBeforeUnmount`, and `watch(conv
 the only one that fires on a thread switch). The notice rides
 `PortalConversation`'s `#notice` slot for platform admins only
 (`shouldFetchTitleHealth`), through `clientPortal.js::fetchTitleGenerationHealth` on
-`portalHttp` — never `@/api`, whose 401 handler hard-navigates to `/login` under
-`/workspace` and would bounce an operator out of a conversation over a background
-diagnostic. **Known blind spot, accepted:** `_title_health` is a module global and prod
+`portalHttp` — never `@/api`, because `portalHttp`'s interceptor is the one place a
+Workspace credential is decided. (Not to avoid a bounce: since #2791 both clients report
+a 401 to the same handler, and a dead platform session goes to `/login` with the page as
+its return path either way, #3444.) **Known blind spot, accepted:** `_title_health` is a module global and prod
 runs `--workers 2`, so a probe can land on a worker that ran no generation and answer
 `unknown`, which shows no notice. Honest under-reporting; making it cross-worker means
 new Redis-shared state for a diagnostic. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
@@ -1576,6 +1582,12 @@ is the edition-agnostic surface it plugs into:
   roll-up; a person steward's waiting lines are `attentionLines` filtered to
   verify/stuck; "Open I steward" emits `open-stewarding`, which
   `PortalProjects.vue` turns into the list's `initialFilter = 'steward'`.
+  A pending steward proposal (`proposal {proposed_by, proposed_at,
+  waiting_on, ask_id, changes}`, trinity-enterprise#980) is a tinted
+  "Waiting on you" / "Waiting on <email>" block at the top of the card, with
+  "Review in Inbox" (a `router-link` from `askInboxRoute` with
+  `INBOX_LINK_CLASS`, like the Needs you row's) for the person it waits on
+  only.
   **Markdown (#3692)**: the goal, task objectives and task/project log bodies
   mount `PortalMarkdown` (the one sanitized `v-html`), never
   `whitespace-pre-line` text. **Needs you** is `ProjectNeedsYou.vue`: the
