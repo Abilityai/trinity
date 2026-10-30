@@ -367,6 +367,7 @@
 </template>
 
 <script setup>
+import { heldThrough } from '@/utils/readThrough'
 /**
  * A multi-agent chat, backed by a room (ent#361).
  *
@@ -939,7 +940,7 @@ async function load({ full = false } = {}) {
     if (full || incoming.some((m) => m && m.sender_kind === 'agent')) readOwed = true
     if (readOwed && roomTranscriptComplete(messages.value.length, data)) {
       readOwed = false
-      emit('read', props.roomId)
+      emit('read', props.roomId, heldThrough(messages.value))
     }
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'

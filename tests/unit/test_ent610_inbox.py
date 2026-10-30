@@ -993,8 +993,12 @@ def test_without_previews_the_route_answers_the_ent359_shape_unchanged(inbox_db,
 
     r = _chat_state_client().get("/api/enterprise/client-portal/chat-state")
     assert r.status_code == 200, r.text
-    assert r.json() == portal_service.get_chat_state(ALICE)
-    assert all(set(c) == {"kind", "id", "starred", "unread"} for c in r.json()["chats"])
+    # `as_of` (trinity-enterprise#1010) is the instant each read was taken, so it
+    # differs between the two calls; everything else is the ent#359 shape.
+    body, direct = r.json(), portal_service.get_chat_state(ALICE)
+    assert body.pop("as_of") and direct.pop("as_of")
+    assert body == direct
+    assert all(set(c) == {"kind", "id", "starred", "unread"} for c in body["chats"])
 
 
 def test_with_previews_the_route_attaches_the_latest_arrival_and_no_cost(inbox_db, roster):

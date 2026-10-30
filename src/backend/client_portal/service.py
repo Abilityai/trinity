@@ -5928,7 +5928,8 @@ def _chat_state_room_left(email: str) -> bool:
 def get_chat_state(email: str, unread: dict[str, int] | None = None,
                    room_reader: tuple[str, str] | None = None,
                    room_unread: dict[str, int] | None = None,
-                   sees_all_rooms: bool = False) -> dict:
+                   sees_all_rooms: bool = False,
+                   as_of: str | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
     `unread` lets a caller pass counts it already read in the same statement as
@@ -5949,6 +5950,13 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
     platform admin, who lists every room through `GET /api/rooms` anyway) keeps
     the admin's OWN starred rows for rooms they are not in; those still count 0.
     """
+    # trinity-enterprise#1010: the instant this state is read AS OF, returned so
+    # the client can send it back as the read write's `through` — "I held
+    # everything up to here". Stamped BEFORE any count is read (a caller that
+    # read its counts first passes the instant it stamped before them): stamped
+    # after, an arrival committed between the two would sit inside `as_of` yet
+    # be missing from what the client was shown, and its read would swallow it.
+    as_of = as_of or utc_now_iso()
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
     if room_unread is None:
@@ -5959,22 +5967,38 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
     chats = []
     seen_threads: set[str] = set()
     seen_rooms: set[str] = set()
+    # trinity-enterprise#1011: a room's cursor lives in a row per identity space
+    # (`db.room_cursor_kind`), its star on the plain `room` row. A room is ONE
+    # entry, present when either row exists: the star from the `room` row, the
+    # presence of a read from THIS reader's space row. Another space's row is
+    # never read here — it is the other identity's state, and listing a room off
+    # it would hand this credential the id of a room it may not be in.
+    own_space = db.room_cursor_kind(room_reader[0]) if room_reader else None
+    room_rows: dict[str, dict] = {}
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
-        if kind == "room" and my_rooms is not None and cid not in my_rooms:
+        if kind == "room" or (own_space and kind == own_space):
+            if my_rooms is not None and cid not in my_rooms:
+                continue
+            entry = room_rows.setdefault(cid, {"starred": False})
+            if kind == "room":
+                entry["starred"] = bool(r.get("starred_at"))
             continue
-        if kind == "thread":
-            seen_threads.add(cid)
-        elif kind == "room":
-            seen_rooms.add(cid)
+        if kind != "thread":
+            continue
+        seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
-            "unread": unread.get(cid, 0) if kind == "thread" else room_unread.get(cid, 0),
+            "unread": unread.get(cid, 0),
         })
+    for cid, entry in room_rows.items():
+        seen_rooms.add(cid)
+        chats.append({"kind": "room", "id": cid, "starred": entry["starred"],
+                      "unread": room_unread.get(cid, 0)})
     # A CURSORLESS thread has unread and no state row, so the loop above never
     # reaches it — and that is the whole ent#557 case: an agent replies into a
     # freshly minted Main the viewer has never opened, so no row was ever
@@ -6018,7 +6042,7 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
         cursorless = []
     for kind, cid, n in cursorless:
         chats.append({"kind": kind, "id": cid, "starred": False, "unread": n})
-    return {"chats": chats}
+    return {"chats": chats, "as_of": as_of}
 
 
 def room_reader_of(principal) -> tuple[str, str] | None:
@@ -6076,10 +6100,40 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 
+# The spelling every stored instant uses: `utc_now_iso` ("…:SS.ffffffZ") and the
+# coarser "…:SSZ" some writers and fixtures store. Strict, because the cursor is
+# compared to stored values AS A STRING: a `through` is stored verbatim (see
+# `db._later`), so an offset form or a bare date would sort wrongly against them.
+_READ_THROUGH = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z")
+
+
+def _read_through(through: str | None, now: str) -> str | None:
+    """The instant a read covers (trinity-enterprise#1010): the client's
+    ``through``, clamped to ``now`` so a client cannot pre-read arrivals that do
+    not exist yet. ``None`` stays ``None`` (the write then covers up to now).
+    Anything that is not one instant in the stored spelling is a 422."""
+    if through is None:
+        return None
+    if not isinstance(through, str) or not _READ_THROUGH.fullmatch(through):
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    try:
+        held = parse_iso_timestamp(through)
+    except ValueError:
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    return now if held > parse_iso_timestamp(now) else through
+
+
 def mark_chat_read(email: str, chat_kind: str, chat_id: str,
-                   room_reader: tuple[str, str] | None = None) -> None:
+                   room_reader: tuple[str, str] | None = None,
+                   through: str | None = None) -> None:
     """Advance the caller's read cursor on one chat. Same non-validation and
     same cap as `set_chat_star` — for a thread.
+
+    trinity-enterprise#1010: the cursor moves to ``through``, the newest instant
+    the client held (its last `as_of`, or the newest message it rendered), not
+    to the server's now — so an arrival after the client's last fetch still
+    counts as unread. Clamped to now; never moves the cursor back; ``None`` is
+    the old meaning (now).
 
     A ROOM's cursor moves only for a reader actively in that room
     (trinity-enterprise#959 fix round 1, security review #3): the cursor row is
@@ -6087,17 +6141,23 @@ def mark_chat_read(email: str, chat_kind: str, chat_id: str,
     platform account clear the same email's Workspace-identity room. An unknown
     room, a room the reader is not in or left, and a call with no reader all
     return exactly as a successful write does, writing nothing — the write
-    stays no existence oracle (invariant #8).
+    stays no existence oracle (invariant #8). And it moves only the reader's
+    OWN identity space's cursor (#1011), seeded from the shared pre-split row.
     """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
-    if kind == "room" and not (room_reader and db.is_active_room_participant(cid, *room_reader)):
-        return
-    if _would_create_row_past_cap(email, kind, cid):
+    now = utc_now_iso()
+    held = _read_through(through, now)
+    cursor_kind, floor_kind = kind, None
+    if kind == "room":
+        if not (room_reader and db.is_active_room_participant(cid, *room_reader)):
+            return
+        cursor_kind, floor_kind = db.room_cursor_kind(room_reader[0]), "room"
+    if _would_create_row_past_cap(email, cursor_kind, cid):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because
         # a bookkeeping table is full would be absurd.
         return
-    db.mark_chat_read(email, kind, cid, utc_now_iso())
+    db.mark_chat_read(email, cursor_kind, cid, now, through=held, floor_kind=floor_kind)
 
 # ---------------------------------------------------------------------------
 # ent#366 — one-click ratings

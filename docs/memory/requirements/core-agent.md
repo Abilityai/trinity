@@ -3920,6 +3920,13 @@ to localStorage in the clear.
     them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
     a room only when `member` is true, and a deep link to another room resolves to nothing. A
     platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
+  - *Read only what I saw (trinity-enterprise#1010, chats too)*: marking a chat or room read
+    covers what the client actually held — its last fetch, or the newest message on screen —
+    never the server's current time, so a message that lands while I am opening it still
+    counts as new. Existing cursors and the ent#557 baseline keep their meaning.
+  - *Each identity reads separately (trinity-enterprise#1011)*: the same email seated in a
+    room as a platform account and as a Workspace identity keeps two read states; reading
+    as one leaves the other's count alone.
   - *Reading it*: opening a room row shows its new messages in the pane (the room's own
     membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
     opens the room. The room on screen reads itself on open and whenever an agent message
