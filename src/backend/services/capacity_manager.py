@@ -83,10 +83,15 @@ class AcquireResult:
         "queued_persistent" — overflow persisted to the SQL backlog; caller
                               should return 202 Accepted. The drain handles
                               actual execution later.
+
+    pull: True when a pull pilot's gate queued the row (#3625). The durable
+        queue is that agent's only dispatch route, so "queued" carries no
+        claim about load and callers must not word it as "at capacity".
     """
     state: Literal["admitted", "queued_in_memory", "queued_persistent"]
     execution_id: str
     queue_position: Optional[int] = None
+    pull: bool = False
 
 
 @dataclass
@@ -443,7 +448,8 @@ class CapacityManager:
             if not enqueued:
                 raise CapacityFull(agent_name, max_concurrent, "persistent_full")
             return AcquireResult(
-                state="queued_persistent", execution_id=execution_id
+                state="queued_persistent", execution_id=execution_id,
+                pull=pull_exclusive,
             )
 
         raise ValueError(f"Unknown overflow_policy: {overflow_policy!r}")
