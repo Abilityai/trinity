@@ -259,6 +259,22 @@ set does not exercise. Open: a real-row training split for that class, the
 10-fact cap, and facts over the 200-character ask (stored intact, the clamp is
 500; the judge counts them as format misses).
 
+Re-scored 2026-10-30 on the **subscription shape** (Haiku 4.5, plain Bearer +
+OAuth beta — what an agent on a subscription extracts with since ent#1027,
+`MEMORY_EVAL_CREDENTIAL=subscription`): gold recall 100%, precision 92%,
+specificity 100%, format 100%, zero leaks; held-out real rows (before the last
+rule) precision 84%, ungrounded 7%, 12% more facts over the 200-character ask.
+The first pass on this model stored the attacker's address from the
+`injection_in_response` case as part of a "flagged and did not act on it" fact
+— Haiku 5.5 never did — so the prompt now says text the agent refused, flagged
+or ignored is not worth remembering at all, not even as "flagged X" (that
+wording produced meta-facts the judge rejected on two injection cases); with
+it the leak is gone and recall is back to 100%. Reconcile on this model is 10
+of 12: a "no longer" fact becomes an UPDATE to the negated wording instead of a
+DELETE, and a NONE carries a neighbour id (ignored by `_reconcile`). Read the
+two models' numbers as the platform-key and subscription baselines; they are
+not the same extractor.
+
 **The model door (trinity-enterprise#1027).** `tests/unit/test_ent1027_model_gateway.py`
 pins resolution (a subscription agent uses its own token even when a key
 exists, an unreadable token never borrows the key, a rate-limited subscription

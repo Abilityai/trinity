@@ -146,6 +146,11 @@ _OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
 def _auth_shape(key: Optional[str]) -> str:
+    """How the EXTRACTOR authenticated. The subscription shape is the plain
+    production request (Bearer + OAuth beta, no identity line); the platform
+    shape on an OAuth token needs the identity line (judge calls always do)."""
+    if (os.environ.get("MEMORY_EVAL_CREDENTIAL") or "platform") == "subscription":
+        return "subscription: plain bearer + oauth beta"
     return "oauth_bearer+identity_system" if (key or "").startswith("sk-ant-oat") else "api_key"
 
 
