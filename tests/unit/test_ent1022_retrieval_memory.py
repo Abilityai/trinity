@@ -532,7 +532,14 @@ class TestRoutesAndPins:
             req = re.search(rf"^{re.escape(name)}==([\w.]+)", reqs, re.M)
             assert img and req, f"{name} must be pinned exactly in both"
             assert img.group(1) == req.group(1), f"{name}: image {img.group(1)} vs test {req.group(1)}"
-            assert md.version(name) == img.group(1), f"{name}: installed {md.version(name)} vs pinned {img.group(1)}"
+            try:
+                installed = md.version(name)
+            except md.PackageNotFoundError:
+                # The environment half of the pin needs the package installed —
+                # CI installs tests/requirements-test.txt; a checkout without it
+                # still proves the Dockerfile ↔ requirements half above.
+                pytest.skip(f"{name} is not installed here; the image/test pin parity above still held")
+            assert installed == img.group(1), f"{name}: installed {installed} vs pinned {img.group(1)}"
 
     def test_sovereignty_pins(self):
         """CI-consumed pin: nothing in the memory modules names a host but the
