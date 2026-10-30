@@ -2665,7 +2665,7 @@ def _format_voice_delta(rows: list[dict], *, budget: int = _SPOKEN_CONTEXT_MAX_C
     return VOICE_DELTA_HEADER + "\n" + "\n".join(lines)
 
 
-def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
+def _build_portal_system_prompt(agent_name: str, email: str, *, retrieved=()) -> str | None:
     """Compose the caller system-prompt fragment for a portal turn (ent#212):
     the client's MEM-001 per-user memory block + the #1205 public-channel
     instructions, via the SAME helper the channel router uses, plus the #2157
@@ -2692,7 +2692,7 @@ def _build_portal_system_prompt(agent_name: str, email: str) -> str | None:
     memory_block = None
     try:
         record = core_db.get_or_create_public_user_memory(agent_name, email)
-        memory_block = format_user_memory_block(record)
+        memory_block = format_user_memory_block(record, retrieved=retrieved)
     except Exception as e:  # noqa: BLE001 — never block a portal turn on memory
         logger.warning("portal memory fetch failed for %s/%s: %s", agent_name, email, e)
     try:
@@ -3270,7 +3270,18 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # skipping both the memory block and the #1205 prompt, so one call closes
     # both. Portal identity is always a verified email, so the router's
     # `verified_email and not is_group` gate is trivially satisfied here.
-    system_prompt = _build_portal_system_prompt(agent_name, email)
+    # trinity-enterprise#1022: the facts most relevant to this message, awaited
+    # off the event loop; [] when memory is off or anything fails.
+    try:
+        from services import memory_service
+        retrieved = await memory_service.recall(agent_name, email, message)
+    except Exception as e:  # noqa: BLE001 — never block a portal turn on memory
+        logger.debug("portal memory recall skipped for %s: %s", agent_name, e)
+        retrieved = ()
+    # The keyword rides only when there is something to carry, so the call is
+    # byte-identical to the pre-#1022 one while memory is off (the default).
+    system_prompt = (_build_portal_system_prompt(agent_name, email, retrieved=retrieved)
+                     if retrieved else _build_portal_system_prompt(agent_name, email))
 
     # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
     # `persist_session=True` → one cold retry if the JSONL is gone. Identical to

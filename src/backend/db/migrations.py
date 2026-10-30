@@ -5752,6 +5752,65 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_memory_facts(cursor, conn):
+    """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
+
+    One row per extracted fact, scoped by ``(agent_name, user_email)`` where
+    ``''`` is the agent scope shared with the owner. The partial unique index on
+    the live ``text_hash`` makes a two-worker duplicate an IntegrityError the
+    writer catches. Schema is also in db/schema.py for fresh installs; mirrored
+    by Alembic revision 0107_agent_memory_facts for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_memory_facts)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_facts (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL,
+                source TEXT NOT NULL,
+                execution_id TEXT,
+                recall_count INTEGER DEFAULT 0,
+                last_recalled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+        "ON agent_memory_facts(agent_name, user_email, deleted_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+        "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL"
+    )
+    conn.commit()
+    print("Created agent_memory_facts table with indexes (trinity-enterprise#1022)")
+
+
+def _migrate_agent_ownership_memory_opt_out(cursor, conn):
+    """trinity-enterprise#1022 — per-agent retrieval-memory opt-out.
+
+    Adds ``memory_opt_out INTEGER DEFAULT 0`` to ``agent_ownership``. The
+    platform switch (``trinity_memory_enabled``, default off) gates globally;
+    this column lets an owner keep one agent out once the platform is on.
+    Mirrored by Alembic revision 0108_agent_ownership_memory_opt_out.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "memory_opt_out",
+        "ALTER TABLE agent_ownership ADD COLUMN memory_opt_out INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5928,4 +5987,6 @@ MIGRATIONS = [
     ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
     ("execution_chat_session_id", _migrate_execution_chat_session_id),
+    ("agent_memory_facts", _migrate_agent_memory_facts),
+    ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
 ]

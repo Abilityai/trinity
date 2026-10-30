@@ -2068,6 +2068,37 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   writes (steps ride the poll while running).
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
+## Retrieval Memory (MEM-002, trinity-enterprise#1022)
+
+- **Status**: ✅ Implemented (default OFF)
+- **Description**: Everything an agent does leaves extracted, deduplicated
+  facts in the platform DB (`agent_memory_facts`); the facts most relevant to
+  the incoming request are recalled into the system prompt inside the ent#419
+  envelope as a third section. Runtime-agnostic: backend seams only, nothing in
+  the agent container, no harness hooks.
+- **Switch**: `trinity_memory_enabled` (system setting, default `false`,
+  Settings → General); per-agent opt-out `agent_ownership.memory_opt_out`.
+  Fail-open everywhere: off / unavailable / error ⇒ the prompt is unchanged.
+- **Scopes**: `(agent_name, user_email)`; `''` is the agent scope, which the
+  agent's owner shares (an owner's turns resolve to it). Every other person has
+  their own scope; recall never crosses scopes. The subject is read off the
+  execution row by `services/memory_subject.resolve` — the agent never names
+  the person; the agent scope is an explicit trigger allowlist, and anonymous
+  public, group-channel, voice, paid, room and judge runs are skipped.
+- **Capture**: one seam — `event_dispatch_service.spawn_task_terminal_event`
+  (every CAS-won terminal). Credentials are redacted before extraction and
+  before storage; every fact passes `user_memory_guard.prepare_summary`.
+  Brakes: a platform Anthropic key, a per-agent daily budget
+  (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
+  a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
+  on the live `text_hash`.
+- **Recall**: async, off the event loop; top 5 above 0.30 cosine within 1,500
+  chars; hits bump usage counters. Local ONNX embeddings (`fastembed`,
+  multilingual MiniLM, baked into the backend image, offline at runtime).
+- **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…`
+  (owner + human-only); forget is a recorded soft delete.
+- **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel

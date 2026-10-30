@@ -1872,6 +1872,20 @@ class TaskExecutionService:
                 except Exception as e:
                     logger.warning(f"[TaskExecService] Failed to mark execution dispatched: {e}")
 
+            # trinity-enterprise#1022: a headless run (agent scope) recalls what
+            # the agent and its owner already know about this request. Awaited
+            # here, off the event loop inside the service; None when memory is
+            # off, the run serves a person (their own caller prompt carries
+            # their memory), or anything fails.
+            try:
+                from services import memory_service
+                memory_block = await memory_service.task_memory_block(agent_name, execution_id, message)
+            except Exception as e:  # noqa: BLE001 — fail-open
+                logger.debug(f"[TaskExecService] memory block skipped: {e}")
+                memory_block = None
+            if memory_block:
+                system_prompt = "\n\n".join(p for p in (memory_block, system_prompt) if p)
+
             # ---- 4. Call agent with retry --------------------------------
             effective_system_prompt = self._compose_effective_system_prompt(
                 agent_name=agent_name,

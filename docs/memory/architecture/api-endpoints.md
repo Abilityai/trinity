@@ -70,6 +70,10 @@
 | POST | `/api/agents/{name}/shared-files` | Mint a download URL for a file in the publish dir (owner/admin or agent-scoped key). The file is addressed to the person the turn was for; optional `audience_email` names a rostered person instead (ent#549) |
 | GET | `/api/agents/{name}/shared-files` | List active shared files with download counts and who each is for (addressee and `audience_source` withheld from key-authenticated callers, ent#549/#2955) |
 | DELETE | `/api/agents/{name}/shared-files/{file_id}` | Revoke a shared file (owner-only; idempotent) |
+| GET | `/api/agents/{name}/retrieval-memory` | Retrieval-memory status for one agent (MEM-002, trinity-enterprise#1022); an agent key reads only its own |
+| PUT | `/api/agents/{name}/retrieval-memory` | Per-agent opt-out `{opt_out}` (owner + human-only, audit-logged) |
+| GET | `/api/agents/{name}/retrieval-memory/facts` | Owner view of one scope's facts (`user_email` omitted = the agent scope; owner + human-only) |
+| DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | Forget one fact — soft delete recording who (owner + human-only, audit-logged) |
 | POST | `/api/agents/{name}/user-memory` | Write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) — user-facing triggers, or a `schedule` run addressed to a seat via ent#498's stamp (ent#637); every write records a `public_user_memory_writes` row |
 | POST | `/api/agents/{name}/decisions` | Record a seat decision — why a thing was approved/deferred/killed — for the seat the execution serves (seat from `execution_id`, never sent; `Idempotency-Key` honoured; grammar receipts `decision_prose_only` / `decision_is_a_note` / `unknown_citation`; `scope: direction` → kept as `routed` with the canon hint). No person email in the answer (trinity-enterprise#638) |
 | GET | `/api/agents/{name}/decisions?execution_id=` | The seat's standing decisions (criterion first, active by default, `include_history`) + evidence stats; email-free (trinity-enterprise#638) |

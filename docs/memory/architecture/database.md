@@ -557,6 +557,34 @@ CREATE TABLE public_user_memory_writes (
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
+
+**agent_memory_facts** (trinity-enterprise#1022, MEM-002 — one row per retrieved-memory
+fact; `user_email = ''` is the agent scope, shared with the owner; never NULL so the
+partial unique index holds on both engines; `embedding` is a float32 LE vector,
+`BLOB` on SQLite / `BYTEA` on PostgreSQL via `to_postgres_table_ddl`; forget is a
+soft delete recording who; Alembic `0107`. `agent_ownership.memory_opt_out INTEGER
+DEFAULT 0` is the per-agent opt-out, Alembic `0108`.)
+```sql
+CREATE TABLE agent_memory_facts (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    embedding_model TEXT NOT NULL,
+    source TEXT NOT NULL,
+    execution_id TEXT,
+    recall_count INTEGER DEFAULT 0,
+    last_recalled_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    deleted_by TEXT
+);
+CREATE INDEX idx_agent_memory_facts_scope ON agent_memory_facts(agent_name, user_email, deleted_at);
+CREATE UNIQUE INDEX idx_agent_memory_facts_live_hash ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL;
+```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
 `db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes

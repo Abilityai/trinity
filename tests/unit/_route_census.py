@@ -826,6 +826,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # changes what the agent itself may do is person-only however it is fenced.
 # key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
+    "routers/agent_memory.py::get_retrieval_memory_endpoint": (
+        "GET /api/agents/{agent_name}/retrieval-memory",
+        "a READ of the agent's own retrieval-memory status (trinity-enterprise#1022): on/off, available, counts. "
+        "The opt-out (PUT), the owner view and forget are person-only"),
     "routers/agent_files.py::get_agent_canon_roles": (
         "GET /api/agents/{agent_name}/canon/roles",
         "a READ of the agent's own canon seats (trinity-enterprise#817), the same rule and budget as its objectives"),

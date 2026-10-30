@@ -2181,6 +2181,33 @@ class OperatorResumeUpdate(BaseModel):
     enabled: bool
 
 
+class MemoryOptOutUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/retrieval-memory (trinity-enterprise#1022).
+
+    Per-agent opt-OUT of retrieval memory. The platform switch
+    (``trinity_memory_enabled``, default off) is the deliberate act; this lets
+    an owner keep one agent out once the platform is on.
+    """
+    opt_out: bool
+
+
+class MemoryFactOut(BaseModel):
+    """One retrieval-memory fact as the owner view sees it (trinity-enterprise#1022).
+
+    Never carries the embedding — the owner reads text, provenance and usage.
+    """
+    id: str
+    agent_name: str
+    user_email: str
+    text: str
+    source: str
+    execution_id: Optional[str] = None
+    recall_count: int = 0
+    last_recalled_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
 class McpExposedUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/mcp-exposed (#846).
 

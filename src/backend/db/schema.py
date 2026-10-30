@@ -103,6 +103,7 @@ TABLES = {
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER DEFAULT 0,
+            memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
             tts_voice_telegram_enabled INTEGER DEFAULT 1,
@@ -1195,6 +1196,33 @@ TABLES = {
             written_at TEXT NOT NULL,
             undone_at TEXT,
             undone_by TEXT
+        )
+    """,
+
+    # trinity-enterprise#1022 (MEM-002): retrieval memory — one row per extracted
+    # fact. `user_email = ''` is the AGENT scope, shared with the agent's owner;
+    # every other person has their own scope. NOT NULL + '' (never NULL) so the
+    # partial unique index below holds on both engines (NULL is distinct in a
+    # unique index on SQLite and PostgreSQL alike). `embedding` is the fact's
+    # float32 little-endian vector, L2-normalised; `text_hash` is the dedupe key.
+    # Forget is a soft delete that records who, so the owner view can show it.
+    "agent_memory_facts": """
+        CREATE TABLE IF NOT EXISTS agent_memory_facts (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL,
+            text_hash TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            embedding_model TEXT NOT NULL,
+            source TEXT NOT NULL,
+            execution_id TEXT,
+            recall_count INTEGER DEFAULT 0,
+            last_recalled_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT,
+            deleted_by TEXT
         )
     """,
 
@@ -2457,6 +2485,14 @@ INDEXES = [
     # Idempotency key index (RELIABILITY-006, #525) — drives the TTL purge sweep
     "CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)",
 
+    # Retrieval memory (trinity-enterprise#1022): the scope read is a range scan;
+    # the partial unique index turns a two-worker duplicate into an IntegrityError
+    # the writer catches, instead of a second copy of the same fact.
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+    "ON agent_memory_facts(agent_name, user_email, deleted_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+    "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL",
+
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_owner ON subscription_credentials(owner_id)",
@@ -2702,6 +2738,10 @@ _PG_TABLE_SUBS = [
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
     (_re.compile(r"DEFAULT\s+CURRENT_TIMESTAMP", _re.IGNORECASE),
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
+    # trinity-enterprise#1022: a binary column. SQLite's BLOB is BYTEA on
+    # PostgreSQL; the SQLAlchemy side (`tables.py`) declares `LargeBinary`, which
+    # the Alembic baseline renders the same way.
+    (_re.compile(r"\bBLOB\b", _re.IGNORECASE), "BYTEA"),
     # Per-column dialect override (trinity-enterprise#478). `col TEXT /* pg:X */`
     # is a plain TEXT column with a comment on SQLite and column type X on
     # PostgreSQL. It exists so `metric_points.dims` can be the JSONB the frozen

@@ -204,6 +204,7 @@ AGENT_REFS: List[AgentRef] = [
     AgentRef("agent_public_links",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory",           "agent_name",        Policy.CASCADE),
     AgentRef("public_user_memory_writes",    "agent_name",        Policy.CASCADE),  # ent#637
+    AgentRef("agent_memory_facts",           "agent_name",        Policy.CASCADE),  # trinity-enterprise#1022
     AgentRef("agent_role_readiness",         "agent_name",        Policy.CASCADE),  # ent#527
     AgentRef("seat_decisions",               "agent_name",        Policy.CASCADE),  # ent#638
 

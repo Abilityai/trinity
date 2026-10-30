@@ -119,6 +119,19 @@ from services.subscription_headroom_alerts import (
 router = APIRouter()
 
 
+@router.get("/memory")
+async def get_retrieval_memory_status(current_user: User = Depends(get_current_user)):
+    """Platform status of retrieval memory (trinity-enterprise#1022): the switch,
+    whether the embedder loaded (and why not), the model, the backend, counts.
+    Admin-only — it is the Settings → General card's honest status line. The
+    switch itself is written through ``PUT /api/settings/trinity_memory_enabled``.
+    """
+    assert_admin(current_user)
+    import asyncio
+    from services import memory_service
+    return await asyncio.to_thread(memory_service.status)
+
+
 @router.get("/feature-flags")
 async def get_public_feature_flags(
     current_user: User = Depends(get_current_user)

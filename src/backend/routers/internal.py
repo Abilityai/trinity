@@ -426,9 +426,23 @@ async def execute_task_internal(
                 "message": refusal.detail,
                 "execution_id": request.execution_id,
             })
+        # trinity-enterprise#1022: the seat's retrieval memory for this run's
+        # prompt — awaited first, then threaded into the block.
+        try:
+            from services import memory_service
+            seat_retrieved = await memory_service.recall(
+                request.agent_name, request.deliver_to_workspace_email, request.message,
+            )
+        except Exception as e:  # noqa: BLE001 — never block a scheduled run on memory
+            logger.debug("[ent#1022] seat recall skipped: %s", e)
+            seat_retrieved = ()
+        # The keyword rides only when there is something to carry, so the call
+        # is byte-identical to the pre-#1022 one while memory is off (the default).
+        seat_kwargs = {"retrieved": seat_retrieved} if seat_retrieved else {}
         seat_system_prompt = await asyncio.to_thread(
-            schedule_seat_memory.build_seat_caller_prompt,
-            request.agent_name, request.deliver_to_workspace_email,
+            lambda: schedule_seat_memory.build_seat_caller_prompt(
+                request.agent_name, request.deliver_to_workspace_email, **seat_kwargs,
+            )
         )
 
     if request.async_mode:

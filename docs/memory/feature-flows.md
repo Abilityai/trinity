@@ -253,6 +253,7 @@
 | Trinity CLI | [cli-tool.md](feature-flows/cli-tool.md) | Python Click CLI with multi-instance profiles, mirroring core MCP tools as shell commands |
 | Trinity Connect | [trinity-connect.md](feature-flows/trinity-connect.md) | Local-remote agent sync via WebSocket |
 | Write User Memory | [write-user-memory.md](feature-flows/write-user-memory.md) | Per-user memory write MCP tool (MEM-001, #888) |
+| Retrieval Memory | [retrieval-memory.md](feature-flows/retrieval-memory.md) | Facts captured from every surface at the terminal seam, recalled by relevance into the ent#419 envelope; default off (MEM-002, trinity-enterprise#1022) |
 
 ### GitHub Integration
 

@@ -98,6 +98,18 @@ RUN pip install --no-cache-dir \
     # bump this pin with the rest of the file.
     tzdata==2026.3 \
     psutil==6.1.1 \
+    # trinity-enterprise#1022 retrieval memory: local ONNX embeddings (no torch,
+    # no service, no egress) + the vector math. fastembed's import-critical
+    # transitives (the runtime, the array lib, the tokenizer, the hub client)
+    # are pinned explicitly for the same reason payments-py's are below: one
+    # floating transitive that fails to import flips the feature to
+    # "unavailable" with a green build. tests/requirements-test.txt carries the
+    # SAME pins (tests/unit/test_ent1022_retrieval_memory.py, the #1891 shape).
+    fastembed==0.9.1 \
+    onnxruntime==1.31.1 \
+    numpy==2.5.4 \
+    tokenizers==0.23.3 \
+    huggingface-hub==1.33.0 \
     # payments-py 1.18.0 (abilityai/trinity-enterprise#679, trinity-enterprise#763):
     # the A2A x402 flow carries payment IN-BAND in task metadata, which 1.2.1
     # cannot read. tests/requirements-test.txt pins the SAME exact version —
@@ -199,6 +211,22 @@ COPY ../../config/manifests /app/config/manifests/
 # bind-mounts ./VERSION:/app/VERSION:ro for hot edits, but prod compose
 # doesn't, so without this COPY the version field falls back to "unknown".
 COPY ../../VERSION /app/VERSION
+
+# trinity-enterprise#1022: bake the retrieval-memory embedding model into the
+# image, OUTSIDE /app (the dev compose bind-mounts ./src/backend over /app, which
+# would shadow it), and verify the ONNX file's sha256 so the build cannot pick
+# up a silently changed upload. At runtime HF_HUB_OFFLINE=1 + local_files_only
+# mean nothing is ever downloaded; ~235 MB on disk, loaded lazily per worker,
+# and only when the platform switch (trinity_memory_enabled) is on.
+ENV FASTEMBED_CACHE_PATH=/opt/trinity/models \
+    HF_HUB_DISABLE_TELEMETRY=1
+RUN mkdir -p /opt/trinity/models && \
+    python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2', cache_dir='/opt/trinity/models')" && \
+    f="$(find /opt/trinity/models -name model_optimized.onnx | head -1)" && \
+    actual="$(sha256sum "$f" | cut -d' ' -f1)" && \
+    test "$actual" = "634d0f66c29dc934c8fa72b8a4fe91dd4d420a22f1d82a241058d4316e659a99" || { echo "embedding model sha256 mismatch: $actual"; exit 1; } && \
+    chown -R 1000:1000 /opt/trinity/models
+ENV HF_HUB_OFFLINE=1
 
 # Ensure all files are readable
 RUN chmod -R 644 /app/*.py /app/alembic.ini && \

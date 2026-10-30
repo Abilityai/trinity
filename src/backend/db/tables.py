@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, LargeBinary, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
@@ -126,6 +126,7 @@ agent_ownership = Table(
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
     Column("operator_resume_enabled", Integer),
+    Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
@@ -979,6 +980,36 @@ public_user_memory_writes = Table(
     Column("written_at", Text),
     Column("undone_at", Text),
     Column("undone_by", Text),
+)
+
+# trinity-enterprise#1022 (MEM-002): retrieval memory facts — see the note in db/schema.py.
+# `user_email = ''` is the agent scope (shared with the owner); never NULL, so the
+# partial unique index on the live hash holds on both engines.
+agent_memory_facts = Table(
+    "agent_memory_facts",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("user_email", Text, nullable=False, server_default=""),
+    Column("text", Text, nullable=False),
+    Column("text_hash", Text, nullable=False),
+    Column("embedding", LargeBinary, nullable=False),
+    Column("embedding_model", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("execution_id", Text),
+    Column("recall_count", Integer, server_default="0"),
+    Column("last_recalled_at", Text),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("deleted_at", Text),
+    Column("deleted_by", Text),
+    Index("idx_agent_memory_facts_scope", "agent_name", "user_email", "deleted_at"),
+    Index(
+        "idx_agent_memory_facts_live_hash", "agent_name", "user_email", "text_hash",
+        unique=True,
+        sqlite_where=text("deleted_at IS NULL"),
+        postgresql_where=text("deleted_at IS NULL"),
+    ),
 )
 
 # ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
