@@ -375,12 +375,50 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
 OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
 
+# trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
+# admins'). A project steward's proposal names people and tasks of a project
+# that not everyone who can use the agent may open — and the person it is
+# addressed to (the project's creator) need not own the steward: it may only be
+# shared with them. So this is keyed on the addressee (`addressed_to_email` or
+# `resolved_to`), never on who owns the agent — owner-keyed, it showed the row to
+# an owner who could not open the project and hid it from the one person who
+# can decide it. Under `gate-`, so it stays about-a-person and reserved.
+ADDRESSEE_ONLY_ID_PREFIXES = ("gate-addressee-only-",)
+
 
 def is_owner_only(item: dict) -> bool:
     """Is this row readable only by its agent's owner (and admins)? Compared
     like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
     candidate = item.get("request_id") or ""
     return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
+
+
+def is_addressee_only(item: dict) -> bool:
+    """Is this row readable only by the person it is addressed to (and admins)
+    (trinity-enterprise#980)? Compared like `is_owner_only`."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(ADDRESSEE_ONLY_ID_PREFIXES)
+
+
+def is_addressed_to(item: dict, email: Optional[str]) -> bool:
+    """Is `email` this row's addressee — its single `addressed_to_email` or one
+    of its `resolved_to` — compared case-insensitively? The Python twin of the
+    SQL `addressed_to_email` filter (trinity-enterprise#816). An empty `email`
+    is nobody's addressee."""
+    viewer = (email or "").strip().lower()
+    if not viewer:
+        return False
+    if str(item.get("addressed_to_email") or "").strip().lower() == viewer:
+        return True
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    if not isinstance(resolved, list):
+        return False
+    return viewer in {str(p).strip().lower() for p in resolved}
 
 
 # ============================================================================
@@ -614,6 +652,7 @@ def list_for_principal(
     agent_names=None,
     cursor: Optional[str] = None,
     owned_agents=None,
+    addressee_email=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
@@ -622,6 +661,11 @@ def list_for_principal(
     when the owner-only rule does not apply (an admin). With a set, an
     owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
     a SQL condition like every other visibility filter, so `total` stays exact.
+
+    `addressee_email` (trinity-enterprise#980): this caller's email, or None
+    when the addressee-only rule does not apply (an admin). With a value, an
+    addressee-only row (`ADDRESSEE_ONLY_ID_PREFIXES`) is listed only when it is
+    addressed to them — the same kind of SQL condition.
 
     Every visibility filter is a SQL condition on the one WHERE builder, so the
     page, `total` and the flags are computed over the same rows:
@@ -652,6 +696,9 @@ def list_for_principal(
     if owned_agents is not None:
         where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
                      owner_agent_names=set(owned_agents))
+    if addressee_email is not None:
+        where.update(addressee_only_request_id_prefixes=ADDRESSEE_ONLY_ID_PREFIXES,
+                     addressee_email=addressee_email)
     warnings = []
     next_cursor = None
     if cursor is None:
