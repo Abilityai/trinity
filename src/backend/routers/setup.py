@@ -27,7 +27,7 @@ in, and disappears for installs where it had nothing left to do.
 
 trinity-enterprise#580 makes that first case a product path, not a leftover: a
 marketplace one-click image boots with `ADMIN_PASSWORD` deliberately blank
-(`ADMIN_PASSWORD_SOURCE=browser`, set only by the image's first boot), so the
+(`ADMIN_PASSWORD_SOURCE=browser`, set by the provisioning listed below), so the
 first person to open the instance creates the admin here — no terminal. #2381's
 invariant is untouched: this still never renders over an existing admin; the
 marketplace path simply no longer pre-provisions one. The residual — the window
@@ -36,12 +36,15 @@ address can claim it — was accepted on 2026-09-10 as the operator's
 responsibility (the instance is empty then, and a squatted one can be destroyed).
 See `docs/DEPLOYMENT.md` → Security Recommendations.
 
-That acceptance covers the marketplace only, so nothing else may become
+That acceptance covers every install whose provisioning exports
+`ADMIN_PASSWORD_SOURCE=browser`: the DigitalOcean 1-Click, the Vultr
+Marketplace server and the DigitalOcean script install
+(`trinity-do-create.sh`, `do-script`, #3799). Nothing else may become
 claimable by it. Only `docker-compose.hosted.yml` renders a blank
 `ADMIN_PASSWORD` (prod keeps `:?`), and it forwards
 `ADMIN_PASSWORD_SOURCE=${ADMIN_PASSWORD_SOURCE:-unset}`. A blank password with
-`ADMIN_PASSWORD_SOURCE=unset` is therefore a HAND-RUN hosted compose — not the
-marketplace (start.sh writes `browser`) — and this endpoint refuses it (403),
+`ADMIN_PASSWORD_SOURCE=unset` is therefore a HAND-RUN hosted compose (start.sh
+writes `browser` on the claimable paths), and this endpoint refuses it (403),
 after the #2381 existing-admin check and before any password work. An ABSENT
 variable (the dev compose, ent#49's blank dev install) and `browser` still pass.
 
