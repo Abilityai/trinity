@@ -17,7 +17,7 @@ Not for you if Trinity already runs on a private network or behind a reverse pro
 | Caddy on ports 80 and 443 | A browser-trusted Let's Encrypt certificate for the droplet's **IP address**, so there is no warning and no domain required. Certificates on this profile last about six days and renew while the server runs — an instance switched off for longer comes back to a browser warning until renewal catches up |
 | Host firewall | Inbound 22, 80 and 443 only |
 | Container ports | Not reachable from off-box. Docker publishes past ordinary firewall rules, so Trinity installs its own rules that drop anything arriving at a container from outside. The backend, MCP server and log collector are reachable only through Caddy, or from the droplet itself |
-| Admin account | On a 1-Click droplet created without a password: none until someone claims it in a browser — **whoever opens it first becomes the admin**. On AWS the claim also requires the EC2 instance ID, so finding the IP is not enough. The install script, or a password supplied at create time, provisions it at first boot instead |
+| Admin account | On a 1-Click droplet created without a password, or a droplet from the install script: none until someone claims it in a browser — **whoever opens it first becomes the admin**. On AWS the claim also requires the EC2 instance ID, so finding the IP is not enough. A password supplied at create time provisions it at first boot instead |
 
 Everything except the web interface is already closed. What stays open is Trinity itself: the web UI and the API answer anyone on the internet who finds the address, and your login is the only thing in the way.
 

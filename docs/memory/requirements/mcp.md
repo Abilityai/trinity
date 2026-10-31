@@ -1810,3 +1810,35 @@ derived, and `User.mcp_scope` is a Pydantic field, not a column.
   admits the system key and acts as `trinity-system`, an agent key is unchanged, and seven
   other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key
   naming no agent, an unknown future scope) are refused without reaching the network.
+
+## Permission Edges & Self-Change Grants — read over MCP (trinity-enterprise#991)
+
+- **Status**: ✅ Implemented (2026-10-31)
+- **Requirement ID**: MCP-EDGES-GRANTS-READ
+- **GitHub Issue**: abilityai/trinity-enterprise#991
+- **Description**: two read-only tools in `src/mcp-server/src/tools/permissions.ts`, so a
+  reconciler can observe the two manifest rows it could not read before:
+  - `get_agent_permissions(agent_name)` → `GET /api/agents/{name}/permissions?strict=true`.
+    Returns `source_agent` and `permitted_agents` only. `available_agents` is dropped: it is the
+    caller's roster, not data about the agent. The output carries
+    `observed_within: "caller_reach_with_container"`, because the route lists only edge targets
+    that have a container and that the caller can see. An edge missing from the list is not a
+    removed edge. Strict mode makes a Docker fault an error (503), never "no edges".
+    Access row `enforce` on `agent_name`: an agent key reads itself, an edge target, or an agent
+    it spawned (the #3810 read set), the same set as the backend's access tier.
+  - `get_agent_capability_grants(agent_name)` → `GET /api/agents/{name}/capability-grants`,
+    returned verbatim (all five capabilities, `granted` true/false, `granted_by`, `granted_at`).
+- **Scope is the route's, unchanged (ruling T1 = A, T2 = A).** No backend change. The grants
+  route stays owner tier (`OwnedAgentByName`): an agent key reads itself or an agent it spawned,
+  **never an edge peer**; a person key reads only as owner or admin (ent#756). The tool's access
+  row is therefore `baselined` on that backend fence, not `enforce`, because an edge-gated row
+  would claim an edge peer is admitted when the route refuses it. A refusal (the route's uniform
+  404) is returned as an error that says "refused, not 'no grants'". A reconciler that observes
+  a fleet it did not spawn reads with a person-scoped key (ent#1034), not through edges.
+- **No write tools.** Granting an edge or a capability stays human-only (Invariant #8,
+  grant-vs-use).
+- **Tests**: `src/mcp-server/src/tools/permissions.test.ts`. It covers the route and strict flag,
+  the dropped roster and the observability label, a 503 that stays an error, the grants payload
+  verbatim, a refused peer that reads as refused, both access rows, and the gate as `server.ts`
+  registers it (real transport, agent key: no edge refused before the backend, edge admitted, an
+  edge peer's grants refused).

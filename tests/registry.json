@@ -64,6 +64,58 @@
       "description": "trinity-enterprise#1030 CP2: a manifest member's grants: are written only by an admin in a signed-in session (the grant route's own gate, dependencies.assert_interactive_admin, spelled once); every other caller gets grant_requires_interactive_admin + summary.grants.held_back + one warning, never a blocker; an agent key deploying a manifest writes no grant; extras are reported, never revoked; the service's refusals land in failed[]; route and apply share the audit verbs."
     },
     {
+      "file": "unit/test_ent1030_naming.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1030_skills.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1001_endpoint_env.py",
+      "feature": "trinity-enterprise#1001",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1001: .env cannot set proxy/TLS-trust names (every runtime), the runtime's own endpoint names (that runtime only) or AGENT_RUNTIME; container-baseline values still apply; Claude settings env pinned by a root-owned managed-settings.d drop-in written from the container env; Codex -c endpoint pins and $CODEX_HOME/.env stripping; Gemini spawns carry every pin against the CLI's own fill-only .env loader; CLI-version guards."
+    },
+    {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -7203,26 +7255,6 @@
         "unit"
       ],
       "description": "The backend's one model door (`services/model_gateway`): the credential follows the agent — its own subscription token, the platform key for an api-key agent or an agent-less job, nobody when a subscription token cannot be read (never a borrowed key); the model follows the credential (Haiku 4.5 on a subscription, Haiku 5.5 on the key, a model override honoured on the key only); `trinity_model_credential` ∈ auto/subscription/platform_key with the 429-on-subscription fallback in auto only; the request/send/complete surface over a scripted transport; the migrated callers (memory extract/reconcile, the MEM-001 summarizer, thread titles, the compatibility AI checks) executed through the door; the honest `extractor` plan on the platform card and the per-agent row; the owner's extract-preview door (facts + screened + who answered, nothing stored; 422 memory_no_subject / transcript_empty / no_extractor; an agent principal refused)."
-    },
-    {
-      "file": "unit/test_ent1030_naming.py",
-      "feature": "trinity-enterprise#1030",
-      "added": "2026-10-31",
-      "categories": [
-        "unit",
-        "systems"
-      ],
-      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
-    },
-    {
-      "file": "unit/test_ent1030_skills.py",
-      "feature": "trinity-enterprise#1030",
-      "added": "2026-10-31",
-      "categories": [
-        "unit",
-        "systems"
-      ],
-      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
     }
   ]
 }

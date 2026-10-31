@@ -129,10 +129,10 @@ export function accessDenied(
  *
  * - no auth context → allowed (dev mode installs no `authenticate`; the backend gates)
  * - `system` → allowed (Phase 11.1: the system agent talks to everyone)
- * - `agent` → itself, or a target with an `agent_permissions` edge from it
- *   (`GET /api/agents/{caller}/permissions`, which the client reads FAIL-CLOSED:
- *   an unreadable list is an empty list). A key row with no agent name is
- *   denied, not promoted to the user rule.
+ * - `agent` → itself, or a target with an `agent_permissions` edge from it or
+ *   that it spawned (`GET /api/agents/{caller}/reach/{target}`, decided from the
+ *   database and read FAIL-CLOSED: any error is "not reachable", ent#629). A key
+ *   row with no agent name is denied, not promoted to the user rule.
  * - `user` → allowed HERE: the backend already scopes a user key to what its
  *   owner can access (`AuthorizedAgent*` / `assert_agent_access`), and it does so
  *   by ROLE and per-user grant, which this layer cannot see (#2824).
@@ -234,6 +234,8 @@ const A2A_OUTBOUND_LIST =
   "a2a.ts refuses agent-scoped keys itself (human_only, no round trip) — the OSS settings route behind it is admin + human-only, not self-scoped, so a permission lookup would be inert";
 const ASSIGNMENTS_SELF =
   "assignments.ts — an agent key reads only its own roster (fails closed without an agent name); user/system keys are scoped by the backend, whose 404 is uniform (ent#500)";
+const GRANTS_OWNER_TIER =
+  "backend fence: agent_config.py OwnedAgentByName — an agent key reads itself or an agent it spawned, never through a permission edge; a person key only as owner or admin (ent#164, ent#756). An `enforce` row would admit an edge peer the route refuses (trinity-enterprise#991)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
 const LOOP_RESOLVE =
@@ -481,6 +483,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#980: projects/proposals.py — creator approval + the agent owner's consent ask" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
+  // --- permissions.ts ---
+  get_agent_permissions: { kind: "enforce", param: "agent_name" },
+  get_agent_capability_grants: { kind: "baselined", owner: GRANTS_OWNER_TIER },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },
