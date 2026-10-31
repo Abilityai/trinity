@@ -45,11 +45,14 @@ DESIGN NOTES (each one is load-bearing; read before changing)
    the alarm, which is #1833.
 
 4. **The ack is the gate; the operator-queue item is only an alarm.** Making the
-   queue item load-bearing was rejected in review: `create_item` is a blind
-   `INSERT ... ON CONFLICT DO NOTHING`, so once the row exists in *any* state
-   (e.g. an operator hits Clear All -> `cancelled`) re-emission is a no-op and the
-   gate would wedge shut permanently and silently; and `prune_terminal_items`
-   would delete the approval at 90 days — the sweep deleting its own authorization.
+   queue item load-bearing was rejected in review: the alarm's sink was then a
+   blind `INSERT ... ON CONFLICT DO NOTHING`, so once the row existed in *any*
+   state (e.g. an operator hits Clear All -> `cancelled`) re-emission was a no-op
+   and the gate would wedge shut permanently and silently. On the platform-alert
+   seam (#3254) it would wedge for the snooze window instead: a person's ending
+   silences the same reading that long, and only then does a reading file again.
+   And `prune_terminal_items` would delete the approval at 90 days — the sweep
+   deleting its own authorization.
    Keeping the alarm decorative dissolves both: a wedged alarm costs
    discoverability, not correctness, and responding to it grants nothing.
 """
@@ -59,6 +62,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from database import db
+from services import platform_alerts
 
 logger = logging.getLogger(__name__)
 
@@ -161,10 +165,11 @@ def consume_acknowledgement(setting_key: str) -> None:
 def _describe_exception(e: BaseException) -> str:
     """`type: message`, and never raises — `str(e)` on a foreign exception can.
 
-    Used by EVERY failure path in this module — `evaluate`'s three `except`
-    branches and `announce_refusal`'s stored `_RefusalEpisode.last_error` plus its
-    per-attempt WARNING. The stored form is an eager f-string, so a raising
-    `__str__` escapes directly. The log form looks safer — deferred `%s`
+    Used by every `except` in this module: `evaluate`'s three branches. (Until
+    #3254 it also formed `announce_refusal`'s stored `_RefusalEpisode.last_error`;
+    the alarm write now goes through `platform_alerts.observe`, which never raises
+    and returns an outcome instead.) An eager f-string of a raising `__str__`
+    escapes directly. The log form looks safer — deferred `%s`
     formatting is logging's problem — but only in production, where `handleError`
     prints a traceback to stderr and carries on; pytest's `LogCaptureHandler`
     re-raises it. Either way a function documented "never raises" must not carry a
@@ -356,14 +361,15 @@ ALARM_AGENT_NAME = "_retention-guard"
 # give-up here, which is where this DIVERGES from #1897: that sink is an external
 # webhook whose outage is independent of the canary's storage, so a permanently
 # misconfigured URL would otherwise retry forever. THIS sink is the platform's own
-# database — the same DB the guard reads its settings from — so a failing
-# `create_item` almost certainly means a DB incident (failover, disk-full, lock
+# database — the same DB the guard reads its settings from — so a `failed`
+# reading almost certainly means a DB incident (failover, disk-full, lock
 # storm), and those routinely exceed 30 minutes. Giving up would mean: DB down 35
 # min, then it recovers, the prune is still refused, and no queue item ever
 # exists until a restart or a window change. That is #1834's exact symptom shipped
-# inside #1834's fix. A retry costs one idempotent INSERT ... ON CONFLICT DO
-# NOTHING per cycle per refusing key (at most 8 keys), and the episode is already
-# bounded by construction — `note_allowed` or a window/reason change resets it.
+# inside #1834's fix. A retry costs one `observe` (a locked find-and-touch of the
+# subject's one row) per cycle per refusing key (at most 8 keys), and the
+# episode is already bounded by construction — `note_allowed` or a window/reason
+# change resets it.
 #
 # Expressed in SECONDS but consumed in CYCLES, and cycles are not a constant:
 # `CleanupService(poll_interval=...)` is a constructor argument and an admin can
@@ -380,6 +386,19 @@ ALARM_ESCALATION_AGE_SECONDS = 1800
 # age must not be at the mercy of an NTP step or a DST transition. Never persisted
 # and never compared across processes, so its arbitrary epoch is irrelevant.
 _clock = time.monotonic
+
+# #3254 (R9): how often a DELIVERED alarm is re-read while its refusal persists.
+# The alarm is a platform-alert condition now (kind `retention_refused`, one
+# pending row per setting), and that row carries the kind's default lifetime: a
+# reading nobody repeats expires. Delivery used to stop every further write (the
+# old row had no deadline), so without a re-read a prune refused for a fortnight
+# would lose its alarm to its own lifetime while the refusal still held.
+# Re-reading at most once per period keeps the deadline moving without a write
+# per cycle. An UNDELIVERED alarm still retries every cycle (#1834), and a failed
+# refresh is retried on the next one. The precedent is the base-image alarm's
+# cooldown (`system_agent_service.BASE_IMAGE_ALERT_COOLDOWN_SECONDS`). In-process
+# and monotonic like the escalation age, so a restart re-reads once.
+ALARM_REFRESH_SECONDS = 6 * 60 * 60
 
 # Refusal reasons where the guard could not determine the blast radius at all.
 # `evaluate` returns at each of these BEFORE `is_acknowledged` is consulted, so an
@@ -402,6 +421,17 @@ _UNDECIDABLE_REASONS = frozenset(
 )
 
 
+# The seam's outcomes that mean the alarm is in the operator queue (#3254): filed,
+# updated in place (a sibling worker's row counts, see `_RefusalEpisode`), or
+# snoozed because a person ended it. `failed` and the two refusals are NOT
+# delivery: an undelivered episode retries every cycle.
+_DELIVERED_OUTCOMES = frozenset({
+    platform_alerts.OBSERVED_CREATED,
+    platform_alerts.OBSERVED_UPDATED,
+    platform_alerts.OBSERVED_SNOOZED,
+})
+
+
 @dataclass
 class _RefusalEpisode:
     """One (setting_key, window_days, reason) refusal run. NOT frozen.
@@ -410,16 +440,18 @@ class _RefusalEpisode:
     retry budget. Any future edit to the freshness rule silently changes retry
     semantics and vice versa; say which one you mean.
 
-    `alarm_delivered` means "the `create_item` call did not raise", NEVER "a row
-    was inserted": `create_item` is INSERT ... ON CONFLICT DO NOTHING and returns
-    the id of the row that EXISTS, so on conflict it returns the pre-existing
-    uuid. Treating "inserted" as the success condition would make a second uvicorn
-    worker — whose write is always a conflict no-op — retry forever.
+    `alarm_delivered` means "`platform_alerts.observe` returned a delivered
+    outcome" (`_DELIVERED_OUTCOMES`), NEVER "a row was inserted": a second uvicorn
+    worker's reading finds the first worker's row and updates it, so treating
+    "created" as the success condition would make that worker retry forever.
+    `last_read_at` is when the seam last accepted a reading; the R9 refresh is
+    timed from it (#3254).
     """
     window_days: int
     reason: str = ""
     alarm_delivered: bool = False
     first_refused_at: float = 0.0     # _clock(), i.e. time.monotonic()
+    last_read_at: float = 0.0         # _clock() of the last delivered reading
     attempts: int = 0
     escalated: bool = False
     last_error: Optional[str] = None
@@ -432,11 +464,11 @@ class _RefusalEpisode:
 #
 # Deliberately in-process (not persisted, not Redis), and this is NOT the skills
 # `_last_sync` mistake: nothing READS this record — it is an emitter-local memo,
-# the durable artifact is the `operator_queue` row in the shared DB, and duplicate
-# emission is a no-op because `_alarm_id()` is a natural key under ON CONFLICT DO
-# NOTHING. `cleanup_service` runs in EVERY uvicorn worker with no leader lease, so
-# both processes already call `announce_refusal` today and the natural key already
-# absorbs it; two independent loops make delivery MORE likely, since worker B can
+# the durable artifact is the `operator_queue` row in the shared DB, and a duplicate
+# reading updates it: the subject `retention_refused:<setting>` carries at most one
+# pending row (#3254). `cleanup_service` runs in EVERY uvicorn worker with no leader
+# lease, so both processes already call `announce_refusal` today and the subject
+# already absorbs it; two independent loops make delivery MORE likely, since worker B can
 # land the row worker A failed to write. Redis would add a failure domain whose
 # own outage would then have to fail open (suppressing the alarm) or closed
 # (blocking) — reintroducing #1834 through the fix. Losing this on restart costs
@@ -454,17 +486,6 @@ def reset_transition_memo() -> None:
     _refusal_episodes.clear()
 
 
-def _alarm_id(setting_key: str, window_days: int) -> str:
-    """Natural key: one alarm per (setting, window), idempotent by construction.
-
-    `create_item` is INSERT ... ON CONFLICT DO NOTHING on `id`, so re-emitting is a
-    no-op. This is only safe because the alarm is decorative — if it were the gate,
-    a `cancelled` row here would wedge it shut forever (that is exactly why the
-    gate lives in the ack endpoint instead).
-    """
-    return f"retention-guard-{setting_key}-{window_days}"
-
-
 def announce_refusal(
     setting_key: str,
     label: str,
@@ -478,9 +499,18 @@ def announce_refusal(
     failed write permanently suppressed its own retry — the durable, operator-
     visible half of the signal was lost until a restart or a window change, which
     is exactly the half designed to survive a log nobody is tailing. Retrying is
-    safe by construction: `create_item` is idempotent on the natural key, and the
+    safe by construction: a reading updates the subject's one pending row, and the
     queue item authorizes NOTHING (the ack endpoint is the gate), so a re-attempt
     can neither re-authorize a prune nor wedge one.
+
+    #3254: the alarm reports through `platform_alerts.observe` (kind
+    `retention_refused`, keyed by the setting; `reason` and `window_days` are its
+    material keys). `observe` never raises, so delivery is read from its OUTCOME:
+    created / updated / snoozed is delivered; `failed` or a refusal is not, and is
+    retried every cycle with the #1834 escalation. A delivered alarm is re-read at
+    most once per `ALARM_REFRESH_SECONDS` while the refusal persists (R9), so its
+    lifetime never ends a refusal that still holds; a failed refresh is retried
+    on the next cycle. `note_allowed` ends it as the platform.
 
     The "never raises" claim leans on `evaluate`'s guarantee that
     `verdict.candidates` is an int: the message below formats it EAGERLY, so a
@@ -499,50 +529,30 @@ def announce_refusal(
     # flips `over_threshold` -> `count_uninterpretable` at an unchanged window is
     # a different problem with a different remedy, and under a window-only key it
     # produced NO fresh ERROR and no new attempt — #1833's new signal silently
-    # swallowed. `_alarm_id` is deliberately NOT changed (a second durable row per
-    # reason is noise, and its natural-key shape is pinned), so the durable row
-    # keeps its first content for a given (setting, window); the re-fired ERROR is
-    # the signal for a reason change.
+    # swallowed. A fresh episode reads the seam at once, and the reading rewrites
+    # the one pending row (#3254), so the durable alarm describes the CURRENT
+    # reason and window. Before #3254 the row kept its first content for a given
+    # (setting, window): in the undecidable -> over_threshold direction it went on
+    # telling the operator an acknowledgement would not help once it had become
+    # the remedy. `reason` and `window_days` are the kind's material keys, so a
+    # person's ending of one reason or window does not snooze another.
     #
     # COST of keying on the reason, accepted deliberately: a `count_fn` that FLAPS
     # between two reasons (say `count_failed` <-> `over_threshold` as a DB blip
     # comes and goes) makes every cycle "fresh", so the transition ERROR fires
     # every 5 minutes — up to 288/day, which is the alert-muting mode this memo
     # exists to prevent — and each fresh episode resets `first_refused_at`, so the
-    # escalation below never trips. Judged the better trade anyway: the alternative
+    # escalation below never trips. Since #3254 each fresh episode also rewrites
+    # the alarm row, so a flap is one row update and one thin `operator_queue_sync`
+    # broadcast per cycle as well. Judged the better trade anyway: the alternative
     # (window-only freshness) silently swallowed #1833's new signal entirely, and a
     # flapping count function is itself a defect that ought to be loud. If this is
     # ever observed in the wild, dampen it with a per-key minimum re-ERROR interval
     # rather than by reverting to a reason-blind key.
-    #
-    # KNOWN RESIDUAL, in BOTH directions, stated rather than discovered later:
-    # because the row keeps its FIRST content for a given (setting, window), a
-    # reason flip leaves the durable alarm describing the OLD reason. The two
-    # directions are not equally harmless, and only one of them is inert.
-    #
-    #   over_threshold -> undecidable: the row still says "acknowledge to proceed".
-    #     Bounded and inert — the corrected text fires as a fresh ERROR, and an ack
-    #     given under the stale prompt is not consumed while the sweep stays
-    #     undecidable (`evaluate` returns before `is_acknowledged`), so it neither
-    #     authorizes this prune nor is silently spent.
-    #
-    #   undecidable -> over_threshold: the row still says "an acknowledgement will
-    #     NOT clear this — the sweep's count function must be fixed", when by then
-    #     an acknowledgement is EXACTLY the available remedy. This one is NOT
-    #     inert: it tells the operator not to take the one action that would
-    #     unblock the sweep, in the durable half specifically designed to outlive a
-    #     log nobody is tailing, so the prune can stay blocked indefinitely. It is
-    #     the worse direction and the reason this is a tracked follow-up rather
-    #     than an accepted quirk.
-    #
-    # Fixing it needs either `verdict.reason` in `_alarm_id` (a second durable row
-    # per reason, and its natural-key shape is pinned) or an UPDATE path the alarm
-    # sink does not have — `create_item` is INSERT ... ON CONFLICT DO NOTHING. Both
-    # are design decisions, not one-liners, hence the follow-up.
     fresh = ep is None or (ep.window_days, ep.reason) != (window_days, verdict.reason)
     if fresh:
         # ARM BEFORE THE ATTEMPT (#1897's ordering): the record exists before
-        # `create_item` is called, so a crash / SIGKILL / BaseException inside the
+        # `observe` is called, so a crash / SIGKILL / BaseException inside the
         # write leaves an UNDELIVERED episode that the next cycle retries — rather
         # than a memo saying "handled" for an alarm that never landed (#1834).
         # `asyncio.CancelledError` is not an `Exception`, so arming in the except
@@ -619,71 +629,76 @@ def announce_refusal(
     else:
         logger.info(message)
 
-    if ep.alarm_delivered:
-        # Exactly today's repeat-refusal no-op. Only a DELIVERED alarm stops the
-        # attempts; an undelivered one is retried for the life of the episode.
+    refreshing = ep.alarm_delivered
+    if refreshing and now - ep.last_read_at < ALARM_REFRESH_SECONDS:
+        # Today's repeat-refusal no-op, until the R9 refresh is due. Only a
+        # DELIVERED alarm stops the per-cycle attempts; an undelivered one is
+        # retried for the life of the episode.
         return
 
-    ep.attempts += 1
-    try:
-        db.create_operator_queue_item(
-            ALARM_AGENT_NAME,
-            {
-                "id": _alarm_id(setting_key, window_days),
-                "type": "alert",
-                "priority": "critical",
-                "title": f"Retention prune refused: {label}",
-                "question": message,
-                # Identifiers and counts only — see the SECURITY note above.
-                "context": {
-                    "alert_type": "retention_blast_radius",
-                    "setting_key": setting_key,
-                    "window_days": window_days,
-                    "window_source": source,
-                    "candidate_count": verdict.candidates,
-                    "threshold": verdict.threshold,
-                    "reason": verdict.reason,
-                },
-                # Must stay NULL: `mark_operator_queue_expired` flips any pending
-                # row past `expires_at` to `expired` fleet-wide every 5s.
-                "expires_at": None,
-            },
-        )
-    except Exception as e:
-        # The alarm is decorative; the refusal already happened and is logged.
-        # Never let a failed alarm change the outcome. `alarm_delivered` stays
-        # False, so the next cycle re-attempts (#1834) — the whole point.
-        ep.last_error = _describe_exception(e)
-        elapsed = now - ep.first_refused_at
-        if not ep.escalated and elapsed > ALARM_ESCALATION_AGE_SECONDS:
-            ep.escalated = True
-            # Says only what THIS process knows. The in-process design above
-            # relies on a sibling worker possibly having landed the row; claiming
-            # "no operator-queue item exists" would send an operator hunting for a
-            # missing item that is present (#1897: no counter may mean two things,
-            # one level over).
-            logger.error(
-                "[RetentionGuard] this worker has been unable to write the refusal "
-                "alarm for %s for %ds across %d attempt(s) — the prune is refused "
-                "and blocked. STILL RETRYING every cycle; another worker may have "
-                "written it. Last error: %s (#1834)",
-                setting_key, int(elapsed), ep.attempts, ep.last_error,
-            )
-        else:
-            # `ep.last_error`, NOT the raw `e`: deferred `%s` formatting is
-            # normally logging's problem (it prints to stderr via handleError and
-            # carries on), but a foreign exception whose `__str__` raises then
-            # produces a silent stderr traceback in production — and pytest's
-            # LogCaptureHandler re-raises it outright, so the same line would
-            # break "never raises" under test. Same information, no raise.
-            logger.warning("[RetentionGuard] could not raise alarm for %s "
-                           "(attempt %d): %s",
-                           setting_key, ep.attempts, ep.last_error)
+    if not refreshing:
+        ep.attempts += 1
+    outcome = platform_alerts.observe(
+        ALARM_AGENT_NAME, "retention_refused", setting_key,
+        title=f"Retention prune refused: {label}",
+        question=message,
+        priority="critical",
+        # Identifiers and counts only — see the SECURITY note above.
+        context={
+            "alert_type": "retention_blast_radius",
+            "setting_key": setting_key,
+            "window_days": window_days,
+            "window_source": source,
+            "candidate_count": verdict.candidates,
+            "threshold": verdict.threshold,
+            "reason": verdict.reason,
+        },
+    )
+    if outcome in _DELIVERED_OUTCOMES:
+        ep.alarm_delivered = True
+        ep.last_read_at = now
         return
-    # "Delivered" means the call did not raise — see `_RefusalEpisode`.
-    ep.alarm_delivered = True
+
+    # The alarm is decorative; the refusal already happened and is logged. Never
+    # let a failed alarm change the outcome. `observe` logged the cause itself.
+    # An undelivered episode stays undelivered, so the next cycle re-attempts
+    # (#1834) — the whole point; a failed refresh keeps its old `last_read_at`,
+    # so it is due again on the next cycle.
+    ep.last_error = f"observe returned {outcome}"
+    if refreshing:
+        logger.warning("[RetentionGuard] could not refresh the alarm for %s (%s); "
+                       "retrying next cycle (#3254)", setting_key, ep.last_error)
+        return
+    elapsed = now - ep.first_refused_at
+    if not ep.escalated and elapsed > ALARM_ESCALATION_AGE_SECONDS:
+        ep.escalated = True
+        # Says only what THIS process knows. The in-process design above
+        # relies on a sibling worker possibly having landed the row; claiming
+        # "no operator-queue item exists" would send an operator hunting for a
+        # missing item that is present (#1897: no counter may mean two things,
+        # one level over).
+        logger.error(
+            "[RetentionGuard] this worker has been unable to write the refusal "
+            "alarm for %s for %ds across %d attempt(s) — the prune is refused "
+            "and blocked. STILL RETRYING every cycle; another worker may have "
+            "written it. Last error: %s (#1834)",
+            setting_key, int(elapsed), ep.attempts, ep.last_error,
+        )
+    else:
+        logger.warning("[RetentionGuard] could not raise alarm for %s "
+                       "(attempt %d): %s",
+                       setting_key, ep.attempts, ep.last_error)
 
 
 def note_allowed(setting_key: str) -> None:
-    """End this key's refusal episode: a future refusal logs at ERROR again."""
+    """End this key's refusal episode and its alarm (#3254).
+
+    A future refusal logs at ERROR again. The alarm is ended as the platform on
+    EVERY allowed sweep, not only when this process holds an episode: the memo
+    is in-process, so after a restart (or on the worker that never refused) it
+    is empty while the row from before is still pending. `clear` is a
+    compare-and-set on pending, so a row a person ended first is untouched; it
+    never raises, and with nothing pending it is one indexed read.
+    """
     _refusal_episodes.pop(setting_key, None)
+    platform_alerts.clear(ALARM_AGENT_NAME, "retention_refused", setting_key)
