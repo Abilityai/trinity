@@ -144,6 +144,26 @@ def plan(mp, *, held_skills: Optional[List[str]], held_sets: Optional[List[str]]
             note="apply never unassigns a skill set; unassign it by hand if it is unwanted"))
 
 
+def set_members(set_name: str) -> Optional[List[str]]:
+    """The skills a set would bring; None when the library cannot say."""
+    try:
+        return skill_set_service.resolved_members([set_name]).get(set_name)
+    except Exception:  # noqa: BLE001 — unknown, and the caller fails closed on it
+        return None
+
+
+def set_held_for_gates(member: str, set_name: str, unlanded) -> List[str]:
+    """Why a set must not be assigned to `member`: the skills it carries whose
+    declared gate did not land. A set the library cannot resolve is held while
+    any of the member's gates is outstanding, since it could carry one."""
+    from services.system_apply import gates as apply_gates
+    outstanding = sorted(skill for who, skill in unlanded if who == member)
+    if not outstanding:
+        return []
+    members = set_members(set_name)
+    return outstanding if members is None else apply_gates.unlanded_in(member, members, unlanded)
+
+
 def delivery_change(apply_change, field_name: str, names: List[str], delivery):
     """The delivery outcome of one write, as a report change: the row is the
     write; delivery is best-effort and named (#2703), never a failure."""
@@ -160,17 +180,37 @@ def delivery_change(apply_change, field_name: str, names: List[str], delivery):
 
 async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[str]) -> None:
     """One `skill_assign` / `skill_set_assign` op."""
+    from services.system_apply import gates as apply_gates
     name, short = op.member, op.short_name
     result: Dict = {}
+
+    async def hold(step: str, skills: List[str]) -> None:
+        def refuse():
+            raise RuntimeError(apply_gates.not_written_reason(skills))
+        await attempt(name, short, step, refuse)
+
     if op.kind == "skill_assign":
+        # ent#753: a skill whose declared gate did not land is not delivered.
+        held = apply_gates.unlanded_in(name, op.args["skills"], out.gates_unlanded)
+        names = [n for n in op.args["skills"] if n not in held]
+        if held:
+            await hold(SKILLS_STEP, held)
+        if not names:
+            return
+
         async def write():
             result.update(await skill_assignment_service.assign_and_deliver(
-                name, list(op.args["skills"]), actor, acting_agent=acting_agent))
+                name, names, actor, acting_agent=acting_agent))
             return True
         if await attempt(name, short, SKILLS_STEP, write):
             out.extra_changes.setdefault(name, []).append(delivery_change(
-                apply_change, SKILLS_STEP, list(op.args["skills"]), result.get("delivery")))
+                apply_change, SKILLS_STEP, names, result.get("delivery")))
     elif op.kind == "skill_set_assign":
+        held = set_held_for_gates(name, op.args["set"], out.gates_unlanded)
+        if held:
+            await hold(SKILL_SETS_STEP, held)
+            return
+
         async def write():
             result.update(await skill_assignment_service.assign_set_and_deliver(
                 name, op.args["set"], actor, acting_agent=acting_agent))

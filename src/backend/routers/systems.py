@@ -527,7 +527,8 @@ async def get_system_manifest(
         # Export manifest. trinity-enterprise#1030: `?naming=prefixed|bare`
         # overrides; absent, the exporter infers it from the members' names.
         try:
-            yaml_content = export_manifest(system_name, system_agents, naming=naming)
+            yaml_content = export_manifest(
+                system_name, system_agents, naming=naming, viewer=current_user)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 

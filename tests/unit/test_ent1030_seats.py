@@ -465,7 +465,8 @@ class TestNoEmail:
 
     def _export(self):
         import yaml
-        text = system_service.export_manifest(SYSTEM, [{"name": LEAD, "template": "local:plain"}])
+        text = system_service.export_manifest(SYSTEM, [{"name": LEAD, "template": "local:plain"}],
+                                              viewer=W.owner_viewer())
         return text, yaml.safe_load(text)
 
     def test_export_emits_the_held_seat_and_round_trips(self, world):

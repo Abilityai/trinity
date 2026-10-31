@@ -454,7 +454,7 @@ class TestExport:
     def _export(self, names):
         import yaml
         text = system_service.export_manifest(
-            SYSTEM, [{"name": n, "template": "local:plain"} for n in names])
+            SYSTEM, [{"name": n, "template": "local:plain"} for n in names], viewer=W.owner_viewer())
         return text, yaml.safe_load(text)
 
     def test_held_grants_are_exported_and_round_trip(self, world):

@@ -619,7 +619,7 @@ class TestExport:
     def _export(self, names):
         import yaml
         text = system_service.export_manifest(
-            SYSTEM, [{"name": n, "template": "local:plain"} for n in names])
+            SYSTEM, [{"name": n, "template": "local:plain"} for n in names], viewer=W.owner_viewer())
         return text, yaml.safe_load(text)
 
     def test_explicit_gates_are_exported_and_round_trip(self, world):
@@ -653,3 +653,115 @@ class TestExport:
         text, doc = self._export([LEAD])
         assert text.splitlines()[0] == f"# unobserved: could not be read: gates of {LEAD}"
         assert "gates" not in doc["agents"]["lead"]
+
+
+# ===========================================================================
+# Gated before delivered: a gate that did not land holds its skill back (ent#753)
+# ===========================================================================
+
+def _gated_manifest(gates, skills=None, skill_sets=None):
+    doc = {"name": SYSTEM, "agents": {"lead": {"template": "local:plain", "gates": gates}}}
+    if skills is not None:
+        doc["agents"]["lead"]["skills"] = skills
+    if skill_sets is not None:
+        doc["agents"]["lead"]["skill_sets"] = skill_sets
+    import yaml
+    return yaml.safe_dump(doc)
+
+
+def _delivered(world):
+    return [c for c in world.calls if c[0] == "deliver"]
+
+
+class TestDeployHoldsAnUngatedSkill:
+    def test_a_refused_gate_holds_its_skill_and_only_its_skill(self, world):
+        res = _deploy(world, _gated_manifest({"deploy": {"approver": "role:cfo"}},
+                                             skills=["deploy", "research"]), world.user(W.ALICE))
+        assert res.status == "deployed"
+        assigned = {r.skill_name for r in db.get_agent_skills(LEAD)}
+        assert assigned == {"research"}
+        assert all("deploy" not in c[2] for c in _delivered(world))
+        assert any("Skill 'deploy' not assigned" in w and "gate" in w for w in res.warnings)
+
+    def test_a_gate_that_lands_still_delivers(self, world):
+        res = _deploy(world, _gated_manifest({"deploy": {}}, skills=["deploy"]), world.user(W.ALICE))
+        assert res.status == "deployed"
+        assert {r.skill_name for r in db.get_agent_skills(LEAD)} == {"deploy"}
+
+    def test_a_gate_phase_that_blows_up_holds_every_declared_gated_skill(self, world, monkeypatch):
+        async def boom(*_a, **_k):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", boom)
+        res = _deploy(world, _gated_manifest({"deploy": {}}, skills=["deploy", "research"]),
+                      world.user(W.ALICE))
+        assert {r.skill_name for r in db.get_agent_skills(LEAD)} == {"research"}
+        assert any("Skill 'deploy' not assigned" in w for w in res.warnings)
+
+    def test_a_set_carrying_the_ungated_skill_is_held_whole(self, world, monkeypatch):
+        from services import skill_set_service
+        monkeypatch.setattr(skill_set_service, "library_sets", lambda **_k: {
+            "ops": {"name": "ops", "source_id": None,
+                    "members": [{"name": "deploy"}, {"name": "research"}]}})
+        monkeypatch.setattr(skill_set_service, "require_set", lambda n: {"name": n})
+        res = _deploy(world, _gated_manifest({"deploy": {"approver": "role:cfo"}}, skill_sets=["ops"]),
+                      world.user(W.ALICE))
+        assert res.status == "deployed"
+        assert not list(db.get_agent_skills(LEAD))
+        assert any("Skill set 'ops' not assigned" in w and "deploy" in w for w in res.warnings)
+
+    def test_the_dry_run_names_the_gate_the_deploy_would_refuse(self, world):
+        res = _deploy(world, _gated_manifest({"deploy": {"approver": "role:cfo"}}, skills=["deploy"]),
+                      world.user(W.ALICE), dry_run=True)
+        assert any("deploy" in w and "approver_unavailable" in w and "would not" in w
+                   for w in res.warnings), res.warnings
+
+    def test_a_clean_dry_run_stays_silent(self, world):
+        res = _deploy(world, _gated_manifest({"deploy": {}}, skills=["deploy"]),
+                      world.user(W.ALICE), dry_run=True)
+        assert res.warnings == []
+
+
+class TestApplyHoldsAnUngatedSkill:
+    def _refuse_gates(self, monkeypatch):
+        async def refused(agent_name, skill_name, *, changes, ctx):
+            raise SkillGateMapRefused("approver_unavailable", "no provider")
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", refused)
+
+    def test_a_refused_write_holds_its_skill_and_only_its_skill(self, world, monkeypatch):
+        world.seed_agent(LEAD)
+        self._refuse_gates(monkeypatch)
+        res = _apply(world, _gated_manifest({"deploy": {}}, skills=["deploy", "research"]),
+                     dry_run=False)
+        assert res.status == "partial"
+        assert {r.skill_name for r in db.get_agent_skills(LEAD)} == {"research"}
+        steps = {(f.step, f.reason.split(":")[0]) for f in res.failed}
+        assert ("skills", "gate_not_written") in steps and any(s == "gates" for s, _ in steps)
+        assert all("deploy" not in c[2] for c in _delivered(world))
+
+    def test_a_gate_write_that_raises_holds_its_skill(self, world, monkeypatch):
+        world.seed_agent(LEAD)
+        async def boom(*_a, **_k):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", boom)
+        res = _apply(world, _gated_manifest({"deploy": {}}, skills=["deploy"]), dry_run=False)
+        assert not list(db.get_agent_skills(LEAD))
+        assert any(f.step == "skills" and f.reason.startswith("gate_not_written") for f in res.failed)
+
+    def test_a_set_carrying_the_ungated_skill_is_held(self, world, monkeypatch):
+        from services import skill_set_service
+        world.seed_agent(LEAD)
+        monkeypatch.setattr(skill_set_service, "library_sets", lambda **_k: {
+            "ops": {"name": "ops", "source_id": None,
+                    "members": [{"name": "deploy"}, {"name": "research"}]}})
+        monkeypatch.setattr(skill_set_service, "require_set", lambda n: {"name": n})
+        self._refuse_gates(monkeypatch)
+        res = _apply(world, _gated_manifest({"deploy": {}}, skill_sets=["ops"]), dry_run=False)
+        assert not list(db.get_agent_skills(LEAD))
+        assert any(f.step == "skill_sets" and f.reason.startswith("gate_not_written")
+                   for f in res.failed)
+
+    def test_a_gate_that_lands_still_delivers(self, world):
+        world.seed_agent(LEAD)
+        res = _apply(world, _gated_manifest({"deploy": {}}, skills=["deploy"]), dry_run=False)
+        assert res.status == "applied", res.failed
+        assert {r.skill_name for r in db.get_agent_skills(LEAD)} == {"deploy"}

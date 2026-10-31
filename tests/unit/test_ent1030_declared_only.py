@@ -263,7 +263,8 @@ class TestDeploy:
 class TestExport:
     def test_every_export_states_the_gap(self, world):
         world.seed_agent(LEAD)
-        text = system_service.export_manifest(SYSTEM, [{"name": LEAD, "template": "local:plain"}])
+        text = system_service.export_manifest(SYSTEM, [{"name": LEAD, "template": "local:plain"}],
+                                              viewer=W.owner_viewer())
         assert system_service.DECLARED_ONLY_EXPORT_HEADER in text.splitlines()
         assert system_service.DECLARED_ONLY_EXPORT_HEADER.startswith("# unobserved:")
         assert "deploy" not in text.split(system_service.DECLARED_ONLY_EXPORT_HEADER)[1]

@@ -28,7 +28,7 @@ this module clears, drops or tombstones a row.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from database import db
 from db.skill_gates import ORIGIN_CLEARED, ORIGIN_SET
@@ -161,6 +161,7 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
 
     if not await attempt(name, short, STEP, write):
         return
+    out.gates_unlanded.discard((name, skill))
     # ent#881: the write surface's warning is a report here — a gate whose
     # approver reaches nobody was saved, and the run says so.
     for warning in result.get("warnings") or []:
@@ -173,6 +174,48 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, Dict[str, Dict]]:
     return {agent_names[short]: declared(cfg) for short, cfg in agents_config.items()
             if short in agent_names and cfg.gates}
+
+
+def skill_key(member: str, skill: str) -> str:
+    """The stored gate key of a skill name; the name itself when it is not one."""
+    try:
+        return skill_gate_map_service.validate_gate_changes(member, skill, {})[0]
+    except SkillGateMapRefused:
+        return skill
+
+
+def declared_keys(agent_names: Dict[str, str], agents_config: Dict) -> Set[Tuple[str, str]]:
+    """Every `(member, gate key)` a deploy declares. Deploy starts from this set
+    and removes what lands, so anything it never reached still counts as not
+    written (ent#753: gated before delivered, failing closed)."""
+    return {(name, skill_key(name, skill))
+            for name, gates in _wanted(agent_names, agents_config).items() for skill in gates}
+
+
+def unlanded_in(member: str, skills, unlanded: Set[Tuple[str, str]]) -> List[str]:
+    """The names in `skills` whose declared gate on `member` did not land."""
+    return [s for s in skills if (member, skill_key(member, s)) in unlanded]
+
+
+def not_written_reason(skills: List[str]) -> str:
+    return (f"gate_not_written: the declared gate on {', '.join(skills)} was not written, "
+            "so this would run with no approval; fix the gate and re-apply")
+
+
+def preview_warnings(agent_names: Dict[str, str], agents_config: Dict) -> List[str]:
+    """What the deploy dry run says about gate values, through the write's own
+    validator. A warning and not a blocker because a real deploy is best-effort
+    here: it creates the member and holds the skill back."""
+    warnings: List[str] = []
+    for name, gates in _wanted(agent_names, agents_config).items():
+        for skill, spec in gates.items():
+            changes = {k: spec[k] for k in GATE_FIELDS if k in spec}
+            try:
+                skill_gate_map_service.validate_gate_changes(name, skill, changes)
+            except SkillGateMapRefused as e:
+                warnings.append(f"Gate on '{skill}' would not be written for '{name}': {e.code} "
+                                f"({e.message}). The skill would not be assigned.")
+    return warnings
 
 
 def deploy_hold_back_warning(agent_names: Dict[str, str], agents_config: Dict,
@@ -193,9 +236,10 @@ def deploy_hold_back_warning(agent_names: Dict[str, str], agents_config: Dict,
 
 
 async def deploy(agent_names: Dict[str, str], agents_config: Dict, current_user,
-                 request) -> List[str]:
+                 request, *, unlanded: Optional[Set[Tuple[str, str]]] = None) -> List[str]:
     """Create mode's `gates:` phase, before skills: best-effort, one warning
-    per refusal, never past the gate above."""
+    per refusal, never past the gate above. A gate that lands leaves `unlanded`;
+    the skill phase holds back whatever is still in it."""
     warning = deploy_hold_back_warning(agent_names, agents_config, current_user)
     if warning is not None:
         return [warning]
@@ -210,6 +254,8 @@ async def deploy(agent_names: Dict[str, str], agents_config: Dict, current_user,
             except SkillGateMapRefused as e:
                 warnings.append(f"Gate on '{skill}' not written for '{name}': {e.code} ({e.message})")
                 continue
+            if unlanded is not None:
+                unlanded.discard((name, skill_key(name, skill)))
             for w in result.get("warnings") or []:
                 if w in ("approver_unassigned", "approver_not_shared"):
                     warnings.append(f"Gate on '{skill}' for '{name}': {w}.")

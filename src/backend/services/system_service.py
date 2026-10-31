@@ -1170,6 +1170,8 @@ async def assign_manifest_skills(
     agent_names: Dict[str, str],
     agents_config: Dict[str, SystemAgentConfig],
     current_user: User,
+    *,
+    gates_unlanded: Optional[set] = None,
 ) -> List[str]:
     """Create mode's `skills:` / `skill_sets:` phase (trinity-enterprise#1030).
 
@@ -1177,13 +1179,17 @@ async def assign_manifest_skills(
     assign routes' sequence. Returns warnings; never raises past one member.
     An agent key assigns only if it holds skills.manage — the skill routes'
     own capability (T8) — and is told what was held back. A name the library
-    cannot assign is skipped with the route's refusal code.
+    cannot assign is skipped with the route's refusal code. A skill whose
+    declared gate did not land, or a set carrying one, is held back and named
+    (ent#753: gated before delivered).
     """
     from dependencies import acting_agent_name, capability_refusal
     from db.capability_grants import CAPABILITY_SKILLS_MANAGE
     from services import skill_assignment_service
+    from services.system_apply import gates as apply_gates
     from services.system_apply import skills as apply_skills
 
+    unlanded = gates_unlanded or set()
     warnings: List[str] = []
     wanted = {short: apply_skills.declared(cfg) for short, cfg in agents_config.items()
               if short in agent_names and (cfg.skills or cfg.skill_sets)}
@@ -1200,9 +1206,13 @@ async def assign_manifest_skills(
     for short, (names, set_names) in wanted.items():
         name = agent_names[short]
         ok = []
+        held = apply_gates.unlanded_in(name, names, unlanded)
         for n in names:
             verdict = apply_skills.library_verdict_skill(n)
-            if verdict is None:
+            if n in held:
+                warnings.append(f"Skill '{n}' not assigned to '{name}': "
+                                f"{apply_gates.not_written_reason([n])}.")
+            elif verdict is None:
                 ok.append(n)
             else:
                 warnings.append(f"Skill '{n}' not assigned to '{name}': {verdict[0]}.")
@@ -1215,6 +1225,11 @@ async def assign_manifest_skills(
                 if verdict is not None:
                     warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
                                     f"{verdict[0]} ({verdict[1]}).")
+                    continue
+                held_by_set = apply_skills.set_held_for_gates(name, set_name, unlanded)
+                if held_by_set:
+                    warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
+                                    f"{apply_gates.not_written_reason(held_by_set)}.")
                     continue
                 await skill_assignment_service.assign_set_and_deliver(
                     name, set_name, current_user, acting_agent=acting)
@@ -1338,8 +1353,40 @@ def _member_short_name(full_name: str, system_name: str,
     return short or None
 
 
+def _export_readable(viewer: Optional[User], name: str) -> Dict[str, bool]:
+    """Which of a member's governance groups `viewer` may read in an export, by
+    the direct read routes' own gates, so an export never says more than they
+    do. `grants` and `seat` are owner-tier; `gates` has its own allowlist. No
+    principal reads none of them."""
+    from fastapi import HTTPException
+    from dependencies import assert_skill_gates_readable, get_owned_agent_by_name
+
+    def passes(gate) -> bool:
+        if viewer is None:
+            return False
+        try:
+            gate(agent_name=name, current_user=viewer)
+            return True
+        except HTTPException:
+            return False
+
+    owner_tier = passes(get_owned_agent_by_name)
+    return {"grants": owner_tier, "seat": owner_tier,
+            "gates": passes(assert_skill_gates_readable)}
+
+
+def _export_resources(name: str, label_resources: Optional[Dict]) -> Optional[Dict]:
+    """A member's effective resources, as apply compares them: a stored override
+    first, per key, then the label. Exporting the label alone would revert an
+    override that is waiting for a restart. Raises on a failed read."""
+    stored = db.get_resource_limits(name) or {}
+    merged = {**(label_resources or {}), **{k: v for k, v in stored.items() if v}}
+    return merged or None
+
+
 def export_manifest(system_name: str, agents: List[Dict], *,
-                    naming: Optional[str] = None) -> str:
+                    naming: Optional[str] = None,
+                    viewer: Optional[User] = None) -> str:
     """
     Export a system as a YAML manifest.
 
@@ -1349,6 +1396,8 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         naming: trinity-enterprise#1030 — `prefixed` or `bare` overrides; None
             infers `bare` when no member carries the `<system>-` prefix and
             `prefixed` otherwise (today's export, unprefixed members omitted)
+        viewer: the caller. Grants, gates and seats appear only where the direct
+            read routes would show them to it; what is withheld is named.
 
     Returns:
         YAML string representing the system configuration. When members were
@@ -1398,6 +1447,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # trinity-enterprise#1030: reads that failed, named in a `# unobserved:`
     # header so an export never reads as "nothing here" when it means "unknown".
     unobserved_reads: List[str] = []
+    withheld: List[str] = []
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
@@ -1433,9 +1483,18 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             "template": template
         }
 
-        # Get resources (if available from labels)
-        if agent.get('resources'):
-            config["resources"] = agent['resources']
+        # Effective resources. An unreadable override is named, never replaced
+        # by the label, which could revert it on re-apply.
+        try:
+            resources = _export_resources(full_name, agent.get('resources'))
+            if resources:
+                config["resources"] = resources
+        except Exception as e:
+            logger.warning(f"Failed to get the resources of {full_name}: {e}")
+            unobserved_reads.append(f"resources of {full_name}")
+
+        readable = _export_readable(viewer, full_name)
+        withheld.extend(f"{group} of {full_name}" for group, ok in readable.items() if not ok)
 
         # trinity-enterprise#704: `kind` round-trips (PR #3022 review). `kind`
         # is not persisted, so it is read back from the binding: a pull-only
@@ -1505,42 +1564,45 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             unobserved_reads.append(f"skills of {full_name}")
 
         # trinity-enterprise#1030 CP2: held admin capabilities.
-        try:
-            from services.system_apply import grants as apply_grants
-            grant_names = apply_grants.read_member(full_name)
-            if grant_names:
-                config["grants"] = grant_names
-        except Exception as e:
-            logger.warning(f"Failed to get grants for {full_name}: {e}")
-            unobserved_reads.append(f"grants of {full_name}")
+        if readable["grants"]:
+            try:
+                from services.system_apply import grants as apply_grants
+                grant_names = apply_grants.read_member(full_name)
+                if grant_names:
+                    config["grants"] = grant_names
+            except Exception as e:
+                logger.warning(f"Failed to get grants for {full_name}: {e}")
+                unobserved_reads.append(f"grants of {full_name}")
 
         # trinity-enterprise#1030 CP3: the explicit approval map. Library
         # defaults and tombstones are state the library drives, not target
         # state, so only `set` rows are the manifest's.
-        try:
-            from services.system_apply import gates as apply_gates
-            gate_map = apply_gates.export_member(full_name)
-            if gate_map:
-                config["gates"] = gate_map
-        except Exception as e:
-            logger.warning(f"Failed to get gates for {full_name}: {e}")
-            unobserved_reads.append(f"gates of {full_name}")
+        if readable["gates"]:
+            try:
+                from services.system_apply import gates as apply_gates
+                gate_map = apply_gates.export_member(full_name)
+                if gate_map:
+                    config["gates"] = gate_map
+            except Exception as e:
+                logger.warning(f"Failed to get gates for {full_name}: {e}")
+                unobserved_reads.append(f"gates of {full_name}")
 
         # trinity-enterprise#1030 CP4: the seat the agent holds, when an
         # assignment module can say. Person seats are not exported: the seam
         # answers per seat and never lists who fills what.
-        try:
-            from services.system_apply import seats as apply_seats
-            held_seat = apply_seats.export_member(full_name)
-            if held_seat:
-                config["seat"] = held_seat
-        except apply_seats.SeatUnobserved:
-            # No provider can say: named in the text like a failed read, but
-            # an expected state of the install, so not logged.
-            unobserved_reads.append(f"seat of {full_name}")
-        except Exception as e:
-            logger.warning(f"Failed to get the seat of {full_name}: {e}")
-            unobserved_reads.append(f"seat of {full_name}")
+        if readable["seat"]:
+            try:
+                from services.system_apply import seats as apply_seats
+                held_seat = apply_seats.export_member(full_name)
+                if held_seat:
+                    config["seat"] = held_seat
+            except apply_seats.SeatUnobserved:
+                # No provider can say: named in the text like a failed read, but
+                # an expected state of the install, so not logged.
+                unobserved_reads.append(f"seat of {full_name}")
+            except Exception as e:
+                logger.warning(f"Failed to get the seat of {full_name}: {e}")
+                unobserved_reads.append(f"seat of {full_name}")
 
         agent_configs[short_name] = config
 
@@ -1687,6 +1749,11 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
     yaml_output = DECLARED_ONLY_EXPORT_HEADER + "\n" + yaml_output  # CP5, T6 = A
+    if withheld:
+        # The same line whether or not anything is held: it reports the caller's
+        # reach, never the member's state.
+        yaml_output = (f"# unobserved: not readable by this caller: {', '.join(withheld)}\n"
+                       f"{yaml_output}")
     if unobserved_reads:
         yaml_output = (f"# unobserved: could not be read: {', '.join(unobserved_reads)}\n"
                        + yaml_output)
@@ -2264,6 +2331,9 @@ async def deploy_manifest(
                 agent_names, manifest.agents, current_user)
             if gates_held_back:
                 all_warnings.append(gates_held_back)
+            else:
+                # ent#753: the refusal the write would give, named before it runs.
+                all_warnings.extend(apply_gates.preview_warnings(agent_names, manifest.agents))
             from services.system_apply import seats as apply_seats
             seats_held_back = apply_seats.deploy_hold_back_warning(
                 agent_names, manifest.agents, current_user)
@@ -2472,11 +2542,14 @@ async def deploy_manifest(
         # skills: a gate is in place before the skill it governs is delivered
         # (ent#753). Written only by a caller holding skills.manage (T8);
         # otherwise listed as held back. Best-effort, like 7-10.
+        gates_unlanded: set = set()
         if any(cfg.gates for cfg in manifest.agents.values()):
             from services.system_apply import gates as apply_gates
+            gates_unlanded = apply_gates.declared_keys(created_map, manifest.agents)
             try:
                 all_warnings.extend(await apply_gates.deploy(
-                    created_map, manifest.agents, current_user, request))
+                    created_map, manifest.agents, current_user, request,
+                    unlanded=gates_unlanded))
             except Exception as e:
                 reason, _ = _failure_reason(e)
                 logger.exception(f"Gate phase failed for system '{manifest.name}'")
@@ -2488,7 +2561,8 @@ async def deploy_manifest(
         if any(cfg.skills or cfg.skill_sets for cfg in manifest.agents.values()):
             try:
                 all_warnings.extend(await assign_manifest_skills(
-                    created_map, manifest.agents, current_user))
+                    created_map, manifest.agents, current_user,
+                    gates_unlanded=gates_unlanded))
             except Exception as e:
                 reason, _ = _failure_reason(e)
                 logger.exception(f"Skill assignment failed for system '{manifest.name}'")
@@ -4085,6 +4159,9 @@ class ApplyOutcome:
     writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
     tags_written: List[str] = field(default_factory=list)
     member_failed: set = field(default_factory=set)
+    # (member, gate key) of every planned gate write that has not landed. Seeded
+    # with all of them, so a skipped or lost write holds its skill back too.
+    gates_unlanded: set = field(default_factory=set)
     extra_changes: Dict[str, List] = field(default_factory=dict)
     restart_required: Dict[str, bool] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
@@ -4191,6 +4268,7 @@ async def execute_apply_plan(
 
     # 2. The remaining writes, phase by phase, filtered to members that exist.
     ops = [op for mp in plan.members.values() for op in mp.ops]
+    out.gates_unlanded = {(op.member, op.args["skill"]) for op in ops if op.kind == "gate_set"}
     for phase in _APPLY_OP_PHASES:
         for op in (o for o in ops if o.kind == phase):
             step = _APPLY_OP_STEP[op.kind]

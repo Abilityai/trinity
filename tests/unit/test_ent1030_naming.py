@@ -305,6 +305,7 @@ def _agents(*names):
 
 def _export(world, names, **kw):
     import yaml
+    kw.setdefault("viewer", W.owner_viewer())
     text = system_service.export_manifest(SYSTEM, _agents(*names), **kw)
     return text, yaml.safe_load(text)
 

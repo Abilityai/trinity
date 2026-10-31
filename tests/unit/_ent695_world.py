@@ -146,6 +146,13 @@ def write_templates(root) -> None:
         (root / name / "template.yaml").write_text(body)
 
 
+def owner_viewer() -> User:
+    """The agent's owner, reading an export of it. Export shows governance
+    groups only to a caller the direct read routes admit."""
+    row = db.get_user_by_username(ALICE)
+    return User(id=row["id"], username=ALICE, role=row["role"], email=row.get("email"))
+
+
 def make_world(monkeypatch, tmp_path=None) -> World:
     """Users, the Docker fakes and the seams. Call inside a `db_backend` test."""
     # CAROL is an `operator`: past the Workspace floor, below `creator`.

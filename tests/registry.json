@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_export_access.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030: a manifest export says no more than the direct read routes: grants and seat for owner or admin, gates through the gate read's allowlist, withheld groups named uniformly whether or not anything is held, no principal reads none, and the route hands the caller to the exporter. resources export the effective value (stored override first), an unreadable override is named instead of falling back to the label, and re-applying an export keeps a pending limit."
+    },
+    {
       "file": "unit/test_ent1030_summary.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",
@@ -50,7 +61,7 @@
         "systems",
         "security"
       ],
-      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read."
+      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read. A gate that did not land holds its skill, or a set carrying it, on deploy and apply, including a write that raised; the deploy dry run names the refusal."
     },
     {
       "file": "unit/test_ent1030_grants.py",

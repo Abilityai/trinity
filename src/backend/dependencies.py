@@ -2610,6 +2610,11 @@ async def get_skill_gate_readable_agent_by_name(
     agent_name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user),
 ) -> str:
+    """The route's dependency over `assert_skill_gates_readable`."""
+    return assert_skill_gates_readable(agent_name, current_user)
+
+
+def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
     """Who may read an agent's skill gate map (trinity-enterprise#753).
 
     An ALLOWlist decided on the principal first, so a refused scope learns
