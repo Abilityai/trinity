@@ -12,12 +12,14 @@ Expose a public URL that fires an agent schedule from an external system (CI/CD,
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
-| `/api/agents/{name}/schedules/{id}/webhook` | POST | JWT | Generate (or rotate) a webhook token for a schedule |
-| `/api/agents/{name}/schedules/{id}/webhook` | GET | JWT | Get the current token status + URL |
-| `/api/agents/{name}/schedules/{id}/webhook` | DELETE | JWT | Revoke the token (old URL immediately 404s) |
-| `/api/agents/{name}/schedules/{id}/webhook/secret` | POST | JWT | Enable / rotate **signature auth**; returns the signing secret **once** |
-| `/api/agents/{name}/schedules/{id}/webhook/secret` | DELETE | JWT | Disable signature auth (URL stays live, unauthenticated) |
+| `/api/agents/{name}/schedules/{id}/webhook` | POST | Person or `schedules.manage` | Generate (or rotate) a webhook token for a schedule |
+| `/api/agents/{name}/schedules/{id}/webhook` | GET | Person or `schedules.manage` | Get the current token status + URL |
+| `/api/agents/{name}/schedules/{id}/webhook` | DELETE | Person or `schedules.manage` | Revoke the token (old URL immediately 404s) |
+| `/api/agents/{name}/schedules/{id}/webhook/secret` | POST | Person or `schedules.manage` | Enable / rotate **signature auth**; returns the signing secret **once** |
+| `/api/agents/{name}/schedules/{id}/webhook/secret` | DELETE | Person or `schedules.manage` | Disable signature auth (URL stays live, unauthenticated) |
 | `/api/webhooks/{token}` | POST | Token (in URL) | Public trigger — returns `202 Accepted`; optional `{"context": "..."}` body (≤4000 chars) is appended to the schedule message |
+
+*Person or `schedules.manage`*: a signed-in session (JWT) or your own MCP API key. An agent's own MCP key may call these routes only with the `schedules.manage` permission, its own schedules included (see [Configuring a webhook from the UI](#configuring-a-webhook-from-the-ui)). The system agent's key is refused.
 
 **The URL you get back.** `webhook_url` in the responses above is built from the request that minted or read it: its host is the request's host, and its scheme is `https://` when the proxy in front of Trinity sent `X-Forwarded-Proto: https`, otherwise `http://` (the scheme is upgraded by that header, never downgraded). Call these routes through your public address — the tunnel or reverse proxy — to get the URL external callers can use; a call straight to the backend port returns an `http://` URL on that host. See [Public Access](../guides/deploying/public-access.md#webhook-urls-after-enabling-public-access).
 
@@ -36,7 +38,7 @@ Open **Agent → Schedules**, expand a schedule, and click **Webhook**:
 1. **Enable webhook** mints the URL. Use **Reveal** / **Copy URL** and the ready-to-paste **Example request** (`curl`) to wire up your caller.
 2. **Rotate URL** issues a new token (the old URL 404s immediately); **Revoke** turns the webhook off entirely.
 
-Access follows the schedule-management model — any user who can manage the agent's schedules can mint/rotate/revoke a webhook.
+Access follows the schedule-management model — any user who can manage the agent's schedules can mint/rotate/revoke a webhook. An agent's own key can manage a webhook, on its own schedules too, only with the **Change other agents' schedules** permission (`schedules.manage`); the system agent's key cannot manage one.
 
 ### Securing a webhook with a signature (recommended)
 

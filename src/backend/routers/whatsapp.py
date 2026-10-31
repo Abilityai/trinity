@@ -30,7 +30,7 @@ from adapters.transports.twilio_webhook import (
     compute_webhook_url,
 )
 from database import db
-from dependencies import OwnedAgentByName, get_current_user
+from dependencies import OwnedAgentByName, get_current_user, require_interactive, require_person
 from models import User, WhatsAppBindingResponse, WhatsAppConfigureRequest, WhatsAppTestRequest
 from services.settings_service import settings_service
 
@@ -124,14 +124,20 @@ async def _validate_twilio_credentials(account_sid: str, auth_token: str) -> dic
     return resp.json()
 
 
-@auth_router.get("/{agent_name}/whatsapp", response_model=WhatsAppBindingResponse)
+@auth_router.get(
+    "/{agent_name}/whatsapp",
+    response_model=WhatsAppBindingResponse,
+    dependencies=[Depends(require_person)],
+)
 async def get_whatsapp_binding(
     agent_name: OwnedAgentByName,
 ):
     """Get WhatsApp/Twilio binding status for an agent.
 
     Owner-only: the response includes the webhook URL (which carries the
-    binding's routing secret), so non-owners must not see it.
+    binding's routing secret), so non-owners must not see it. A person only
+    (trinity-enterprise#719): the response carries the webhook secret, so the
+    read is ruled on sensitivity.
     """
     binding = db.get_whatsapp_binding(agent_name)
     if not binding:
@@ -164,7 +170,11 @@ async def get_whatsapp_binding(
     )
 
 
-@auth_router.put("/{agent_name}/whatsapp", response_model=WhatsAppBindingResponse)
+@auth_router.put(
+    "/{agent_name}/whatsapp",
+    response_model=WhatsAppBindingResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def configure_whatsapp_binding(
     agent_name: OwnedAgentByName,
     config: WhatsAppConfigureRequest,
@@ -174,7 +184,9 @@ async def configure_whatsapp_binding(
     Configure a Twilio WhatsApp sender for an agent.
 
     Validates the AccountSid/AuthToken by calling Twilio's Account endpoint,
-    encrypts the AuthToken, and creates or replaces the binding.
+    encrypts the AuthToken, and creates or replaces the binding. Binding
+    Twilio credentials binds a credential, so it takes a signed-in session
+    (``require_interactive``, trinity-enterprise#719).
     """
     account_sid = config.account_sid.strip()
     auth_token = config.auth_token.strip()
@@ -227,7 +239,7 @@ async def configure_whatsapp_binding(
     )
 
 
-@auth_router.delete("/{agent_name}/whatsapp")
+@auth_router.delete("/{agent_name}/whatsapp", dependencies=[Depends(require_person)])
 async def delete_whatsapp_binding_endpoint(
     agent_name: OwnedAgentByName,
 ):
@@ -240,7 +252,7 @@ async def delete_whatsapp_binding_endpoint(
     return {"ok": True, "message": f"WhatsApp binding removed from {agent_name}"}
 
 
-@auth_router.post("/{agent_name}/whatsapp/test")
+@auth_router.post("/{agent_name}/whatsapp/test", dependencies=[Depends(require_person)])
 async def test_whatsapp_binding(
     agent_name: OwnedAgentByName,
     test: WhatsAppTestRequest,

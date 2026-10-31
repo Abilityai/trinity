@@ -348,10 +348,10 @@ ordered check is belt+braces):
    unbound-channel suppression — never fire a send destined to fail).
 
 Consent writes are human-only: the `allow_proactive` arm of
-`PUT /api/agents/{name}/telegram/groups/{id}` calls `reject_agent_principal`
-(an agent-scoped key resolves to the owner and could self-grant consent —
-ent#223's own post-ship pitfall); `trigger_mode`/welcome updates stay
-agent-callable.
+`PUT /api/agents/{name}/telegram/groups/{id}` calls `assert_person` (only a
+signed-in session or the person's own `user` key passes; every machine
+principal is refused — ent#223's grant-vs-use line); `trigger_mode`/welcome
+updates stay agent-callable.
 
 **Rendering (D5):** `html.escape(summary, quote=False)` BEFORE
 `TelegramAdapter().format_response` (`_markdown_to_html` escapes nothing;

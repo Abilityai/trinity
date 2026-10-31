@@ -4385,8 +4385,10 @@ class ScheduleResponse(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
-    # the same predicate the webhook routes enforce — the client has no numeric
-    # user id to compare an owner id against, and the creator's id is not exposed.
+    # both checks the webhook routes enforce — the principal rule (a person, or an
+    # agent key holding `schedules.manage`, trinity-enterprise#719) and the share
+    # tier — the client has no numeric user id to compare an owner id against,
+    # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
 
@@ -4804,7 +4806,7 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
-    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    # ent#265: human-only arm — the router calls assert_person when set.
     allow_proactive: Optional[bool] = None
     # ent#600: human-only arm too — recording a group's conversation is a
     # privacy decision the owner makes, not one an agent grants itself.

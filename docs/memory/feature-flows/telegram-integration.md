@@ -540,7 +540,7 @@ All endpoints require JWT + `OwnedAgentByName` (agent owner only):
 
 - `GET /api/agents/{name}/telegram/groups` — List active group configs
 - `PUT /api/agents/{name}/telegram/groups/{id}` — Update trigger_mode, welcome_enabled, welcome_text, allow_proactive, context_enabled (ownership verified; the two consent arms are human-only). Items carry `context_status` + `context_hint` (ent#600)
-- `DELETE /api/agents/{name}/telegram/groups/{id}` — Deactivate group config
+- `DELETE /api/agents/{name}/telegram/groups/{id}` — Deactivate group config (a person only: `Depends(require_person)`, trinity-enterprise#719)
 
 ### Frontend: Group Config UI
 
@@ -1050,8 +1050,8 @@ per-turn, so flipping mid-run takes effect on the NEXT turn.
   same panel flow) got the same accessor; the group-message POST was already
   owner-gated, so no usable flow narrows.
 - `PUT /api/agents/{name}/telegram/progress-indicator` `{enabled}` —
-  `OwnedAgentByName` + `reject_agent_principal` (human-only; an agent-scoped
-  key resolves to the owner), 404 without a binding; dedicated route so
+  `Depends(require_person)` (a signed-in session or the person's own `user`
+  key) + `OwnedAgentByName`, 404 without a binding; dedicated route so
   toggling never re-sends the bot token (mirrors `PUT /voip/enabled`).
 - UI: switch in `TelegramChannelPanel.vue` (Slack `allow_proactive` precedent).
 
@@ -1116,8 +1116,8 @@ rendering). Telegram-side surface added here:
 - **Toggle**: per-group **"Completion reports"** toggle (`BaseToggle` since ent#600) in
   `TelegramChannelPanel.vue` (via the existing `updateGroup` PUT). The
   `allow_proactive` arm of `PUT /api/agents/{name}/telegram/groups/{id}` is
-  human-only (`reject_agent_principal`); `trigger_mode`/welcome arms stay
-  agent-callable.
+  human-only (`assert_person`, the PERSON allowlist); `trigger_mode`/welcome
+  arms stay agent-callable.
 - Inline turns (`triggered_by="telegram"`) NEVER report — the adapter already
   replied (the no-double-post rule).
 - The proactive group-send endpoint is deliberately NOT gated on this flag
