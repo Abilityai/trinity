@@ -32,13 +32,28 @@ def _storage(path):
     return LocalArchiveStorage(str(path))
 
 
-def test_a_writable_directory_files_no_alarm(tmp_path):
+def _seam_db():
+    """#3254 re-pin (write-observation point): the alarm reports through
+    `platform_alerts.observe` / `clear`, which use the seam's accessors instead
+    of `create_operator_queue_item`. This fake holds no pending row and no
+    person's ending, so every failing probe reaches the seam's create, where
+    these tests now watch it. One row per subject and the platform's clear are
+    asserted on the real DB in tests/unit/test_3254_backup_archive_alerts.py."""
     db = MagicMock()
+    db.find_pending_operator_queue_by_subject.return_value = None
+    db.find_person_ended_operator_queue_by_subject.return_value = None
+    db.create_platform_operator_queue_item.return_value = {
+        "outcome": "created", "row": None, "changed": False}
+    return db
+
+
+def test_a_writable_directory_files_no_alarm(tmp_path):
+    db = _seam_db()
     with patch("database.db", db):
         storage = _storage(tmp_path / "archives")
 
     assert storage.archive_path.exists()
-    db.create_operator_queue_item.assert_not_called()
+    db.create_platform_operator_queue_item.assert_not_called()   # #3254 re-pin: the seam's create
     # And the probe cleans up after itself — an archive listing must not grow a
     # `.perm-probe-<pid>` file per boot.
     assert not list(storage.archive_path.glob(".perm-probe*"))
@@ -49,7 +64,7 @@ def test_an_unwritable_directory_alarms_with_the_cause(tmp_path):
     log line already said and it is what nobody acted on."""
     archives = tmp_path / "archives"
     archives.mkdir()
-    db = MagicMock()
+    db = _seam_db()
 
     # Simulate the real condition (root-owned dir, non-root process) rather than
     # chmod 000, which pytest may run as a user that can bypass.
@@ -63,8 +78,9 @@ def test_an_unwritable_directory_alarms_with_the_cause(tmp_path):
         with patch.object(archive_storage, "get_archive_storage", return_value=storage):
             assert archive_storage.probe_archive_writability() is False
 
-    db.create_operator_queue_item.assert_called_once()
-    agent, item = db.create_operator_queue_item.call_args.args
+    # #3254 re-pin (write-observation point): the seam's create, same asserts.
+    db.create_platform_operator_queue_item.assert_called_once()
+    agent, item = db.create_platform_operator_queue_item.call_args.args
     assert agent == "_log-archive"
     assert item["id"].startswith("log-archive-")
     assert item["type"] == "alert" and item["priority"] == "high"
@@ -75,24 +91,28 @@ def test_an_unwritable_directory_alarms_with_the_cause(tmp_path):
     assert item["context"]["path"] == str(archives)
 
 
-def test_the_alarm_id_is_stable_within_a_day(tmp_path):
+def test_the_alarm_subject_is_stable_across_runs(tmp_path):
     """A crash-looping backend must not flood the queue while an operator is
-    already looking at the alarm. `create_operator_queue_item` dedupes on the id
-    (ON CONFLICT DO NOTHING), so the id has to repeat."""
+    already looking at the alarm.
+
+    #3254 re-pin (id shape; was `test_the_alarm_id_is_stable_within_a_day`):
+    the old create deduped on a per-day id (ON CONFLICT DO NOTHING), so the id
+    had to repeat. The seam dedupes on the SUBJECT: a pending row of the same
+    subject is updated in place, so the subject has to repeat."""
     archives = tmp_path / "archives"
     archives.mkdir()
     from services import archive_storage
 
-    ids = []
+    subjects = []
     for _ in range(3):
-        db = MagicMock()
+        db = _seam_db()
         with patch("database.db", db), \
              patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
             storage = _storage(archives)
             with patch.object(archive_storage, "get_archive_storage", return_value=storage):
                 archive_storage.probe_archive_writability()
-        ids.append(db.create_operator_queue_item.call_args.args[1]["id"])
-    assert len(set(ids)) == 1, ids
+        subjects.append(db.create_platform_operator_queue_item.call_args.kwargs["subject"])
+    assert len(set(subjects)) == 1 and subjects[0], subjects
 
 
 def test_a_failed_probe_never_raises(tmp_path):
@@ -108,14 +128,23 @@ def test_a_failed_probe_never_raises(tmp_path):
 
 def test_alarm_plumbing_failure_does_not_break_startup(tmp_path):
     """The alarm itself is best-effort: a DB that cannot take the row must not turn
-    a maintenance problem into a boot failure."""
+    a maintenance problem into a boot failure.
+
+    #3254 re-pin (write-observation point): the fault moves to the seam's create,
+    and the probe that raises the alarm is driven. Construction alone never
+    reached the alarm (it is the run's job), so the old injection was never hit."""
+    from services import archive_storage
+
     archives = tmp_path / "archives"
     archives.mkdir()
-    db = MagicMock()
-    db.create_operator_queue_item.side_effect = RuntimeError("db down")
+    db = _seam_db()
+    db.create_platform_operator_queue_item.side_effect = RuntimeError("db down")
     with patch("database.db", db), \
          patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
-        _storage(archives)                    # must not raise
+        storage = _storage(archives)          # must not raise
+        with patch.object(archive_storage, "get_archive_storage", return_value=storage):
+            assert archive_storage.probe_archive_writability() is False   # must not raise
+    db.create_platform_operator_queue_item.assert_called_once()
 
 
 def test_the_id_prefix_is_reserved_so_an_agent_cannot_pre_silence_it():
@@ -155,7 +184,7 @@ def test_an_uncreatable_directory_neither_raises_nor_touches_the_db(tmp_path, mo
     cascading tracebacks per test process. The fault surfaces on the next run."""
     from services import archive_storage
 
-    db = MagicMock()
+    db = _seam_db()
     monkeypatch.setattr(
         archive_storage.Path, "mkdir",
         lambda self, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
@@ -165,27 +194,33 @@ def test_an_uncreatable_directory_neither_raises_nor_touches_the_db(tmp_path, mo
 
     assert storage is not None                       # no raise
     assert storage.init_error                        # ...but it remembers
-    db.create_operator_queue_item.assert_not_called()   # and stays off the DB
+    assert db.mock_calls == []                       # and stays off the DB (#3254 re-pin: any accessor)
 
     # The run is what reports it.
     with patch("database.db", db), \
          patch.object(archive_storage, "get_archive_storage", return_value=storage):
         assert archive_storage.probe_archive_writability() is False
-    db.create_operator_queue_item.assert_called_once()
+    db.create_platform_operator_queue_item.assert_called_once()   # #3254 re-pin: the seam's create
 
 
 def test_no_alarm_when_archival_is_deliberately_disabled(tmp_path, monkeypatch):
     """Storage is constructed unconditionally while the flag is only read in
     `start()`, so an install with `LOG_ARCHIVE_ENABLED=false` was told every boot
     that "archival fails on every run" — about a job that never runs."""
+    from services import archive_storage
+
     archives = tmp_path / "archives"
     archives.mkdir()
     monkeypatch.setenv("LOG_ARCHIVE_ENABLED", "false")
-    db = MagicMock()
+    db = _seam_db()
     with patch("database.db", db), \
          patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
-        _storage(archives)
-    db.create_operator_queue_item.assert_not_called()
+        storage = _storage(archives)
+        # #3254 re-pin (write-observation point): the alarm is raised by the RUN's
+        # probe, so that is what is driven; construction alone never reached it.
+        with patch.object(archive_storage, "get_archive_storage", return_value=storage):
+            assert archive_storage.probe_archive_writability() is True
+    assert db.mock_calls == []
 
 
 def test_the_probe_can_be_re_armed_per_run(tmp_path, monkeypatch):
@@ -197,18 +232,18 @@ def test_the_probe_can_be_re_armed_per_run(tmp_path, monkeypatch):
 
     archives = tmp_path / "archives"
     archives.mkdir()
-    with patch("database.db", MagicMock()):
+    with patch("database.db", _seam_db()):
         storage = archive_storage.LocalArchiveStorage(str(archives))
     monkeypatch.setattr(archive_storage, "get_archive_storage", lambda: storage)
 
-    with patch("database.db", MagicMock()):
+    with patch("database.db", _seam_db()):
         assert archive_storage.probe_archive_writability() is True
 
-    db = MagicMock()
+    db = _seam_db()
     with patch("database.db", db), \
          patch("pathlib.Path.touch", side_effect=PermissionError(13, "denied")):
         assert archive_storage.probe_archive_writability() is False
-    db.create_operator_queue_item.assert_called_once()
+    db.create_platform_operator_queue_item.assert_called_once()   # #3254 re-pin: the seam's create
 
 
 def test_staging_lands_beside_the_destination_not_on_the_tmpfs(tmp_path, monkeypatch):
@@ -261,4 +296,6 @@ def test_construction_does_not_import_or_touch_the_database(tmp_path, monkeypatc
             lambda self, **kw: (_ for _ in ()).throw(PermissionError(13, "denied")),
         )
         archive_storage.LocalArchiveStorage(str(tmp_path / "broken"))
-    sentinel.create_operator_queue_item.assert_not_called()
+    # #3254 re-pin (write-observation point): no accessor of any name, the seam's
+    # included, was called.
+    assert sentinel.mock_calls == []

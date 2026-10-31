@@ -58,9 +58,26 @@ class FakeDB:
     def set_setting(self, key, value):
         self.settings[key] = str(value)
 
-    def create_operator_queue_item(self, agent_name, item):
+    # #3254 re-pin (write-observation point): the two alarms report through
+    # `platform_alerts.observe`, which writes with the seam's accessors, not
+    # `create_operator_queue_item`. The fake holds no pending row and no
+    # person's ending, so every alarm reading reaches the seam's create and is
+    # recorded there: `queue_items` still counts alarm readings, and every
+    # count below is unchanged. One row per subject, the platform's clear and
+    # the snooze are asserted on the real DB in
+    # tests/unit/test_3254_backup_archive_alerts.py.
+    def find_pending_operator_queue_by_subject(self, agent_name, subject):
+        return None
+
+    def find_person_ended_operator_queue_by_subject(self, agent_name, subject, since):
+        return None
+
+    # The seam may pass further keyword-only options (e.g. how a reading
+    # updates a pending row); this double files every reading and decides none.
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None, **_seam_options):
         self.queue_items.append((agent_name, item))
-        return item["id"]
+        return {"outcome": "created", "row": item, "changed": False}
 
 
 class FakeRedis:
@@ -236,9 +253,10 @@ class TestPreflightAndFailure:
         assert agent == ALARM_AGENT_NAME
         assert item["id"].startswith(ALARM_ID_PREFIX)
         assert item["context"]["alert_type"] == "db_backup_failure"
-        # G-04 rule: context carries status/paths only — never row data.
+        # G-04 rule: context carries status/paths only — never row data
+        # (#3254: plus the last success's timestamp, the episode marker).
         assert set(item["context"]) <= {
-            "alert_type", "status", "trigger", "backup_dir"
+            "alert_type", "status", "trigger", "backup_dir", "last_success_at"
         }
 
     def test_failed_backup_writes_status_and_alarm(self, env, monkeypatch):

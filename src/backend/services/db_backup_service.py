@@ -47,11 +47,13 @@ for the deliberately inverted coercion) + the fixed
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import os
 import secrets
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -124,13 +126,19 @@ _PREFLIGHT_HEADROOM = 1.2
 _STALENESS_ALARM_DAYS = 3       # ≈ 3 missed dailies
 _STALENESS_REALARM_DAYS = 7     # while stale, re-alarm at most weekly
 
-# Alarm plumbing: platform-created directly via db.create_operator_queue_item
-# (bypasses the #1632 agent-ingestion caps by construction). The sentinel host
-# is uncreatable as an agent (sanitize_agent_name strips the leading '_') and
-# is excluded from canary L-03's orphan scan — parity-tested against
-# canary/snapshot.py (_PLATFORM_ALARM_SENTINELS). The id prefix is registered
-# in operator_queue_service._RESERVED_ID_PREFIXES so an agent cannot
-# pre-create (and via on_conflict_do_nothing, silence) the backup alarm.
+# The outcomes that raise the edge alarm (BKUP-013a).
+_FAILURE_STATUSES = ("failed", "skipped_no_space")
+
+# Alarm plumbing (#3254): the two alarms are platform alert conditions
+# reported through services.platform_alerts — `db_backup_failure` (the edge
+# alarm) and `db_backup_stale` (the staleness re-alarm), two subjects keyed by
+# the backup directory, each one pending row updated in place and ended by the
+# platform when a backup succeeds. The sentinel host is uncreatable as an
+# agent (sanitize_agent_name strips the leading '_') and is excluded from
+# canary L-03's orphan scan — parity-tested against canary/snapshot.py
+# (_PLATFORM_ALARM_SENTINELS). The id prefix is both kinds' registered prefix
+# and is reserved in operator_queue_service._RESERVED_ID_PREFIXES, so an agent
+# cannot mint a row into it.
 ALARM_AGENT_NAME = "_db-backup"
 ALARM_ID_PREFIX = "db-backup-"
 
@@ -155,6 +163,46 @@ STATUS_KEYS = (
 
 class BackupRunError(RuntimeError):
     """A backup attempt failed in a way the run loop reports as `failed`."""
+
+
+@contextmanager
+def _outcome_lock():
+    """Serialise one worker's status write and the alarm it implies (#3254).
+
+    Two uvicorn workers run the nightly job when the Redis lease fails open,
+    and each records its own outcome. The failure alarm is decided from the
+    prior status and then filed or ended, so an outcome the sibling records in
+    between leaves the alarm out of step with the status that stands: a
+    durable ``failed`` with its alarm ended (the next failure then raises no
+    edge), or an alarm beside an ``ok``. The shape of
+    ``db/migration_lock.migration_lock``: an OS ``flock`` on a sidecar of the
+    database file, which both workers share through the ``/data`` bind mount
+    and which the kernel releases if its holder dies.
+
+    Fails open: if the lock file cannot be opened or locked, the outcome is
+    recorded and alarmed unserialised, as before, with a WARNING. A lost alarm
+    is the worse failure.
+    """
+    fd = None
+    try:
+        try:
+            fd = os.open(f"{db_connection.DB_PATH}.db-backup-alarm.lock",
+                         os.O_RDWR | os.O_CREAT, 0o600)
+            # Held only for a few settings writes and one alarm call.
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            logger.warning("[DBBackup] outcome lock unavailable (%s); "
+                           "recording the outcome without it", exc)
+            if fd is not None:
+                os.close(fd)
+                fd = None
+        yield
+    finally:
+        if fd is not None:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
 
 def effective_backup_retention_days() -> int:
@@ -341,6 +389,18 @@ class DBBackupService:
         or absent — exactly once per failure episode, re-armed only by an
         intervening success. Continued failure is the staleness re-alarm's
         job, not the edge's.
+
+        An ``ok`` is a verified recovery point, so it ends both alarm
+        conditions as the platform (#3254). A person's ending is never
+        overwritten: ``clear`` is a compare-and-set on a pending row. Each
+        reading carries the last success it follows (``last_success_at``, a
+        material key of both kinds), so a person's ending snoozes re-reads of
+        that one episode and the first failure after a new success files.
+
+        The status write and the alarm it implies run as one section under
+        ``_outcome_lock``, so the other worker's outcome lands wholly before or
+        wholly after it, and a durable ``failed`` always has its alarm, which
+        the next run's edge check relies on.
         """
         from database import db
         from utils.helpers import utc_now_iso
@@ -366,64 +426,83 @@ class DBBackupService:
                     db.set_setting("db_backup_last_duration_ms", str(duration_ms))
             return prior
 
-        try:
-            prior = await asyncio.to_thread(_write)
-        except Exception:
-            logger.exception("[DBBackup] could not persist status")
-            return
+        def _record() -> None:
+            with _outcome_lock():
+                try:
+                    prior = _write()
+                except Exception:
+                    logger.exception("[DBBackup] could not persist status")
+                    return
+                self._alarm_for_outcome(status, prior, trigger=trigger, error=error)
 
-        if status in ("failed", "skipped_no_space") and prior in (None, "ok"):
-            self._emit_alarm(
-                title=(
-                    "Database backup skipped: not enough disk space"
-                    if status == "skipped_no_space"
-                    else "Database backup failed"
-                ),
+        await asyncio.to_thread(_record)
+
+    def _alarm_for_outcome(
+        self, status: str, prior: str | None, *, trigger: str, error: str,
+    ) -> None:
+        """The alarm transition one recorded outcome implies. Called with the
+        outcome lock held, right after the status write it acts on."""
+        from database import db
+        from services import platform_alerts
+
+        backup_dir = self.backup_dir()  # both alarms' key
+        if status == "ok":
+            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_failure", backup_dir)
+            platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
+        elif status in _FAILURE_STATUSES and prior in (None, "ok"):
+            title = (
+                "Database backup skipped: not enough disk space"
+                if status == "skipped_no_space"
+                else "Database backup failed"
+            )
+            # Context carries status/paths/sizes only — never row data
+            # (canary G-04 rule). `alert_type` also tells the upgrade sweep
+            # which of the two `db-backup-` kinds a row is.
+            outcome = platform_alerts.observe(
+                ALARM_AGENT_NAME, "db_backup_failure", backup_dir,
+                title=title,
                 question=(
                     f"The nightly database backup reported '{status}': "
                     f"{(error or 'no detail')[:500]} — the platform has no "
                     f"fresh recovery point until this is resolved. Backups "
-                    f"land in {self.backup_dir()}."
+                    f"land in {backup_dir}."
                 ),
                 context={
                     "alert_type": "db_backup_failure",
                     "status": status,
                     "trigger": trigger,
-                    "backup_dir": self.backup_dir(),
+                    "backup_dir": backup_dir,
+                    "last_success_at": db.get_setting_value("db_backup_last_success_at", None),
                 },
             )
-
-    def _emit_alarm(self, *, title: str, question: str, context: Dict) -> None:
-        """Direct platform create on the sentinel host. Context carries
-        status/paths/sizes only — never row data (canary G-04 rule)."""
-        from database import db
-        from utils.helpers import utc_now_iso
-
-        now = utc_now_iso()
-        item = {
-            "id": f"{ALARM_ID_PREFIX}{now}",
-            "type": "alert",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": context,
-            "created_at": now,
-            # Must stay NULL: mark_operator_queue_expired flips any pending
-            # row past expires_at to expired fleet-wide every 5s.
-            "expires_at": None,
-        }
-        try:
-            db.create_operator_queue_item(ALARM_AGENT_NAME, item)
-            logger.warning("[DBBackup] operator alarm emitted: %s", title)
-        except Exception:
-            logger.exception("[DBBackup] failed to emit operator alarm")
+            logger.warning("[DBBackup] operator alarm %s: %s", outcome, title)
 
     async def _staleness_check(self) -> None:
         """BKUP-013b: while the last success is older than 3 days, re-alarm at
-        most once per 7 days. Never fires while fresh; never raises."""
+        most once per 7 days. Never fires while fresh; never raises.
+
+        Each re-alarm is a new reading of the one ``db_backup_stale`` row,
+        which moves its lifetime (#3254). It carries the last success
+        (``last_success_at``, the episode marker): after a person ends the row,
+        a re-alarm of the same staleness is snoozed and is not stamped, so the
+        daily check files again on the first run after the snooze lapses; a
+        staleness that follows a newer success files at once.
+
+        A success inside the threshold ends
+        that row as the platform — the boot pre-migration backup records its
+        success in the settings without passing through ``_record_outcome``,
+        so this is where it is seen. With no success on record the reference
+        is the first attempt, and a young one is not evidence that a backup
+        works, so it ends nothing.
+
+        The read, the decision and the alarm run under ``_outcome_lock``, like
+        an outcome and its alarm, so a sibling worker's ``ok`` lands wholly
+        before this check (which then reads the fresh success) or wholly after
+        it (and its clear ends what this check filed)."""
         from database import db
         from utils.helpers import utc_now_iso
+
+        from services import platform_alerts
 
         def _read() -> Dict[str, Optional[str]]:
             return {
@@ -435,39 +514,52 @@ class DBBackupService:
                     "db_backup_last_staleness_alarm_at", None),
             }
 
-        try:
-            state = await asyncio.to_thread(_read)
+        def _check() -> None:
+            state = _read()
             reference = state["last_success_at"] or state["first_attempt_at"]
             if not reference:
                 return
             now = datetime.now(timezone.utc)
             age_days = (now - _parse_iso(reference)).total_seconds() / 86400.0
+            backup_dir = self.backup_dir()  # the alarm's key
             if age_days <= _STALENESS_ALARM_DAYS:
+                if state["last_success_at"]:
+                    platform_alerts.clear(ALARM_AGENT_NAME, "db_backup_stale", backup_dir)
                 return
             last_alarm = state["last_staleness_alarm_at"]
             if last_alarm is not None:
                 alarm_age = (now - _parse_iso(last_alarm)).total_seconds() / 86400.0
                 if alarm_age < _STALENESS_REALARM_DAYS:
                     return
-            await asyncio.to_thread(
-                db.set_setting, "db_backup_last_staleness_alarm_at",
-                utc_now_iso(),
-            )
-            self._emit_alarm(
+            outcome = platform_alerts.observe(
+                ALARM_AGENT_NAME, "db_backup_stale", backup_dir,
                 title="Database backups are stale",
                 question=(
                     f"The newest successful database backup is "
                     f"{age_days:.1f} days old (threshold "
                     f"{_STALENESS_ALARM_DAYS}d). Silence over time is also a "
                     f"failure — check db_backup_last_error and the backend "
-                    f"logs. Backups land in {self.backup_dir()}."
+                    f"logs. Backups land in {backup_dir}."
                 ),
                 context={
                     "alert_type": "db_backup_stale",
                     "last_success_age_days": round(age_days, 1),
-                    "backup_dir": self.backup_dir(),
+                    "backup_dir": backup_dir,
+                    "last_success_at": state["last_success_at"],
                 },
             )
+            # Only a reading that landed starts the weekly wait: a snoozed one
+            # is re-read daily until the snooze lapses, a failed one retried.
+            if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
+                db.set_setting("db_backup_last_staleness_alarm_at", utc_now_iso())
+            logger.warning("[DBBackup] staleness alarm %s", outcome)
+
+        def _locked_check() -> None:
+            with _outcome_lock():
+                _check()
+
+        try:
+            await asyncio.to_thread(_locked_check)
         except Exception:
             logger.exception("[DBBackup] staleness check failed")
 
