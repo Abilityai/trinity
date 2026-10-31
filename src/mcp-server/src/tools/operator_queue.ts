@@ -147,7 +147,7 @@ const askOperatorParameters = z.object({
     .optional()
     .describe(
       "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. A role several people fill reaches every one of them: the first answer wins. " +
-        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (no assignments module answers here: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them).",
+        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them).",
     ),
   expires_at: z
     .string()

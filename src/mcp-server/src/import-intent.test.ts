@@ -94,7 +94,9 @@ describe("ent#1007 create_agent fork_to_own block", () => {
         name: "a1",
         template: "github:org/repo",
         import_intent: "fork",
-        fork_to_own: { destination_repo: "acme/sales-agent" },
+        // `false` is the value a dropped key would silently flip: the backend
+        // defaults a fork to private.
+        fork_to_own: { destination_repo: "acme/sales-agent", private: false },
       },
       undefined
     );
@@ -105,7 +107,7 @@ describe("ent#1007 create_agent fork_to_own block", () => {
       name: "a1",
       template: "github:org/repo",
       import_intent: "fork",
-      fork_to_own: { destination_repo: "acme/sales-agent" },
+      fork_to_own: { destination_repo: "acme/sales-agent", private: false },
     });
   });
 

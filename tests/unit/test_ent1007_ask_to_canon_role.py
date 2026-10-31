@@ -292,6 +292,30 @@ class TestEveryFailureArmIsNamed:
         assert (e.status_code, e.code) == (422, "role_unavailable")
         assert _rows(real_db, agent) == []
 
+    @pytest.mark.parametrize("arm", ["no_provider", "no_answer", "raises", "malformed"])
+    def test_role_unavailable_remedy_is_true_for_every_degraded_arm(self, real_db, agent, people, arm):
+        """A provider that raised or answered malformed is installed: the
+        remedy must not say the module is missing. One text, true for all four
+        arms, naming no person."""
+        from services import assignment_provider
+
+        class _Malformed(_Provider):
+            def people_for_role_id(self, agent_name, role_id):
+                return {"emails": "not-a-list"}
+
+        if arm == "no_answer":
+            _provide(roles={"other-role": [people["alice"]]})
+        elif arm == "raises":
+            _provide(roles={ROLE: [people["alice"]]}, raise_for=ROLE)
+        elif arm == "malformed":
+            assignment_provider.register_provider(_Malformed())
+        e = _refused(agent)
+        assert (e.status_code, e.code) == (422, "role_unavailable")
+        assert "is not installed, has no answer for this role, or could not answer" in e.message
+        assert "primary" in e.message and "operator" in e.message
+        assert "@" not in e.message and "alice" not in e.message.lower()
+        assert _rows(real_db, agent) == []
+
     def test_nobody_seated_is_role_unassigned_and_names_the_label(self, real_db, agent):
         _provide(roles={ROLE: []})
         e = _refused(agent)

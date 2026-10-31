@@ -67,10 +67,21 @@ def _container(extra_labels, status="running"):
 # Read: label -> AgentStatus.kind, on both the full and the fast path
 # ---------------------------------------------------------------------------
 
+# An unrecognised value passed through the read would not reach these two
+# assertions on its own: `AgentStatus.kind` is a Literal, so the full path
+# raises a ValidationError and the fast path swallows it and lists nothing.
+# Both tests turn that into a failure that names the value or the lost agent,
+# never an incidental error.
+
 @pytest.mark.parametrize("extra,expected", CASES)
 def test_full_status_reads_kind_from_the_label(extra, expected):
+    from pydantic import ValidationError
     from services import docker_service
-    status = docker_service.get_agent_status_from_container(_container(extra))
+    try:
+        status = docker_service.get_agent_status_from_container(_container(extra))
+    except ValidationError as e:
+        pytest.fail(f"the label value {e.errors()[0].get('input')!r} reached "
+                    f"AgentStatus.kind; expected {expected!r}")
     assert status.kind == expected
     assert status.model_dump()["kind"] == expected
 
@@ -81,8 +92,11 @@ def test_fast_list_reads_kind_from_the_label(monkeypatch, extra, expected):
     client = MagicMock()
     client.containers.list.return_value = [_container(extra)]
     monkeypatch.setattr(docker_service, "docker_client", client)
-    [status] = docker_service.list_all_agents_fast()
-    assert status.kind == expected
+    statuses = docker_service.list_all_agents_fast()
+    assert len(statuses) == 1, (
+        f"label {extra!r} dropped the agent from the fast list (a value the "
+        f"read passed through failed AgentStatus and the list swallowed it)")
+    assert statuses[0].kind == expected
 
 
 def test_kind_is_a_declared_nullable_field_defaulting_to_none():
@@ -194,14 +208,14 @@ def _drive_info(monkeypatch, container, agent_reply=None, raise_exc=None):
     return asyncio.run(agent_files.get_agent_info_endpoint("a1", None))
 
 
-@pytest.mark.parametrize("extra,expected", CASES[:3])
+@pytest.mark.parametrize("extra,expected", CASES)
 def test_info_stopped_shape_carries_kind(monkeypatch, extra, expected):
     out = _drive_info(monkeypatch, _container(extra, status="exited"))
     assert out["status"] == "stopped"
     assert "kind" in out and out["kind"] == expected
 
 
-@pytest.mark.parametrize("extra,expected", CASES[:3])
+@pytest.mark.parametrize("extra,expected", CASES)
 def test_info_agent_answer_shape_carries_the_label_kind(monkeypatch, extra, expected):
     reply = SimpleNamespace(status_code=200, json=lambda: {"has_template": True, "kind": "bogus"})
     out = _drive_info(monkeypatch, _container(extra), agent_reply=reply)
@@ -209,14 +223,14 @@ def test_info_agent_answer_shape_carries_the_label_kind(monkeypatch, extra, expe
     assert "kind" in out and out["kind"] == expected
 
 
-@pytest.mark.parametrize("extra,expected", CASES[:3])
+@pytest.mark.parametrize("extra,expected", CASES)
 def test_info_old_agent_server_shape_carries_kind(monkeypatch, extra, expected):
     reply = SimpleNamespace(status_code=404, json=lambda: {})
     out = _drive_info(monkeypatch, _container(extra), agent_reply=reply)
     assert "kind" in out and out["kind"] == expected
 
 
-@pytest.mark.parametrize("extra,expected", CASES[:3])
+@pytest.mark.parametrize("extra,expected", CASES)
 def test_info_fetch_error_shape_carries_kind(monkeypatch, extra, expected):
     out = _drive_info(monkeypatch, _container(extra), raise_exc=RuntimeError("boom"))
     assert "kind" in out and out["kind"] == expected

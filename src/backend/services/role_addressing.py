@@ -224,8 +224,9 @@ def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
     if people is None:
         raise RoleRefused(
             "role_unavailable", role,
-            f"The {label} role cannot be addressed on this install right now: canon "
-            "roles need the assignments module to answer. Address the ask to primary "
+            f"The {label} role cannot be addressed on this install right now: the "
+            "assignments module that answers canon roles is not installed, has no "
+            "answer for this role, or could not answer. Address the ask to primary "
             "or operator.",
         )
     if not people:
