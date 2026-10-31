@@ -31,16 +31,25 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence, Tuple
+from datetime import datetime, timedelta, timezone  # noqa: F401 — kept for G13 (rows imports them)
+from typing import (
+    Optional,
+    Sequence,  # noqa: F401 — kept for G13 (filechannel imports it)
+    Tuple,
+)
 
-from services import rate_limiter
+from services import rate_limiter  # noqa: F401 — O1(d): read as oqs.rate_limiter from outside, _oq.rate_limiter in ingest
 from services.operator_queue_choices import (
     OPTIONS_DROPPED_MARKER,
-    options_cap_violation,
-    title_cap_violation,
+    options_cap_violation,  # noqa: F401 — kept for G13 (ingest imports it)
+    title_cap_violation,  # noqa: F401 — kept for G13 (ingest imports it)
 )
-from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+from utils.helpers import (
+    iso_cutoff,
+    parse_iso_timestamp,
+    to_utc_iso,  # noqa: F401 — read as oqs.to_utc_iso from outside; kept for G13 (rows, filechannel)
+    utc_now_iso,
+)
 
 # #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
 # `deps`, and read as `deps.X`, never bound here — a stale
@@ -1017,8 +1026,8 @@ async def _maybe_emit_alert_budget_episode(
 # and write-back halves of the service in `ingest` / `write_back`, composed
 # below. Imported after every package-owned definition, so nothing they read
 # from `_oq` at import time can be missing (none does today).
-from . import filechannel  # noqa: E402
-from . import rows  # noqa: E402
+from . import filechannel  # noqa: E402,F401 — loads the submodule here, in G6 order
+from . import rows  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import ingest  # noqa: E402
 from . import write_back  # noqa: E402
 
