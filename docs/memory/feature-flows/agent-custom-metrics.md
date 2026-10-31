@@ -16,7 +16,7 @@
 **Feature ID**: 9.9
 **Status**: Implemented
 **Date**: 2025-12-10
-**Last Updated**: 2026-10-01 (ent#729 — a corrected value restates its point)
+**Last Updated**: 2026-10-28 (ent#1006 — declare, edit and retire from the UI)
 
 ## The declared metric registry (ent#477)
 
@@ -42,8 +42,11 @@ template.yaml `metrics:`
   │     lifecycle.start_agent_internal → metric_registry
   │       .spawn_refresh_from_running_agent(source="start")   fire-and-forget
   │
-  └─ POST /api/agents/{name}/metrics/definitions/refresh
-        routers/agent_files.py  (AuthorizedAgentByName, running agent only)
+  ├─ POST /api/agents/{name}/metrics/definitions/refresh
+  │     routers/agent_files.py  (AuthorizedAgentByName, running agent only)
+  │
+  └─ UI form write (ent#1006)  → refresh_from_running_agent(source="ui")
+        after the form's own template.yaml write — see below
 
   every live path ───► metric_registry.refresh_from_running_agent
                           docker exec `timeout N head -c 256K template.yaml`
@@ -87,6 +90,49 @@ undeclared-metric 422's hint names.
 Requirement: `docs/memory/requirements/lifecycle-observability.md` §47.
 
 ---
+
+## Declaring from the UI (ent#1006)
+
+A second door onto the SAME block. The form never writes the registry: it
+edits `template.yaml` and lets the reconcile above read the file back, so a
+UI declaration and a hand edit are indistinguishable afterwards (and git
+auto-sync carries either to the repo).
+
+```
+DeclaredMetricsTiles.vue  (canManage = agent.can_share && !is_system)
+  "Declare metric" / tile "Edit" ─► MetricDeclarationModal.vue
+  tile "Retire…"                 ─► RetireMetricDialog.vue
+        │  stores/agents.js: getMetricDeclarations · declareMetric ·
+        │  updateMetricDeclaration · getMetricReferences · retireMetricDeclaration
+        ▼
+routers/agent_files.py  /api/agents/{name}/metrics/declarations[/{metric}]
+  OwnedAgentByName + require_person_or_capability("instructions.manage")
+        ▼
+services/metric_declaration_service.py
+  read  ── metric_registry.read_template_text   (agent_not_running 409 /
+                                                 template_unreadable 503)
+  CAS   ── template_hash(raw) == base_hash ?     (template_changed 409)
+  edit  ── metric_declaration_editor.validate   (metric_invalid 422 + per-field errors)
+           metric_declaration_editor.apply      (line edit + re-parse verify;
+                                                 template_not_editable 409)
+  retire── find_references: points · objectives · dashboard.yaml widgets ·
+           metric_references providers          (metric_in_use 409 unless
+                                                 acknowledge_references=true;
+                                                 an unchecked source counts)
+  CAS   ── re-read, must still equal raw
+  write ── agent_service.update_agent_file_logic("template.yaml")
+           (Files tier: template.yaml is an INSTRUCTIONS-class file, ent#820;
+            writes the file_write audit row)
+  then  ── metric_registry.refresh_from_running_agent(source="ui")
+```
+
+| Property | Why |
+|---|---|
+| Only the target item's lines change | A re-dump would drop comments and the author's key order; the verify step refuses any result that changed another key |
+| Name and type are immutable on edit | Points are stored by name and read in the type's units — the same reason the registry refuses a type change |
+| Cadence is required in the form | Every metric declared from the UI is stale-checkable from day one; a hand edit may still omit it |
+| `template.yaml` is an instruction file | Without it, a share holder or an agent key without `instructions.manage` could write the same block through the generic Files route |
+| No MCP tool | An agent edits its own template in-container and calls `refresh_metric_definitions` |
 
 ## Recording points against those declarations (ent#478)
 
@@ -678,3 +724,4 @@ Still open:
 | 2026-09-30 | ent#676: the role card cut over to the objective join — the rebase note became the landed section; one limiter bucket for both doors in `services/objectives_read_budget.py` (the card degrades, the route 429s) |
 | 2026-10-01 | ent#729 (R45): a different value at an existing `(metric, ts, dims)` restates the row (`revision`, `recorded_at`, `execution_id` follow the write; `ts`, `created_at`, freshness unmoved); the receipt gains `corrected` on REST and MCP; dual-track migration `0086` |
 | 2026-10-09 | ent#731: guard metrics in the join — `role` on every row, the always-hold rule, `summary.guards`, three guard findings; the MCP `get_objectives` description names them |
+| 2026-10-28 | Declaring from the UI (ent#1006): `MetricDeclarationModal.vue` / `RetireMetricDialog.vue`, the `/metrics/declarations` routes, the line editor, CAS on the template hash, the reference check and the `metric_references` provider seam |

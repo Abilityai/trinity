@@ -73,12 +73,34 @@ A `dashboard.yaml` value is whatever the agent last wrote into the file. A decla
 
 ### How declared metrics work
 
-1. The agent declares its metrics in `template.yaml` under `metrics:`. Each entry has a `name`, a `type` (`counter`, `gauge`, `percentage`, `status`, `duration`, or `bytes`), a `label`, and optional fields such as `unit`, `cadence`, `direction` (`up_good`, `down_good`, `neutral`), `aggregation` (`last`, `sum`, `avg`), and `dimensions`. A `status` metric lists its allowed `values`, each with a `color`.
+1. Metrics are declared in `template.yaml` under `metrics:` — either by editing the file, or from the agent's **Dashboard** tab with **Declare metric** (see [Declaring a metric from the UI](#declaring-a-metric-from-the-ui)). Both write the same block. Each entry has a `name`, a `type` (`counter`, `gauge`, `percentage`, `status`, `duration`, or `bytes`), a `label`, and optional fields such as `unit`, `cadence`, `direction` (`up_good`, `down_good`, `neutral`), `aggregation` (`last`, `sum`, `avg`), and `dimensions`. A `status` metric lists its allowed `values`, each with a `color`.
 2. Trinity reads that block into a per-agent metric registry. It re-reads it when the agent is created, when a git pull or reset brings in a new `template.yaml`, and when the container starts. An entry Trinity cannot read is dropped and reported as a finding in the agent's compatibility report.
 3. The agent records values with `record_metrics`. Each batch is all-or-nothing: if one point is invalid, the whole batch is refused and each bad point comes back with a reason code. A name the registry does not hold is refused with `metric_undeclared`.
-4. Open the agent's **Dashboard** tab. A **Declared Metrics** section shows one tile per metric, above any `dashboard.yaml` widgets. The tab appears when the agent has declared metrics, even with no `dashboard.yaml`.
+4. Open the agent's **Dashboard** tab. A **Declared Metrics** section shows one tile per metric, above any `dashboard.yaml` widgets. The tab appears when the agent has declared metrics, even with no `dashboard.yaml`, and always for the agent's owner.
 
 Each tile shows the latest value, formatted for its type (a `duration` of 5400 reads `1h 30m`), and when that point was recorded — relative on the tile, exact on hover. Pick a window (**Auto**, **24 hours**, **7 days**, **30 days**, **90 days**) to change the sparkline range. The tiles read only from the point store, so they show the same numbers when the agent is stopped.
+
+### Declaring a metric from the UI
+
+The agent's owner, or an admin, can declare, edit and retire metrics without editing files. People the agent is shared with see the tiles but not these controls.
+
+1. Start the agent. The form edits `template.yaml` inside the agent, so a stopped agent shows **Start the agent to change its metrics** and nothing is changed.
+2. On the **Dashboard** tab, select **Declare metric** (or **Declare a metric** when the agent has none yet).
+3. Fill in the form:
+   - **Label** is what the tile shows. **Name** is suggested from the label; the agent records under it, so it cannot change later.
+   - **What kind of number is it?** picks the type: Count, Level, Percentage, Status, Duration or Data size. A Status metric lists its allowed values, each with a colour.
+   - **How often is it recorded?** is required. The help line says when the tile turns stale. **Custom…** takes any fixed length from one minute to 366 days, such as `12h` or `3d`; use `4w` for monthly.
+   - **More options** holds thresholds, dimensions, how several series fold together, and an optional **Recorded by** note. The note is shown on the tile and stored as `x-recorded-by`.
+   - **What gets added to template.yaml** previews the entry.
+4. Select **Declare metric**. The tile appears at once, and the metric is offered in the Workspace project **Add a metric** picker. The agent's next git sync carries the change to its repository.
+
+Errors appear under the field they belong to, using the same checks as a hand edit: a name that is not lowercase letters, digits and underscores, an unknown type, a cadence outside the allowed range, a duplicate name, or a 51st metric. Nothing is written until the form is valid.
+
+- **Edit** on a tile opens the same form with name and type locked. The preview shows the change as a diff.
+- **Retire…** lists what still uses the metric — recorded points, objectives, `dashboard.yaml` widgets and project links — and asks you to confirm before removing the entry. Recorded points are kept; declaring the same name again brings them back.
+- If the agent or someone else changed `template.yaml` while the form was open, saving is refused and **Reload and keep my entries** applies your entries to the latest file.
+- A `metrics:` block written as a one-line list or with YAML anchors cannot be edited by the form. It says so; edit the block in **Files** instead.
+- If `template.yaml` cannot be parsed, the form changes nothing and no metric is retired.
 
 ### Freshness
 

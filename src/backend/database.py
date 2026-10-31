@@ -132,6 +132,7 @@ from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
 from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
+from db.memory_facts import MemoryFactOperations  # trinity-enterprise#1022 retrieval memory
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
@@ -458,11 +459,12 @@ _DEFAULT_SOURCE_SEED_NOTE = (
 def _default_skill_source_values():
     """The seed row, or None when seeding is disabled/misconfigured."""
     from config import (
+        BUNDLED_SKILL_SOURCE_URL,
         DEFAULT_SKILL_SOURCE_NAME,
         DEFAULT_SKILL_SOURCE_REF,
         DEFAULT_SKILL_SOURCE_URL,
     )
-    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY, SEED_CREATED_BY
 
     url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
     ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
@@ -479,7 +481,10 @@ def _default_skill_source_values():
         "enabled": 1,
         "priority": DEFAULT_SOURCE_PRIORITY,
         "last_sync_status": "never",
-        "created_by": "seed:ent237",
+        "created_by": SEED_CREATED_BY,
+        # trinity-enterprise#529: the built-in catalog follows the platform's
+        # pin on upgrade; a seed pointed at a fork does not.
+        "follows_bundled_pin": 1 if url == BUNDLED_SKILL_SOURCE_URL else 0,
     }
 
 
@@ -511,13 +516,14 @@ def _seed_fresh_install_skill_source(cursor, conn):
         cursor.execute(
             "INSERT OR IGNORE INTO skill_sources "
             "(id, name, url, ref, ref_type, is_default, enabled, priority, "
-            " last_sync_status, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " last_sync_status, created_by, follows_bundled_pin, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 values["id"], values["name"], values["url"], values["ref"],
                 values["ref_type"], values["is_default"], values["enabled"],
                 values["priority"], values["last_sync_status"],
-                values["created_by"], now, now,
+                values["created_by"], values["follows_bundled_pin"], now, now,
             ),
         )
         conn.commit()
@@ -1051,6 +1057,7 @@ class DatabaseManager:
         self._agent_shared_files_ops = AgentSharedFilesOperations()
         self._settings_ops = SettingsOperations()
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
+        self._memory_fact_ops = MemoryFactOperations()  # trinity-enterprise#1022
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
         self._skill_sets_ops = SkillSetsOperations()
@@ -1904,6 +1911,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1936,6 +1947,14 @@ class DatabaseManager:
         """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
         return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
 
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """#3380 — name the /chat thread this turn answers."""
+        return self._schedule_ops.set_execution_chat_session(execution_id, chat_session_id)
+
+    def get_execution_chat_session_id(self, execution_id: str):
+        """#3380 — the /chat thread a turn answers, or None."""
+        return self._schedule_ops.get_execution_chat_session_id(execution_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -1943,8 +1962,11 @@ class DatabaseManager:
             agent_name, claude_session_id, user_id
         )
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50):
-        return self._schedule_ops.get_schedule_executions(schedule_id, limit)
+    def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
+                                source_user_id=None, include_unattributed=False):
+        return self._schedule_ops.get_schedule_executions(
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1954,7 +1976,7 @@ class DatabaseManager:
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
                                      exclude_triggers=None, scope_to_viewer=False,
-                                     viewer_email=None):
+                                     viewer_email=None, source_user_id=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1964,7 +1986,8 @@ class DatabaseManager:
         """
         return self._schedule_ops.get_agent_executions_summary(
             agent_name, limit, exclude_triggers=exclude_triggers,
-            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email,
+            source_user_id=source_user_id)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -1976,9 +1999,11 @@ class DatabaseManager:
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
-    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200, *,
+                               source_user_id=None):
         """Every execution row of one fan-out batch (#2670)."""
-        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+        return self._schedule_ops.get_fan_out_executions(
+            agent_name, fan_out_id, limit, source_user_id=source_user_id)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -2008,9 +2033,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
@@ -2278,8 +2304,10 @@ class DatabaseManager:
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 
-    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
-        return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
+    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None, *, own_rows_user_id=None, own_rows_exempt_agents=None):
+        return self._activity_ops.get_activities_in_range(
+            start_time, end_time, activity_types, limit, agent_names,
+            own_rows_user_id=own_rows_user_id, own_rows_exempt_agents=own_rows_exempt_agents)
 
     def get_latest_activity_for_agents(self, agent_names: list):
         return self._activity_ops.get_latest_activity_for_agents(agent_names)
@@ -3040,6 +3068,9 @@ class DatabaseManager:
     def update_skill_source(self, source_id: str, **fields):
         return self._skill_sources_ops.update_source(source_id, **fields)
 
+    def follow_skill_source_pin(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.follow_bundled_pin(source_id, **kwargs)
+
     def delete_skill_source(self, source_id: str):
         return self._skill_sources_ops.delete_source(source_id)
 
@@ -3176,6 +3207,52 @@ class DatabaseManager:
             agent_name, user_email, agent_notes,
             execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
         )
+
+    # ------------------------------------------------------------------
+    # Retrieval memory facts (trinity-enterprise#1022, MEM-002)
+    # ------------------------------------------------------------------
+
+    def get_memory_opt_out(self, agent_name: str) -> bool:
+        return self._agent_ops.get_memory_opt_out(agent_name)
+
+    def set_memory_opt_out(self, agent_name: str, opt_out: bool) -> bool:
+        return self._agent_ops.set_memory_opt_out(agent_name, opt_out)
+
+    def insert_memory_fact(self, **kwargs):
+        return self._memory_fact_ops.insert_memory_fact(**kwargs)
+
+    def list_memory_facts(self, agent_name: str, user_email: str, **kwargs):
+        return self._memory_fact_ops.list_memory_facts(agent_name, user_email, **kwargs)
+
+    def memory_scope_fingerprint(self, agent_name: str, user_email: str):
+        return self._memory_fact_ops.memory_scope_fingerprint(agent_name, user_email)
+
+    def update_memory_fact_text(self, fact_id: str, agent_name: str, **kwargs) -> bool:
+        return self._memory_fact_ops.update_memory_fact_text(fact_id, agent_name, **kwargs)
+
+    def soft_delete_memory_fact(self, fact_id: str, agent_name: str, *, deleted_by: str, execution_id=None) -> bool:
+        return self._memory_fact_ops.soft_delete_memory_fact(fact_id, agent_name, deleted_by=deleted_by, execution_id=execution_id)
+
+    def mark_memory_facts_recalled(self, fact_ids, *, agent_name: str) -> None:
+        return self._memory_fact_ops.mark_memory_facts_recalled(fact_ids, agent_name=agent_name)
+
+    def prune_memory_scope(self, agent_name: str, user_email: str, *, cap: int) -> int:
+        return self._memory_fact_ops.prune_memory_scope(agent_name, user_email, cap=cap)
+
+    def count_memory_retains_since(self, agent_name: str, since_iso: str) -> int:
+        return self._memory_fact_ops.count_memory_retains_since(agent_name, since_iso)
+
+    def memory_fact_stats(self, agent_name=None) -> dict:
+        return self._memory_fact_ops.memory_fact_stats(agent_name)
+
+    def insert_memory_fact_events(self, rows) -> int:
+        return self._memory_fact_ops.insert_memory_fact_events(rows)
+
+    def list_memory_fact_events(self, agent_name: str, **kwargs):
+        return self._memory_fact_ops.list_memory_fact_events(agent_name, **kwargs)
+
+    def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
+        return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
     def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
         return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
@@ -4423,6 +4500,10 @@ class DatabaseManager:
             agent_name, day_start_iso, limit
         )
 
+    def metric_point_usage(self, agent_name: str, metric: str, limit: int):
+        """`(count to limit, newest ts)` for one metric — the retire check (ent#1006)."""
+        return self._metric_point_ops.point_usage(agent_name, metric, limit)
+
     def latest_metric_points(
         self, agent_name: str, metric_names, per_metric_limit: int = 200
     ):
@@ -4480,17 +4561,21 @@ class DatabaseManager:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
-    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
-        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+        return self._idempotency_ops.attach_execution(scope, key, execution_id, claim_token=claim_token)
 
-    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot, *, claim_token=None) -> None:
         """Mark an idempotency claim completed and store the replay snapshot."""
-        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot, claim_token=claim_token)
 
-    def idempotency_release(self, scope: str, key: str) -> None:
+    def idempotency_release(self, scope: str, key: str, *, claim_token=None) -> None:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
-        return self._idempotency_ops.release(scope, key)
+        return self._idempotency_ops.release(scope, key, claim_token=claim_token)
+
+    def idempotency_reclaim_in_flight(self, scope: str, key: str, claim_token) -> bool:
+        """Compare-and-delete a stale in_flight claim still owned by claim_token (#3298)."""
+        return self._idempotency_ops.reclaim_in_flight(scope, key, claim_token)
 
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
@@ -4541,7 +4626,7 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
     def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
@@ -4563,6 +4648,9 @@ class DatabaseManager:
 
     def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
         return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def rearm_lost_dispatch(self, loop_id: str, *, due_for):
+        return self._loop_ops.rearm_lost_dispatch(loop_id, due_for=due_for)
 
     def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
         return self._loop_ops.claim_due_loop(loop_id, next_run_at)
