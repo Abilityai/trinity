@@ -16,7 +16,6 @@ this module clears, drops or tombstones a row.
   ent#881's reachability answer (`approver_unassigned`, `approver_not_shared`)
   rides as the change's `note`, a warning on the write surface too — never a
   silent pass, never a refusal.
-* `summarize` — `summary.gates`.
 * `run` — the executor's writes, each through `skill_gate_map_service.set_gate`
   with `trigger="apply"`, so gate admission (ent#753, ent#848, ent#881), the
   marker ordering contract (#752) and the audit row are the route's own.
@@ -136,23 +135,6 @@ def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
     if stored is not None and undeclared:
         mp.changes.append(apply_change(STEP, "report", "gate_undeclared",
                                        current=undeclared, note=UNDECLARED_NOTE))
-
-
-def summarize(members: Dict) -> Dict[str, int]:
-    """`summary.gates` over every member's plan. Blocked members are not
-    counted: nothing about them runs."""
-    writes = reports = 0
-    for mp in members.values():
-        if mp.verdict == "blocked":
-            continue
-        for c in mp.changes:
-            if c.field != STEP:
-                continue
-            if c.action == "write":
-                writes += 1
-            else:
-                reports += 1
-    return {"write": writes, "report": reports}
 
 
 def _context(actor, trigger: str, request) -> skill_gate_map_service.GateContext:

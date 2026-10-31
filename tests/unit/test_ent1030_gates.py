@@ -342,7 +342,7 @@ class TestPlan:
         assert change.current is None
         assert change.desired == {"skill": "deploy", "approver": "primary", "deadline_hours": 24}
         assert change.note is None   # the owner has an email: primary reaches someone
-        assert res.summary["gates"] == {"write": 1, "report": 0}
+        assert res.summary["gates"] == {"write": 1, "report": 0, "unobserved": 0}
         assert _rows(LEAD) == {}
 
     def test_a_stored_gate_that_differs_is_rewritten(self, world):
@@ -359,7 +359,7 @@ class TestPlan:
         _set(LEAD, "deploy", approver="primary", deadline_hours=24)
         res = _apply(world, _manifest({"Deploy": {"approver": "primary"}}), dry_run=True)
         assert _member(res).verdict == "unchanged" and _codes(_member(res)) == []
-        assert res.summary["gates"] == {"write": 0, "report": 0}
+        assert res.summary["gates"] == {"write": 0, "report": 0, "unobserved": 0}
 
     def test_a_stored_gate_the_manifest_does_not_name_is_reported_never_cleared(self, world):
         world.seed_agent(LEAD)
@@ -371,7 +371,7 @@ class TestPlan:
         assert lead.changes[0].current == [{"skill": "deploy", "approver": "primary",
                                             "deadline_hours": None}]
         assert "never clears" in lead.changes[0].note
-        assert res.summary["gates"] == {"write": 0, "report": 1}
+        assert res.summary["gates"] == {"write": 0, "report": 1, "unobserved": 0}
 
     def test_a_declared_gate_on_a_cleared_tombstone_is_a_write(self, world, monkeypatch):
         world.seed_agent(LEAD)

@@ -20,7 +20,6 @@ nothing in this repo writes a seat.
 * `plan` — `seat_missing` / `seat_differs` writes when the writer exists,
   otherwise `seat_unobserved`; `seat_filled` / `seat_vacant` /
   `seat_unobserved` reports for person seats, never a write.
-* `summarize` — `summary.roles`.
 * `run` — op `seat_set` through `assignment_provider.write_seat`; a refusal is
   recorded in `failed[]` with the module's code.
 * `export_member` — `seat:` when the provider says the agent holds one.
@@ -191,25 +190,6 @@ def plan(mp, *, seat: Optional[Dict[str, Any]], people: Optional[Dict[Tuple[str,
                 note = _UNOBSERVED_NOTE if code == UNOBSERVED_CODE else _PERSON_NOTE
                 mp.changes.append(apply_change(PERSON_STEP, "report", code,
                                                desired=by_code[code], note=note))
-
-
-def summarize(members: Dict) -> Dict[str, int]:
-    """`summary.roles` over every member's plan. Blocked members are not
-    counted: nothing about them runs."""
-    out = {"write": 0, "report": 0, "unobserved": 0}
-    for mp in members.values():
-        if mp.verdict == "blocked":
-            continue
-        for c in mp.changes:
-            if c.field not in GROUP_FIELDS:
-                continue
-            if c.action == "write":
-                out["write"] += 1
-            elif c.code == UNOBSERVED_CODE:
-                out["unobserved"] += 1
-            else:
-                out["report"] += 1
-    return out
 
 
 class _Refused(Exception):

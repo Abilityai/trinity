@@ -1,6 +1,26 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_summary.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP6: SystemApplyResponse.summary has skills/grants/gates/roles/members each with write/report/unobserved (grants keeps held_back); one manifest exercising every group under an interactive admin, a non-admin creator and an admin's own MCP key (S8), dry run and real run counting alike and the second dry run writing nothing; member.unobserved lists roles without the provider hooks; a read error (person seats, skills) is the retryable blocker, never unobserved, and a blocked member is counted in no group; two bare manifests on one agent add and never remove (S6); the deploy preview's configured counts appear only for a member that declares a group."
+    },
+    {
+      "file": "../src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1030 CP6: ManifestPreview mounted in jsdom — the one 'after create, also configured' line sums every agent's configured counts with plurals, says person seats are reported and never filled, and renders nothing when no agent declares a configuration group."
+    },
+    {
       "file": "unit/test_ent1030_declared_only.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",

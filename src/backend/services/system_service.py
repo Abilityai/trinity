@@ -2088,6 +2088,20 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     return reason[:_REASON_MAX_LEN], status_code
 
 
+def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
+    """trinity-enterprise#1030 CP6: what a created member is configured with
+    after create — counts per group, for the preview's one line. Empty (no
+    key at all) when the member declares none of them. A held-back write is
+    named in `warnings`, not here."""
+    counts = {
+        "skills": len(cfg.skills or []), "skill_sets": len(cfg.skill_sets or []),
+        "gates": len(cfg.gates or {}), "grants": len(cfg.grants or []),
+        "seat": 1 if cfg.seat else 0, "person_seats": len(cfg.person_seats or []),
+    }
+    counts = {k: v for k, v in counts.items() if v}
+    return {"configured": counts} if counts else {}
+
+
 async def deploy_manifest(
     manifest_yaml: str,
     current_user: User,
@@ -2156,7 +2170,10 @@ async def deploy_manifest(
                 {
                     "name": final_name,
                     "short_name": short_name,
-                    "template": manifest.agents[short_name].template
+                    "template": manifest.agents[short_name].template,
+                    # trinity-enterprise#1030 CP6: only when the member declares
+                    # one of the new groups, so every other preview is byte-identical.
+                    **_configured_preview(manifest.agents[short_name]),
                 }
                 for short_name, final_name in agent_names.items()
             ]
@@ -3297,6 +3314,8 @@ class ApplyMemberPlan:
     changes: List["SystemApplyChange"] = field(default_factory=list)
     ops: List[ApplyOp] = field(default_factory=list)
     restart_required: bool = False
+    # trinity-enterprise#1030 CP6: config groups the platform could not observe.
+    unobserved: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -3920,17 +3939,20 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     grants_summary, grants_warning = apply_grants.summarize(members)
     if grants_warning:
         warnings.append(grants_warning)
-    from services.system_apply import gates as apply_gates
-    gates_summary = apply_gates.summarize(members)
-    from services.system_apply import seats as apply_seats
-    roles_summary = apply_seats.summarize(members)
+    # trinity-enterprise#1030 CP6: one summary per config group, each
+    # {write, report, unobserved}; and each member's unobserved groups.
+    from services.system_apply import summary as apply_summary
+    for mp in members.values():
+        if mp.verdict != "blocked":
+            mp.unobserved = apply_summary.member_unobserved(mp)
+    summary = apply_summary.build(
+        members, extras={"grants": {"held_back": grants_summary["held_back"]}})
 
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted, summary={"grants": grants_summary, "gates": gates_summary,
-                 "roles": roles_summary},
+        adopted=adopted, summary=summary,
     )
 
 
@@ -4356,7 +4378,7 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
             applied = mp.name not in outcome.member_failed
         members.append(SystemApplyMember(
             name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
-            restart_required=restart, applied=applied))
+            restart_required=restart, applied=applied, unobserved=list(mp.unobserved)))
     response = SystemApplyResponse(
         dry_run=dry_run,
         system_name=plan.system_name,

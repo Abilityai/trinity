@@ -69,6 +69,19 @@ describe("ent#1030 the systems descriptions name naming: bare", () => {
     assert.match(tools.applySystem.description, /adopt/);
   });
 
+  it("the manifest text names the CP1-CP5 keys and the never-revoke rule", () => {
+    const deployManifest = tools.deploySystem.parameters.shape.manifest.description ?? "";
+    for (const key of ["skills:", "skill_sets", "gates:", "grants:", "seat:", "person_seats", "deploy: false"]) {
+      assert.ok(deployManifest.includes(key), `deploy_system manifest text lacks ${key}`);
+    }
+    const applyManifest = tools.applySystem.parameters.shape.manifest.description ?? "";
+    assert.match(applyManifest, /never a person or an email/);
+    assert.match(applyManifest, /declared_only/);
+    assert.match(tools.applySystem.description, /never revoked/);
+    assert.match(tools.applySystem.description, /admin in a signed-in session/);
+    assert.match(tools.applySystem.description, /unobserved/);
+  });
+
   it("every systems tool description fits Claude Code's 2,048 cut (#3234)", () => {
     for (const tool of Object.values(tools)) {
       const d: string = (tool as { description: string }).description;

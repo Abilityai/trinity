@@ -251,6 +251,13 @@ export function createSystemTools(
             "    kind: deployment  # optional: 'agent' (default; own branch + auto-push when the repo is the creator's own) or 'deployment' (pull-only)\n" +
             "    folders: {expose: true, consume: true}\n" +
             "    schedules: [{name: daily, cron: '0 9 * * *', message: '...'}]\n" +
+            "    skills: [skill-name]  # optional, additive; also skill_sets: [set-name]\n" +
+            "    gates: {skill-name: {approver: primary, deadline_hours: 24}}  # optional approval map\n" +
+            "    grants: [agents.manage]  # optional; written only for an admin in a signed-in session\n" +
+            "    seat: role-id  # optional canon seat the agent holds; person_seats: [{role, kind}] names no person\n" +
+            "  catalog-entry:\n" +
+            "    template: github:Org/other\n" +
+            "    deploy: false  # optional: named in the system, never created\n" +
             "permissions:\n" +
             "  preset: full-mesh  # or orchestrator-workers, none, explicit"
           ),
@@ -564,6 +571,9 @@ export function createSystemTools(
         + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
         + "remedy says which tag to add (tag_agent). Under `naming: bare` an untagged agent the manifest "
         + "declares is adopted instead (one tag write, listed in `adopted[]`). "
+        + "Per-member skills, skill_sets, gates, grants, seat and person_seats are additive: an "
+        + "absent key or a held extra is reported, never revoked; grants are written only for an "
+        + "admin in a signed-in session. `summary` counts write | report | unobserved per group. "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
         + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
         + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
@@ -575,7 +585,10 @@ export function createSystemTools(
           .describe(
             "The system manifest as a YAML string, in the format deploy_system takes (name, "
             + "description, prompt, agents, permissions). Members are named '{name}-{agent}', or by "
-            + "their agent key under `naming: bare`."
+            + "their agent key under `naming: bare`. Per member, optionally: skills, skill_sets, "
+            + "gates ({skill: {approver, deadline_hours}}), grants, seat (a canon role id), "
+            + "person_seats ([{role, kind}], never a person or an email) and deploy: false (a "
+            + "declared-only member: verdict declared_only, never created or deleted)."
           ),
         dry_run: z
           .boolean()

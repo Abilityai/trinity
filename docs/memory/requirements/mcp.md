@@ -249,6 +249,12 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
 - **Rules**: `get_system_manifest({system_name, naming?})` forwards `naming` (`prefixed` | `bare`, a zod enum, so any other value is refused before a request) as the export route's `?naming=` override and sends no query when it is omitted (the backend infers). Its `system_name` text says membership is by the system tag with a `'{system_name}-*'` fallback, replacing the stale "All agents matching" line (#2373). `deploy_system` and `apply_system` name `naming: bare` in their manifest text; `apply_system` says an untagged declared agent is adopted under it (`adopted[]`). Every systems tool description stays under the 2,048-character cut (#3234).
 - **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
 
+#### 7.7.2 The target-state keys on the systems tools (trinity-enterprise#1030)
+
+- **Status**: ✅ Implemented (text only, no new tool or parameter).
+- **Rules**: `deploy_system`'s manifest text shows `skills` / `skill_sets`, `gates`, `grants` (written only for an admin in a signed-in session), `seat` / `person_seats` (no person) and `deploy: false`. `apply_system`'s description says these keys are additive — an absent key or a held extra is reported, never revoked — that grants need a signed-in admin, and that `summary` counts write | report | unobserved per group; its manifest text lists the keys, says a person seat never carries a person or an email, and names the `declared_only` verdict. Every systems tool description stays under the 2,048-character cut (#3234; `apply_system` is at 1,983).
+- **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
+
 ---
 
 ## 32. A2A Agent Discoverability (#737)

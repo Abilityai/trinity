@@ -117,6 +117,46 @@ permissions:
   preset: orchestrator-workers
 ```
 
+### Target-state keys (apply and deploy)
+
+A manifest can also carry the configuration each member should have, so one file describes the whole system. Every key is optional and per member unless noted. Both **deploy** (create mode) and **apply** (`apply_system`, `POST /api/systems/apply`, which reconciles a live system and previews by default) read them.
+
+```yaml
+name: content-production
+naming: bare                      # top level: optional, default `prefixed`
+agents:
+  content-lead:                   # under `bare` the key is the agent's full name
+    template: github:YourOrg/lead-agent
+    skills: [research, publish]   # library skills
+    skill_sets: [ops-core]        # skill sets
+    gates:                        # approval map: which skills need a person's approval
+      publish: { approver: primary, deadline_hours: 24 }
+    grants: [agents.manage]       # admin grants (capabilities)
+    seat: content-lead            # the canon role this AGENT holds
+    person_seats:                 # seats a PERSON must fill: role and kind only
+      - { role: content-owner, kind: approver }
+  style-guide:
+    template: github:YourOrg/style-guide
+    deploy: false                 # named in the system, never created
+```
+
+| Key | What it does |
+|-----|--------------|
+| `naming` | `prefixed` (default): members are named `<system>-<key>`. `bare`: the key is the full agent name, and apply adopts an existing untagged agent of that name by adding the system tag (listed in `adopted`). |
+| `skills`, `skill_sets` | Assigned when missing. An unknown skill or set is a blocker. |
+| `gates` | `{<skill>: {approver, deadline_hours}}`. Written when missing or different; `approver` is `primary`, `approver`, or `role:<id>`. The preview reports the same refusal the write would give. |
+| `grants` | Capabilities from the admin grant list. **Written only when the caller is an admin in a signed-in session.** Any other caller (an agent key, an admin's own MCP key, a non-admin) gets the grant reported as held back (`grant_requires_interactive_admin`, plus one warning line), and the rest of the manifest still applies. |
+| `seat` | The canon role the agent itself holds. Written only when an installed assignment module provides a seat writer; otherwise reported `seat_unobserved` and nothing is written. |
+| `person_seats` | `[{role, kind}]`, where `kind` is `primary`, `approver`, `collaborator` or `viewer`. **Report-only**: apply says whether each seat is filled, vacant or unobserved and never fills one. A person seat names the role and the kind, **never a person**: an email address anywhere in `seat` or `person_seats` (or an extra key such as `person:`) is refused, because the manifest is meant to be committed to git. |
+| `deploy: false` | A declared-only member. Apply gives it the verdict `declared_only` and reports whether its template is in the catalog and whether an agent already holds its name. That agent is never created, changed or deleted. An explicit permission edge or `folders:` naming a declared-only member is refused; a preset skips it with a warning. |
+
+Rules that hold for every key:
+
+- **An absent key is never a revoke.** Leaving a key out, or omitting an item a member already has, changes nothing. Apply reports what the member holds beyond the manifest (`skill_extra`, `grant_extra`, `gate_undeclared`, …) and never unassigns, revokes or clears it. Removing something is a human act in the agent's own settings.
+- **`summary`** in the apply result counts, per group (`skills`, `grants`, `gates`, `roles`, `members`), what is written, what is only reported, and what is **`unobserved`**. Unobserved means this install has nothing that can answer for that group (each member lists its unobserved groups). It is never shown as "in sync". A failed read is different: it blocks the member with the retryable `member_reads_unavailable`.
+- **Export** writes each member's skills, skill sets, gates, grants and held seat back out, so the file re-applies unchanged. Person seats and declared-only members are not stored on the platform and are not exported. The first lines of every export are `# unobserved:` comments that say so (and name anything that could not be read).
+- The deploy preview shows one line under **Agents to create** that totals what the created agents will be configured with. Anything held back is listed under the notes.
+
 ## Deploy Result (best-effort by default)
 
 Deploy is **best-effort / continue-on-error by default**: if one agent fails to create, the rest still deploy. Read the response `status` field, not just the HTTP code:
@@ -164,6 +204,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | `list_systems()` | List all deployed systems |
 | `restart_system(name)` | Restart all agents in a system (creator role, human callers only — refused for an agent key) |
 | `get_system_manifest(name)` | Export the system as a redeployable YAML manifest |
+| `apply_system(manifest, dry_run?)` | Reconcile a live system to a manifest (previews unless `dry_run` is `false`). Human-only, creator role. Never deletes, revokes or restarts; see [Target-state keys](#target-state-keys-apply-and-deploy) |
 | `teardown_system(system_name, dry_run?, agents?)` | Remove a deployed system's agents. Previews by default (`dry_run` is `true` unless you set it to `false`). Needs a matching entitlement; without it the tool reports that the capability is not available (`404`/`403`) instead of failing |
 
 ### API Endpoints
@@ -171,6 +212,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/systems/deploy` | POST | Deploy a system from a YAML manifest (`dry_run`, `strict` in the body); creator role |
+| `/api/systems/apply` | POST | Reconcile a live system to a manifest (`dry_run` defaults to `true`); creator role, human-only |
 | `/api/systems/manifests` | GET | The bundled manifest catalogue shown under **Pick a system** (creator role) |
 | `/api/systems/manifests/{manifest_id}` | GET | One bundled manifest's YAML and preview (creator role) |
 | `/api/systems` | GET | List all deployed systems |
