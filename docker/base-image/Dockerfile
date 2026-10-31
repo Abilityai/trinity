@@ -237,6 +237,8 @@ COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
 COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
+COPY ./hooks/turn-tier-guard.py /opt/trinity/hooks/turn-tier-guard.py
+COPY ./hooks/file_path_policy.py /opt/trinity/hooks/file_path_policy.py
 # trinity-enterprise#752: the gated-skill hook (bootstrap + decision).
 COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
 COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
@@ -291,9 +293,11 @@ RUN chown -R root:root /etc/claude-code && \
 # everything still in shell form.
 RUN mkdir -p /etc/claude-code/managed-settings.d
 COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
+COPY ./hooks/managed-settings.d/60-turn-tier-guard.json /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
 RUN chown -R root:root /etc/claude-code/managed-settings.d && \
     chmod 0755 /etc/claude-code/managed-settings.d && \
-    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json
+    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json \
+                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
 
 # `~/.claude` still belongs to the agent — Claude Code writes its own state there
 # (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a

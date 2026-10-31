@@ -758,6 +758,13 @@ def _validate_guardrails_payload(body: dict) -> dict:
                 )
         cleaned[field] = value
 
+    # ent#926: may channel and public-link visitors' turns use the shell (and run
+    # on Gemini/Codex)? Read live per turn by turn_tier_service; absent = on.
+    if "visitor_shell" in body:
+        if not isinstance(body["visitor_shell"], bool):
+            raise HTTPException(status_code=400, detail="visitor_shell must be true or false")
+        cleaned["visitor_shell"] = body["visitor_shell"]
+
     return cleaned
 
 

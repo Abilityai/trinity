@@ -809,6 +809,7 @@ ROUTE_TIERS = {
     ("routers/git.py", "get_pull_sync_config"): "accessor: a config flag, no text",
     ("routers/git.py", "set_pull_sync_config"): "owner + person (already ruled)",
     ("routers/fan_out.py", "fan_out"): "dispatch with the caller's own key; the rows it makes carry their id",
+    ("routers/agents.py", "agent_execution_turn_tier"): "the agent's own key only, for its own turn (ent#926 turn-tier route)",
     # whole-agent aggregates, ruled open to share holders (PR #3777 review): counts,
     # rates, cost and durations, no prompt or response text
     ("routers/schedules.py", "get_schedule_analytics"): "accessor: one schedule's run counts and durations, no text (ruled open)",

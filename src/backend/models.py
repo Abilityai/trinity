@@ -500,15 +500,17 @@ class User(BaseModel):
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
-    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
-    # an agent key's fleet reach. Private, never serialized; None until read.
-    _fleet_reach: Optional[set] = PrivateAttr(default=None)
     # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
     # key's request carried (#2392) — the turn the agent is acting in. Private
     # like the reach set: written only by `dependencies.record_acting_turn`, from
     # the request, never from a token, and never serialized. Read by the viewer
     # helpers, which narrow a shared person's turn to that person's rows.
     _acting_execution_id: Optional[str] = PrivateAttr(default=None)
+    # The turn_tier_service answer for it, computed once per request.
+    _acting_turn_cache: Optional[tuple] = PrivateAttr(default=None)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -2595,6 +2597,7 @@ _PULL_ERROR_CODES = frozenset({
     "timeout", "capacity", "auth", "billing", "agent_error", "network",
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
     "model_unsupported",  # #3012 — the agent's model-rejection 400
+    "turn_refused",  # ent#926 — a runtime that cannot scope the turn refused it
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).

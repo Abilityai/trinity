@@ -940,6 +940,10 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)",
         _SIB_OWN_KEY),
+    "routers/agents.py::agent_execution_turn_tier": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+        "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)",
+        _SIB_OWN_KEY),
     "routers/aauth_person.py::request_person_token": (
         "POST /api/agents/{agent_name}/aauth/person-token",
         "a USE of the agent's AAuth identity (trinity-enterprise#878): the handler refuses every principal "

@@ -966,6 +966,10 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
             record_acting_turn(request, principal)
+            # PR #3778 review: for EVERY agent key, header or not — the fence
+            # judges a header-less request by the ledger (`restricted_agent_turn`),
+            # so a curl with the agent's key cannot skip it by omitting the header.
+            _enforce_standing_work_fence(request, principal)
             return principal
 
     # Both JWT and MCP key failed
@@ -2779,6 +2783,10 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     if not (db.can_user_share_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name, manage=True)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    # ent#926: an agent's key resolves to its owner, so an owner check inside a
+    # handler (a force-reset pull) would pass it in a shared person's turn.
+    if restricted_agent_turn(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWNER_TIER_TURN_REFUSED)
 
 
 # ---------------------------------------------------------------------------
@@ -2901,6 +2909,58 @@ def acting_turn_user_id(current_user: User) -> Optional[int]:
         if isinstance(person, int) and person > 0:
             return person
     return NO_ROWS_USER_ID
+
+
+# An agent key acting in a turn the platform restricts (a shared person's, or a
+# visitor's once the owner turned `visitor_shell` off) is refused, at the one
+# auth entry point like the ephemeral and ops fences, on every route the route
+# census rates owner tier, on standing work (schedules and their webhooks and
+# triggers, loops, reminders, events, event subscriptions: work that later runs
+# as the owner), and on an agent-naming route the census has never seen (ent#926
+# ruling 2026-10-19; PR #3778 review: a fixed list of regexes left every other
+# owner-tier route open, because the agent's key resolves to its owner). The
+# table is `services/agent_route_tiers.json`, held to the code by the census test.
+
+STANDING_WORK_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), so it cannot set up work that runs later as the agent's owner: schedules, "
+    "loops, reminders and events. Ask the agent's owner to set it up."
+)
+OWNER_TIER_TURN_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), and this is something only the agent's owner may do. Ask the agent's "
+    "owner to do it."
+)
+
+
+def restricted_agent_turn(principal) -> bool:
+    """Whether `principal` is an agent key acting in a turn the platform rates
+    below the owner (the shell's line: a shared person always, a visitor when
+    the owner turned `visitor_shell` off, an unknown or foreign turn always).
+
+    The turn header can only narrow: a call that omits it (a shell `curl` with
+    the agent's key) or names an owner turn is still restricted while any
+    running turn on the agent is (`running_turn_restricts`, the ledger — the
+    rule the key's reads follow, ent#875). The price is the same as there: while
+    a shared person's turn runs, the owner's concurrent runs are fenced too."""
+    agent = getattr(principal, "agent_name", None)
+    if getattr(principal, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return False
+    from services import turn_tier_service
+    acting = turn_tier_service.acting_turn(db, principal)
+    if acting is not None and turn_tier_service.restricts_standing_work(db, agent, acting[0], acting[1]):
+        return True
+    return turn_tier_service.running_turn_restricts(db, agent)
+
+
+def _enforce_standing_work_fence(request, principal: User) -> None:
+    from services import route_tier_service
+    method = (getattr(request, "method", "") or "").upper()
+    refused = route_tier_service.refused_in_restricted_turn(method, request)
+    if refused is None or not restricted_agent_turn(principal):
+        return
+    detail = STANDING_WORK_REFUSED if refused == "standing_work" else OWNER_TIER_TURN_REFUSED
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
 def agent_viewer_tier(current_user: User, agent_name: str) -> str:

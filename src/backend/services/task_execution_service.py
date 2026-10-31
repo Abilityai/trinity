@@ -3203,6 +3203,10 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 403:
+            # ent#926: the agent refused the turn for who it is for (a runtime
+            # that cannot scope it). A refusal, not an outage or an auth fault.
+            error_code = TaskExecutionErrorCode.TURN_REFUSED
         elif agent_status_code == 422 and is_turn_limit(error_msg):
             # #3988: the turn stopped at its cap. Coded so the caller is told to
             # raise the cap or split the task, not that the agent is down. The

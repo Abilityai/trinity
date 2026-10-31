@@ -157,6 +157,273 @@ def test_the_auth_dependency_records_the_header_for_an_agent_key_only():
     assert "_acting_execution_id" not in key.model_dump()
 
 
+# ---- standing work: a restricted turn cannot set up what later runs as the owner -----------
+# (ruling 2026-10-19). Fired schedule/loop/reminder/event turns rate as owner when the
+# agent's key created them, because that key resolves to the owner.
+
+EXECUTIONS["e-visitor"] = SimpleNamespace(agent_name=AGENT, source_user_id=None, triggered_by="slack")
+
+
+class _Req:
+    def __init__(self, method, path):
+        self.method, self.scope = method, {"path": path}
+
+
+STANDING = [
+    ("POST", "/api/agents/agent-a/schedules"),
+    ("PUT", "/api/agents/agent-a/schedules/s1"),
+    ("POST", "/api/agents/agent-a/schedules/s1/enable"),
+    ("POST", "/api/agents/agent-a/schedules/s1/trigger"),
+    ("POST", "/api/agents/agent-a/schedules/s1/webhook"),
+    ("POST", "/api/agents/agent-a/schedules/s1/webhook/secret"),
+    ("POST", "/api/agents/agent-a/loops"),
+    ("POST", "/api/agents/agent-a/reminders"),
+    ("POST", "/api/events"),
+    ("POST", "/api/agents/agent-a/emit-event"),
+    ("POST", "/api/agents/agent-a/event-subscriptions"),
+    ("PUT", "/api/event-subscriptions/sub-1"),
+]
+
+
+# Creator-gated routes that name no agent and create or act on the owner's agents
+# (PR #3778 review): the key carries the owner's role, so `require_role("creator")`
+# alone let a shared person's turn create an agent cloned with the owner's PAT.
+OWNER_UNNAMED = [
+    ("POST", "/api/agents"),
+    ("POST", "/api/agents/deploy-local"),
+    ("POST", "/api/systems/deploy"),
+    ("POST", "/api/systems/my-system/restart"),
+]
+
+
+@pytest.fixture
+def visitor_shell(monkeypatch):
+    setting = {}
+    monkeypatch.setattr(dep.db, "get_guardrails_config", lambda agent: setting)
+    return setting
+
+
+@pytest.mark.parametrize("method,path", STANDING)
+def test_a_shared_persons_turn_cannot_set_up_standing_work(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403 and "owner" in exc.value.detail
+
+
+@pytest.mark.parametrize("method,path", STANDING)
+def test_the_owners_turn_and_no_turn_may(method, path, visitor_shell):
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+@pytest.mark.parametrize("method,path", OWNER_UNNAMED)
+def test_a_shared_persons_turn_cannot_create_or_deploy_agents(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("method,path", OWNER_UNNAMED)
+def test_the_owners_turn_may_create_and_deploy_agents(method, path, visitor_shell):
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+def test_reading_the_agent_list_is_not_fenced(visitor_shell):
+    dep._enforce_standing_work_fence(_Req("GET", "/api/agents"), _key("e-mate"))
+
+
+def test_a_visitor_may_while_the_owner_allows_it_and_not_after(visitor_shell):
+    req = _Req("POST", "/api/agents/agent-a/reminders")
+    dep._enforce_standing_work_fence(req, _key("e-visitor"))          # default on
+    visitor_shell["visitor_shell"] = False
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-visitor"))
+
+
+@pytest.mark.parametrize("method,path", [
+    ("GET", "/api/agents/agent-a/schedules"),            # reading is not setting up
+    # DELETE /schedules/{id} is fenced now (PR #3778 review): the agent's key carries
+    # the owner's identity, so "removing standing work" deleted the OWNER's schedules.
+    ("POST", "/api/agents/agent-a/schedules/s1/disable"),
+    ("POST", "/api/agents/agent-a/reminders/r1/cancel"),
+    ("POST", "/api/agents/agent-a/task"),                 # dispatch is scoped, not refused
+])
+def test_other_routes_are_not_fenced(method, path, visitor_shell):
+    dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+
+
+def test_a_foreign_execution_id_is_refused_not_trusted(visitor_shell):
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(_Req("POST", "/api/agents/agent-a/loops"), _key("e-other"))
+
+
+# ---- a turn the agent dispatches is no higher than its parent --------------------------------
+
+def test_a_turn_dispatched_for_a_shared_person_carries_that_person():
+    from services import turn_tier_service as t
+    principal = _key("e-mate")
+    USERS[MATE_ID]["email"] = "mate@example.com"
+    assert t.turn_origin_user_id(dep.db, principal) == MATE_ID
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") == "mate@example.com"
+
+
+def test_a_turn_dispatched_for_a_visitor_carries_no_user():
+    from services import turn_tier_service as t
+    principal = _key("e-visitor")
+    assert t.turn_origin_user_id(dep.db, principal) is None
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") is None
+
+
+@pytest.mark.parametrize("run", ["e-owner", "e-sched", "manual", None])
+def test_an_owner_turn_or_no_turn_dispatches_as_before(run):
+    from services import turn_tier_service as t
+    principal = _key(run)
+    assert t.turn_origin_user_id(dep.db, principal) == OWNER_ID
+    assert t.turn_origin_email(dep.db, principal, "owner@example.com") == "owner@example.com"
+
+
+def test_a_child_of_a_visitor_turn_rates_as_a_visitor_not_the_owner():
+    """`self_task` left the owner-configured list: a no-user self-task is a visitor's."""
+    from services import turn_tier_service as t
+    EXECUTIONS["e-child"] = SimpleNamespace(agent_name=AGENT, source_user_id=None, triggered_by="self_task")
+    assert t.turn_actor(dep.db, AGENT, "e-child") == ("share", "visitor", None)
+
+
+def test_no_row_is_stamped_with_the_bare_caller_id():
+    """Every site that stamps a new turn goes through turn_origin_user_id; a new
+    `source_user_id=current_user.id` would let an agent key dispatch as the owner."""
+    import ast
+    from pathlib import Path
+    root = Path(dep.__file__).resolve().parent
+    offenders = []
+    for path in list((root / "services").rglob("*.py")) + list((root / "routers").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.keyword) and node.arg == "source_user_id"
+                    and isinstance(node.value, ast.Attribute) and node.value.attr == "id"
+                    and isinstance(node.value.value, ast.Name) and node.value.value.id == "current_user"):
+                offenders.append(f"{path.relative_to(root)}:{node.value.lineno}")
+    assert offenders == [], f"use turn_tier_service.turn_origin_user_id: {offenders}"
+
+
+# ---- owner-tier routes: refused by default in a restricted turn (PR #3778 review) ---------
+# The standing-work fence was nine regexes, so every other owner-tier route an agent's key
+# could reach (`POST /git/sync`, `/git/reset-to-main-preserve-state`, a force-reset pull)
+# still ran at owner tier in a shared person's turn: the key resolves to the owner. The
+# fence now reads the route census at runtime: an `owner` row, or an agent-naming route
+# with no row at all, is refused for an agent key in a restricted turn unless its row says
+# why it may pass (`restricted_turn`).
+
+import json as _json
+import re as _re
+from pathlib import Path as _Path
+
+_TABLE = _json.loads((_Path(dep.__file__).resolve().parent / "services" / "agent_route_tiers.json").read_text())
+
+
+def _concrete(template):
+    """A request path for a route template: the agent is agent-a, every other param x."""
+    path = _re.sub(r"\{(agent_name|name)\}", AGENT, template)
+    return _re.sub(r"\{[^}]+\}", "x", path)
+
+
+class _RoutedReq:
+    """A request as FastAPI hands it to a dependency: the matched route is in the scope."""
+
+    def __init__(self, method, template):
+        self.method = method
+        self.scope = {"path": _concrete(template), "route": SimpleNamespace(path=template)}
+
+
+# PR #3778 review: `resource` rows are fenced like `owner` rows. A resource gate
+# is creator-or-owner, and the agent's key carries the OWNER's id/username, so in
+# a shared person's turn it passed for every owner-created schedule.
+_FENCED_TIERS = ("owner", "resource")
+OWNER_ROWS = sorted(k for k, r in _TABLE.items()
+                    if r["tier"] in _FENCED_TIERS and r["method"] != "WEBSOCKET" and not r.get("restricted_turn"))
+OPEN_ROWS = sorted(k for k, r in _TABLE.items()
+                   if (r["tier"] not in _FENCED_TIERS or r.get("restricted_turn")) and not r.get("standing_work")
+                   and r["method"] != "WEBSOCKET")
+
+
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/api/agents/agent-a/git/sync"),
+    ("POST", "/api/agents/agent-a/git/reset-to-main-preserve-state"),
+    ("PUT", "/api/agents/agent-a/git/auto-sync"),
+    ("POST", "/api/agents/agent-a/credentials/inject"),
+])
+def test_the_reviewers_owner_tier_routes_are_refused_in_a_shared_persons_turn(method, path, visitor_shell):
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req(method, path), _key("e-mate"))
+    assert exc.value.status_code == 403
+    for run in ("e-owner", "e-sched", "manual", None):
+        dep._enforce_standing_work_fence(_Req(method, path), _key(run))
+
+
+@pytest.mark.parametrize("key", OWNER_ROWS)
+def test_every_owner_tier_route_is_refused_in_a_shared_persons_turn(key, visitor_shell):
+    row = _TABLE[key]
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-mate"))
+    assert exc.value.status_code == 403, key
+    dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-owner"))
+
+
+@pytest.mark.parametrize("key", OPEN_ROWS)
+def test_a_route_a_shared_person_may_use_stays_open_to_the_agent_in_their_turn(key, visitor_shell):
+    row = _TABLE[key]
+    dep._enforce_standing_work_fence(_RoutedReq(row["method"], row["path"]), _key("e-mate"))
+
+
+def test_an_agent_route_the_census_has_never_seen_is_owner_tier(visitor_shell):
+    req = _RoutedReq("POST", "/api/agents/{agent_name}/brand-new-power")
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-mate"))
+    dep._enforce_standing_work_fence(req, _key("e-owner"))
+
+
+def test_a_route_that_names_no_agent_is_not_the_census_s_question(visitor_shell):
+    dep._enforce_standing_work_fence(_RoutedReq("GET", "/api/agents"), _key("e-mate"))
+
+
+def test_a_visitor_reaches_owner_tier_routes_only_while_the_owner_allows_the_shell(visitor_shell):
+    req = _Req("POST", "/api/agents/agent-a/git/sync")
+    dep._enforce_standing_work_fence(req, _key("e-visitor"))
+    visitor_shell["visitor_shell"] = False
+    with pytest.raises(dep.HTTPException):
+        dep._enforce_standing_work_fence(req, _key("e-visitor"))
+
+
+def test_an_owner_check_inside_a_handler_refuses_a_restricted_turn(visitor_shell):
+    """`POST /git/pull` is accessor tier; its `force_reset` is owner tier inside the
+    handler (`assert_agent_owner`), which the agent's key passed as the owner."""
+    with pytest.raises(dep.HTTPException) as exc:
+        dep.assert_agent_owner(_key("e-mate"), AGENT)
+    assert exc.value.status_code == 403
+    for run in ("e-owner", "manual", None):
+        dep.assert_agent_owner(_key(run), AGENT)
+
+
+def test_the_census_ships_with_the_backend():
+    """Read at runtime, so it lives in a directory the backend image copies."""
+    backend = _Path(dep.__file__).resolve().parent
+    dockerfile = (backend.parents[1] / "docker/backend/Dockerfile").read_text()
+    assert "COPY ../../src/backend/services /app/services/" in dockerfile
+    from services import route_tier_service
+    assert route_tier_service.TABLE == _TABLE
+
+
+def test_the_files_surface_rates_an_agent_key_in_a_shared_turn_as_that_share(visitor_shell):
+    """AC3: an agent key is KEY tier on the Files routes, where an `instructions.manage`
+    grant lets it rewrite CLAUDE.md. Acting for a shared person it is that person's tier."""
+    from services.agent_service import files
+    from services import file_path_policy as policy
+    assert files._caller_tier(_key("e-mate"), AGENT) == policy.SHARE
+    assert not policy.decide(files._caller_tier(_key("e-mate"), AGENT), "write", "CLAUDE.md").allowed
+    for run in ("e-owner", "manual", None):
+        assert files._caller_tier(_key(run), AGENT) == policy.KEY
+
+
 # ---- the header is not proof: the ledger decides (PR #3777 review, point 3) ----------------
 
 
@@ -230,3 +497,74 @@ def test_a_schedule_of_another_agent_is_not_this_turns_creator(monkeypatch):
     from services import turn_tier_service as tts
     monkeypatch.setitem(SCHEDULES, "s-mate", SimpleNamespace(agent_name="agent-b", owner_id=OWNER_ID))
     assert tts.turn_tier(dep.db, AGENT, "e-mate-cron") == tts.SHARE
+
+
+
+# --------------------------------------------------------------------------- #
+# PR #3778 second review
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("method,template", [
+    ("DELETE", "/api/agents/{name}/schedules/{schedule_id}"),
+    ("GET", "/api/agents/{name}/schedules/{schedule_id}/webhook"),
+    ("DELETE", "/api/agents/{name}/schedules/{schedule_id}/webhook"),
+    ("DELETE", "/api/agents/{name}/schedules/{schedule_id}/webhook/secret"),
+])
+def test_a_shared_persons_turn_cannot_act_on_the_owners_schedules(method, template, visitor_shell):
+    """Finding 2: these `resource` rows passed their creator-or-owner checks,
+    because the agent's key carries the owner's identity."""
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_RoutedReq(method, template), _key("e-mate"))
+    assert exc.value.status_code == 403
+    dep._enforce_standing_work_fence(_RoutedReq(method, template), _key("e-owner"))
+
+
+def _through_auth(monkeypatch, method, template, headers=None):
+    """The REAL `get_current_user` for the agent's own MCP key — the wiring the
+    first version's test bypassed by calling `restricted_agent_turn` directly."""
+    import asyncio
+    monkeypatch.setattr(dep.db, "validate_mcp_api_key", lambda token: {
+        "key_id": "k-agent", "key_name": "agent key", "user_id": "owner",
+        "user_email": "owner@example.com", "agent_name": AGENT, "scope": "agent"})
+    monkeypatch.setattr(dep.db, "get_user_by_email", lambda e: {
+        "id": OWNER_ID, "username": "owner", "email": e, "role": "creator"})
+    request = SimpleNamespace(
+        method=method, headers=headers or {},
+        scope={"path": _concrete(template), "route": SimpleNamespace(path=template)})
+    return asyncio.run(dep.get_current_user(request=request, token="trinity_mcp_x"))
+
+
+OWNER_ROUTE = ("POST", "/api/agents/{agent_name}/git/sync")
+
+
+@pytest.mark.parametrize("headers", [
+    {},                                         # a shell curl with the agent's key
+    {"X-Trinity-Execution-Id": "manual"},
+    {"X-Trinity-Execution-Id": "e-owner"},      # an owner-tier header widens nothing
+])
+def test_a_key_without_a_restricted_header_is_fenced_while_a_shared_turn_runs(
+        monkeypatch, visitor_shell, headers):
+    """Finding 1: the fence ran only when the request carried a turn header."""
+    _running("e-mate")
+    with pytest.raises(dep.HTTPException) as exc:
+        _through_auth(monkeypatch, *OWNER_ROUTE, headers=headers)
+    assert exc.value.status_code == 403
+
+
+def test_with_no_restricted_turn_running_the_key_reaches_owner_routes(monkeypatch, visitor_shell):
+    _running("e-owner")
+    assert _through_auth(monkeypatch, *OWNER_ROUTE).agent_name == AGENT
+
+
+def test_a_header_naming_the_shared_turn_is_fenced_through_auth(monkeypatch, visitor_shell):
+    _running("e-mate")
+    with pytest.raises(dep.HTTPException):
+        _through_auth(monkeypatch, *OWNER_ROUTE, headers={"X-Trinity-Execution-Id": "e-mate"})
+
+
+def test_an_unreadable_ledger_fails_closed(monkeypatch, visitor_shell):
+    def boom(agent):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(dep.db, "get_running_turn_attribution", boom)
+    with pytest.raises(dep.HTTPException):
+        _through_auth(monkeypatch, *OWNER_ROUTE)

@@ -46,6 +46,7 @@ from models import (
     activity_state_for_terminal,
 )
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from services.activity_service import activity_service
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -217,8 +218,8 @@ async def prepare_chat_execution(
         message=request.message,
         triggered_by=triggered_by,
         fields=TaskExecutionFields(
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -732,6 +733,8 @@ def _classify_agent_http_failure(
         return TaskExecutionErrorCode.NETWORK
     if is_model_rejection(error_msg):
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
+    if agent_status_code == 403:
+        return TaskExecutionErrorCode.TURN_REFUSED
     # #3849: the API refused the prompt's length — a 503 from the agent, but
     # not a credential fault.
     if is_prompt_too_long(error_msg):
@@ -793,6 +796,11 @@ async def _apply_sub003_autoswitch(
     # runtime's own sentence as a 400, the status the agent itself answers.
     if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
         raise ChatDispatchError(400, error_msg, headers=code_headers)
+
+    # ent#926: the agent refused this turn for who it is for. Its own sentence,
+    # as the 403 it is; a 503 would tell every caller to retry a refusal.
+    if code.value == TaskExecutionErrorCode.TURN_REFUSED.value:
+        raise ChatDispatchError(403, error_msg, headers=code_headers)
 
     # Only when the WALK ended the turn: a later, unrelated failure (a plain 500
     # after a served switch) keeps the generic wording below, and the walk's
@@ -1462,8 +1470,8 @@ async def run_pulled_chat_turn(
                 triggered_by=triggered_by,
                 on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),
                 execution_id=task_execution_id,
-                source_user_id=current_user.id,
-                source_user_email=user_email,
+                source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                source_user_email=turn_tier_service.turn_origin_email(db, current_user, user_email),
                 source_agent_name=x_source_agent,
                 source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                 source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2231,8 +2239,8 @@ async def create_task_execution_and_activities(
         message=request.message,
         triggered_by=triggered_by,
         fields=TaskExecutionFields(
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2520,6 +2528,11 @@ def _map_task_failure(name, result, *, idem):
             # #3012: same 400 as the /chat path — a refused model is not an
             # unavailable agent, and a caller must not wait-and-retry it.
             raise ChatDispatchError(400, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.TURN_REFUSED.value
+        ):
+            # ent#926: same 403 as the /chat path — a refusal, never retried.
+            raise ChatDispatchError(403, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,
@@ -2757,8 +2770,8 @@ async def _dispatch_sync_immediate(
         agent_name=name,
         message=request.message,
         triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
+        source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+        source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
         source_agent_name=x_source_agent,
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2946,8 +2959,8 @@ async def dispatch_parallel_task(
                     model=request.model,
                     timeout_seconds=request.timeout_seconds,
                     allowed_tools=request.allowed_tools,
-                    source_user_id=current_user.id,
-                    source_user_email=current_user.email or current_user.username,
+                    source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                    source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
                     source_agent_name=x_source_agent,
                     source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),

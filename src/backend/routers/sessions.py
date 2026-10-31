@@ -27,6 +27,7 @@ from typing import Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import CreateSessionRequest, SessionMessageRequest, User
@@ -412,8 +413,8 @@ async def send_session_message(
             triggered_by="session",
             lock_ttl=lock_ttl,
             on_resume_failure=_on_resume_failure,
-            source_user_id=current_user.id,
-            source_user_email=user_email,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, user_email),
             model=body.model,
             timeout_seconds=body.timeout_seconds,
             subscription_id=session.subscription_id,
