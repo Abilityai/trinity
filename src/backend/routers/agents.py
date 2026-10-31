@@ -479,6 +479,8 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
             "template": None,
             "runtime": "claude-code",
             "base_image_version": None,
+            # trinity-enterprise#1007: no container, no `trinity.kind` label.
+            "kind": None,
             # Signal to the UI that this agent has no container yet —
             # recovered (or otherwise container-less). Drives a
             # "Start to bring online" affordance instead of the normal

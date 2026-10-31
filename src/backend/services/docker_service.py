@@ -83,6 +83,16 @@ def get_agent_runtime(name: str) -> str:
         return "claude-code"
 
 
+def kind_from_labels(labels) -> Optional[str]:
+    """trinity-enterprise#1007: the create-time kind from `trinity.kind`.
+
+    None means unknown — an agent created before the label existed, a container
+    rebuilt by `recreate_missing_container`, the system agent — and is never
+    defaulted to a kind; an unrecognised value reads as None too."""
+    value = (labels or {}).get("trinity.kind")
+    return value if value in ("agent", "deployment") else None
+
+
 def get_agent_status_from_container(container) -> AgentStatus:
     """Convert a Docker container to AgentStatus using container labels."""
     labels = container.labels
@@ -145,6 +155,7 @@ def get_agent_status_from_container(container) -> AgentStatus:
         runtime=runtime,
         base_image_version=base_image_version,
         ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
+        kind=kind_from_labels(labels),  # trinity-enterprise#1007
     )
 
 
@@ -245,6 +256,7 @@ def list_all_agents_fast() -> List[AgentStatus]:
                 runtime=labels.get("trinity.agent-runtime", "claude-code"),
                 base_image_version=labels.get("trinity.base-image-version"),  # Label only, no image lookup
                 ephemeral=labels.get("trinity.ephemeral") == "true",  # trinity-enterprise#69
+                kind=kind_from_labels(labels),  # trinity-enterprise#1007
             )
             agents.append(agent)
 

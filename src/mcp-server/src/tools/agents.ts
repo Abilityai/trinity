@@ -148,7 +148,8 @@ export function createAgentTools(
       name: "get_agent",
       description:
         "Get detailed information about a specific agent by name. " +
-        "Returns the agent's status, port assignments, resource limits, and container ID.",
+        "Returns the agent's status, port assignments, resource limits, and container ID, " +
+        "and its create-time kind ('agent' | 'deployment'; null when unknown — e.g. created before kind was recorded).",
       parameters: z.object({
         name: z.string().describe("The name of the agent to retrieve"),
       }),
@@ -169,7 +170,8 @@ export function createAgentTools(
         "Get full template metadata and capabilities for an agent. " +
         "Returns detailed information from the agent's template.yaml including: " +
         "display name, description, version, author, capabilities, available commands, " +
-        "MCP servers, tools, skills, and example use cases. " +
+        "MCP servers, tools, skills, and example use cases, plus the create-time kind " +
+        "('agent' | 'deployment', null when unknown). " +
         "Useful for understanding what an agent can do before interacting with it. " +
         "Access control: agents can only get info about agents they have permission to call.",
       parameters: z.object({
@@ -273,7 +275,12 @@ export function createAgentTools(
         "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
         "You can create agents from: (1) any GitHub repo using 'github:owner/repo' format (PAT must have access), " +
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
-        "The agent will be started automatically after creation.",
+        "The agent will be started automatically after creation. " +
+        "Fork-to-own (import_intent 'fork' + a fork_to_own block) copies a 'github:owner/repo' template into a new repo " +
+        "you own and creates the agent from that copy, using your saved personal GitHub token (Settings); there is no PAT " +
+        "argument here because tool arguments are audit-logged. With an agent key the backend refuses it with " +
+        "`FORK_PAT_REQUIRED` — an agent cannot spend its owner's token. A template that declares fork_to_own required " +
+        "is refused with `FORK_TO_OWN_REQUIRED` unless the block is present.",
       parameters: z.object({
         name: z
           .string()
@@ -334,15 +341,32 @@ export function createAgentTools(
             "says why. 'deployment': a deployment of a codebase — pull-only, no auto-push."
           ),
         import_intent: z
-          .enum(["copy", "clone"])
+          .enum(["copy", "clone", "fork"])
           .optional()
           .describe(
             "How to import a 'github:owner/repo' template (trinity-enterprise#15). " +
             "'clone' (default when omitted): normal git-synced clone that keeps tracking " +
             "the source repo. 'copy': point-in-time snapshot of the repo contents — no " +
             "git sync and no upstream tie; the response includes an import_snapshot " +
-            "with the source repo and head SHA. 'fork' (copy into a new repo you own) " +
-            "is available only in the web UI."
+            "with the source repo and head SHA. 'fork': copy into a new repo you own " +
+            "(needs the fork_to_own block)."
+          ),
+        fork_to_own: z
+          .object({
+            destination_repo: z
+              .string()
+              .regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9._-]+$/)
+              .refine((v) => !v.includes(".."), "destination_repo must not contain '..'")
+              .describe("New repo to create, as owner/name in your account or org"),
+            private: z
+              .boolean()
+              .optional()
+              .describe("Destination repo visibility (default: private)"),
+          })
+          .optional()
+          .describe(
+            "Fork-to-own (trinity-enterprise#93): copy the 'github:' template into destination_repo " +
+            "first; the agent is created from the copy. Uses your saved personal GitHub token."
           ),
         ephemeral: z
           .object({
@@ -384,7 +408,8 @@ export function createAgentTools(
           custom_instructions?: string;
           source_branch?: string;
           kind?: "agent" | "deployment";
-          import_intent?: "copy" | "clone";
+          import_intent?: "copy" | "clone" | "fork";
+          fork_to_own?: { destination_repo: string; private?: boolean };
           ephemeral?: { max_executions?: number; ttl_seconds?: number };
         },
         context: any
@@ -404,6 +429,7 @@ export function createAgentTools(
           source_branch: args.source_branch,
           kind: args.kind,
           import_intent: args.import_intent,
+          fork_to_own: args.fork_to_own,
           ephemeral: args.ephemeral,
         };
 

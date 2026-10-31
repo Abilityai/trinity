@@ -258,7 +258,8 @@ def saved_token_not_for_agents():
     return _http_error(
         400, "FORK_PAT_REQUIRED",
         "An agent cannot use its owner's saved GitHub token to create a "
-        "repository. Pass fork_to_own.github_pat explicitly.",
+        "repository, and MCP tools never carry a token. Ask the owner to create "
+        "this fork. A direct API call may send its own fork_to_own.github_pat.",
     )
 
 

@@ -1052,10 +1052,11 @@ async def _apply_fork_to_own(
             detail={
                 "error": (
                     f"Template '{config.template}' requires fork-to-own "
-                    f"creation: provide fork_to_own.destination_repo (and "
-                    f"fork_to_own.github_pat, unless your personal GitHub "
-                    f"token is saved in Settings) so the agent's repo is your "
-                    f"own, not the shared template."
+                    f"creation: provide fork_to_own.destination_repo so the "
+                    f"agent's repo is your own, not the shared template. The "
+                    f"fork uses your personal GitHub token saved in Settings. "
+                    f"MCP tools never carry a token; a direct API call may "
+                    f"send its own fork_to_own.github_pat."
                 ),
                 "code": "FORK_TO_OWN_REQUIRED",
             },
@@ -2526,7 +2527,10 @@ async def _create_agent_container(
         'trinity.template': config.template or '',
         'trinity.agent-runtime': config.runtime or 'claude-code',
         'trinity.full-capabilities': str(full_capabilities).lower(),
-        'trinity.base-image-version': get_platform_version()
+        'trinity.base-image-version': get_platform_version(),
+        # trinity-enterprise#1007: the effective create-time kind (#705), read
+        # back on AgentStatus.kind and /info. Nothing else persists it.
+        'trinity.kind': config.kind or 'agent',
     }
     if config.import_intent:
         # trinity-enterprise#15: ops-visible import provenance (a copy agent
