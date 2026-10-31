@@ -22,15 +22,15 @@ Polling cycle:
 # A name `__init__` stops reading keeps its line with a per-line F401 waiver
 # (`noqa: F401`) that says which of the two keeps it, so F401 still checks
 # every other import here.
-import asyncio
-import base64
+import asyncio  # noqa: F401 — kept for G13 (poller imports it)
+import base64  # noqa: F401 — kept for G13 (listing imports it)
 import hashlib
 import json
 import logging
 import os
 import re
 import time
-import uuid
+import uuid  # noqa: F401 — kept for G13 (listing and poller import it)
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence, Tuple
 
@@ -1315,7 +1315,7 @@ async def _maybe_emit_alert_budget_episode(
 
 # #3785: the package's own submodules, imported after the names they read
 # from `__init__` (test_3785's G6 and G13).
-from . import listing  # noqa: E402
+from . import listing  # noqa: E402,F401 — loads the submodule here, in G6 order
 
 # #3785: the poller core (instance state, start/stop, the leader lease, the
 # loop and the cycle) lives in `poller.PollerCoreMixin`. Imported after every
