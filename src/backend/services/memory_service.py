@@ -309,11 +309,14 @@ def _rank(query_vec, ids, texts, matrix, *, k: int, min_score: float, records=No
 
 
 def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: Optional[int],
-                 execution_id: Optional[str] = None, op: str = "recall") -> List[Dict[str, Any]]:
+                 execution_id: Optional[str] = None, op: str = "recall",
+                 actor: Optional[str] = None) -> List[Dict[str, Any]]:
     """The ranked facts for ``query`` in one scope. ``max_chars`` bounds the
     prompt block (None = unbounded, the search door); ``op`` is the journal row
     each hit leaves — a ``search`` row also carries the query, so the owner can
-    see what was looked up."""
+    see what was looked up, and a search that matched nothing still leaves ONE
+    row (no ``fact_id``): every search is recorded. ``actor`` is the person
+    behind an owner-door search, so the journal says who looked."""
     vectors = memory_embeddings.embed([query[:QUERY_CLAMP]])
     if not vectors:
         return []
@@ -330,19 +333,21 @@ def _recall_sync(agent_name: str, scope: str, query: str, *, k: int, max_chars: 
         picked.append(record)
         if budget is not None:
             budget -= len(ranked.text)
-    if picked:
+    if picked or op == "search":
         try:
             # An owner typing in the search box (no execution behind it) is
             # looking, not using: the recall counter feeds the cap-prune order,
             # so bumping it would shelter whatever the owner searched for.
-            if execution_id is not None or op != "search":
+            if picked and (execution_id is not None or op != "search"):
                 db.mark_memory_facts_recalled([r["id"] for r in picked], agent_name=agent_name)
             looked_up = sanitize_text(query)[:FACT_CLAMP] if op == "search" else None
-            db.insert_memory_fact_events([
+            rows = [
                 {"agent_name": agent_name, "user_email": scope, "fact_id": r["id"], "op": op,
-                 "execution_id": execution_id, "score": r["relevance"], "candidate_text": looked_up}
+                 "execution_id": execution_id, "score": r["relevance"], "candidate_text": looked_up, "actor": actor}
                 for r in picked
-            ])
+            ] or [{"agent_name": agent_name, "user_email": scope, "fact_id": None, "op": op,
+                   "execution_id": execution_id, "candidate_text": looked_up, "actor": actor}]
+            db.insert_memory_fact_events(rows)
         except Exception as e:  # noqa: BLE001 — counters and the journal are bookkeeping, never a failure
             logger.debug("[memory] recall bookkeeping not written: %s", e)
     return picked
@@ -375,20 +380,21 @@ class MemorySearchError(RuntimeError):
 
 async def search_records(
     agent_name: str, user_email: Optional[str], query: Optional[str], *,
-    k: int = 10, execution_id: Optional[str] = None,
+    k: int = 10, execution_id: Optional[str] = None, actor: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """The search door (trinity-enterprise#1028): ``recall_records`` without
     the prompt-block budget and past the recall tail (``k`` ≤ ``SEARCH_K_MAX``),
-    each record also carrying ``line`` (the rendered prompt form), each hit
-    journaled as a ``search`` row with the query. ``[]`` when off, unavailable,
-    empty or on any error."""
+    each record also carrying ``line`` (the rendered prompt form), every search
+    journaled as ``search`` rows with the query — one per hit, or one with no
+    fact when nothing matched. ``actor`` names the person behind an owner-door
+    search. ``[]`` when off, empty or (before the gates) unavailable."""
     if not query or not str(query).strip() or not is_enabled(agent_name):
         return []
     k = max(1, min(int(k), SEARCH_K_MAX))
     try:
         scope = await asyncio.to_thread(scope_for, agent_name, user_email)
         records = await asyncio.to_thread(_recall_sync, agent_name, scope, str(query), k=k, max_chars=None,
-                                          execution_id=execution_id, op="search")
+                                          execution_id=execution_id, op="search", actor=actor)
     except Exception as e:  # noqa: BLE001
         # Recall stays fail-open (never a 500 on the agent's turn); a search is
         # answered to its caller, so a broken embedder or store is a named

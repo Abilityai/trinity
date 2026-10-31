@@ -37,6 +37,7 @@ from dependencies import (
     require_person,
 )
 from db.memory_facts import EVENT_OPS
+from models import TaskExecutionStatus
 from models import (
     MemoryFactEventOut,
     MemoryFactOut,
@@ -202,7 +203,13 @@ def _memory_on_or_4xx(agent_name: str) -> None:
         })
     platform = memory_service.status()
     if not platform["available"]:
-        raise HTTPException(status_code=503, detail={"code": "memory_unavailable", "message": platform["reason"] or "embedding model not loaded"})
+        # The loader's own text (a path, a library's error) is for the log and
+        # the Settings card, never for the caller (Product Quality Bar 10).
+        logger.info("[memory] search refused for %s: embedder unavailable (%s)", agent_name, platform.get("reason") or "not loaded")
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Retrieval memory is on but its embedding model is not loaded. Try again shortly; the Settings → General → Retrieval memory card says why.",
+        })
 
 
 def _hit(record: dict) -> MemorySearchHit:
@@ -234,7 +241,7 @@ async def search_retrieval_memory_endpoint(
             raise HTTPException(status_code=422, detail={"code": "invalid_email", "message": "user_email is not an email address"})
     _memory_on_or_4xx(agent_name)
     try:
-        records = await memory_service.search_records(agent_name, email, query, k=k)
+        records = await memory_service.search_records(agent_name, email, query, k=k, actor=current_user.email)
     except memory_service.MemorySearchError:
         raise HTTPException(status_code=503, detail={
             "code": "memory_unavailable",
@@ -273,6 +280,17 @@ async def search_retrieval_memory_agent_endpoint(
         raise HTTPException(status_code=404, detail="Execution not found")
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
+    # The door serves the turn the agent is IN. Nothing proves which turn a
+    # request comes from (ent#926: the header is a claim, the ledger is the
+    # fact), so the named run must be live — a finished run of another person
+    # read that person's scope while `GET /executions/{id}` refused it — and no
+    # other live turn on this agent may resolve to a different scope; while two
+    # do, the door fails closed, as the execution reads do.
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_not_live",
+            "message": "That run has finished. Search memory with the execution_id of the turn you are in.",
+        })
     subject = memory_subject.resolve(execution)
     if subject.kind == memory_subject.SKIP:
         raise HTTPException(status_code=422, detail={
@@ -280,6 +298,13 @@ async def search_retrieval_memory_agent_endpoint(
             "message": ("This run serves no one whose memory can be searched: an anonymous public turn, a group "
                         f"conversation, or a '{subject.triggered_by}' trigger. Memory is searched on a person's "
                         "verified turn or on the agent's own headless runs."),
+        })
+    scope = await asyncio.to_thread(memory_service.scope_for, agent_name, subject.user_email)
+    if await asyncio.to_thread(_another_live_scope, agent_name, execution.id, scope):
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_ambiguous",
+            "message": ("Another turn for someone else is running on this agent right now, so whose memory this "
+                        "search is for cannot be told apart. Try again once that turn ends."),
         })
     _memory_on_or_4xx(agent_name)
     try:
@@ -290,5 +315,26 @@ async def search_retrieval_memory_agent_endpoint(
             "code": "memory_unavailable",
             "message": "Memory search could not be answered — the embedder or the store did not respond. Try again; if it persists, check Settings → General → Retrieval memory.",
         })
-    return MemorySearchResponse(agent_name=agent_name, scope="person" if subject.is_person else "agent",
+    return MemorySearchResponse(agent_name=agent_name, scope="agent" if scope == memory_service.AGENT_SCOPE else "person",
                                 hits=[_hit(r) for r in records])
+
+
+def _another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution_id`` resolves
+    to a scope other than ``scope``. Read from the ledger (only ``running`` rows,
+    never a request); a ledger that cannot be read counts as ambiguous."""
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution_id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is None:
+                continue
+            other_subject = memory_subject.resolve(other)
+            other_scope = memory_service.scope_for(agent_name, other_subject.user_email) if other_subject.kind != memory_subject.SKIP else None
+            if other_scope != scope:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[memory] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True

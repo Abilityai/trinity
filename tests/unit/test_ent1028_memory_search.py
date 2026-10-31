@@ -89,10 +89,13 @@ def own(agent):
     return person(agent, mcp_scope="agent", agent_name=agent.name)
 
 
-def execution(agent_name, *, triggered_by, source_user_email=None, message="hello"):
+def execution(agent_name, *, triggered_by, source_user_email=None, message="hello", finished=False):
+    """A run of ``agent_name``. Live (``running``) by default — the agent door
+    serves the turn the agent is in; ``finished=True`` is the row it refuses."""
     ex = db.create_task_execution(agent_name, message, triggered_by,
                                   fields=TaskExecutionFields(source_user_email=source_user_email))
-    db.update_execution_status(ex.id, "success", ExecutionResult(response="done"))
+    if finished:
+        db.update_execution_status(ex.id, "success", ExecutionResult(response="done"))
     return ex.id
 
 
@@ -266,11 +269,82 @@ class TestAgentSearchRoute:
         with pytest.raises(HTTPException) as err:
             self._call(agent, MemorySearchRequest(execution_id=anonymous, query="   "), own(agent))
         assert err.value.status_code == 422 and err.value.detail["code"] == "query_empty"
+        # A live anonymous turn beside the headless run is ambiguous (its visitor
+        # could read the agent scope through it); end it before the next refusal.
+        db.update_execution_status(anonymous, "success", ExecutionResult(response="done"))
         db.set_setting(ms.SETTING_ENABLED, "false")
         headless = execution(agent.name, triggered_by="schedule")
         with pytest.raises(HTTPException) as err:
             self._call(agent, MemorySearchRequest(execution_id=headless, query="deploy"), own(agent))
         assert err.value.status_code == 422 and err.value.detail["code"] == "memory_off"
+
+    def test_a_finished_run_cannot_be_named(self, agent, memory_on):
+        """The leak the merge-train found on this PR: an agent key, during a turn
+        for whoever it is shared with, named another person's FINISHED run and
+        read that person's scope — the read `GET /executions/{id}` refuses it
+        (ent#926). The door serves the turn the agent is in, so only a live run
+        can be named; a finished one is refused by name, whoever it served."""
+        seed(agent, "Prefers invoices as PDF", scope="ann@example.com")
+        finished = execution(agent.name, triggered_by="public", source_user_email="ann@example.com", finished=True)
+        with pytest.raises(HTTPException) as err:
+            self._call(agent, MemorySearchRequest(execution_id=finished, query="invoices PDF"), own(agent))
+        assert err.value.status_code == 422 and err.value.detail["code"] == "memory_turn_not_live"
+        assert db.list_memory_fact_events(agent.name, execution_id=finished, op="search", limit=10) == []
+
+    def test_a_live_run_beside_another_persons_live_turn_is_refused(self, agent, memory_on):
+        """Nothing proves which live turn a request comes from, so while two live
+        turns on the agent resolve to different scopes the door fails closed
+        (the ent#926 ledger rule). Two headless runs share one scope and pass."""
+        seed(agent, "Prefers invoices as PDF", scope="ann@example.com")
+        seed(agent, "Invoices as PDF are archived yearly")
+        ann = execution(agent.name, triggered_by="public", source_user_email="ann@example.com")
+        bob = execution(agent.name, triggered_by="public", source_user_email="bob@example.com")
+        for named in (ann, bob):
+            with pytest.raises(HTTPException) as err:
+                self._call(agent, MemorySearchRequest(execution_id=named, query="invoices PDF"), own(agent))
+            assert err.value.status_code == 422 and err.value.detail["code"] == "memory_turn_ambiguous"
+        db.update_execution_status(bob, "success", ExecutionResult(response="done"))
+        out = self._call(agent, MemorySearchRequest(execution_id=ann, query="invoices PDF"), own(agent))
+        assert [h.text for h in out.hits] == ["Prefers invoices as PDF"]
+        db.update_execution_status(ann, "success", ExecutionResult(response="done"))
+        first = execution(agent.name, triggered_by="schedule")
+        execution(agent.name, triggered_by="mcp")
+        out = self._call(agent, MemorySearchRequest(execution_id=first, query="invoices PDF"), own(agent))
+        assert out.scope == "agent" and [h.text for h in out.hits] == ["Invoices as PDF are archived yearly"]
+
+    def test_the_owners_own_turn_reports_the_agent_scope(self, agent, memory_on):
+        """`scope_for` folds the owner's turns into the agent scope; the answer
+        says which scope answered, so it says `agent`, not `person`."""
+        seed(agent, "Invoices as PDF are archived yearly")
+        mine = execution(agent.name, triggered_by="public", source_user_email=agent.owner_email)
+        out = self._call(agent, MemorySearchRequest(execution_id=mine, query="invoices PDF"), own(agent))
+        assert out.scope == "agent" and len(out.hits) == 1
+
+    def test_a_search_with_no_hits_is_still_journaled(self, agent, memory_on):
+        """Acceptance criterion: EVERY search is recorded — a fishing search that
+        matched nothing is the one the owner most wants to see."""
+        exec_id = execution(agent.name, triggered_by="schedule")
+        out = self._call(agent, MemorySearchRequest(execution_id=exec_id, query="nothing stored about this"), own(agent))
+        assert out.hits == []
+        rows = db.list_memory_fact_events(agent.name, execution_id=exec_id, op="search", limit=10)
+        assert len(rows) == 1 and rows[0]["fact_id"] is None
+        assert rows[0]["candidate_text"] == "nothing stored about this"
+        owner_rows = run(ms.search_records(agent.name, "ann@example.com", "nothing either", k=5, actor=agent.owner_email))
+        assert owner_rows == []
+        journal = db.list_memory_fact_events(agent.name, op="search", limit=10)
+        mine = [r for r in journal if r["candidate_text"] == "nothing either"]
+        assert len(mine) == 1 and mine[0]["user_email"] == "ann@example.com" and mine[0]["actor"] == agent.owner_email
+
+    def test_an_embedder_fault_never_reaches_the_caller_verbatim(self, agent, memory_on, monkeypatch):
+        """Bar 10: the 503 names the condition; the loader's own text (a path, a
+        library's error) is for the log and the Settings card, not the agent."""
+        monkeypatch.setattr(ms, "status", lambda: {"enabled": True, "available": False,
+                                                   "reason": "could not load /home/dev/.cache/secret-path boom"})
+        exec_id = execution(agent.name, triggered_by="schedule")
+        with pytest.raises(HTTPException) as err:
+            self._call(agent, MemorySearchRequest(execution_id=exec_id, query="deploy"), own(agent))
+        assert err.value.status_code == 503 and err.value.detail["code"] == "memory_unavailable"
+        assert "secret-path" not in err.value.detail["message"]
 
     def test_k_is_capped_by_the_model(self):
         with pytest.raises(Exception):
