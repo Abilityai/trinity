@@ -61,7 +61,17 @@ _REASON_MAX_LEN = 500
 _KNOWN_MANIFEST_KEYS = frozenset({
     "name", "description", "prompt", "agents", "permissions",
     "default_tags", "system_view",
+    "naming",  # trinity-enterprise#1030
 })
+
+# trinity-enterprise#1030: keys read but left out of the unknown-key warning's
+# "Recognized keys are:" list, because that text is create-mode output pinned
+# byte-for-byte by `test_ent695_create_mode_golden.py` (AC6 of ent#695). The
+# key is recognised all the same: it is never an unknown key.
+_UNLISTED_MANIFEST_KEYS = frozenset({"naming"})
+
+# trinity-enterprise#1030: the values `naming:` may take. `prefixed` is today.
+MANIFEST_NAMING_MODES = ("prefixed", "bare")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -201,8 +211,14 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
                 shared=sv_data.get("shared", True)
             )
 
+    # trinity-enterprise#1030: absent is `prefixed` (today). Any present value
+    # is carried as text so `validate_manifest` names the refusal — YAML reads
+    # `naming: yes` as a boolean and `naming: 1` as an int.
+    naming = data["naming"] if "naming" in data else "prefixed"
+
     return SystemManifest(
         name=data["name"],
+        naming=naming if isinstance(naming, str) else str(naming),
         description=data.get("description"),
         prompt=data.get("prompt"),
         agents=agents,
@@ -242,6 +258,14 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
         raise ValueError(
             f"Invalid system name '{manifest.name}': must be 1-50 chars, "
             "lowercase alphanumeric and hyphens, start/end with alphanumeric"
+        )
+
+    # trinity-enterprise#1030: under `bare` a key is the agent's full name. The
+    # agent-name rule below already holds for both modes, and a key equal to
+    # the system name is allowed (an agent may be named like its system).
+    if manifest.naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{manifest.naming}': naming must be 'prefixed' or 'bare'"
         )
 
     # Validate agent names
@@ -363,7 +387,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             "Ignored unknown top-level key(s): "
             f"{', '.join(manifest.unknown_keys)}. "
             "Recognized keys are: "
-            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS))}."
+            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS - _UNLISTED_MANIFEST_KEYS))}."
         )
 
     return warnings
@@ -394,9 +418,30 @@ def get_next_agent_name(base_name: str) -> str:
     return f"{base_name}_{n}"
 
 
+def _member_name(system_name: str, short: str, naming: str = "prefixed") -> str:
+    """THE one rule for a member's agent name (trinity-enterprise#1030).
+
+    `prefixed` (today): `<system>-<short>`. `bare`: the manifest key IS the
+    name. Every site that names a member calls this — three f-string copies of
+    one rule is how #2373 became a bug in three places.
+    """
+    return short if naming == "bare" else f"{system_name}-{short}"
+
+
+def member_name(manifest: SystemManifest, short: str) -> str:
+    """The agent name of manifest key `short`, under the manifest's `naming`."""
+    return _member_name(manifest.name, short, manifest.naming)
+
+
+def declared_names(manifest: SystemManifest) -> Dict[str, str]:
+    """{short: agent name} for every declared member, in manifest order."""
+    return {short: member_name(manifest, short) for short in manifest.agents}
+
+
 def resolve_agent_names(
     system_name: str,
-    agents: Dict[str, SystemAgentConfig]
+    agents: Dict[str, SystemAgentConfig],
+    naming: str = "prefixed",
 ) -> Tuple[Dict[str, str], List[str]]:
     """
     Resolve short agent names to final names, handling conflicts.
@@ -404,6 +449,8 @@ def resolve_agent_names(
     Args:
         system_name: The system name prefix
         agents: Dict of short_name -> agent config
+        naming: `prefixed` (today) or `bare` (trinity-enterprise#1030); a
+            taken name is `_N`-suffixed under both, as create mode always has
 
     Returns:
         Tuple of (name_mapping, warnings)
@@ -414,7 +461,7 @@ def resolve_agent_names(
     warnings = []
 
     for short_name in agents.keys():
-        base_name = f"{system_name}-{short_name}"
+        base_name = _member_name(system_name, short_name, naming)
         final_name = get_next_agent_name(base_name)
         name_mapping[short_name] = final_name
 
@@ -1560,7 +1607,7 @@ def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Op
             (
                 short,
                 _preflight_template(
-                    f"{manifest.name}-{short}", short, cfg.template, cfg.resources
+                    member_name(manifest, short), short, cfg.template, cfg.resources
                 ),
             )
             for short, cfg in manifest.agents.items()
@@ -1601,7 +1648,7 @@ def _summarize_manifest(path: Path, yaml_text: str) -> BundledManifestSummary:
     )
     try:
         summary.already_deployed = any(
-            agent_exists(f"{manifest.name}-{short}") for short in manifest.agents
+            agent_exists(name) for name in declared_names(manifest).values()
         )
     except Exception:  # noqa: BLE001 — a DB hiccup must not blank the catalog
         logger.warning(
@@ -1842,7 +1889,8 @@ async def deploy_manifest(
         # 3. Resolve agent names (handle conflicts)
         agent_names, name_warnings = resolve_agent_names(
             manifest.name,
-            manifest.agents
+            manifest.agents,
+            naming=manifest.naming,
         )
         all_warnings = validation_warnings + name_warnings
 
@@ -2429,7 +2477,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             ))
 
     # 2. Membership through THE one predicate, and the evidence gate (AC5).
-    declared = {short: f"{system}-{short}" for short in manifest.agents}
+    declared = declared_names(manifest)
     if roster_ok:
         snapshot.membership = system_membership(system, snapshot.roster)
         if not snapshot.membership.tags_readable:
@@ -2557,11 +2605,11 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     # not, matched by name only. Before any write, and before the lock.
     if roster_ok and snapshot.membership.tags_readable:
         unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
-        declared_names = set(declared.values())
+        declared_set = set(declared.values())
         for member in snapshot.membership.members:
             if snapshot.membership.evidence.get(member) != "prefix" or member in unavailable:
                 continue
-            is_declared = member in declared_names
+            is_declared = member in declared_set
             blockers.append(_apply_blocker(
                 "membership_evidence_prefix_only", member,
                 f"'{member}' is matched to '{system}' by its name only; no deploy "
@@ -2753,6 +2801,7 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
     "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
     "SystemManifest.system_view": ("reconciled", "created when absent; differences reported"),
+    "SystemManifest.naming": ("reconciled", "how a short name maps to a member name; prefixed is today"),
     "SystemManifest.unknown_keys": ("report-only", "warnings from validate_manifest"),
     "SystemManifest.unknown_agent_keys": ("report-only", "warnings from validate_manifest"),
     "SystemAgentConfig.template": ("report-only", "template_differs; used to create"),
@@ -3183,7 +3232,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     are reports is `unchanged`: AC1 counts writes.
     """
     system = manifest.name
-    agent_names = {short: f"{system}-{short}" for short in manifest.agents}
+    agent_names = declared_names(manifest)
     declared_final = set(agent_names.values())
     blockers: List[SystemApplyBlocker] = list(snapshot.blockers)
     desired_edges = _desired_edges(agent_names, manifest.permissions)

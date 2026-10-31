@@ -1332,6 +1332,11 @@ class SystemManifest(BaseModel):
     # ORG-001 Phase 4: Tags and System View support
     default_tags: Optional[List[str]] = None  # Applied to all agents in manifest
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
+    # trinity-enterprise#1030: how a manifest key maps to a member name.
+    # `prefixed` (today) names member `x` of system `s` `s-x`; `bare` names it
+    # `x`. A plain `str`, not a Literal, so `validate_manifest` can refuse any
+    # other value with a NAMED 400 rather than a raw Pydantic dump.
+    naming: str = "prefixed"
     # ent#126: top-level keys the parser does not recognise, recorded so
     # `validate_manifest` can WARN about them. Silently dropping them is how
     # `trinity_prompt:` (a typo for `prompt:`) sat in a shipped manifest doing

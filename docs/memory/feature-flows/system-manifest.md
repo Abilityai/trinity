@@ -478,6 +478,8 @@ resolve_agent_names("my-system", {"worker": ...})
 #          ["Agent 'my-system-worker' already exists, will create 'my-system-worker_2'"])
 ```
 
+**Naming (trinity-enterprise#1030)**: `resolve_agent_names(system_name, agents, naming=)` names each member through `_member_name` — the one rule (`member_name(manifest, short)` / `declared_names(manifest)` are the manifest-level entry points that apply's snapshot and plan and the bundled catalog call). `naming: bare` makes the key the full name (`regent`, not `my-system-regent`); the `_N` suffix on a taken name is unchanged in both modes.
+
 #### configure_permissions() (Lines 215-293)
 ```python
 async def configure_permissions(
