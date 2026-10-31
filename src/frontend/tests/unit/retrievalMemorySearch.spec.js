@@ -86,6 +86,28 @@ describe('RetrievalMemorySearch (agent settings → Memory)', () => {
     expect(w.find('[data-testid="retrieval-memory-search-empty"]').exists()).toBe(false)
   })
 
+  it('a first search that fails shows the error alone, never "0 facts" beside it', async () => {
+    api.get.mockRejectedValueOnce({ response: { data: { detail: { code: 'memory_off', message: 'Retrieval memory is off for this agent.' } } } })
+    const w = mount(RetrievalMemorySearch, { props: { agentName: 'analyst' } })
+    await search(w, 'invoices')
+    expect(w.get('[data-testid="retrieval-memory-search-error"]').text()).toContain('Retrieval memory is off')
+    expect(w.text()).not.toContain('0 facts')
+    expect(w.find('[data-testid="retrieval-memory-search-empty"]').exists()).toBe(false)
+    expect(w.find('[data-testid="retrieval-memory-search-idle"]').exists()).toBe(false)
+  })
+
+  it('switching to another agent clears the query, the hits and the error', async () => {
+    api.get.mockResolvedValueOnce({ data: HITS })
+    const w = mount(RetrievalMemorySearch, { props: { agentName: 'analyst' } })
+    await search(w, 'bullets')
+    expect(w.findAll('[data-testid="retrieval-memory-search-hit"]')).toHaveLength(2)
+    await w.setProps({ agentName: 'scribe' })
+    expect(w.findAll('[data-testid="retrieval-memory-search-hit"]')).toHaveLength(0)
+    expect(w.find('[data-testid="retrieval-memory-search-idle"]').exists()).toBe(true)
+    expect(w.get('[data-testid="retrieval-memory-search-input"]').element.value).toBe('')
+    expect(api.get).toHaveBeenCalledTimes(1)
+  })
+
   it('a blank query does not call the API', async () => {
     const w = mount(RetrievalMemorySearch, { props: { agentName: 'analyst' } })
     await search(w, '   ')

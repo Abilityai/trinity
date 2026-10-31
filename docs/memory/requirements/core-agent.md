@@ -2097,7 +2097,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   (person-only, scope by email), the agent through MCP `search_memory` →
   `POST …/retrieval-memory/search`, the scope read off the execution it names
   by the whose-memory rule (a person's turn → their scope; a headless run → the
-  agent scope; anonymous / group → refused with the reason), an agent key only
+  agent scope; anonymous / group → refused with the reason) — a run that must be
+  the agent's live turn and the only live scope on the agent (a finished run or
+  a concurrent other-scope turn is refused by name), an agent key only
   for its own agent and no human at all (403 `agent_only` — a shared-with user
   must not read a person's scope by naming their run; the owner has the GET door). Up to 50 hits, each with the rendered line, relevance and
   score; every hit journaled as a `search` row carrying the query. Off or

@@ -79,6 +79,10 @@
         Nothing matched. Try other words, or a name or date you expect to be remembered.
       </p>
 
+      <!-- A first search that failed: the InlineError above says what went
+           wrong; the region keeps its footprint and claims no count. -->
+      <div v-else-if="view.state === 'failed'" data-testid="retrieval-memory-search-failed" aria-hidden="true" />
+
       <template v-else>
         <p class="mb-2 text-[12.5px] text-gray-600 dark:text-gray-400 tabular-nums">
           {{ hits.length }} fact{{ hits.length === 1 ? '' : 's' }} · most relevant first
@@ -110,7 +114,7 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import api from '../../api'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
@@ -137,6 +141,17 @@ const error = ref('')
 const view = computed(() => {
   if (!hasSearched.value) return { state: 'idle', stale: false }
   return viewState({ loading: inFlight.value, hasLoaded: hasLoaded.value, error: error.value, count: hits.value.length })
+})
+
+// AgentDetail keeps this instance across agents (no :key, KeepAlive), so a
+// switch starts over: another agent's hits must never sit under this one's name.
+watch(() => props.agentName, () => {
+  query.value = ''
+  hits.value = []
+  inFlight.value = false
+  hasSearched.value = false
+  hasLoaded.value = false
+  error.value = ''
 })
 
 function meta(hit) {

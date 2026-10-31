@@ -143,14 +143,26 @@ ranking is also a door the agent and the owner can open by hand.
 `memory_service.search_records(agent_name, user_email, query, k, execution_id)`
 is `recall_records` without the prompt-block budget and past the recall tail
 (`k ≤ SEARCH_K_MAX = 50`), each record also carrying `line` — the rendered
-`(date, kind of run) text` — and each hit journaled as a `search` row whose
-`candidate_text` is the query, so the owner can see what an agent looked up.
+`(date, kind of run) text` — and every search journaled as `search` rows whose
+`candidate_text` is the query (one per hit, or one with no `fact_id` when nothing
+matched — a fishing search is the one the owner most wants to see; an owner-door
+row also carries the `actor`), so the owner can see what was looked up.
 The agent door (`POST …/retrieval-memory/search`, MCP `search_memory`) never
 takes a person from the caller: the scope is `memory_subject.resolve` over the
 execution row the agent names — the served person's scope on a person turn, the
 agent scope on a headless run, a 422 `memory_no_subject` with the reason for an
 anonymous or group turn — and an agent-scoped key may only search its own agent,
-checked first (ent#840). **It is agents-only** (operator ruling on PR #4114, 403
+checked first (ent#840). **The named run must be the turn the agent is in.**
+Nothing proves which turn a request comes from (ent#926: the header is a claim,
+the ledger is the fact), so the row must be `running` — a finished run of another
+person read that person's scope while `GET /executions/{id}` refused it (the
+merge-train finding on PR #4114) — and no other live turn on the agent may
+resolve to a different scope; while two do, 422 `memory_turn_ambiguous`, as the
+execution reads fail closed. A finished run is 422 `memory_turn_not_live`. The
+two read sites are declared in `test_ent875_exec_control_routes.READ_SITES`
+with that rule as their reason. The answer's `scope` is the scope that answered
+(`agent` for the owner's own turn, which `scope_for` folds in). The 503 for a
+missing embedder names the condition, never the loader's text (Bar 10). **It is agents-only** (operator ruling on PR #4114, 403
 `agent_only` for any human, the owner included): a human has the owner door,
 which takes the scope explicitly and holds the owner line, and letting a human
 in here would let anyone the agent is merely shared with read any person's
