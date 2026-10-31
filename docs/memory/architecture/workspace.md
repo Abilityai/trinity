@@ -97,7 +97,12 @@ source guard says so, because the first cut of this fix guarded `auth.js` alone 
 the tab (the merge-train review's C1); the two sync actions and `logout()` delete it as a
 belt. The reaction itself (`reactToPlatformUnauthorized`), the storage listener
 (`reactToStorageEvent`) and the request rebuild (`applyRequestCredential`) are functions
-of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. The
+of their collaborators, executed by unit tests with fakes — `main.js` is wiring only. A
+`logout` verdict sends the page it happened on as `/login?redirect=` (`loginLocation`,
+#3444) — on the Workspace too, so an operator whose token died mid-chat comes back to the
+chat; a session ended in another tab still never navigates, and the Workspace sign-in card
+offers "Have a Trinity account? Sign in" to the same return path whenever no platform
+session is held (#3466). The
 logout revoke carries its token **explicitly**, because #2258's clear-before-revoke
 ordering means storage is already empty by then. The Workspace veto in the verdict reads
 the **per-tab** portal token from the store, not shared `localStorage`, so a client
@@ -289,9 +294,10 @@ cleared from three sites (the next turn-done, `onBeforeUnmount`, and `watch(conv
 the only one that fires on a thread switch). The notice rides
 `PortalConversation`'s `#notice` slot for platform admins only
 (`shouldFetchTitleHealth`), through `clientPortal.js::fetchTitleGenerationHealth` on
-`portalHttp` — never `@/api`, whose 401 handler hard-navigates to `/login` under
-`/workspace` and would bounce an operator out of a conversation over a background
-diagnostic. **Known blind spot, accepted:** `_title_health` is a module global and prod
+`portalHttp` — never `@/api`, because `portalHttp`'s interceptor is the one place a
+Workspace credential is decided. (Not to avoid a bounce: since #2791 both clients report
+a 401 to the same handler, and a dead platform session goes to `/login` with the page as
+its return path either way, #3444.) **Known blind spot, accepted:** `_title_health` is a module global and prod
 runs `--workers 2`, so a probe can land on a worker that ran no generation and answer
 `unknown`, which shows no notice. Honest under-reporting; making it cross-worker means
 new Redis-shared state for a diagnostic. `PortalEditableTitle.vue` is the one editor for the row, the 1:1 header and the
@@ -560,6 +566,10 @@ renders FROM the durable #2320 verdict, so it survives a reload; **Ask about it*
 never a send — the ruled lesser control) and for `PortalWork`, the tab body (Now · Earlier; since the ent#610 2026-09-30 ruling Work draws no ask — one `PortalAsksWaitingLine` ("N ask(s) waiting on you · Open in Inbox", counted from `openAsks`, to `asksHomeRoute(agent)`), which Info also mounts for every principal; the ask row itself renders in the Inbox, in its raising chat's thread as a tile when `raised_in_turn` (placed by server time; the chat also reads its own chat-turn asks, `GET …/asks?chat_id=`, with no ended window, merged under the store's fresher rows), and in a project's Needs you — since #2915 the projection (`WorkspaceAsk`) carries a coarse `sync ∈ {confirmed, changed, closed, unconfirmed}` + `aging` (never the reason or a poller timestamp), rendered by the shared `queueSyncBadge` rule (in the Workspace through `workspaceAskBadge`, which drops the operator-only "Unconfirmed" since ent#610 PR A2), and an answer to a changed/closed ask is refused with `AskError(409, "item_diverged")` until `acknowledge_divergence` rides the resend; since trinity-enterprise#611 the list also carries asks that ENDED in the last 7 days (`include_ended`, read past the operator's Clear All) with a coarse `ended_by ∈ {you, operator, timeout}` + `ended_at` and never an email or the cancel reason — since trinity-enterprise#816 (the 2026-10-07 ruling) an ask to a role several people fill is ONE row delivered to each of them: "addressed to the viewer" is `addressed_to_email = viewer` OR `viewer ∈ resolved_to`, in SQL for the list and its count (`db/operator_queue._resolved_to_contains`) and in `_is_addressed_to` for every per-ask door (answer, dismiss, discuss, context — a non-addressee keeps the uniform 404); the projection carries `shared`, the first answer wins (a later one is `already_resolved`), the others read `ended_by = someone_else` + `answered_by` (that co-addressee's name, else address; never an operator's), and Dismiss/Discuss are refused 422 `shared_ask` and hidden in `PortalAsks` until they are per person; a shared ask has no single addressee, so it attaches to no chat and lives in the Inbox only — `pending-only` keeps a project's Needs you to what is still open; a chat's ended chat-turn asks are its own read, not this window — and the answer is person-only; since PR B the projection also names `proposal`, the exact action an approval asks the person to approve (rendered read-only by `QueueProposal`), while `context` stays off; since trinity-enterprise#610 PR A2 (§3g L7) a selected ask's context is its own lazy read, `GET …/asks/{id}/context` → `asks/service.get_ask_context` (the run only after the agent / live-window / audience checks on the agent-written `execution_id`; an origin excerpt only from a chat TURN's thread (`triggered_by = public`) verified as the viewer's, else the ask's own chat only for an in-turn ask — a background ask has no chat origin; no `cost` or `execution_id` — stricter than Work's projection by decision), rendered by `PortalAskContext` below the pane's card;
 rooms grouped by participant, absence visible). **OSS-core by decision (ent#525): deliberately
 ungated.** See [workspace-work.md](../feature-flows/workspace-work.md).
+**Own rows on a shared agent (ent#875):** the roster unions owned and shared agents, so the Work
+read (`work/service.get_work`, and the `/activity` lines) narrows every agent the viewer does not
+own to their own rows — by user id, or by email as requester or spawned-for client — in the WHERE
+before each LIMIT (`_own_rows`; owner of the rule: `security.md` §5d).
 
 
 **The roster payload is *the* portal capability channel (#2128).** A portal principal
@@ -1560,6 +1570,12 @@ is the edition-agnostic surface it plugs into:
   roll-up; a person steward's waiting lines are `attentionLines` filtered to
   verify/stuck; "Open I steward" emits `open-stewarding`, which
   `PortalProjects.vue` turns into the list's `initialFilter = 'steward'`.
+  A pending steward proposal (`proposal {proposed_by, proposed_at,
+  waiting_on, ask_id, changes}`, trinity-enterprise#980) is a tinted
+  "Waiting on you" / "Waiting on <email>" block at the top of the card, with
+  "Review in Inbox" (a `router-link` from `askInboxRoute` with
+  `INBOX_LINK_CLASS`, like the Needs you row's) for the person it waits on
+  only.
   **Markdown (#3692)**: the goal, task objectives and task/project log bodies
   mount `PortalMarkdown` (the one sanitized `v-html`), never
   `whitespace-pre-line` text. **Needs you** is `ProjectNeedsYou.vue`: the

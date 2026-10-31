@@ -94,6 +94,16 @@ _SCAN_DIRS = ("services", "routers", "client_portal")
 # (module path relative to src/backend, enclosing function) -> why it is exempt.
 # The bar is high: the value written is provably NOT an unscrubbed staged secret.
 _ALLOWLIST = {
+    (
+        "services/cleanup_service.py",
+        "_write_recovered_chat_reply",
+    ): (
+        "#3380 watchdog-recovered /chat reply. The add_chat_message content and "
+        "tool_calls are read back from the PERSISTED schedule_executions row, "
+        "which apply_result already scrubbed when it won the terminal CAS; this "
+        "writer runs only after that win and re-checks the row is SUCCESS. No "
+        "agent-authored text reaches it except through that scrubbed row."
+    ),
     # -- schedule_executions (update_execution_status) writers --------------
     (
         "services/task_execution_service.py",

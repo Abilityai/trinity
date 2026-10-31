@@ -518,7 +518,23 @@ def _definition_fields(definition: Dict[str, Any]) -> Dict[str, Any]:
         "status": definition.get("status"),
         "retired_at": definition.get("retired_at"),
         "type_conflict": definition.get("type_conflict"),
+        "recorded_by": _recorded_by(definition),
     }
+
+
+def _recorded_by(definition: Dict[str, Any]) -> Optional[str]:
+    """The `x-recorded-by` note (ent#1006): who or what writes this metric.
+
+    Author-controlled free text from an extension key, so it is type-checked
+    and capped here rather than trusted to be a short string.
+    """
+    extensions = definition.get("extensions")
+    if not isinstance(extensions, dict):
+        return None
+    note = extensions.get("x-recorded-by")
+    if not isinstance(note, str) or not note.strip():
+        return None
+    return note.strip()[:200]
 
 
 def read_agent_metrics(

@@ -464,6 +464,22 @@ _CANARY_SCHEMA_SQL = """
             requested_at TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending'
         );
+        -- #4000: the RD-04/RD-05 collector's join (only the columns it reads).
+        CREATE TABLE agent_git_config (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            sync_enabled INTEGER DEFAULT 1
+        );
+        CREATE TABLE agent_sync_state (
+            agent_name TEXT PRIMARY KEY,
+            last_sync_at TEXT,
+            git_dir_bytes INTEGER,
+            pack_count INTEGER,
+            loose_objects INTEGER,
+            maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,
+            updated_at TEXT
+        );
         CREATE TABLE mcp_api_keys (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
@@ -1535,6 +1551,7 @@ class TestRunner:
             "L-03",
             "B-01", "B-02", "B-08",
             "R-01",
+            "RD-04", "RD-05",
         }
         assert results["S-01"] == []
         assert results["S-02"] == []
@@ -1561,6 +1578,9 @@ class TestRunner:
         # B-02 / R-01 are green on a clean platform.
         assert results["B-02"] == []
         assert results["R-01"] == []
+        # RD-04 / RD-05 (#4000): no git-bound agents seeded.
+        assert results["RD-04"] == []
+        assert results["RD-05"] == []
 
     def test_run_invariants_subset(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1")
@@ -4153,6 +4173,7 @@ class TestIssue1540EngineSeam:
 
         from db.tables import (
             access_requests,
+            agent_git_config,
             agent_ownership,
             agent_public_links,
             agent_reports,
@@ -4160,6 +4181,7 @@ class TestIssue1540EngineSeam:
             agent_shared_files,
             agent_sharing,
             agent_skills,
+            agent_sync_state,
             agent_tags,
             chat_sessions,
             mcp_api_keys,
@@ -4181,6 +4203,8 @@ class TestIssue1540EngineSeam:
             access_requests,
             agent_reports,
             mcp_api_keys,
+            agent_git_config,  # #4000: RD-04/RD-05 collector
+            agent_sync_state,
         ]
         engine = engine_mod.get_engine()
         # Clean slate: (re)create just the canary tables on PG (no ForeignKeys in
@@ -4282,6 +4306,7 @@ class TestIssue1540EngineSeam:
 
         from db.tables import (
             access_requests,
+            agent_git_config,
             agent_ownership,
             agent_public_links,
             agent_reports,
@@ -4289,6 +4314,7 @@ class TestIssue1540EngineSeam:
             agent_shared_files,
             agent_sharing,
             agent_skills,
+            agent_sync_state,
             agent_tags,
             chat_sessions,
             mcp_api_keys,
@@ -4310,6 +4336,8 @@ class TestIssue1540EngineSeam:
             access_requests,
             agent_reports,
             mcp_api_keys,
+            agent_git_config,  # #4000: RD-04/RD-05 collector
+            agent_sync_state,
         ]
         engine = engine_mod.get_engine()
         for tbl in reversed(canary_tables):

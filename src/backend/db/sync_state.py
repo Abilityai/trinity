@@ -35,6 +35,7 @@ _COLUMNS = (
     "pack_count",  # #1595: packs from `git count-objects -v`
     "loose_objects",  # #1595: loose objects (gc-health signal)
     "maintenance_failures",  # #1595: consecutive failed maintenance attempts
+    "git_stats_at",  # #4000: when the agent measured the git stats (RD-04)
     "diverged_since",  # trinity-enterprise#706: divergence episode clock (ISO-Z)
     "dirty_files",  # trinity-enterprise#706: porcelain change count
     "dirty_since",  # trinity-enterprise#706: dirt episode clock (ISO-Z)
@@ -175,6 +176,7 @@ class SyncStateOperations:
         pack_count: Optional[int] = None,
         loose_objects: Optional[int] = None,
         maintenance_failures: Optional[int] = None,
+        git_stats_at: Optional[str] = None,
         last_pull_at: Optional[str] = None,
         last_pull_status: Optional[str] = None,
         behind_after_pull: Optional[int] = None,
@@ -239,6 +241,7 @@ class SyncStateOperations:
             # 0 is a meaningful reset here (post-success), not "unset" — it
             # passes _merged as-is; only a true None falls back to prior.
             "maintenance_failures": _merged("maintenance_failures", maintenance_failures) or 0,
+            "git_stats_at": _merged("git_stats_at", git_stats_at),  # #4000: None keeps prior
             "diverged_since": _clock("diverged_since", diverged_since),  # ent#706
             "dirty_files": _merged("dirty_files", dirty_files),  # ent#706
             "dirty_since": _clock("dirty_since", dirty_since),  # ent#706

@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
+# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -46,6 +46,7 @@ from models import (
     CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
+    MetricDeclarationRequest,
     ObjectiveJoinRead,
     ShareFileMcpRequest,
     ShareFileResponse,
@@ -802,6 +803,113 @@ async def refresh_agent_metric_definitions(
         )
 
     return {"success": True, **summary.to_dict()}
+
+
+# ============================================================================
+# Declaring metrics from the UI (trinity-enterprise#1006)
+# ============================================================================
+# The form edits the agent's `template.yaml` `metrics:` block — the template
+# stays the single source of truth — and the registry is refreshed from the
+# file it wrote. Owner tier: a person who owns the agent (or an admin), or an
+# agent key holding `instructions.manage` bounded to its owner's agents. The
+# write itself goes through the Files write, which applies the same tier to
+# `template.yaml` (an instruction file, ent#820) and writes the audit row.
+
+def _declaration_error(e) -> HTTPException:
+    return HTTPException(
+        status_code=e.status,
+        detail={"code": e.code, "message": e.message, **e.extra},
+    )
+
+
+@router.get("/{agent_name}/metrics/declarations",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_declarations(agent_name: OwnedAgentByName):
+    """What `template.yaml` declares, as written, for the declaration form.
+
+    Unlike `/metrics/definitions` (the reconciled registry), this reads the
+    live file, because the form edits the file. Carries `template_hash`, the
+    compare-and-swap token every write must send back, and `editable` — a
+    `metrics:` block in a layout the form cannot change safely says so here,
+    before anyone fills in a form that could never be saved.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.read_editor(agent_name)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.post("/{agent_name}/metrics/declarations",
+             dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def declare_metric(
+    agent_name: OwnedAgentByName,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Declare a metric: append one entry to `template.yaml metrics:`."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.declare(agent_name, fields, body.base_hash,
+                                 current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.put("/{agent_name}/metrics/declarations/{metric_name}",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def update_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Edit one declared metric. Name and type cannot change."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.update(agent_name, metric_name, fields, body.base_hash,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.get("/{agent_name}/metrics/declarations/{metric_name}/references",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_references(agent_name: OwnedAgentByName, metric_name: str):
+    """What still uses this metric: recorded points, objectives, dashboard
+    widgets and anything a registered provider reports. `unchecked` names
+    the sources that could not be read — not evidence of no use."""
+    from services import metric_declaration_service as svc
+    return await svc.references(agent_name, metric_name)
+
+
+@router.delete("/{agent_name}/metrics/declarations/{metric_name}",
+               dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def retire_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    request: Request,
+    base_hash: str = Query(..., min_length=64, max_length=64),
+    acknowledge_references: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+):
+    """Retire a metric: remove its entry from `template.yaml metrics:`.
+
+    Recorded points are kept. A metric still in use (or whose use could not be
+    checked) is refused as `metric_in_use` with the list, unless
+    `acknowledge_references=true`.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.retire(agent_name, metric_name, base_hash,
+                                acknowledge_references=acknowledge_references,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
 
 
 # ============================================================================

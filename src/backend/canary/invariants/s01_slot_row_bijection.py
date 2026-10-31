@@ -5,6 +5,10 @@ Per agent A: the set of execution_ids in `agent:slots:A` (Redis ZSET) must
 equal the set of execution_ids in `schedule_executions` with status='running'
 and agent_name=A.
 
+An admitted /chat turn's slot member and row id are the same admission id
+(#3989). A turn admitted as `queued_in_memory` holds no slot and still lands in
+`in_sql_only` after `SQL_GRACE_SECONDS` (#3999).
+
 Drain sentinels (members starting with `drain-`) are filtered out — see
 services/backlog_service.py for why they exist.
 

@@ -17,6 +17,7 @@ import hashlib
 import json
 import re
 import logging
+import uuid
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Optional, Any, List, Tuple
@@ -273,7 +274,9 @@ async def _emit_gitignore_untracked_alert(
     set collapses onto one row; a different set is a different row, because a
     later Push must never overwrite an earlier one's path list on a pending
     must-act alert. The two directions are tagged apart because they need
-    different action.
+    different action. Each call is one Push (`sync_to_github` calls this once
+    per Push) and carries its own `push_id`, a material key of the kind: after a
+    person ends the row, a later Push of the same set files again at once.
 
     Best-effort by construction: `observe` never raises, and an alerting
     failure must not fail a Push either.
@@ -343,6 +346,7 @@ async def _emit_gitignore_untracked_alert(
                 "shadowed_negations": list(sweep.shadowed[:20]),
                 "unignored_paths": gained,
                 "unignored_count": len(sweep.unignored),
+                "push_id": uuid.uuid4().hex,
             },
         )
         logger.warning(

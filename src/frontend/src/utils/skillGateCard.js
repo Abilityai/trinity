@@ -20,6 +20,21 @@ export function gateReadOnly(item) {
   return isGateCard(item) && item.gate.can_decide !== true
 }
 
+/**
+ * trinity-enterprise#980 — any platform-raised approval addressed to particular
+ * people carries `addressed`: who it waits on, and whether THIS viewer may decide
+ * it (`ask_service.may_end`'s own answer). A viewer who may not gets no controls.
+ */
+export function addressedReadOnly(item) {
+  return !!item?.addressed && item.addressed.can_decide !== true
+}
+
+/** Who a still-pending approval waits on, for a viewer who cannot decide it. */
+export function addressedWaitingOn(item) {
+  if (!addressedReadOnly(item) || isGateCard(item) || item.status !== 'pending') return ''
+  return (item.addressed.waiting_on || []).join(', ')
+}
+
 /** The note beside a picked Reject is the reason the requester is told. */
 export function gateRejecting(item, option) {
   return isGateCard(item) && option === GATE_REJECT

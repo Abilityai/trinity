@@ -430,6 +430,13 @@ class _LoopDB:
         self.loops[lid]["next_run_at"] = next_run_at
 
     def start_loop_run(self, lid, run_number, *, execution_id=None):
+        # #3317: inserting run K is a claim, as the real one.
+        row = self.loops.get(lid)
+        if (row is None or row["status"] in _LOOP_TERMINAL
+                or row["runs_completed"] != run_number - 1
+                or any(r["run_number"] >= run_number for r in self.runs[lid])):
+            return None
+        row["next_run_at"] = None
         rid = f"lr_{lid}_{run_number}"
         self.runs[lid].append({
             "id": rid, "loop_id": lid, "run_number": run_number, "execution_id": execution_id,
