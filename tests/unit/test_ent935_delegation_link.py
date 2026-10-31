@@ -109,11 +109,11 @@ class TestSqliteMigration:
 
 # --- M.1: PostgreSQL track + model ------------------------------------------
 
-def test_alembic_revision_chains_after_0104_and_adds_the_columns():
+def test_alembic_revision_chains_after_0110_and_adds_the_columns():
     versions = _BACKEND / "migrations" / "versions"
     hits = [p for p in versions.glob("*.py")
-            if 'down_revision = "0104_agent_sync_state_git_stats_at"' in p.read_text()]
-    assert [p.name for p in hits] == ["0105_delegation_link.py"], hits
+            if 'down_revision = "0110_agent_memory_provenance"' in p.read_text()]
+    assert [p.name for p in hits] == ["0111_delegation_link.py"], hits
     rev = _load(str(hits[0].relative_to(_BACKEND)), "ent935_rev")
 
     executed: list[str] = []

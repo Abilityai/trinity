@@ -353,6 +353,35 @@ class TestRequest:
         assert data["content"][0]["input"] == {"ok": 1}
         assert transport.calls[0]["body"]["tools"] == [{"name": "t"}]
 
+    def test_a_reasoning_caller_keeps_its_thinking_and_gets_its_schema(self, transport, key):
+        """`thinking: disabled` is a 400 on Sonnet 5.5 / Opus 5.5, so a caller on a
+        reasoning model opts out of the one-shot shape; the schema sits beside it
+        in `output_config`, the one place the API reads it."""
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+        transport.script.append(answer('{"ok": true}', model="claude-opus-5-5"))
+        data = run(gw.request("reasoning", credential=gw.resolve(None), prompt="P", max_tokens=900,
+                              model="claude-opus-5-5", output_schema=schema, one_shot=False))
+        assert gw.first_text(data) == '{"ok": true}'
+        assert transport.calls[0]["body"] == {
+            "model": "claude-opus-5-5", "max_tokens": 900, "messages": [{"role": "user", "content": "P"}],
+            "output_config": {"format": {"type": "json_schema", "schema": schema}}}
+
+    def test_a_schema_on_the_one_shot_shape_keeps_its_effort(self, transport, key):
+        schema = {"type": "object"}
+        transport.script.append(answer("{}", model=gw.MODEL_ON_API_KEY))
+        run(gw.request("one_shot", prompt="P", output_schema=schema))
+        assert transport.calls[0]["body"]["output_config"] == {
+            "effort": "low", "format": {"type": "json_schema", "schema": schema}}
+
+    def test_the_schema_survives_the_429_step_aside(self, transport, key, agent, monkeypatch):
+        subscribed(monkeypatch, agent)
+        schema = {"type": "object"}
+        transport.script.extend([(429, {"error": "limited"}), answer("{}", model=gw.MODEL_ON_API_KEY)])
+        run(gw.request("one_shot", agent_name=agent.name, prompt="P", output_schema=schema, one_shot=False))
+        assert len(transport.calls) == 2
+        assert transport.calls[1]["body"]["output_config"]["format"]["schema"] == schema
+        assert "thinking" not in transport.calls[1]["body"]
+
 
 # --------------------------------------------------------------------------- #
 # 3. The callers go through the door
