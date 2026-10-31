@@ -2156,6 +2156,206 @@ class EvaluationResponse(BaseModel):
     comment: Optional[str] = None
     comment_withheld: bool = False
     updated_at: Optional[str] = None
+    # ent#935 addendum A, projected by ent#937 (N2): who delegated this run.
+    caller_agent: Optional[str] = None
+    parent_execution_id: Optional[str] = None
+    delegation_mode: Optional[str] = None
+    # ent#937 / ent#936 TD-8 — what a MACHINE reads of a Tier-1 verdict instead
+    # of `quality` and `judge`: `[{dimension, verdict: pass|fail|n/a, reason}]`.
+    # None on every other row and for an operator.
+    judge_findings: Optional[List[Dict[str, Optional[str]]]] = None
+
+
+class EvaluationRunRows(BaseModel):
+    """How one run graded under every grader (trinity-enterprise#938, the
+    execution page): the Tier-0 row, the judge's row if the run was sampled,
+    the pair row if another agent delegated it. Each is the same projection
+    the singular read applies — `None` where no such row exists."""
+    tier0: EvaluationResponse
+    judge: Optional[EvaluationResponse] = None
+    pair: Optional[EvaluationResponse] = None
+
+
+class EvaluationSummary(BaseModel):
+    """One fold of Tier-0-graded runs (ent#937). A machine principal's copy
+    has no `quality_mean` / `judge_human_agreement` / `agreement_n` and no
+    rate or success counter (`completed`, `completion_rate`, `passed`,
+    `checks_passed_rate`, ent#939) — absent by rule, not null-as-ungraded, so
+    they ride as extras rather than declared fields."""
+    model_config = ConfigDict(extra="allow")
+    evaluated: int
+    graded: int
+    per_check_fail: Dict[str, int] = {}
+    judged: int
+    # ent#940 — the edge checks of the pair rows, on `by=pair` only (TD-6).
+    # A machine's copy holds the sample size and failures (`PAIR_MACHINE_KEYS`).
+    pair: Optional[Dict[str, Any]] = None
+
+
+class EvaluationAggregateGroup(EvaluationSummary):
+    key: Dict[str, Optional[str]]
+
+
+class EvaluationAggregateResponse(BaseModel):
+    by: str
+    since: str
+    until: str
+    truncated: bool
+    total: EvaluationSummary
+    groups: List[EvaluationAggregateGroup]
+
+
+class EvaluationFailedRun(BaseModel):
+    """A run that did not complete or failed a gate check. Closed vocabulary
+    only — check ids and reason codes, never evidence text."""
+    execution_id: str
+    agent_name: str
+    caller_agent: Optional[str] = None
+    schedule_id: Optional[str] = None
+    # ent#939 — the playbook the run invoked (where its fix lives), if any.
+    playbook: Optional[str] = None
+    completed_at: Optional[str] = None
+    completion: bool
+    failed_checks: List[Dict[str, Optional[str]]] = []
+    # ent#940 — the failed edge checks of the run's pair row, same vocabulary.
+    pair_failed_checks: List[Dict[str, Optional[str]]] = []
+
+
+class EvaluationJudgeFailedRun(BaseModel):
+    """ent#939 — a run a judge failed on a dimension, by dimension name only:
+    no reason prose, no score, no model."""
+    execution_id: str
+    completed_at: Optional[str] = None
+    schedule_id: Optional[str] = None
+    playbook: Optional[str] = None
+    dimensions: List[str]
+
+
+class EvaluationAgentSummaryResponse(BaseModel):
+    agent_name: str
+    since: str
+    until: str
+    truncated: bool
+    summary: EvaluationSummary
+    failed: List[EvaluationFailedRun]
+    failed_truncated: bool
+    # ent#940 (TD-6) — runs this agent delegated whose edge failed a pair
+    # check: its own failures as the caller (`failed` holds them as callee).
+    pair_failed: List[EvaluationFailedRun] = []
+    # ent#939 — runs a judge failed on a dimension (names only).
+    judge_failed: List[EvaluationJudgeFailedRun] = []
+
+
+class AgentIndicator(BaseModel):
+    """One behavioral indicator (ent#939). `value` is None unless `state` is
+    `ok` — a thin sample is never rendered as a zero."""
+    id: str
+    state: Literal["ok", "insufficient", "no_runs"]
+    value: Optional[float] = None
+    n: int = 0
+    num: Optional[int] = None
+    # points against the same-length window before; None when either is thin
+    delta: Optional[int] = None
+    # quality only — the judge's agreement with person ratings
+    agreement: Optional[float] = None
+    agreement_n: Optional[int] = None
+    # cost_vs_baseline only — medians per run, USD
+    median: Optional[float] = None
+    baseline: Optional[float] = None
+    baseline_n: Optional[int] = None
+
+
+class AgentIndicatorSource(BaseModel):
+    kind: Literal["playbook", "schedule", "chat"]
+    ref: Optional[str] = None
+    # a schedule's name, resolved for display
+    label: Optional[str] = None
+
+
+class AgentIndicatorFixPath(BaseModel):
+    check: str
+    judge: bool
+    source: AgentIndicatorSource
+    failed: int
+
+
+class AgentIndicatorsResponse(BaseModel):
+    agent_name: str
+    days: int
+    since: str
+    until: str
+    min_runs: int
+    runs: int
+    truncated: bool
+    latest_run_at: Optional[str] = None
+    indicators: List[AgentIndicator]
+    fix_paths: List[AgentIndicatorFixPath]
+
+
+class AgentIndicatorRun(BaseModel):
+    execution_id: str
+    completed_at: Optional[str] = None
+    reasons: List[str]
+    cost: Optional[float] = None
+
+
+class AgentIndicatorGroup(BaseModel):
+    source: AgentIndicatorSource
+    runs: int
+    failed: int
+    items: List[AgentIndicatorRun]
+
+
+class AgentIndicatorRunsResponse(BaseModel):
+    agent_name: str
+    indicator: str
+    check: Optional[str] = None
+    days: int
+    since: str
+    until: str
+    truncated: bool
+    groups: List[AgentIndicatorGroup]
+
+
+class EvaluationFailedResponse(BaseModel):
+    since: str
+    until: str
+    total: int
+    truncated: bool
+    items: List[EvaluationFailedRun]
+
+
+class EvaluationChainNode(BaseModel):
+    execution_id: str
+    agent_name: str
+    caller_agent: Optional[str] = None
+    parent_execution_id: Optional[str] = None
+    status: Optional[str] = None
+    triggered_by: Optional[str] = None
+    chain_depth: Optional[int] = None
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+
+
+class EvaluationChainResponse(BaseModel):
+    """A run's delegation chain. A walk that stops early says why
+    (`depth` | `nodes` | `access` | `missing`) — never which id it stopped at."""
+    execution: EvaluationChainNode
+    ancestors: List[EvaluationChainNode]
+    descendants: List[EvaluationChainNode]
+    ancestors_truncated: Optional[str] = None
+    descendants_truncated: Optional[str] = None
+
+
+class EvaluationTrendPoint(BaseModel):
+    ts: str
+    value: float
+
+
+class EvaluationTrendResponse(BaseModel):
+    metric: str
+    dims: Dict[str, str]
+    points: List[EvaluationTrendPoint]
 
 
 class CircuitBreakerConfigUpdate(BaseModel):
@@ -2738,6 +2938,11 @@ class ScheduleAnalyticsResponse(BaseModel):
     failed_count: int
     cancelled_count: int
     success_rate: float
+    # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
+    checks_passed_rate: Optional[float] = None
+    evaluated_count: int = 0
     duration_ms: DurationPercentiles
     cost: CostTotals
     tool_calls: ToolCallSummary
@@ -2802,6 +3007,11 @@ class AgentAnalyticsResponse(BaseModel):
     success_count: int
     failed_count: int
     success_rate: float
+    # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
+    checks_passed_rate: Optional[float] = None
+    evaluated_count: int = 0
     duration_ms: DurationStats
     context_avg: Optional[int] = None
     by_type: List[AgentTypeTotal] = []
@@ -2830,6 +3040,11 @@ class ScheduleSummaryRow(BaseModel):
     failed_count: int
     cancelled_count: int
     success_rate: Optional[float] = None
+    # ent#935: the deterministic Tier-0 gate rate beside Completion — runs
+    # whose gate headline passed / runs with a gate check graded (a skip-only
+    # row or a run with no Tier-0 row is on neither side). None when 0 graded.
+    checks_passed_rate: Optional[float] = None
+    evaluated_count: int = 0
     avg_duration_ms: Optional[int] = None
     cost_total: float
     context_avg: Optional[int] = None

@@ -913,13 +913,417 @@ external call. The managed grading experience — judge panels, calibration, rub
 management UI — is the paid layer, mirroring §42 (#668) where STATIC is free and the
 AI tier is not.
 
-**Not included** (later children of the epic): the Tier-0 evaluator that *populates*
-`quality`, the agent-owned case runner, the Tier-1 judge (enterprise), and
-replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+**Not included** (later children of the epic): the agent-owned case runner, the Tier-1
+judge (enterprise), and replay/shadow evaluation (blocked on #1084 fail-closed + #1408).
+
+### Addendum — Tier-0 deterministic evaluator (trinity-enterprise#935)
+
+Every finished `schedule`- or `agent`-triggered run — and, since ent#940 (addendum C,
+FR-21), every `fan_out`, `loop` or `reminder` run another agent sent — is graded against
+the platform's own records, with **zero LLM calls**. OSS core, always on, no setting.
+
+- **FR-7 — Tier-0 writer**: one `agent_evaluations` row per execution, written by the
+  platform under `evaluator='platform:tier0'`, keyed `target_kind='execution',
+  target_id=<execution_id>`. The existing partial unique index
+  `idx_agent_evaluations_rating_target` (ent#366) makes that one row — a re-evaluation
+  (a FAILED terminal later overwritten by SUCCESS, two sweep workers) updates in place;
+  no migration. `completion` mirrors `status == 'success'`; `quality` stays NULL (Tier
+  0 grades checks, not answer quality). The writer (`services/tier0_evaluator.py ::
+  evaluate_execution(execution_id)`) takes an execution id only — no principal, no
+  request — and imports nothing from FastAPI or the auth layer, so the graded agent
+  cannot reach it (the FR-2 rule, extended). Every row also carries the **delegation
+  link** (addendum A), derived from the execution row on each write and never passed
+  in: `caller_agent` = `source_agent_name`, `parent_execution_id` = the row's stored
+  parent, `delegation_mode` = `fan_out` / `loop` / `reminder` from `fan_out_id` /
+  `loop_id` / `triggered_by`, otherwise **NULL** — an agent-sourced run's sync vs
+  async is not recorded on the row, and the mode is not guessed. Tier-0 rows never
+  enter a rating read: every tally and per-person read keys on a `workspace:` /
+  `operator:` evaluator.
+- **FR-8 — Checks vocabulary**: `checks_json = {schema: 1, intent_ref, evaluated_at,
+  headline, checks: [...]}`; each check is `{id, tier: gate|signal, source:
+  platform|agent_reported, status: pass|fail|skip, reason?, evidence}`. A skip always
+  names its reason; a check that raises is `skip: evaluator_error` (exception class
+  only) and never costs the row. Evidence is counts, ids, paths and hashes only; the
+  one text field, a claim excerpt, is ≤200 characters and scrubbed of credential
+  patterns and staged runtime secrets. Gate checks: `execution_exists` (the run's
+  #2467 integrity record; NULL → `skip: no_integrity_record`), `credential_echo`
+  (pattern hits, redaction markers and staged-secret hits in reply/error — counts only),
+  `validate_001` (VALIDATE-001's `business_status`; usually `skip: not_run_yet` at
+  grading time), `deliverable_landed` (a claimed deliverable must have left a receipt
+  attributable by execution id — an ask, a completed outbound effect, a metric point;
+  a bare "Done"/"completed" with **zero receipts fails**, an explicit no-op reply
+  ("nothing to do", "no new items") is `skip: no_claim`, a report published in the
+  run's time window is `skip: unattributable` and never a pass — reports carry no
+  execution id — and a commit/push claim alone is `skip: no_receipt_source`),
+  `playbook_outputs` (every output the invoked skill declares must have left a receipt:
+  declared outputs come from an `outputs:` frontmatter key — flat or under `trinity:`,
+  read through the ent#183 hardened frontmatter parser; the contract itself does not
+  carry it yet — and from the `## Output` prose section only when the frontmatter
+  declares none; the skill is the library's copy, recorded by source id and tree sha. A
+  declared ask / outbound effect / metric with zero receipts, or a declared report with
+  no report at all in the run's window, fails; a report only window-matched is `skip:
+  unattributable`; an "Unknown command" reply (#1410) fails `playbook_unresolved`; a
+  reply whose `Not done:` footer names missing work is `skip: declared_not_done`, so an
+  honest abort is not graded as a silent miss; a non-playbook run, a skill the library
+  does not hold, or nothing declared is a named skip). Signal check (listed, never
+  counted in the headline): `budget_vs_baseline` (cost, duration, tool-call count and
+  context against the p5–p95 band of the same series' last ≤20 successful runs — the
+  schedule; for a run another agent sent (`source_agent_name` set, any trigger but
+  `schedule`) the agent, the trigger, the sender and the playbook it invoked — so a
+  `chat_with_agent` baseline is per caller (ent#940, FR-21); for an unsourced
+  agent-triggered run the agent plus the playbook; fewer
+  than 5 → `skip: insufficient_history`; a metric the run or its history did not record
+  is left out, never read as zero; outside the band on either side fails). **Headline**
+  (`headline = {passed, gate_pass, gate_fail, gate_skip}`): computed from gate checks
+  only — the run passes when no gate failed; skips never count against it and a failing
+  signal never moves it. The null tests hold on the headline: a do-nothing run and a
+  claims-everything-done run both fail it, an honest abort passes it. Two further
+  signals — `trajectory_bounds` and `footprint` — are planned but not built: the
+  per-tool-call records they were specified against are not written by the platform
+  today, so they await a data-source decision.
+- **FR-9 — Sweep**: the single writer path. `services/tier0_sweep_service.py` is a
+  backend loop started in every uvicorn worker (`main.py`, the watch-loops boot phase,
+  staggered +13 s; stopped with the background services, releasing the lease) that
+  ticks every 60 s under the Redis leader lease `tier0:leader` (TTL 3× the cadence, the
+  #1464 shape: SET NX EX, GET == self → EXPIRE). The lease **fails open**: no Redis or
+  a Redis error makes the worker a leader for the tick, a contended lease skips the
+  tick — never an error, never a wait — and two leaders at once are only a doubled
+  read, because the write is idempotent on the index (FR-7). Nothing in the sweep sits
+  in the path of a terminal execution write; the terminal writers do not import the
+  evaluator and it does not import them. Each tick (`tier0_evaluator.sweep`) grades up
+  to 25 runs that are terminal (`success`/`failed`/`cancelled`), triggered by `schedule`
+  or `agent` — or by `fan_out` / `loop` / `reminder` with `source_agent_name` set
+  (ent#940, FR-21; one rule, `db.evaluations.tier0_eligible`) — completed at least 30 s ago (so evidence written just after the terminal
+  has landed) and at most 24 h ago (no backfill), and have no Tier-0 row yet — oldest
+  first, the rest on the next tick. Each evaluation runs off the event loop
+  (`to_thread`, at most 4 at once) under a 10 s bound; a raising evaluation costs
+  itself only, and one that outlives the bound gets a row every check of which is
+  `skip: evaluator_timeout` — written only when no row exists, so a grade that lands
+  late is never replaced by a skip (the reverse order re-grades in place) and a hung
+  evaluation is not re-picked every tick. An evaluated run is never picked again: a
+  FAILED terminal later replayed as SUCCESS is re-graded in place by the writer, but
+  nothing triggers that re-grade yet (D-3, ent#937). Not the scheduler's terminal
+  hook: the scheduler owns no terminal for `agent` runs, and the backend's own terminal
+  fan-out misses the FAILED terminals the scheduler writes itself.
+- **FR-10 — Read, and the fence on write**: `GET
+  /api/agents/{name}/executions/{execution_id}/evaluation` returns the run's Tier-0 row
+  under the agent's existing evaluation access rule (`get_authorized_agent_by_name`,
+  uniform 404) and the ent#366 projection; not evaluated yet, or an execution that is
+  not this agent's, is one 404 `not_evaluated`. No MCP tool for this route (ent#937's
+  `get_evaluation_summary` serves the summary, FR-14). The write fence (FR-2, extended): no agent-key,
+  MCP or user route can create, update or delete a `platform:tier0` row or set the
+  delegation columns — the admin write files under `admin:<user>` and ignores any
+  evaluator/target/delegation keys in the body, a Workspace rating cannot address an
+  `execution` target and is always prefixed, every DML on `agent_evaluations` lives in
+  the db layer with exactly four callers past the facade (the admin route, the
+  Workspace rating, the Tier-0 evaluator and — ent#940, FR-19 — the pair evaluator), and
+  the evaluators and sweep import no
+  FastAPI or auth type, so no route can hand them a caller to trust.
+- **FR-10a — Execution page**: `ExecutionDetail.vue` shows the run's Tier-0 result in a
+  "Checks" card (`components/ExecutionChecks.vue`) read from the FR-10 route, through the
+  shared api client. One headline, from the stored gate-only `headline` (counted from the
+  gate entries when a row carries none): **Checks passed** (no gate failed, at least one
+  passed), **Checks failed** (any gate failed), **No gate check applied** (every gate
+  skipped — e.g. `evaluator_timeout`), with "N of M gate checks passed/failed · K skipped"
+  and the failed gates listed by id, reason and scalar evidence. Signals are listed as
+  "recorded, not counted" observations (`budget_vs_baseline — outside baseline`), never
+  worded or coloured as pass/fail. A 404 `not_evaluated` renders **Not evaluated** with
+  the reason a run may have none (the card's copy says scheduled runs, agent-triggered
+  runs and runs another agent delegated are graded, about a minute after they finish),
+  never as an error; any other read failure says the
+  checks could not be loaded, with Retry. Running and queued runs request nothing.
+  **Checks passed rate (built, C3)**: the three existing analytics payloads — per-schedule
+  `GET …/schedules/{id}/analytics`, each row of `GET …/schedules/analytics-summary`, and
+  the agent `GET …/analytics` — carry `checks_passed_rate` + `evaluated_count` beside
+  Completion (`success_rate`, unchanged). `evaluated_count` is the window's runs with a
+  **gate check graded** — at least one gate passed or failed; the rate is those whose
+  `platform:tier0` gate headline passed (no gate failed) divided by that count. A
+  **skip-only** row (every gate skipped — `evaluator_timeout`, nothing to check) is on
+  **neither side** of the rate, matching the execution page's "No gate check applied"; a
+  run with **no** Tier-0 row is likewise *not evaluated*, never a failure. Only
+  `evaluator='platform:tier0'` rows are read, so a Workspace or operator rating never
+  enters it. `evaluated_count == 0` (including an all-skip-only window) →
+  `checks_passed_rate: null`, rendered "—", never 0%. Read-only and additive: no schema change, no new route. The
+  rate is computed over the newest 5,000 graded runs (the existing pool cap).
+  `ScheduleAnalyticsCard.vue` shows it as a "Checks passed" tile next to Completion.
+  `OverviewPanel.vue` shows it beside the completion headline and as a "checks" column
+  on each "Schedules performance" row, whose rate caption now reads "completion". The
+  tooltip on each reads "N of M runs with a gate check graded · deterministic checks,
+  not answer quality".
+
+- **FR-11 — Aggregate read (ent#937)**: `GET /api/evaluations/aggregate` (`by ∈
+  {agent, schedule, pair}`), `/evaluations/failed`, `/evaluations/chain/{execution_id}` and
+  `/agents/{name}/evaluations/summary` fold Tier-0 rows (plus any `platform:tier1:*` row,
+  LEFT JOINed) INNER JOINed to their execution rows over `period ∈ {day, week, custom}`
+  (custom ≤ 92 d, 422 `invalid_period`), capped at 5,000 rows with `truncated`. Rates are
+  null when nothing was counted; `checks_passed_rate` = passed ÷ graded; a skip-only row
+  is on neither side. Failed runs carry check ids and reason codes, never evidence.
+- **FR-12 — Who reads what**: one `scope_for` helper. A person reads the agents they
+  can access; an agent key reads its own rows and the pairs it is caller or callee of —
+  on the new routes and the existing list, single-row and execution reads — and an
+  out-of-scope agent reads as zeros. A machine principal never receives
+  `quality_mean` / `judge_human_agreement` / `agreement_n` (absent, not null), nor the
+  two quality trend series. The evaluator is projected through an allowlist (ent#781).
+  The chain walk stops at the first inaccessible node and names only the reason kind.
+- **FR-13 — Scorecard points**: daily `eval.*` points (four rates + five counts) under
+  the reserved owner `platform:eval`, graded agent or pair in `dims`, written on each
+  Tier-0 row and nightly under the sweep lease; `GET /api/evaluations/trend` reads them
+  verbatim (≤ 92 d). `record_metrics` refuses the `eval.` prefix for every principal
+  (`eval_namespace_reserved`). Aggregates age out with execution rows via the INNER
+  JOIN; points persist for `metrics_retention_days` (default 365 d).
+- **FR-14 — MCP read**: `get_evaluation_summary` proxies the summary route for agent,
+  user and system keys. An agent key with no `agent_name` reads itself; naming another
+  agent passes the MCP permission edge first and the backend then narrows to the pair.
+  The description states the self/pair scope and that an agent never sees judge scores,
+  inside the 2,048-character cap.
+
+### Addendum B — the Tier-1 judge seam (trinity-enterprise#936)
+
+A judge layer — sampled, model-backed, an enterprise module — grades a run's *quality*
+on top of its Tier-0 evidence. The OSS core carries only the **seam** it writes through:
+the row contract, four db primitives and one schema guard. Nothing in OSS samples,
+prompts or calls a model.
+
+- **FR-15 — A second platform row, never the Tier-0 row**: a judge verdict is its own
+  `agent_evaluations` row, `evaluator='platform:tier1:<model>'` (prefix
+  `TIER1_EVALUATOR_PREFIX`), keyed `target_kind='execution', target_id=<execution_id>` on
+  the same partial unique index as Tier-0 — one judge row per run, no migration. Two rows
+  because the Tier-0 writer emits `quality=NULL` on *its* row on every re-grade: a verdict
+  written in place would be clobbered by the next FAILED→SUCCESS relabel. The judge row
+  copies the Tier-0 row's `agent_name`, `archetype` and delegation link (addendum A)
+  inside the write transaction — nothing is passed in — and leaves `completion` and
+  `checks_json` NULL; `quality` is the verdict's (NULL for a skip). A Tier-0 re-grade
+  never touches it, and it never enters a rating read (ratings key on `workspace:` /
+  `operator:` evaluators). A reader of a run's evaluation joins Tier-0 + Tier-1 per
+  execution (ent#937 owns that read and its agent projection).
+- **FR-16 — Claim, then finish; a skip is final**: `claim_tier1_row(execution_id,
+  model)` INSERTs the row in state `claimed` only if the run has a Tier-0 row and no
+  Tier-1 row under *any* model; a racing second claim (two sweep leaders) loses on the
+  index and gets `None` — no provider call, no spend — so the call that follows a claim
+  happens at most once per run. `finish_tier1_row(eval_id, judge)` writes the verdict or
+  the skip onto a row that is still `claimed` and nothing else: a Tier-0 row's id, a
+  judged row, a skipped row all write nothing (`None`). A `skip` is final per run. A
+  claim older than `TIER1_CLAIM_STALE_SECONDS` (10 min, a worker that died mid-call) is
+  released by `reclaim_stale_tier1`, which deletes `claimed` rows only. `tier1_candidates`
+  returns Tier-0 rows (the sampler needs their checks) whose run has no Tier-1 row in any
+  state, within a lookback, bounded, oldest first.
+- **FR-17 — The schema guard**: `validate_judge_json` admits a finished document on
+  structural grounds only — `schema: 1`; `state ∈ {judged, skipped}`; a judged document
+  names its `model`, a `verdict ∈ {graded, indeterminate}`, `quality` in 0–1 or null, and
+  `dimensions` from the closed set `scope_fidelity / escalation_correctness /
+  intent_alignment / helpfulness`, each `pass | fail | n/a` (an omitted dimension is
+  `n/a`) with an optional `reason` of ≤160 characters carrying **no quotation mark** (a
+  reason is structural, never a quotation; the transcript-window no-quote guard lives in
+  the judge beside the transcript); a skipped document names a `skip` from the frozen
+  reason enum. Each defect is a named `JudgeJsonError.code` (`judge_reason_too_long`,
+  `judge_skip_unknown`, …) and the row is never written. Whether `quality` agrees with
+  the dimensions is the rubric's, not the guard's. A judged document also carries
+  `findings` — `[{dimension, verdict, reason}]`, `reason` null — the list FR-12's
+  machine projection hands the graded agent as `judge_findings`; `dimensions` (with
+  the prose reasons) is for operators only. Extra keys pass the guard unchanged.
+- **FR-18 — The fence, extended**: the three Tier-1 writers are reached from the
+  `database.py` facade only — no router, no service, no MCP tool — and take ids and
+  column values, never a principal. The admin write still files under `admin:<user>`
+  with no target, so a body naming the Tier-1 evaluator cannot land a judge row; a
+  Workspace rating's prefixed evaluator cannot collide with the Tier-1 key. OSS ships
+  **no** machine-principal read guard here: the agent-facing projection of a judge row
+  (judge findings only — never `quality`, the grader or prose) is ent#937's read.
+### Addendum — Operations › Evaluations tab (trinity-enterprise#938)
+
+Operator-facing read surface over the ent#935/#937 primitives — one tab, no new aggregate
+route, no direct table reads. Tier-0 blocks are OSS-core (AGENT_EVAL_STRATEGY §10: a read
+surface over an OSS primitive is an OSS primitive); the calibration pieces (judged-quality
+column, judge–human agreement tile, the rating affordance) are enterprise (ruled
+2026-10-29): rendered only where the judge module is entitled, with the agreement floor
+(T4) at 20 person-rated runs — below it the agreement and quality read "uncalibrated".
+
+- **FR-15 — The tab and its audience**: `/operations?tab=evaluations` renders
+  `components/EvaluationsPanel.vue` from `views/Operations.vue`. The audience is the
+  **operator floor** (roles `operator`, `creator`, `admin` — ent#837's rung above `user`),
+  as the ent#938 DoD reads ("Admin / operator only"). The guard is the API: every read the
+  tab issues goes to the ent#937 routes, where the operator floor refuses role `user` with
+  403 `workspace_only`, an agent key reads only its own rows, and a machine principal never
+  receives a judge score (FR-12) — pinned under four principals by
+  `tests/unit/test_938_tab_guard.py`. The UI mirrors that guard (the tab is listed, and
+  its panel mounted, only at the floor; a deep link below it bounces to the default tab)
+  and is never the guard alone. Period picker: 7 days (default, `period=week`), 30 days
+  and custom (`period=custom&since&until`, API-validated ≤ 92 d; a bad window renders the
+  API's `invalid_period` message beside the picker and keeps the previous data). State
+  lives in `stores/evaluations.js`, the one domain store; its request set is pinned to the
+  ent#937 routes. Loading / failed / empty / stale follow `utils/loadingState.js::viewState`;
+  the empty state names the Tier-0 scope (scheduled runs, agent-triggered runs and runs
+  another agent delegated — the ent#940 `fan_out`/`loop`/`reminder` runs — graded about a
+  minute after they finish) and links to the Executions tab.
+- **FR-16 — Operator rating from the run page** (ruling T2, built after the placement
+  answer): human-only `POST|GET /api/agents/{name}/executions/{id}/rating` behind
+  `require_interactive` + the owner-tier agent gate, a small service into the existing
+  rating upsert, evaluator `operator:<identity>`, `target_kind='execution'`, no schema
+  change; the ent#935 write-fence tests are amended additively and an AST guard pins that
+  every Tier-0 reader keys on the evaluator. Never `quality` on a `platform:*` row.
+- **FR-17 — Fleet trend** (ruling T3): a nightly fleet series under the reserved
+  `platform:eval` owner with `dims={"scope":"fleet"}` (never `{}`, which the dims reader
+  cannot select), written only by the unscoped nightly pass, and only for completed UTC days (never today,
+  which is still filling) — the per-row restate and the
+  over-cap per-agent retry see one agent's rows, so they write no fleet point and an
+  over-cap day is a gap. `GET /api/evaluations/trend` naming neither `agent=` nor a pair
+  reads it (every per-agent/pair key absent) and hands it only to the two readers it names —
+  an admin person, or the system key (sample-size series only; a rate, success-count or
+  judge-score metric is a 422 for a machine, ent#939 FR-21). A person scoped to fewer agents, every agent key, and any other machine key
+  (even one owned by an admin) get the empty series (never a 403); the tab tells an admin
+  no fleet point is written yet, and anyone else that the fleet series is admin-only and to
+  pick an agent. The chart caption states the one-day lag and the day the series
+  starts. The agreement floor (ruling T4) is 20 person-rated runs, on the agreement tile.
+
+### Addendum C — Pair evaluation: the caller→callee edge (trinity-enterprise#940)
+
+Tier-0 grades what one run left behind; it cannot see whether the **delegation** was
+sound — whether the caller dispatched what it said it did, read the result before
+relaying it, or re-sent the same brief. Layer 1 (deterministic, OSS core, always on, no
+setting, no migration) grades that edge as its own row. **Not built here:** Layer 2, the
+sampled pair judge (`brief_sufficient`, `stayed_in_brief`, `relayed_faithfully` on the
+Tier-1 row), waits on the Tier-1 judge (ent#936); and the enterprise gitlink that lands
+it on the integration branch. Neither exists yet.
+
+- **FR-18 — Pair checks and skip reasons**: one row per delegated **callee** run, written
+  by `services/tier0_pair_evaluator.py :: evaluate_pair(execution_id)` — same check
+  vocabulary as FR-8 (`{id, tier, source, status, reason?, evidence}`, gate-only
+  `headline`). Gate checks: `dispatch_exists` (every execution / fan-out id the caller's
+  own activity rows or reply name resolves to a run under the caller; ids come from the
+  structured record first and the reply's tokens second; an unknown execution id fails
+  `unresolved_id`; a fan-out id in a reply never fails — there is no per-target lookup;
+  nothing named → `skip: no_claimed_ids`), `one_sided_record` (a chat-mode callee run
+  needs the caller's `agent_collaboration` row for it, else `fail: no_caller_record`;
+  fan-out / loop / reminder runs carry their record on the row → `skip:
+  no_activity_channel`), `relay_unverified` (the caller relayed the result — its reply
+  names the callee run's id, the one attributable relay channel, since reports and asks
+  carry no cited id — without a `read_result` receipt (FR-21) dated after the callee
+  ended and no later than the caller's own end → `fail: unread_relay`; no such reply →
+  `skip: no_relay`; a caller that ended before any receipt existed on the install →
+  `skip: no_readback_record`, so pre-receipt history is never failed),
+  `relayed_failed_work` (relayed a run whose own Tier-0 headline failed → `fail:
+  relayed_failed`; `skip: callee_not_graded`), `duplicate_dispatch` (two sibling runs on
+  the same callee with the same playbook series key **and** token-set Jaccard ≥
+  `DUPLICATE_JACCARD` = 0.9 over the normalised brief — a module constant, deliberately
+  not a setting; loop mode and distinct fan-out tasks are excluded, a retry chain is one
+  dispatch, more than `SIBLING_CAP` = 200 siblings → `skip: sibling_cap`, one child →
+  `skip: single_dispatch`), `resend_after_receipt` (a duplicate admitted after the first
+  had a receipt → `fail: resent_after_receipt`) and `wrong_route` (the callee answered
+  "Unknown command" or the peer-grant policy wrote a `skill_not_granted` refusal for the
+  run; library-catalog membership is evidence only, since workspace playbooks are never in
+  it — **ruled 2026-10-29: an off-catalog playbook stays evidence (`in_catalog: false`),
+  never a fail**, because catalogs drift and a workspace pick is often legitimate; prose
+  intent → `skip: not_a_playbook`). Signal checks (recorded, never in the
+  headline): `failed_with_side_effects` (a failed callee run with attributable receipts —
+  window-matched reports never count) and `rework_bounds` (round trips on this edge
+  against the p95 of the same caller→callee→playbook series' earlier caller turns; fewer
+  than 5 → `skip: insufficient_history`; only the upper side fails). While the caller is still running the caller-side checks are
+  `skip: caller_running` and the row is not final: it is re-picked and re-graded in place
+  once the caller ends (within the 24 h window). A caller whose read raised is `skip:
+  caller_unreadable` and is re-picked the same way, never finalized; fresh candidates are
+  graded before these re-grades in a tick's batch. A missing caller is `skip:
+  caller_missing`; an unreadable source costs its checks only (`*_unreadable`), and a
+  raising check is `skip: evaluator_error`, as in FR-8.
+- **FR-19 — The pair row and its fence**: `evaluator='platform:tier0:pair'`,
+  `target_kind='execution'`, `target_id=<callee execution id>` — the ent#366 unique index
+  keeps it one row, beside (never replacing) the run's Tier-0 row; `quality` stays NULL.
+  The row also carries `metrics`, evidence beside the checks and never pass/fail: latency
+  dispatch → start, start → end and end → the caller's first read, the callee's cost, and
+  `verified` (the callee's own Tier-0 headline passed); a value the records lack is null,
+  never 0. Written by **phase 2 of the Tier-0 sweep** (FR-9's loop, lease and bounds — no
+  second loop or lease): up to 25 candidates a tick, Tier-0 rows that name a caller and
+  have no pair row yet; a hung evaluation leaves an all-skip `evaluator_timeout` row
+  through the INSERT-only path. The writer takes `evaluator=` from the closed set
+  `PLATFORM_EVALUATORS = (platform:tier0, platform:tier0:pair)` and raises on anything
+  else; the admin write route cannot file either; every Tier-0 reader matches the bare
+  `platform:tier0` string, so a pair row is never counted as a Tier-0 grade.
+- **FR-20 — Reading the pair**: `window_rows` LEFT JOINs the pair row as `pair_checks`
+  (a run with both rows still counts once). `fold` keeps the Tier-0 counters unchanged
+  and adds a disjoint `pair` block on `by=pair` only — `pair_graded`, `pair_passed`,
+  `pair_checks_passed_rate`, `pair_per_check_fail`, `latency_p50_ms`,
+  `cost_per_verified_outcome`, `round_trips_mean`. `by=agent` carries no pair rates; an
+  agent's summary lists only its own failed pair checks: a pair check grades the caller's
+  handling of the edge, so it appears as caller in `pair_failed` and never in the
+  callee's `failed` list (nor on `/evaluations/failed` outside `by=pair`); a person
+  reads the edge failures through `by=pair` (an agent key sees only its own side). A machine principal
+  reads the pair block's sample size and failures only (`pair_graded`,
+  `pair_per_check_fail`; no rate since ent#939 FR-21), check ids and reason codes, never
+  evidence or quality; the evaluator projects as `platform:tier0:pair`. Scorecard (FR-13)
+  gains `eval.pair_graded`, `eval.pair_passed`, `eval.pair_checks_passed_rate` on pair
+  series only.
+- **FR-21 — Delegated triggers, the series key, and the read receipt**:
+  (1) Tier-0 now grades `fan_out`, `loop` and `reminder` runs **when another agent sent
+  them** (`source_agent_name` set); the same triggers without a sender, and `user` runs,
+  stay ungraded. One rule, `db.evaluations.tier0_eligible`, serves the candidate query and
+  the evaluator. (2) `budget_vs_baseline` keys a **sourced non-schedule run** — every
+  trigger including `agent` — on `(agent_name, triggered_by, source_agent_name,
+  playbook)`, so a `chat_with_agent` baseline is now per caller; an unsourced run keeps
+  the ent#935 key (agent + playbook), a schedule run its schedule. (3) The **first-read
+  receipt**: an agent key reading another agent's **finished** run through `GET
+  /api/agents/{name}/executions/{id}` (MCP `get_execution_result`) or `GET
+  /api/agents/{name}/fan-out/{fan_out_id}` (MCP `get_fan_out_result`, one receipt per
+  finished child) writes one `agent_collaboration` activity with `"action":
+  "read_result"`, `related_execution_id` = the run, on the reader's own agent. A receipt
+  is written only for a finished run, so a poll of a running run writes nothing; a human
+  read and an agent reading its own run write nothing; the reader is the key's own agent,
+  never a header. First read only — the row id is a uuid5 over (reader, run) and the
+  insert does nothing on conflict, so repeat and racing reads leave one row. Fail-open:
+  the response's status and body never change. No broadcast. Inline delivery counts as a
+  read: a sync `/chat`, sync `/task` or sync `POST /fan-out` answer (and its idempotent
+  replay) that hands an agent key a finished run writes the same receipt, by the run's
+  stored status; an accepted/queued receipt answer writes none.
 
 See [agent-evaluations.md](../feature-flows/agent-evaluations.md).
 
 ---
+
+### Addendum D — Per-agent behavioral indicators (trinity-enterprise#939)
+
+Read-only over the ent#937 window rows; nothing here writes an evaluation.
+
+- **FR-18 — The indicator set**: completion, checks passed (the Tier-0 gate rate, "honesty
+  of claims"), scope fidelity and escalation correctness (the judge's dimension verdicts;
+  `n/a` is not a sample), quality (judged runs only, with the judge↔person agreement and
+  its `n`), cost vs baseline (this window's median run cost over the median of the agent's
+  successful runs in the 30 days before). Each is its own measure: no blended score, no
+  weighting, no rank. Declared defaults: window 14 days (7 / 14 / 30 accepted), sample floor
+  5 runs (`system_settings['agent_indicators_min_runs']`, clamped 1–100). Below the floor an
+  indicator reads `insufficient` with the counts it has; an empty window reads `no_runs`;
+  `value` is null in both, so nothing renders a zero. A delta in points against the
+  previous same-length window appears only when both windows meet the floor.
+- **FR-19 — Operator read**: `GET /api/agents/{name}/evaluations/indicators?days=` behind
+  the agent access gate and `require_person` — an agent key is refused (the agent reads its
+  failed checks through the summary, FR-21). Also returns the fix paths: failed checks and
+  judge-failed dimensions counted per source — the playbook the run invoked (Tier-0's
+  `intent_ref`), else its schedule (named), else chat. A chat/API run's
+  `schedule_id='__manual__'` is chat, never a schedule.
+- **FR-20 — Drill-down**: `GET …/indicators/{indicator}/runs?days=&check=` lists the runs
+  counting against one indicator, grouped by source with "failed of runs" per group, newest
+  50 per group, reason codes only (never evidence). `check=` narrows checks passed to one
+  Tier-0 check. Cost has no runs to list (422).
+- **FR-21 — The agent's own view**: the ent#937 summary (MCP `get_evaluation_summary`) adds
+  the playbook each failed run invoked and `judge_failed` — runs the judge failed on a
+  dimension, by dimension name only. Never a score, a rate, or a judge's reason.
+  **Ruled 2026-10-29 — no rate on any machine read**: a machine principal's summary and
+  aggregate copy drop `completion_rate`, `checks_passed_rate` and the success counters a
+  rate is rebuilt from (`completed`, `passed`; on the pair block `pair_passed`,
+  `pair_checks_passed_rate`) — absent by rule, beside the judge-score keys. It keeps the
+  sample size (`evaluated`, `graded`, `judged`, `pair_graded`) and the failures by check
+  id. The trend serves a machine the sample-size series only (`MACHINE_METRICS`); every
+  rate and success series is a 422 for it.
+- **FR-22 — Workspace**: the role card read (`GET /api/enterprise/client-portal/agents/
+  {name}/role`) carries `behavior` on every card, role or not: a tone per indicator
+  (`good` ≥ 85 %, `watch` below, `unknown` under the floor) and the run count, never a
+  number. The sentences live in the frontend. Unreadable → `null` (nothing shown, never
+  "all good").
+- **FR-23 — UI**: Agent Overview › Behavior (`components/indicators/`), tiles that open the
+  drill-down in place, the fix-path table linking to the Skills / Schedules tab or
+  Operations › Evaluations; the Workspace agent details render the plain-words block
+  (`portal/PortalAgentBehavior.vue`). Out of scope until ruled: auto-adjusting skills from
+  indicators, any agent-visible scalar, cross-install comparison.
+
+**Tests.** `tests/unit/test_939_indicators_compute.py`, `test_939_indicators_routes.py`,
+`test_939_agent_self_view.py`, `test_939_workspace_behavior.py`;
+`src/frontend/tests/unit/agentBehavior.mount.spec.js`.
 
 ## 47. Declared Metric Registry (trinity-enterprise#477)
 

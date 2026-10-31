@@ -38,6 +38,7 @@ from services.capacity_manager import (
 from services import dispatch_admission_service
 from services import chat_execution_service
 from services import chat_persistence_service
+from services.activity_service import activity_service
 from services.chat_signals import (
     ChatAdmissionReplay,
     ChatDispatchError,
@@ -283,6 +284,8 @@ async def chat_with_agent(
                 },
             )
         _raise_if_stored_error(admission.snapshot)
+        # ent#940 I3: a replayed finished answer is an inline delivery too.
+        activity_service.record_inline_result(current_user, name, admission.snapshot)
         return JSONResponse(
             content=admission.snapshot
             or {"execution": {"task_execution_id": admission.execution_id}},
@@ -316,6 +319,8 @@ async def chat_with_agent(
             chain_depth=admission.chain_depth,
             # trinity-enterprise#752: a self-approval is recorded on the row.
             gate=admission.gate,
+            # ent#935: stored as parent_execution_id when it is the caller's own turn.
+            x_trinity_execution_id=x_trinity_execution_id,
         )
     except BaseException:
         await chat_execution_service.release_admission(
@@ -337,7 +342,7 @@ async def chat_with_agent(
     # ChatDispatchError, which this thin handler maps 1:1 to an HTTPException.
     # The finally in run_chat_turn releases the slot + idem claim.
     try:
-        return await chat_execution_service.run_chat_turn(
+        response = await chat_execution_service.run_chat_turn(
             name=name,
             request=request,
             current_user=current_user,
@@ -359,6 +364,9 @@ async def chat_with_agent(
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+    # ent#940 I3: an agent key handed the finished result inline has read it.
+    activity_service.record_inline_result(current_user, name, response)
+    return response
 
 
 def _resolve_deprecated_task_timeout(requested: Optional[int], agent_cap: int) -> tuple:
@@ -527,11 +535,14 @@ async def execute_parallel_task(
                 },
             )
         _raise_if_stored_error(result.snapshot)
+        activity_service.record_inline_result(current_user, name, result.snapshot)
         return JSONResponse(
             content=result.snapshot
             or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
             headers={"X-Idempotent-Replay": "true"},
         )
+    # ent#940 I3: a sync answer is the finished result, delivered inline.
+    activity_service.record_inline_result(current_user, name, result)
     return result
 
 

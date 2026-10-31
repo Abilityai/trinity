@@ -125,6 +125,7 @@ from db.skill_gate_requests import SkillGateRequestOperations
 from db.user_preferences import UserPreferenceOperations
 from db.product_events import ProductEventOperations
 from db.evaluations import EvaluationOperations
+from db.evaluation_aggregates import EvaluationAggregateOperations
 from db.reminders import RemindersOperations
 from db.connector import ConnectorOperations
 from db.permissions import PermissionOperations
@@ -1050,6 +1051,7 @@ class DatabaseManager:
         self._user_preference_ops = UserPreferenceOperations()
         self._product_event_ops = ProductEventOperations()
         self._evaluation_ops = EvaluationOperations()
+        self._evaluation_aggregate_ops = EvaluationAggregateOperations()  # ent#937 read side
         self._reminder_ops = RemindersOperations()
         self._connector_ops = ConnectorOperations()
         self._permission_ops = PermissionOperations(self._user_ops, self._agent_ops)
@@ -1995,6 +1997,26 @@ class DatabaseManager:
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
 
+    def get_execution_receipts(self, execution_id: str, agent_name: str,
+                               started_at, completed_at, grace_seconds: int = 60):
+        return self._schedule_ops.get_execution_receipts(
+            execution_id, agent_name, started_at, completed_at, grace_seconds)
+
+    def recent_series_metrics(self, execution_id: str, limit: int = 20):
+        return self._schedule_ops.recent_series_metrics(execution_id, limit)
+
+    # ent#940 — pair evaluator reads
+    def sibling_executions(self, parent_execution_id: str, cap: int = 200):
+        return self._schedule_ops.sibling_executions(parent_execution_id, cap)
+
+    def pair_rework_series(self, caller_agent: str, callee_agent: str, series_key: str,
+                           limit: int = 20):
+        return self._schedule_ops.pair_rework_series(caller_agent, callee_agent,
+                                                     series_key, limit)
+
+    def tool_call_count(self, raw):
+        return self._schedule_ops._tool_call_count(raw)
+
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
@@ -2303,6 +2325,16 @@ class DatabaseManager:
 
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
+
+    def collaboration_rows_for_executions(self, execution_ids):  # ent#940
+        return self._activity_ops.collaboration_rows_for_executions(execution_ids)
+
+    def earliest_collaboration_action(self, action):  # ent#940
+        return self._activity_ops.earliest_collaboration_action(action)
+
+    def insert_read_receipt_if_absent(self, reader_agent, target_agent, execution_id):  # ent#940
+        return self._activity_ops.insert_read_receipt_if_absent(
+            reader_agent, target_agent, execution_id)
 
     def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None, *, own_rows_user_id=None, own_rows_exempt_agents=None):
         return self._activity_ops.get_activities_in_range(
@@ -3173,14 +3205,66 @@ class DatabaseManager:
     def workspace_rating_tally(self, agent_name):
         return self._evaluation_ops.workspace_rating_tally(agent_name)
 
-    def list_agent_evaluations(self, agent_name, limit=50):
-        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
+    def list_agent_evaluations(self, agent_name, limit=50, *, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit, caller=caller)
 
-    def list_fleet_evaluations(self, agent_names, limit=100):
-        return self._evaluation_ops.list_evaluations_for_agents(agent_names, limit)
+    def list_fleet_evaluations(self, agent_names, limit=100, *, callers=None, caller=None):
+        return self._evaluation_ops.list_evaluations_for_agents(
+            agent_names, limit, callers=callers, caller=caller)
 
-    def latest_evaluation_for_execution(self, execution_id):
-        return self._evaluation_ops.latest_for_execution(execution_id)
+    # --- evaluation read API (ent#937) ---------------------------------------
+    def evaluation_window_rows(self, **kw):
+        return self._evaluation_aggregate_ops.window_rows(**kw)
+
+    def evaluation_window_agents(self, **kw):
+        return self._evaluation_aggregate_ops.window_agents(**kw)
+
+    def evaluation_human_labels(self, execution_ids):
+        return self._evaluation_aggregate_ops.human_labels(execution_ids)
+
+    def evaluation_agent_costs(self, agent_name, **kw):
+        return self._evaluation_aggregate_ops.agent_costs(agent_name, **kw)
+
+    def execution_chain_node(self, execution_id):
+        return self._evaluation_aggregate_ops.chain_node(execution_id)
+
+    def execution_chain_ancestors(self, execution_id, **kw):
+        return self._evaluation_aggregate_ops.chain_ancestors(execution_id, **kw)
+
+    def execution_chain_descendants(self, execution_id, **kw):
+        return self._evaluation_aggregate_ops.chain_descendants(execution_id, **kw)
+
+    # --- Tier-0 deterministic evaluator (ent#935) ---------------------------
+    def upsert_platform_evaluation(self, agent_name, **kw):
+        return self._evaluation_ops.upsert_platform_evaluation(agent_name, **kw)
+
+    def insert_platform_evaluation_if_absent(self, agent_name, **kw):
+        return self._evaluation_ops.insert_platform_evaluation_if_absent(agent_name, **kw)
+
+    def latest_tier0_for_execution(self, execution_id, **kw):
+        return self._evaluation_ops.latest_tier0_for_execution(execution_id, **kw)
+
+    def unevaluated_execution_ids(self, **kw):
+        return self._evaluation_ops.unevaluated_execution_ids(**kw)
+
+    # --- Tier-1 sampled judge seam (ent#936) --------------------------------
+    def claim_tier1_row(self, execution_id, **kw):
+        return self._evaluation_ops.claim_tier1_row(execution_id, **kw)
+
+    def finish_tier1_row(self, eval_id, **kw):
+        return self._evaluation_ops.finish_tier1_row(eval_id, **kw)
+
+    def latest_tier1_for_execution(self, execution_id):
+        return self._evaluation_ops.latest_tier1_for_execution(execution_id)
+
+    def tier1_candidates(self, **kw):
+        return self._evaluation_ops.tier1_candidates(**kw)
+
+    def reclaim_stale_tier1(self, **kw):
+        return self._evaluation_ops.reclaim_stale_tier1(**kw)
+
+    def unevaluated_pair_execution_ids(self, **kw):  # ent#940
+        return self._evaluation_ops.unevaluated_pair_execution_ids(**kw)
 
     def get_or_create_public_user_memory(self, agent_name: str, user_email: str) -> dict:
         return self._public_link_ops.get_or_create_user_memory(agent_name, user_email)
@@ -4537,10 +4621,14 @@ class DatabaseManager:
         absent_keys,
         since_iso: str,
         limit: int,
+        *,
+        until_iso=None,
     ):
-        """One dimension series' newest points since `since_iso` (#3293)."""
+        """One dimension series' newest points since `since_iso` (#3293),
+        optionally before `until_iso` (ent#937 trend read)."""
         return self._metric_point_ops.series_points_for_dims(
-            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit
+            agent_name, metric, dict(dims), list(absent_keys), since_iso, limit,
+            until_iso=until_iso,
         )
 
     def count_metric_points_candidates(self, retention_days: int, limit: int) -> int:

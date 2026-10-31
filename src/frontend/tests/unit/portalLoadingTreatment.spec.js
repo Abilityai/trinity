@@ -55,6 +55,7 @@ const CHART = [
   'components/AgentTile.vue',            // grid tile chart zones (ent#245)
   'components/DashboardPanel.vue',       // agent-defined dashboard charts (ent#253)
   'components/tiles/ExecutionsTile.vue', // the Executions grid tile (ent#449)
+  'components/evaluations/EvalTrend.vue', // Operations › Evaluations checks-passed trend chart (ent#938)
   // ent#523 put the Workspace agent band here (a Workspace surface AND a chart
   // surface — the beam wrapped the `StackedBarChart` alone). trinity-enterprise#968
   // took it OUT again: the band's chart is now `portal/ActivityWave.vue`, a

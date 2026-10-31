@@ -310,11 +310,13 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   trinity-ops-agent#232 trap). The surface has exactly one write route and no
   agent-writable path.
 - **Read is access-scoped, deliberately unfenced**: `AuthorizedAgentByName` for an
-  agent's own evaluations, `accessible_agent_names` for the fleet list. An agent seeing
-  its own bad score is the feedback loop; read ≠ write.
+  agent's own evaluations, `accessible_agent_names` for the fleet list — an agent key
+  narrowed to itself and its pairs (ent#937). An agent seeing its own bad score is the
+  feedback loop; read ≠ write.
 - **`quality` is nullable and null ≠ 0** — the axes are independent, so a run can carry
-  `completion` before anything has graded it. The Tier-0 evaluator that populates
-  `quality` is a later child; this is the surface it writes to.
+  `completion` before anything has graded it. The Tier-0 evaluator (ent#935) writes
+  `completion` and its checks and leaves `quality` NULL — it grades what the run left
+  behind, not the answer (requirements §46, FR-7..FR-10a).
 - **Completion relabel**: Overview (#1107), schedules rollup (#1115) and fleet stats
   (EXEC-022) now say "Completion", not "Success rate". Additive — the `success_rate`
   API field is unchanged; only the label moved.
@@ -354,6 +356,25 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   statically named call to the three writer APIs, each driven through the real writer
   and read back as a machine) and `test_ent781_read_routes.py` (the output contract,
   operator/non-operator/machine readers, all three GETs over HTTP).
+- **Read API + scorecard (ent#937)**: `db/evaluation_aggregates.py` (bounded,
+  execution-INNER-JOINed window fetch, 5,000-row cap, chain walk ≤ 200 nodes) →
+  `services/evaluation_read_service.py` (period parse, fold, projection, `scope_for`) →
+  five GET routes (`/evaluations/aggregate|failed|trend|chain/{id}`,
+  `/agents/{name}/evaluations/summary`), static before `/{eval_id}`. An agent key is
+  narrowed to itself and its pairs on every evaluation read; a machine never gets a
+  judge's score. `services/eval_scorecard_service.py` writes daily `eval.*` points under
+  the reserved owner `platform:eval` (per Tier-0 row + nightly under the sweep lease);
+  `record_metrics` refuses `eval.`. MCP: `get_evaluation_summary`. Requirements §46
+  FR-11..FR-14.
+- **Pair evaluation (ent#940, Layer 1)**: `services/tier0_pair_evaluator.py` writes one
+  `platform:tier0:pair` row per delegated callee run (phase 2 of the Tier-0 sweep) —
+  seven gate + two signal edge checks and latency/cost metrics. `window_rows` LEFT JOINs
+  it as `pair_checks`; `fold` adds a disjoint `pair` block on `by=pair` only (Tier-0
+  counters untouched); a machine reads its counts only. `activity_service.record_first_reads`
+  writes a first-read `read_result` receipt when an agent key reads another agent's
+  finished run (execution and fan-out result GETs; fail-open, response unchanged). Tier-0
+  now also grades sourced `fan_out`/`loop`/`reminder` runs. The sampled pair judge
+  (Layer 2) is not built. Requirements §46 addendum C, FR-18..FR-21.
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.
