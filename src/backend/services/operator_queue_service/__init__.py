@@ -83,7 +83,7 @@ from utils.helpers import (
     iso_cutoff,  # noqa: F401 — kept for G13 (listing and ingest import it)
     parse_iso_timestamp,  # noqa: F401 — kept for G13 (listing, rows and filechannel import it)
     to_utc_iso,  # noqa: F401 — read as oqs.to_utc_iso from outside; kept for G13 (rows, filechannel)
-    utc_now_iso,
+    utc_now_iso,  # noqa: F401 — kept for G13 (poller, filechannel, ingest, write_back and flood import it)
 )
 
 # #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
@@ -627,7 +627,7 @@ from . import write_back  # noqa: E402
 # #3785 (S6): the bounded-alert delegates live in `alerts` and the flood alert
 # in `flood.FloodAlertMixin`, composed below. Neither reads a package name at
 # import time.
-from . import alerts  # noqa: E402
+from . import alerts  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import flood  # noqa: E402
 
 
