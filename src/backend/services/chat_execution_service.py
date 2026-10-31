@@ -3097,7 +3097,8 @@ async def _record_cancel_event(name, current_user, task_execution_id, details):
 
 
 async def _cancel_queued_if_queued(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """BACKLOG-001: if the execution is still queued in the backlog, cancel it
     directly (no container interaction, no slot to release) and return the
@@ -3146,6 +3147,8 @@ async def _cancel_queued_if_queued(
                     "actor_kind": actor_kind,
                 },
             )
+            if on_ended is not None:
+                await on_ended("cancelled_while_queued")
             return {"status": "cancelled_while_queued", "execution_id": execution_id}
     return None
 
@@ -3189,7 +3192,8 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
 
 
 async def _proxy_terminate_and_finalize(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """Proxy the terminate to the agent container, force-release capacity on a
     terminal outcome, write the #679 CANCELLED CAS (only when we actually
@@ -3230,6 +3234,13 @@ async def _proxy_terminate_and_finalize(
         # the agent's own terminal already ran its own release, and firing an
         # emergency clear on a no-op branch was the part with no defensible
         # reading at all.
+        # #3180: set only by the CANCELLED CAS below, and the audit hook reads
+        # it rather than the agent's answer. The agent answers `terminated`
+        # again for a turn it accepted but has not started (its pending entry
+        # is kept), and two terminates of a live process may both get it, so
+        # only the call that wins the CAS ended the turn. Cost, accepted: a kill
+        # of a process whose row is already terminal writes no row.
+        cancel_won = False
         if result.get("status") == "terminated" and task_execution_id:
             try:
                 capacity = get_capacity_manager()
@@ -3283,6 +3294,8 @@ async def _proxy_terminate_and_finalize(
                 "actor_kind": actor_kind,
             },
         )
+        if cancel_won and on_ended is not None:
+            await on_ended("terminated")
         return result
 
     except httpx.ConnectError:
@@ -3292,7 +3305,8 @@ async def _proxy_terminate_and_finalize(
 
 
 async def terminate_execution(
-    *, name, execution_id, task_execution_id, current_user=None, actor_kind="operator"
+    *, name, execution_id, task_execution_id, current_user=None, actor_kind="operator",
+    on_ended=None,
 ):
     """Terminate a running execution: cancel-if-queued (BACKLOG-001), else
     container-gate then proxy-terminate + finalize. Returns the result dict
@@ -3310,6 +3324,14 @@ async def terminate_execution(
     FAILED (#679/#1332), neutral for the dispatch breaker, and CAS-guarded — a
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
+
+    #3180: `on_ended`, when given, is awaited once with the arm's status, and
+    only when THIS call ended work: the queued cancel won its CAS, the parked
+    cancel won its CAS, or the agent answered `terminated` and the CANCELLED CAS
+    that follows was won. A repeat terminate (of a still-parked turn, or one the
+    agent answers `terminated` again) gives the same answer but does not call
+    it, and neither does `already_finished` or any error arm. The response is
+    unchanged either way.
     """
     # ent#551 QA: two voice-dispatched turns were cancelled ~3 s after their
     # call ended and nothing in the log said by whom — uvicorn access logging
@@ -3349,7 +3371,8 @@ async def terminate_execution(
             raise ChatDispatchError(404, "Execution not found in agent")
 
     queued = await _cancel_queued_if_queued(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
     if queued is not None:
         return queued
@@ -3360,7 +3383,8 @@ async def terminate_execution(
     # refuses to POST, and finalize CANCELLED now. Before this the only
     # "cancel" a parked row ever got was the watchdog's wrong one.
     parked = await _cancel_inflight_if_parked(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
     if parked is not None:
         return parked
@@ -3372,12 +3396,14 @@ async def terminate_execution(
         raise ChatDispatchError(503, "Agent is not running")
 
     return await _proxy_terminate_and_finalize(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
 
 
 async def _cancel_inflight_if_parked(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """#2433: cancel an execution whose backend dispatcher is still PARKED in
     the agent-call queue (never dispatched). Returns the cancelled payload, or
@@ -3461,4 +3487,8 @@ async def _cancel_inflight_if_parked(
             "actor_kind": actor_kind,
         },
     )
+    # #3180: only the call that won the CANCELLED CAS ended the turn; a repeat
+    # while the dispatcher is still parked answers the same but ended nothing.
+    if cancel_won and on_ended is not None:
+        await on_ended("cancelled_while_parked")
     return {"status": "cancelled_while_parked", "execution_id": execution_id}

@@ -1113,6 +1113,7 @@ async def force_release_agent(
 @router.post("/{agent_name}/circuit-breaker/reset")
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
+    request: Request,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
     # admin gate, and the one this PR's first pass missed. `require_role`
     # rejects connector principals but NOT agent ones, deliberately: agent
@@ -1143,6 +1144,26 @@ async def reset_circuit_breaker_endpoint(
     prior_dispatch = DispatchBreaker(agent_name).to_dict().get("state", "closed")
     reset_circuit(agent_name)
     reset_dispatch(agent_name)
+    # #3180: the most-run operator write had no audit row. Written only once
+    # both resets have returned, for every principal that reaches this route;
+    # `log` derives the key fields from the principal (#2389), so a key's reset
+    # names the key. Not conditional on DISPATCH_BREAKER_ENABLED or the
+    # per-agent toggle: the transport breaker trips with both off. Both resets
+    # are fail-open (when Redis refuses they log and return), so the row
+    # records the request, not a confirmed reset.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="circuit_breaker_reset",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "prior_transport_state": prior_transport,
+            "prior_dispatch_state": prior_dispatch,
+        },
+    )
     return {
         "agent_name": agent_name,
         "prior_state": prior_transport,  # back-compat field (transport breaker)
