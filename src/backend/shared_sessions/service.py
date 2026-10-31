@@ -317,11 +317,24 @@ def _can_still_reach(current_user, agent_name: str) -> bool:
     return True
 
 
-def _require_membership(room_id: str, current_user) -> dict:
+def _require_membership(room_id: str, current_user, *, allow_departed: bool = False) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
     Never 403 on a room the caller isn't in — that would confirm the room exists
     (Invariant #8, enumeration-safety). Admins can see any room.
+
+    A participant who LEFT is not in the room (trinity-enterprise#959 fix round
+    1): a removed agent's own key could otherwise keep reading — and posting
+    into — the room it was removed from. Same uniform 404. Only agents can be
+    removed today.
+
+    `allow_departed` is for ONE caller: the engine posting a reply that was
+    already dispatched (`post_message` with `_sender_override`, never set by a
+    route). A wake runs under the WAKER's principal, and the waker may be an
+    agent that posted `@B` with its own key; if a moderator removes it while B
+    is still running, B's reply — already paid for — must still land (Codex
+    re-review, round 2). The participant row must still exist: only the
+    `left_at` check is relaxed, never membership itself.
     """
     kind, identity = _caller(current_user)
     is_admin = getattr(current_user, "role", None) == "admin" and kind == "user"
@@ -339,7 +352,7 @@ def _require_membership(room_id: str, current_user) -> dict:
         raise RoomError(404, "room_not_found", "Room not found")
     if is_admin:
         return room
-    if not participant:
+    if not participant or (participant.get("left_at") and not allow_departed):
         raise RoomError(404, "room_not_found", "Room not found")
     return room
 
@@ -633,6 +646,15 @@ def list_rooms(current_user) -> dict:
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
+        # trinity-enterprise#959: is the CALLER actively in this room? Off the
+        # admin path the list is ACTIVE membership (`list_rooms_for_participant`
+        # drops a room the caller left), so it is true there; an admin lists
+        # every room, and the Workspace Inbox shows only the rooms its reader
+        # is in, so it needs the bit rather than inferring it from a count.
+        r["member"] = any(
+            p.get("kind") == kind and p.get("identity") == identity and not p.get("left_at")
+            for p in participants
+        )
         r["message_count"] = counts_by_room.get(r["id"], 0)
         # Absent for an empty room; the client already falls back to `created_at`,
         # which for a room nobody has spoken in is the honest answer.
@@ -701,7 +723,7 @@ def add_participant(current_user, room_id: str, agent_name: str,
         if active_agents >= MAX_PARTICIPANTS:
             raise RoomError(422, "participant_cap",
                             f"At most {MAX_PARTICIPANTS} agent participants")
-    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso())
+    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso(), rejoin=True)
     _post_system(room_id, f"{agent_name} joined the room.")
     return {"room_id": room_id, "agent": agent_name, "added": True}
 
@@ -1222,7 +1244,9 @@ async def post_message(current_user, room_id: str, content: str,
         raise RoomError(413, "message_too_large",
                         f"Message exceeds {MAX_CONTENT_CHARS} characters")
 
-    room = _require_membership(room_id, current_user)
+    # An engine reply (`_sender_override`) was dispatched while its waker was a
+    # member; it lands even if the waker has since been removed (ent#959 r2).
+    room = _require_membership(room_id, current_user, allow_departed=is_agent_reply)
 
     # A human/external post is INBOUND — reject it if the room is closed, expired
     # or already at budget. An agent reply (``_sender_override`` set) is an

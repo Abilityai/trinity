@@ -75,8 +75,8 @@
               <!-- Round 3: the agent keeps its width (to 60%) and the chat title
                    is what truncates — both shrank, and a long title left the
                    agent at 1–7 characters. -->
-              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ it.type === 'mention' ? (it.mention && it.mention.tagged_by) || 'Someone' : labelFor(it.agent_name) }}</span>
-              <span v-if="it.type === 'thread'" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
+              <span class="shrink-0 max-w-[60%] text-sm font-medium truncate text-gray-900 dark:text-gray-100" :data-testid="`inbox-row-agent-${it.key}`">{{ it.type === 'mention' ? (it.mention && it.mention.tagged_by) || 'Someone' : it.type === 'room' ? roomAgentsLabel(it, labels) : labelFor(it.agent_name) }}</span>
+              <span v-if="isChatItem(it)" class="min-w-0 text-[12.5px] truncate" :class="meta(it)">· {{ threadTitle(it) }}</span>
               <span
                 class="ml-auto shrink-0 text-[12.5px] tabular-nums"
                 :class="meta(it)"
@@ -98,7 +98,7 @@
             <span v-else-if="it.latest && it.latest.excerpt" class="mt-0.5 block text-sm truncate" :class="secondary(it)">{{ it.latest.excerpt }}</span>
 
             <span class="mt-1 flex items-center gap-1.5 flex-wrap">
-              <BaseBadge v-if="it.type === 'thread' && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
+              <BaseBadge v-if="isChatItem(it) && it.n > 0" variant="primary" class="tabular-nums" :data-testid="`inbox-row-new-${it.key}`">{{ newLabel(it.n) }}</BaseBadge>
               <!-- trinity-enterprise#631: a tag is New until opened, then Read
                    (kept in place, drawn read, until the selection moves). -->
               <BaseBadge v-if="it.type === 'mention' && it.status === 'unread'" variant="primary" :data-testid="`inbox-row-new-${it.key}`">New</BaseBadge>
@@ -111,7 +111,7 @@
               <!-- On a selected row the neutral fill is the row's own (gray-750
                    in dark), so it gets an edge (round 3). -->
               <BaseBadge
-                v-if="it.type === 'thread' && it.readInPlace"
+                v-if="isChatItem(it) && it.readInPlace"
                 variant="neutral"
                 :class="it.key === selectedKey ? 'ring-1 ring-inset ring-gray-300 dark:ring-gray-600' : ''"
                 :data-testid="`inbox-row-read-${it.key}`"
@@ -180,7 +180,7 @@ import { onBeforeUnmount, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import { relativeTime } from './portalUtils'
-import { newLabel } from './portalInbox'
+import { newLabel, isChatItem, roomAgentsLabel } from './portalInbox'
 import { mentionWhere } from './portalMentions'
 import { priorityBadge, expiresSoonLabel, needsExpiryTick, nextExpiryEntry, askKindIcon } from './portalAskUrgency'
 import { queueEnding, queueTypeLabel, workspaceEndingText, workspaceReplacesText } from '@/utils/operatorQueue'
