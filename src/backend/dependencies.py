@@ -1421,6 +1421,34 @@ def reject_non_interactive_principal(current_user: User) -> None:
         )
 
 
+def assert_interactive_admin(current_user: User) -> None:
+    """The GRANT gate (trinity-enterprise#1030 CP2): an admin in a signed-in
+    session — `assert_admin` AND `reject_non_interactive_principal`, spelled
+    here and nowhere else.
+
+    The two capability-grant routes call it after their `Depends(require_admin)`;
+    the manifest apply snapshot and create-mode deploy ask `is_interactive_admin`
+    before planning a `grants:` write and otherwise REPORT the grant as held
+    back. One spelling, so a manifest can never grant what the route would
+    refuse: an agent key resolving to its admin owner, or an admin's own MCP
+    key, fails here exactly as it fails at `PUT /capability-grants/{cap}`.
+    Raises 403; returns None on success.
+    """
+    assert_admin(current_user)
+    reject_non_interactive_principal(current_user)
+
+
+def is_interactive_admin(current_user: User) -> bool:
+    """`assert_interactive_admin` as a predicate, for the surfaces that hold a
+    write back instead of refusing the request (the `is_interactive_principal`
+    precedent)."""
+    try:
+        assert_interactive_admin(current_user)
+    except HTTPException:
+        return False
+    return True
+
+
 def is_interactive_principal(current_user: User) -> bool:
     """Did this caller authenticate INTERACTIVELY (a JWT human)?
 

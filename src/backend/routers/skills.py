@@ -23,7 +23,7 @@ from dependencies import (
     get_current_user,
     require_admin,
     reject_agent_principal,
-    reject_non_interactive_principal,
+    assert_interactive_admin,
     get_authorized_agent_by_name,
     get_skill_managed_agent_by_name,
     can_manage_agent_skills,
@@ -886,7 +886,7 @@ async def set_skill_manager(
     audited — who gave which agent the power to write skills into its siblings,
     and when, is exactly the record a later incident review reaches for.
     """
-    reject_non_interactive_principal(admin_user)
+    assert_interactive_admin(admin_user)  # the one spelling of the grant gate (ent#1030)
     try:
         result = capability_grant_service.set_grant(
             agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user.username
@@ -894,21 +894,11 @@ async def set_skill_manager(
     except CapabilityGrantRefused as e:
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     if result["changed"]:
-        try:  # best-effort: the grant has already committed
-            await platform_audit_service.log(
-                event_type=AuditEventType.AUTHORIZATION,
-                event_action="skill_manager_grant" if body.granted else "skill_manager_revoke",
-                source="api",
-                actor_user=admin_user,
-                actor_ip=request.client.host if request.client else None,
-                endpoint=request.scope["path"],
-                request_id=getattr(request.state, "request_id", None),
-                target_type="agent",
-                target_id=agent_name,
-                details={"capability": CAPABILITY_SKILLS_MANAGE, "granted": body.granted},
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("skill-manager audit failed for %s", agent_name)
+        # `skill_manager_grant` / `skill_manager_revoke`, from the shared verb
+        # table every grant door uses.
+        await capability_grant_service.audit_grant_change(
+            agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user, request=request,
+            log=platform_audit_service.log)
     return SkillManagerGrantResult(**result)
 
 
