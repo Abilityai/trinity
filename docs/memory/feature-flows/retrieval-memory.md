@@ -102,7 +102,20 @@ subscription runs on that agent's own setup token — same credential, same bill
 as its chat — through the Messages API's OAuth beta; an agent on API-key auth,
 or a job with no agent behind it, runs on the instance's platform key; a
 subscription-mode agent whose token cannot be read answers nobody rather than
-borrowing an instance key it was never assigned. **The model follows the
+borrowing an instance key it was never assigned. The token is read **before**
+the rate-limit check (the merge-train found the limit checked first, so a
+limited subscription with an unreadable token fell through to the key in
+`auto`). "Rate-limited" is the platform's ONE derivation —
+`subscription_headroom_service.rate_limited_now_cached` →
+`resolve_rate_limited_now` (#2157 / #447): a fresh provider verdict wins in both
+directions, the 2h failure-row inference only when the provider could not
+answer — so the gateway agrees with the Subscriptions card and a recovered
+subscription is not billed to the key for two hours. The key arm honours the
+agent's `use_platform_api_key` (False = the operator asserting this agent never
+runs on the instance key; the platform itself always may). On a
+subscription-only install a Gemini or Codex agent therefore captures nothing
+until a platform key exists — ruled "ship as is" at merge-train Gate 1
+(2026-10-31), tracked in trinity-enterprise#1038. **The model follows the
 credential**: measured 2026-10-30 on a real setup token, plain Bearer with the
 OAuth beta, `claude-haiku-4-5` answers 200 while Haiku 5.5, Sonnet 4.6 / 5.5
 and Opus 4.6 / 5.5 answer 429 `Error` unless the request claims to be Claude
@@ -114,12 +127,17 @@ TEXT block read). The knob is `trinity_model_credential` (Settings → General):
 answers 429 mid-call, steps aside to the platform key when there is one),
 `subscription` (the agent's subscription or nobody), `platform_key` (the key or
 nobody). Every answered call logs one bounded usage line (purpose, credential
-kind, model, tokens, latency); nothing in the agent container is involved.
+kind, model, tokens, latency) — thread titles too, through `log_usage` after
+their own `send`; an upstream error body is scrubbed (`sanitize_text`) before
+it is logged; nothing in the agent container is involved.
 
 `POST …/retrieval-memory/extract-preview` (owner, person-only) runs one exchange
 through the real path on whatever credential would answer for that agent and
-returns the facts, the screened candidates and who answered (`extractor`,
-`model`, `subscription`), storing nothing — the owner's prompt-tuning tool and
+returns the facts, the screened candidates and who **actually** answered
+(`extractor`, `model`, `subscription`, from the gateway's `report` — after a 429
+fallback that is the key and Haiku 5.5, not the plan), storing nothing; an
+upstream failure is 502 `extractor_failed` with the status, never `facts: []`
+that reads as "nothing worth remembering" — the owner's prompt-tuning tool and
 the eval's way (`MEMORY_EVAL_VIA_BACKEND`) to score the prompt on a live agent;
 `MEMORY_EVAL_CREDENTIAL=subscription` scores it locally on the subscription
 shape and model.
@@ -277,11 +295,14 @@ not the same extractor.
 
 **The model door (trinity-enterprise#1027).** `tests/unit/test_ent1027_model_gateway.py`
 pins resolution (a subscription agent uses its own token even when a key
-exists, an unreadable token never borrows the key, a rate-limited subscription
-steps aside in `auto` only, the knob matrix, a db failure reads as nobody, the
-plan never carries the secret), the request (the platform-key one-shot shape,
-the plain subscription shape pinned to its model, the 429 fallback in `auto`
-only, failures as None, the first TEXT block, tools passing through), the four
+exists, an unreadable token never borrows the key — limited or not, raising or
+not — a rate-limited subscription steps aside in `auto` only, the rate-limit
+gate is the one derivation with a fresh verdict beating the inference both
+ways, `use_platform_api_key = False` answers nobody, the knob matrix, a db
+failure reads as nobody, the plan never carries the secret), the request (the
+platform-key one-shot shape, the plain subscription shape pinned to its model,
+the 429 fallback in `auto` only, failures as None, a scrubbed error log, the
+`report` naming who answered, the first TEXT block, tools passing through), the four
 callers going through the door (memory captures on the subscription with no
 platform key, the summarizer, thread titles following the agent, the
 compatibility checks), the honest status on both cards and the owner preview.

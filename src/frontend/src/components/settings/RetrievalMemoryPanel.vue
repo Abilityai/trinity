@@ -53,16 +53,18 @@
       </div>
 
       <!--
-        trinity-enterprise#1027: where the extraction call runs. Editable while
+        trinity-enterprise#1027: which credential the backend's own model calls
+        run on — memory extraction, conversation summaries, thread titles, the
+        compatibility checks: one knob for the one door. Editable while
         the platform switch is off (the value is saved and applies once it is
         on). The status slot is always rendered at one line so changing the
         option never moves the row (principle 29).
       -->
       <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between sm:gap-4" data-testid="retrieval-memory-extractor-row">
         <div class="min-w-0 sm:flex-1">
-          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Extraction runs on</p>
+          <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Backend model calls run on</p>
           <p class="mt-0.5 text-[12.5px] text-gray-500 dark:text-gray-400">
-            Facts are extracted by a small model call after each run — the same door the conversation summaries and thread titles use. On the agent's subscription it
+            Memory extraction, conversation summaries, thread titles and the compatibility checks are small model calls the platform makes for an agent — one door, one credential. On the agent's subscription it
             uses the agent's own subscription token, directly from the platform; the platform key uses the
             instance's Anthropic key.<template v-if="view.state !== 'loading' && !status.enabled"> Saved now, applies once the switch above is on.</template>
           </p>
@@ -78,7 +80,7 @@
           :model-value="status.credential_mode || 'auto'"
           :disabled="savingExtractor || view.state === 'loading'"
           size="sm"
-          aria-label="Extraction runs on"
+          aria-label="Backend model calls run on"
           data-testid="retrieval-memory-extractor"
           @update:model-value="setExtractor"
         >
@@ -166,7 +168,7 @@ async function setExtractor(value) {
     await settingsStore.updateSetting('trinity_model_credential', value)
     await load()
   } catch (e) {
-    extractorError.value = 'Could not change where extraction runs. The saved choice is shown.'
+    extractorError.value = 'Could not change which credential backend model calls use. The saved choice is shown.'
     await load()
   } finally {
     savingExtractor.value = false
