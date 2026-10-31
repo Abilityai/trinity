@@ -101,7 +101,7 @@
   | **INTERACTIVE** | JWT session only | every key | `Depends(require_interactive)` (predicate `is_interactive_principal`, #1854) |
 
   They are **credential-class** rules, not proof of human origin: a `user` key is the person's delegated credential, and a JWT counts as interactive only because non-human JWTs are fenced at `get_current_user`.
-- **Assignment rule**: a route that **grants or changes what an agent may do** takes PERSON; a route that **mints, binds or rotates a credential or sign-in identity** takes INTERACTIVE — a minter must be stricter than the principal class it produces, or the PERSON rule is circular.
+- **Assignment rule**: a route that **grants or changes what an agent may do** takes PERSON; a route that **mints, binds or rotates a credential or sign-in identity** takes INTERACTIVE — a minter must be stricter than the principal class it produces, or the PERSON rule is circular. **One ruled exception (2026-10-28, trinity-enterprise#719)**: writing a credential the caller supplies in the request into the caller's own agent takes PERSON — `POST /api/agents/{name}/credentials/inject` and `PUT /api/agents/{name}/github-pat`. The key holder already holds what it writes, and the public abilities toolkit's `/trinity:onboard` does both on the person's own `user` key (Step 5e `inject_credentials`; the tier-1 `set_agent_github_pat`). Agent and system keys stay refused. A route where the platform mints the secret and hands it back, restores a whole credential archive, binds a paid account, or binds a stored token the request does not carry (`POST .../git/bind-to-own-repo`) stays INTERACTIVE.
 
   | Route | Rule |
   |---|---|
@@ -110,6 +110,7 @@
   | `PUT /api/agents/{name}/{read-only, resources, timeout, public-channel-model, guardrails}` | PERSON **or** an agent holding `agents.manage` (§2.9) |
   | `PUT /api/users/me/email` (ent#711) | INTERACTIVE |
   | `PUT` / `DELETE /api/users/me/github-pat` (a credential future agent creations inherit, ent#162) | INTERACTIVE |
+  | `POST /api/agents/{name}/credentials/inject`, `PUT /api/agents/{name}/github-pat` (a credential the caller supplies, into its own agent; the ruled exception above) | PERSON |
   | `POST /api/mcp/keys` (every scope), `POST /api/mcp/keys/ensure-default` | INTERACTIVE (security.md §20.10) |
   | `GET /api/mcp/keys` (trinity-enterprise#712 — the key inventory; no machine consumer) | INTERACTIVE |
   | `POST /api/settings/email-whitelist` (trinity-enterprise#717 — every role, the default `user` included: each whitelist role yields an interactive session at first sign-in, and `operator` and above can mint keys) | admin **and** INTERACTIVE |

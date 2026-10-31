@@ -34,6 +34,7 @@ from dependencies import (
     capability_fence,
     get_current_user,
     reject_agent_principal,
+    require_interactive,
     require_person,
     AuthorizedAgentByName,
     OwnedAgentByName,
@@ -457,7 +458,7 @@ async def get_git_config(
     }
 
 
-@router.post("/{agent_name}/git/initialize")
+@router.post("/{agent_name}/git/initialize", dependencies=[Depends(require_person)])
 async def initialize_github_sync(
     agent_name: OwnedAgentByName,
     body: GitInitializeRequest,
@@ -479,6 +480,12 @@ async def initialize_github_sync(
     - GitHub PAT configured (per-agent or platform-level) in system settings
     - Agent must be running
     - User must be agent owner
+    - A person (`require_person` in the decorator, trinity-enterprise#719). Not
+      INTERACTIVE: the body carries no credential, so the caller binds none. The
+      handler seeds a token already configured for the agent (its per-agent PAT
+      or the platform PAT) into the agent's credential helper. Setting a
+      per-agent PAT is PERSON too (`PUT .../github-pat`); the repository binding
+      is INTERACTIVE (`bind-to-own-repo`).
     """
     from services.docker_service import get_agent_container
     from services.github_service import GitHubService, GitHubError
@@ -675,7 +682,7 @@ async def get_agent_github_pat_status(
     }
 
 
-@router.put("/{agent_name}/github-pat")
+@router.put("/{agent_name}/github-pat", dependencies=[Depends(require_person)])
 async def set_agent_github_pat(
     agent_name: OwnedAgentByName,
     body: GitHubPATRequest,
@@ -689,6 +696,12 @@ async def set_agent_github_pat(
 
     Note: Agent must be restarted for the new PAT to be used in
     container git operations (PAT is embedded in remote URL on restart).
+
+    A person (`require_person` in the decorator, trinity-enterprise#719): a
+    signed-in session or the person's own `user`-scoped key. It binds only the
+    token in the body, which the caller already holds. The public abilities
+    toolkit's `/trinity:onboard` sets a per-agent token this way on the person's
+    own key (ruled 2026-10-28). Every agent key and the system key are refused.
 
     Body:
     - pat: GitHub Personal Access Token
@@ -762,7 +775,7 @@ async def set_agent_github_pat(
     }
 
 
-@router.delete("/{agent_name}/github-pat")
+@router.delete("/{agent_name}/github-pat", dependencies=[Depends(require_person)])
 async def clear_agent_github_pat(
     agent_name: OwnedAgentByName,
     request: Request
@@ -960,7 +973,11 @@ async def _bind_locks(agent_name: str, destination_repo: str):
                 pass
 
 
-@router.post("/{agent_name}/git/bind-to-own-repo", response_model=BindAgentRepoResponse)
+@router.post(
+    "/{agent_name}/git/bind-to-own-repo",
+    response_model=BindAgentRepoResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def bind_agent_to_own_repo(
     agent_name: OwnedAgentByName,
     body: BindAgentRepoRequest,
@@ -974,8 +991,15 @@ async def bind_agent_to_own_repo(
     history into it, repoints `origin`, persists the per-agent PAT, and
     re-bakes the container environment so the rebind survives a restart.
 
-    Owner-only (`OwnedAgentByName`, uniform 404) **and human-only**
-    (`reject_agent_principal`). The role gate alone is insufficient: an
+    Owner-only (`OwnedAgentByName`, uniform 404) **and a signed-in session**
+    (`require_interactive` in the decorator, trinity-enterprise#719): with no
+    token in the body it stores the caller's SAVED GitHub token, which only a
+    session can set (ent#711) and the request does not carry, as the agent's
+    per-agent PAT, and it can create a repository on the caller's GitHub account,
+    so no MCP key may do it. `PUT .../github-pat`, which binds only the token in
+    its body, is PERSON. The inline `reject_agent_principal` stays as a second
+    layer for direct calls.
+    The role gate alone is insufficient: an
     agent-scoped key resolves to its owner CARRYING the owner's role, so on a
     default admin-owned install any agent's injected `TRINITY_MCP_API_KEY`
     would satisfy it (trinity-ops-agent#232; #1644/#1816 precedent). Blast
@@ -1225,7 +1249,7 @@ async def get_auto_sync_config(agent_name: AuthorizedAgentByName):
     }
 
 
-@router.put("/{agent_name}/git/auto-sync")
+@router.put("/{agent_name}/git/auto-sync", dependencies=[Depends(require_person)])
 async def set_auto_sync_config(
     agent_name: OwnedAgentByName,
     body: AutoSyncToggle,
@@ -1279,7 +1303,7 @@ async def get_freeze_schedules_config(agent_name: AuthorizedAgentByName):
     }
 
 
-@router.put("/{agent_name}/git/freeze-schedules-if-failing")
+@router.put("/{agent_name}/git/freeze-schedules-if-failing", dependencies=[Depends(require_person)])
 async def set_freeze_schedules_config(
     agent_name: OwnedAgentByName,
     body: FreezeSchedulesToggle,

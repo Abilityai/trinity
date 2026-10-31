@@ -22,7 +22,7 @@ from models import (
     CredentialRequirementsResponse,
 )
 from config import OAUTH_CONFIGS, BACKEND_URL
-from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, human_only, reject_agent_principal
+from dependencies import get_current_user, require_admin, get_authorized_agent_by_name, get_owned_agent_by_name, reject_agent_principal, require_interactive, require_person
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.mcp_validator import validate_mcp_config, McpValidationError
@@ -96,7 +96,7 @@ async def get_agent_credentials_status(
     return payload
 
 
-@router.get("/agents/{agent_name}/credentials/env-drift")
+@router.get("/agents/{agent_name}/credentials/env-drift", dependencies=[Depends(require_person)])
 async def get_agent_env_drift(
     agent_name: str = Depends(get_owned_agent_by_name),
     current_user: User = Depends(get_current_user),
@@ -151,6 +151,7 @@ async def get_agent_env_drift(
 @router.get(
     "/agents/{agent_name}/credential-requirements",
     response_model=CredentialRequirementsResponse,
+    dependencies=[Depends(require_person)],
 )
 async def get_agent_credential_requirements(
     request: Request,
@@ -312,7 +313,7 @@ async def list_oauth_providers(current_user: User = Depends(get_current_user)):
 # New Credential System (CRED-002: Simplified Encrypted File Storage)
 # ============================================================================
 
-@router.post("/agents/{agent_name}/credentials/inject")
+@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_person)])
 async def inject_credentials(
     request_body: CredentialInjectRequest,
     request: Request,
@@ -325,8 +326,13 @@ async def inject_credentials(
     This is the new simplified credential injection that writes files
     directly to the agent's workspace without Redis or template processing.
 
-    trinity-enterprise#69 Part 2: credential ops are human-only — an
-    agent-scoped key (which resolves to the owner) is rejected below.
+    A person (`require_person` in the decorator, trinity-enterprise#719): a
+    signed-in session or the person's own `user`-scoped key. The caller supplies
+    the files, so the key holder already holds what it writes. The public
+    abilities toolkit's `/trinity:onboard` delivers a deployed agent's `.env`
+    this way on the person's own key (ruled 2026-10-28). Every agent key and the
+    system key are refused; the inline `reject_agent_principal` below stays as a
+    second layer (trinity-enterprise#69 Part 2).
 
     Args:
         agent_name: Name of the agent
@@ -454,7 +460,7 @@ async def inject_credentials(
     )
 
 
-@router.post("/agents/{agent_name}/credentials/export", dependencies=[Depends(human_only)])
+@router.post("/agents/{agent_name}/credentials/export", dependencies=[Depends(require_person)])
 async def export_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),
@@ -529,7 +535,7 @@ async def export_credentials(
         raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
 
 
-@router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(human_only)])
+@router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(require_interactive)])
 async def import_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),

@@ -6,6 +6,12 @@ could switch on its own paid wake-ups (ent#329: "answers to this agent may now s
 money, and the bill lands on the owner"). Same class as the ent#223 consent toggle and
 the ent#109 bind endpoint: the endpoint that GRANTS a spend is human-only; the flag's
 *use* (the resume dispatch itself) is untouched.
+
+Since trinity-enterprise#719 the route is PERSON (`Depends(require_person)` in its
+decorator), so the system key and every other non-person scope are refused too, before
+the ownership lookup. The handler's own `reject_agent_principal` stays as a second layer
+for direct calls. The tests below call the handler directly, which skips the decorator;
+the real-router matrix is `test_ent719_own_settings_identity_git_human_only.py`.
 """
 
 from __future__ import annotations
@@ -33,6 +39,19 @@ def _router():
 
 
 class TestOperatorResumeToggleIsHumanOnly:
+    def test_the_route_is_person_gated_in_its_decorator(self):
+        """The decorator gate runs before `OwnedAgentByName`, so a refusal does not
+        depend on whether the agent exists, and it covers every non-person scope."""
+        agents_router = _router()
+        route = next(
+            r for r in agents_router.router.routes
+            if getattr(r, "path", None) == "/api/agents/{agent_name}/operator-resume"
+            and "PUT" in r.methods
+        )
+        # By name, not identity: another suite may have re-imported `dependencies`.
+        gates = [(d.dependency.__module__, d.dependency.__qualname__) for d in route.dependencies]
+        assert gates == [("dependencies", "require_person")]
+
     def test_the_toggle_carries_the_guard(self):
         src = inspect.getsource(_router().set_operator_resume_endpoint)
         assert "reject_agent_principal(current_user)" in src, (

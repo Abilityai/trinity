@@ -327,7 +327,7 @@ const revokeKey = (keyId) => {
 
 ### Backend: `POST /api/mcp/keys/{key_id}/revoke` (`mcp_keys.py:114-126`)
 ```python
-@router.post("/keys/{key_id}/revoke")
+@router.post("/keys/{key_id}/revoke", dependencies=[Depends(require_person)])  # a session or the person's own user key (trinity-enterprise#719)
 async def revoke_mcp_api_key_endpoint(key_id: str, ...):
     success = db.revoke_mcp_api_key(key_id, current_user.username)
     if not success:
