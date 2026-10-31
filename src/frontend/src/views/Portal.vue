@@ -99,6 +99,20 @@
         </template>
 
         <p v-if="error" class="mt-3 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
+
+        <!-- #3466: this card is the door for people an agent was shared with.
+             An operator whose platform session ended here (signed out in
+             another tab, back after it expired) gets the platform login too,
+             on both steps. Not while a platform session is held: the
+             "Continue as" card above is the way back then. -->
+        <p v-if="!authStore.isAuthenticated" :class="[HELP_CLASS, 'mt-6 text-center']">
+          Have a Trinity account?
+          <router-link
+            :to="platformLoginLocation"
+            data-testid="workspace-platform-login"
+            class="font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Sign in</router-link>
+        </p>
       </div>
     </div>
 
@@ -907,6 +921,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
+import { loginLocation } from '@/utils/platformSession'
+import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -1042,6 +1058,11 @@ const route = useRoute()
 const router = useRouter()
 
 // ---- Sign-in ------------------------------------------------------------------
+// #3466: the card's platform-login line returns to this page, or to the shared
+// canvas a visitor came from (the same return the code sign-in honours).
+const platformLoginLocation = computed(() =>
+  loginLocation(canvasReturnPath(route.query.redirect) || route.fullPath)
+)
 const step = ref('email')
 const email = ref('')
 const code = ref('')

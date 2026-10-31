@@ -17,7 +17,7 @@ Building the allowlist correctly is the load-bearing part — kill the
 wrong PID and the agent-server wedges itself. This module is the
 single source of truth for "is PID N allowed to live."
 
-The allowlist composes three sources:
+The allowlist composes four sources:
 
 1. **Hard-protected PIDs** — process attributes the platform itself
    needs regardless of any config:
@@ -51,6 +51,15 @@ The allowlist composes three sources:
    long-lived daemons via ``SessionStart`` hooks (e.g. the
    ``moltbook-http-mcp`` server on cornelius-m). Default file is
    empty; templates that ship persistent daemons must declare them.
+
+4. **Platform tree commands** (#4002) — the exact cmdline startup.sh
+   uses for the template setup hook (``bash
+   /home/developer/.trinity/setup.sh``). Always applied, independent of
+   the user file, and protects the descendant tree (apt/pip/npm
+   children), so a long install is not SIGKILLed mid-run. Exact match:
+   any other ``setup.sh`` stays killable. Lifetime-bounded the same way
+   as #1501: once setup.sh exits its leftovers reparent to PID 1 and are
+   reaped on the next sweep.
 
 The sweep itself lives in :mod:`orphan_sweep`. This module only
 computes the set of allowed PIDs.
@@ -309,6 +318,27 @@ _PLATFORM_ESSENTIAL_PATTERNS = (
 )
 
 
+# #4002: exact cmdlines (not globs) protected WITH their descendant tree.
+# Must match the invocation in startup.sh's "Persistent Setup Script" block.
+_PLATFORM_TREE_PATTERNS = (
+    "bash /home/developer/.trinity/setup.sh",  # template setup hook
+)
+
+
+def _platform_tree_pids() -> Set[int]:
+    """#4002: PIDs whose cmdline equals a :data:`_PLATFORM_TREE_PATTERNS`
+    entry, plus their descendants. Always runs."""
+    result: Set[int] = set()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return result
+    for name in entries:
+        if name.isdigit() and _read_cmdline(int(name)) in _PLATFORM_TREE_PATTERNS:
+            result.update(descendants_of(int(name)))
+    return result
+
+
 def _platform_essential_pids() -> Set[int]:
     """Return PIDs whose cmdline matches a base-image essential pattern.
 
@@ -362,6 +392,7 @@ def resolve_allowlist(
     allowlist.update(_ssh_session_pids())
     allowlist.update(_docker_exec_session_pids())  # #1153
     allowlist.update(_platform_essential_pids())
+    allowlist.update(_platform_tree_pids())  # #4002
 
     for pid in extra_pids:
         if pid <= 0:

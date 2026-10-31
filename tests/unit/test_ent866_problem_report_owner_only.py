@@ -191,4 +191,5 @@ def test_only_the_complaint_is_owner_only_not_every_row_about_a_person():
     assert oqs.is_owner_only({"request_id": "  WORKSPACE-PROBLEM-abc"})
     assert not oqs.is_owner_only({"request_id": "gate-123"})
     assert not oqs.is_owner_only({"request_id": "plain-1"})
-    assert set(oqs.OWNER_ONLY_ID_PREFIXES) <= set(oqs.ABOUT_A_PERSON_ID_PREFIXES)
+    # Every owner-only row is also about a person (never a machine key's).
+    assert all(p.startswith(oqs.ABOUT_A_PERSON_ID_PREFIXES) for p in oqs.OWNER_ONLY_ID_PREFIXES)

@@ -8,7 +8,7 @@ surfaces #1644's suite executes but never asserts:
   suite only probes 12-vs-1000 and 1001-vs-1000, so the one comparison that decides
   whether a prune runs is never tested at its own boundary;
 * the refusal-episode transition memo, the alarm's log LEVEL, its COUNT, and its
-  PAYLOAD — `announce_refusal`/`note_allowed`/`_alarm_id` all run today
+  PAYLOAD — `announce_refusal`/`note_allowed` and the alarm's natural key all ran
   (`test_1644:177`, `test_cleanup_inner_sweeps:105`) but nothing asserts what they
   did, which is precisely the state in which a mutant survives;
 * `_read_retention_settings`, whose body never executes anywhere in the suite —
@@ -27,6 +27,13 @@ retention value or a threshold value. Assertions pin DIRECTIONS
 `RETENTION_OPS_KEYS` window has a `_guard_allows` call site) — never a number that
 is safe today and catastrophic tomorrow.
 
+#3254 RE-PINS: the refusal alarm is written by `platform_alerts.observe` through
+`database.db.create_platform_operator_queue_item`. `_DbDouble` now stands in for
+that seam create (`_route_seam`, write-observation point), so `queue_items` keeps
+every alarm write and the count/level/payload assertions are unchanged. Two tests
+pinned the old row itself and say so: the natural key is the subject, not the id
+(id shape), and the seam composes the item (fixture shape).
+
 Invocation: `cd tests && python -m pytest unit/test_1771a_retention_edges.py`.
 `tests/unit/pytest.ini` wins ini-discovery, so rootdir is `tests/unit` and the root
 `pyproject.toml` `pythonpath`/`markers` do NOT apply; `tests/` reaches `sys.path`
@@ -36,6 +43,7 @@ only via the `cd tests` + `python -m pytest` form.
 import ast
 import logging
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -69,8 +77,9 @@ class _DbDouble:
     """In-memory stand-in for the four `db` methods this subsystem touches.
 
     Verified signatures: `get_setting_value(key, default=None)`, `set_setting(key,
-    value)`, `delete_setting(key)` (database.py:1705-1711) and
-    `create_operator_queue_item(agent_name, item)` (database.py:2513).
+    value)`, `delete_setting(key)` (database.py:1705-1711) and (#3254 re-pin) the
+    seam's `create_platform_operator_queue_item(agent_name, item, *, subject,
+    max_pending_for_type)`, which `_route_seam` puts where `observe` calls it.
 
     A dict double rather than a real DB because these tests assert the exact alarm
     PAYLOAD and the exact alarm COUNT, which a real queue table would only let us
@@ -80,6 +89,7 @@ class _DbDouble:
     def __init__(self, settings=None):
         self.settings = dict(settings or {})
         self.queue_items = []
+        self.subjects = []
         self.raise_on_get = False
         self.raise_on_create = False
 
@@ -94,10 +104,31 @@ class _DbDouble:
     def delete_setting(self, key):
         self.settings.pop(key, None)
 
-    def create_operator_queue_item(self, agent_name, item):
+    # The seam may pass further keyword-only options (e.g. how a reading
+    # updates a pending row); this double files every reading and decides none.
+    def create_platform_operator_queue_item(self, agent_name, item, *, subject,
+                                            max_pending_for_type=None, **_seam_options):
         if self.raise_on_create:
             raise RuntimeError("operator queue is down")
         self.queue_items.append((agent_name, item))
+        self.subjects.append(subject)
+        return {"outcome": "created", "row": dict(item, subject=subject), "changed": True}
+
+
+def _route_seam(monkeypatch, double):
+    """#3254 re-pin (write-observation point): `observe` reads the queue through
+    `database.db` (resolved now, R6). Its create goes to the double; its two
+    reads see an empty queue, so no row another test left can update or snooze
+    a reading here; its thin broadcast stays off the loop."""
+    import database
+    from services import operator_resume_service
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
+    monkeypatch.setattr(database.db, "find_pending_operator_queue_by_subject",
+                        lambda agent_name, subject: None)
+    monkeypatch.setattr(database.db, "find_person_ended_operator_queue_by_subject",
+                        lambda agent_name, subject, since: None)
+    monkeypatch.setattr(database.db, "create_platform_operator_queue_item",
+                        double.create_platform_operator_queue_item)
 
 
 @pytest.fixture(autouse=True)
@@ -132,6 +163,7 @@ def guard_db(monkeypatch):
     """
     double = _DbDouble()
     monkeypatch.setattr(_RG, "db", double)
+    _route_seam(monkeypatch, double)
     return double
 
 
@@ -353,7 +385,7 @@ class TestAckLifecycle:
 
 
 # ---------------------------------------------------------------------------
-# C — announce_refusal / _refusal_episodes / note_allowed / _alarm_id
+# C — announce_refusal / _refusal_episodes / note_allowed / the natural key
 # ---------------------------------------------------------------------------
 
 
@@ -367,9 +399,10 @@ class TestRefusalAlarm:
     def test_first_refusal_logs_error_and_raises_exactly_one_alarm(
         self, guard_db, caplog
     ):
-        """C1. 'Exactly one' is the point: `create_item` is INSERT ... ON CONFLICT
-        DO NOTHING, so a duplicate is silent — only a count proves the transition
-        gate works."""
+        """C1. 'Exactly one' is the point: a duplicate reading is silent at the row
+        (since #3254 it updates the setting's one pending row; at #1771 an INSERT
+        ... ON CONFLICT DO NOTHING absorbed it), so only a count of the writes
+        proves the transition gate works."""
         with caplog.at_level(logging.INFO, logger=_RG.logger.name):
             _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
 
@@ -441,24 +474,34 @@ class TestRefusalAlarm:
         guard_db.raise_on_create = True
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
 
-    def test_alarm_id_is_the_natural_key_and_expiry_is_null(self, guard_db):
-        """C9 + C10. `expires_at` must stay None: `mark_operator_queue_expired`
-        flips any pending row past `expires_at` to `expired` fleet-wide every 5s,
-        which would silently retire the alarm.
+    def test_the_subject_is_the_natural_key_and_expiry_is_the_lifetime(self, guard_db):
+        """C9 + C10 (#3254 renamed this test from `test_alarm_id_is_the_natural_key_
+        and_expiry_is_null`). The natural key and the deadline, compared against LITERAL
+        formats, never against the code's own helpers (a tautology the mutation
+        gate caught: mutating the `"retention-guard-"` prefix left an
+        `item["id"] == _alarm_id(...)` assertion green).
 
-        The id is compared against a LITERAL format, not against `_alarm_id()`
-        itself. Asserting `item["id"] == _alarm_id(...)` is a tautology — both
-        sides move together, so it survives any change to the id's shape. The
-        mutation gate caught exactly that: mutating the `"retention-guard-"`
-        prefix left the original assertion green. The format is load-bearing:
-        `create_item` is INSERT ... ON CONFLICT DO NOTHING on `id`, so the natural
-        key is what makes re-emission idempotent (one alarm per setting+window).
+        #3254 re-pin (id shape): the natural key moved from the id
+        (`retention-guard-<setting>-<window>`, idempotent under ON CONFLICT DO
+        NOTHING) to the SUBJECT, which carries at most one pending row; the id
+        keeps the reserved prefix and the setting. The deadline is no longer NULL:
+        the kind's default lifetime, kept moving while the refusal persists by
+        the R9 refresh (`test_3254_retention_alert.py` runs it 30 days ahead), so
+        `mark_operator_queue_expired` retires only an alarm nobody re-read.
         """
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
         _agent, item = guard_db.queue_items[0]
 
-        assert item["id"] == "retention-guard-execution_row_retention_days-5"
-        assert item["expires_at"] is None
+        assert guard_db.subjects == ["retention_refused:execution_row_retention_days"]
+        assert item["id"].startswith("retention-guard-execution_row_retention_days-")
+        from services import platform_alerts
+        lifetime = platform_alerts.lifetime_for("retention_refused")
+        assert lifetime is not None, "a finite lifetime: the alarm is no longer NULL-deadlined"
+        expires = datetime.fromisoformat(item["expires_at"].replace("Z", "+00:00"))
+        created = datetime.fromisoformat(item["created_at"].replace("Z", "+00:00"))
+        # Two clock reads inside `observe`, microseconds apart.
+        assert abs((expires - created) - lifetime) < timedelta(seconds=1), (
+            "the kind's lifetime, measured from this reading")
 
     def test_alarm_is_raised_as_a_critical_alert(self, guard_db):
         """The alarm's ROUTING and VISIBILITY fields, not just its key set.
@@ -541,13 +584,17 @@ class TestVerdictImmutability:
         _RG.announce_refusal("execution_row_retention_days", "rows", 5, _verdict())
         _agent, item = guard_db.queue_items[0]
 
+        # #3254 re-pin (fixture shape): the seam composes the item, adding its
+        # own `status` and `created_at`; still no free-form field beyond these.
         assert set(item) == {
             "id",
             "type",
+            "status",
             "priority",
             "title",
             "question",
             "context",
+            "created_at",
             "expires_at",
         }
         assert set(item["context"]) == {

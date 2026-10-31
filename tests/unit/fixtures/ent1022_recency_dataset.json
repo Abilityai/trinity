@@ -1,0 +1,41 @@
+{
+  "_about": "Recency-weighted recall (trinity-enterprise#1022). Facts carry an age in days relative to `now`; each query names the fact that must rank first, the facts that must be in the top k, and the ones that must not surface. Evaluated by tests/unit/ent1022_recency_eval.py against the real embedding model inside the backend image.",
+  "now": "2026-10-30T00:00:00Z",
+  "facts": [
+    {"id": "deadline_old",  "days_ago": 45,  "text": "The Q4 budget review is due on Friday 2 October."},
+    {"id": "deadline_new",  "days_ago": 2,   "text": "The Q4 budget review moved to Monday 2 November."},
+    {"id": "deploy_old",    "days_ago": 300, "text": "Deploys go to staging first, then to production after the smoke test passes."},
+    {"id": "smoke_note",    "days_ago": 0,   "text": "The smoke test was flaky again this morning and had to be re-run."},
+    {"id": "report_fri",    "days_ago": 1,   "text": "Weekly reports go out on Friday mornings."},
+    {"id": "report_mon",    "days_ago": 120, "text": "Weekly reports used to go out on Monday afternoons."},
+    {"id": "cat",           "days_ago": 0,   "text": "The office cat is called Biscuit and likes tuna."},
+    {"id": "kyiv",          "days_ago": 60,  "text": "The team's office is in Kyiv."},
+    {"id": "token",         "days_ago": 10,  "text": "The weekly report schedule failed because the GitHub token expired."},
+    {"id": "token_fixed",   "days_ago": 3,   "text": "The GitHub token was rotated and the weekly report schedule runs again."},
+    {"id": "tone",          "days_ago": 200, "text": "The owner prefers short answers without preamble."},
+    {"id": "lunch",         "days_ago": 0,   "text": "Lunch orders close at 11:30 on Fridays."}
+  ],
+  "queries": [
+    {"name": "superseded deadline: the newer revision ranks first",
+     "query": "When is the Q4 budget review due?",
+     "expect_first": "deadline_new", "expect_in_top": ["deadline_new", "deadline_old"], "expect_absent": ["cat", "lunch"]},
+    {"name": "an old fact that is the only relevant one is still recalled, above a fresh weak match",
+     "query": "How do we deploy to production?",
+     "expect_first": "deploy_old", "expect_absent": ["cat", "lunch"]},
+    {"name": "report cadence: the current one beats the historical one",
+     "query": "When do the weekly reports go out?",
+     "expect_first": "report_fri", "expect_in_top": ["report_fri", "report_mon"], "expect_absent": ["cat"]},
+    {"name": "a fresh unrelated fact never outranks the relevant older one",
+     "query": "Where is the team based?",
+     "expect_first": "kyiv"},
+    {"name": "fix after failure: the resolution ranks above the failure it resolved",
+     "query": "Why did the weekly report schedule fail, and is it fixed now?",
+     "expect_first": "token_fixed", "expect_in_top": ["token_fixed", "token"]},
+    {"name": "multilingual: a Ukrainian question finds the English fact",
+     "query": "Коли відправляються щотижневі звіти?",
+     "expect_first": "report_fri", "expect_absent": ["cat"]},
+    {"name": "a 200-day-old strong match beats every fresh weak one",
+     "query": "How does the owner like replies to be written?",
+     "expect_first": "tone", "expect_absent": ["cat", "lunch"]}
+  ]
+}
