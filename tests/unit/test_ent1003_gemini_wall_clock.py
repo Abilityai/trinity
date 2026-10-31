@@ -178,7 +178,7 @@ async def test_a_silent_task_run_is_ended_on_its_wall_clock_budget(gemini, refus
         )
 
     assert error.value.status_code == 504
-    assert "Task exceeded 1s timeout" in error.value.detail
+    assert error.value.detail == "Task execution timed out after 1 seconds"
     assert time.monotonic() - started < 10, "the budget was not enforced on a timer"
     _assert_whole_group_ended(gemini)
     assert not gemini["registry"].is_execution_running("ent1003-task")

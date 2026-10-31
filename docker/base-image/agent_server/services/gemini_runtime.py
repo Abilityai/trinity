@@ -1012,13 +1012,13 @@ class GeminiRuntime(AgentRuntime):
                             break
                         if time.time() - start_time > timeout_seconds:
                             process.kill()
-                            raise TimeoutError(f"Task exceeded {timeout_seconds}s timeout")
+                            raise TimeoutError(f"Task execution timed out after {timeout_seconds} seconds")
                         self._process_stream_line(line, execution_log, metadata, tool_start_times, tool_names, response_parts, model)
                     stderr = process.stderr.read()
                     try:
                         return_code = deadline.reap()
                     except TimeoutError:
-                        raise TimeoutError(f"Task exceeded {timeout_seconds}s timeout") from None
+                        raise TimeoutError(f"Task execution timed out after {timeout_seconds} seconds") from None
                 except Exception as e:
                     # Stop the timer before the kill below reaps the child.
                     deadline.finish()
