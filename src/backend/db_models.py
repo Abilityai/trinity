@@ -831,6 +831,12 @@ class SkillSource(BaseModel):
     created_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # trinity-enterprise#529: True while the seeded default still points where
+    # the platform put it, so a newer bundled pin moves it at boot. The latest
+    # move is recorded in the two fields after it (Settings → Library line).
+    follows_bundled_pin: bool = False
+    followed_from_ref: Optional[str] = None
+    followed_at: Optional[datetime] = None
 
 
 class SkillInfo(BaseModel):

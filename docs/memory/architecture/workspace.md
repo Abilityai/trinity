@@ -1570,6 +1570,12 @@ is the edition-agnostic surface it plugs into:
   roll-up; a person steward's waiting lines are `attentionLines` filtered to
   verify/stuck; "Open I steward" emits `open-stewarding`, which
   `PortalProjects.vue` turns into the list's `initialFilter = 'steward'`.
+  A pending steward proposal (`proposal {proposed_by, proposed_at,
+  waiting_on, ask_id, changes}`, trinity-enterprise#980) is a tinted
+  "Waiting on you" / "Waiting on <email>" block at the top of the card, with
+  "Review in Inbox" (a `router-link` from `askInboxRoute` with
+  `INBOX_LINK_CLASS`, like the Needs you row's) for the person it waits on
+  only.
   **Markdown (#3692)**: the goal, task objectives and task/project log bodies
   mount `PortalMarkdown` (the one sanitized `v-html`), never
   `whitespace-pre-line` text. **Needs you** is `ProjectNeedsYou.vue`: the

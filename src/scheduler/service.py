@@ -35,6 +35,7 @@ from .locking import get_lock_manager, LockManager
 # unchanged. Source of truth: src/backend/services/failure_classifier.py,
 # mirrored byte-identically at src/scheduler/failure_classifier.py.
 from .failure_classifier import is_auth_failure as _is_auth_failure
+from .failure_classifier import is_turn_limit
 # #3940: every user schedule registers a trigger whose next fire time never
 # goes backwards, whatever APScheduler answers at a DST transition.
 from .cron_trigger import MonotonicCronTrigger
@@ -82,6 +83,20 @@ _POLL_DEADLINE_WHEN_NULL = 7200
 # treat as an outcome. `queued` joined `running` when the scheduler's dispatch
 # became able to land on the durable pull queue.
 _NON_TERMINAL_POLL_STATES = (ExecutionStatus.RUNNING, ExecutionStatus.QUEUED)
+
+
+# #3993: the code a pull terminal folds into the row's error text
+# (`pull_coordination_service`: "[<error_code>] <text>"; there is no error_code
+# column on schedule_executions).
+_MAX_TURNS_CODE_PREFIX = "[max_turns]"
+
+
+def _is_turn_limit_failure(error: Optional[str]) -> bool:
+    """True when a failed row stopped at its turn limit (#3988), on either
+    dispatch path: a pull row carries the typed `[max_turns]` prefix, a push row
+    the agent's own "Task exceeded turn limit:" text (`is_turn_limit`)."""
+    text = (error or "").lstrip()
+    return text.lower().startswith(_MAX_TURNS_CODE_PREFIX) or is_turn_limit(text)
 
 
 class SchedulerService:
@@ -1591,6 +1606,16 @@ class SchedulerService:
             logger.info(
                 f"Execution {execution.id} was poison-parked by the lease reaper; "
                 "not retrying — it is with the operator"
+            )
+            return
+
+        # #3993: a turn limit (#3988) is deterministic. The same task under the
+        # same cap stops at the same place, so a retry burns a full turn budget
+        # for the same failure.
+        if _is_turn_limit_failure(execution.error):
+            logger.info(
+                f"Execution {execution.id} stopped at its turn limit; not retrying — "
+                "a retry repeats it. Raise the cap or split the task."
             )
             return
 

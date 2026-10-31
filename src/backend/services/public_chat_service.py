@@ -27,6 +27,7 @@ from database import db
 # the response model is shared through the same home the router uses.
 from database import PublicChatResponse
 from services.docker_service import get_agent_container
+from services import memory_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     format_user_memory_block,
@@ -345,7 +346,10 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     memory_system_prompt = None
     if identifier_type == "email" and verified_email:
         user_memory = db.get_or_create_public_user_memory(agent_name, verified_email)
-        memory_system_prompt = format_user_memory_block(user_memory)
+        # trinity-enterprise#1022: the facts most relevant to this message, off
+        # the event loop; [] when memory is off or anything fails.
+        retrieved = await memory_service.recall(agent_name, verified_email, chat_request.message)
+        memory_system_prompt = format_user_memory_block(user_memory, retrieved=retrieved)
 
     # EXEC-024: Execute via TaskExecutionService (unified execution path)
     # Public executions now get full tracking: execution records, activity stream,
