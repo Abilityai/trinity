@@ -50,9 +50,10 @@ pytestmark = pytest.mark.unit
 # `operator_queue` pre-filter seeing every module.
 _LOGGER = "services.operator_queue_service"
 
-# `__init__` still holds the pre-split file; the slice that brings it under the
-# threshold drops this entry (the staleness check below fails until it does).
-_OVER_THRESHOLD_EXEMPT = {"__init__.py": "the pre-split module, emptied slice by slice (#3785)"}
+# No module is exempt: #3785 S6 brought `__init__` under the threshold and
+# dropped its entry. A future exemption carries its reason here, and the
+# staleness check below fails once the module is back under the threshold.
+_OVER_THRESHOLD_EXEMPT: dict = {}
 
 # O1(d): import bindings the package OWNS — production code outside reads them
 # through the package (ask_service: `oqs.rate_limiter.check`), so a submodule

@@ -54,7 +54,7 @@ def _note_commit_lag(stamp: str) -> None:
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
-# ingestion boundary (services/operator_queue_service.py) clamps to far smaller
+# ingestion boundary (services/operator_queue_service/filechannel.py) clamps to far smaller
 # service caps *before* calling create_item, so a clamped agent item never trips
 # these; platform items are small and never trip them either. They exist only as
 # a second layer (#1525's validate-at-boundary-AND-at-sink philosophy) so the
@@ -766,7 +766,7 @@ class OperatorQueueOperations:
             channel=channel,
             raised_by=raised_by,
             # ent#364: already validated against the agent's roster by
-            # `operator_queue_service._validated_addressee`. This layer stores it;
+            # `operator_queue_service.filechannel._validated_addressee`. This layer stores it;
             # it does not decide it, and it must never derive it from `context`
             # (which is agent-authored).
             addressed_to_email=item.get("addressed_to_email"),

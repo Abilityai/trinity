@@ -108,7 +108,7 @@ def test_startup_registers_the_skill_gate_ending_observer(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# 3. operator_queue_service.py — the poll cycle runs the sweep
+# 3. operator_queue_service/poller.py — the poll cycle runs the sweep
 # ---------------------------------------------------------------------------
 
 def test_every_leader_poll_cycle_runs_the_skill_gate_sweep(monkeypatch):
