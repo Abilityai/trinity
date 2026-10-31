@@ -89,14 +89,6 @@ _ALLOWED_CALLERS = {
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
-        "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
-        "platform-only: edge-triggered per threshold crossing (#1595)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
-        "{diverged_since}), and an episode must last > 24 h before it can raise "
-        "one, so at most one per agent per day (trinity-enterprise#706)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         "platform-only: fires only for schedules the operator enabled validation "
         "on; cadence operator-bound (#1632 classification)",

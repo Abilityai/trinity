@@ -3,9 +3,10 @@ Sync Health Service (#389 S1).
 
 Polls each git-enabled agent on an interval, reads its `/api/git/status`
 response (which now carries dual ahead/behind + persisted sync-state from
-the auto-sync heartbeat), upserts `agent_sync_state`, and emits a
-`sync_failing` operator-queue entry when the consecutive-failures counter
-crosses the alert threshold.
+the auto-sync heartbeat), upserts `agent_sync_state`, and reports
+`sync_failing` through the platform-alert seam (#3254) while the
+consecutive-failures counter is at or over the alert threshold, ending it
+when the counter falls back.
 
 Lifecycle mirrors `OperatorQueueSyncService`:
   - `start()` kicks off `_poll_loop`
@@ -44,13 +45,15 @@ import asyncio
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional
+from typing import Dict, Optional, Set, Tuple
 
 from database import db
 from redis_breaker_util import get_breaker_redis
 from services import git_service
+from services import platform_alerts
 from services import sync_freeze_policy
 from services.sync_health_view import sync_view
 from services.agent_client import AgentClient
@@ -60,6 +63,19 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 60  # seconds
 ALERT_THRESHOLD = 3  # emit sync_failing entry after N consecutive failures
+
+# #3254 (R9): how often a condition that persists is re-read through the
+# platform-alert seam. Each re-read moves its row's deadline, so a lifetime only
+# ends a condition nobody re-read (a clear lost to a fault), never one that still
+# holds. #3255's base-image alarm cooldown is the precedent.
+ALERT_REFRESH_SECONDS = 6 * 60 * 60
+
+# #3254: the git error a sync_failing alert carries. The agent server writes at
+# most this much (`agent_server/routers/git.py::_summarize_git_error`), but
+# `sync-state.json` is agent-writable: an agent writing more could push its own
+# alert past the queue's 64 KiB context belt, so every write of it failed and the
+# alarm about that agent was silenced. The stored sync state keeps the full text.
+ALERT_ERROR_EXCERPT_CHARS = 240
 
 # #2742: single Redis key holding the current sync-health leader's worker id.
 # One poller across all uvicorn workers. Collides with none of the five existing
@@ -92,17 +108,13 @@ def _poll_interval_seconds() -> int:
     return value if value > 0 else DEFAULT_POLL_INTERVAL
 
 
-# #1595: edge-triggered git-bloat alerting — the killed-auto-gc failure class
-# was "completely silent until the disk fills"; a column behind an API nobody
-# queries reproduces that. Both thresholds compare prior DB row → new value so
-# each crossing fires exactly once per episode (the sync_failing pattern).
+# #1595: git-bloat alerting — the killed-auto-gc failure class was "completely
+# silent until the disk fills"; a column behind an API nobody queries
+# reproduces that. Both thresholds compare prior DB row → new value: the
+# crossing reports the condition and the falling edge ends it (#3254, the
+# sync_failing pattern).
 GIT_DIR_ALERT_BYTES = int(os.getenv("GIT_DIR_ALERT_BYTES", str(10 * 1024**3)))
 MAINTENANCE_FAILURES_ALERT_THRESHOLD = 3
-
-# trinity-enterprise#706: id prefix of the one-per-episode divergence-freeze
-# item. Platform-reserved in operator_queue_service._RESERVED_ID_PREFIXES, so an
-# agent cannot pre-create the id and silence the alarm about itself.
-SYNC_DIVERGED_ALERT_PREFIX = "sync-diverged-"
 
 
 # PostgreSQL column ceilings. `Integer` is int4 there (SQLite's INTEGER is 64-bit
@@ -262,6 +274,13 @@ def _coerce_agent_timestamp(value) -> Optional[datetime]:
     return parsed
 
 
+def _alert_log(outcome: str):
+    """WARNING for a newly filed alert, INFO for a re-read of one (#3254 R9
+    re-reads every 6 h, so WARNING each time would multiply the old one line
+    per crossing). A failed write is already an ERROR from the seam itself."""
+    return logger.warning if outcome == platform_alerts.OBSERVED_CREATED else logger.info
+
+
 def _config_value(config, key: str):
     """Read a git-config field from the model the poller gets, or a dict."""
     if isinstance(config, dict):
@@ -356,11 +375,25 @@ class SyncHealthService:
         # far-future `at` would flood the log for the life of the process.
         self._last_lock_recovery: Dict[str, Dict] = {}
         self._lock_stuck_agents: set = set()
-        # trinity-enterprise#706: the last sync_diverged item id this process
-        # raised per agent — only to skip a redundant INSERT every poll while a
-        # freeze lasts. The DB's (agent_name, request_id) conflict target is
-        # what makes it one item per episode across restarts and workers.
-        self._diverged_alerted: Dict[str, str] = {}
+        # #3254: when this process last reported each live condition to the
+        # platform-alert seam, `(kind, agent) -> (episode, monotonic seconds)`.
+        # A crossing is reported at once and a persisting condition at most
+        # every ALERT_REFRESH_SECONDS (R9), so the 60 s poll touches no row in
+        # between. The seam's subject, not this memo, keeps it one row across
+        # restarts and workers; a restart only re-reads once.
+        self._alert_read_at: Dict[Tuple[str, str], Tuple[Optional[str], float]] = {}
+        # #3254: the divergence episode whose seam row this process looked up
+        # and did not find, and when: `agent -> (episode, monotonic seconds)`.
+        # A miss is trusted for ALERT_REFRESH_SECONDS, not for the episode:
+        # another worker may raise the row while this one is not the leader.
+        self._divergence_looked_up: Dict[str, Tuple[str, float]] = {}
+        # #3254 (R10): agents whose maintenance streak fell under the threshold
+        # without the agent's own "repacked …" outcome. Its server reports a
+        # zero streak whenever sync-state.json is missing, oversized or corrupt,
+        # so such a drop is no evidence; the alert ends on a later reading that
+        # carries the outcome. In-process only: a restart leaves the row to its
+        # lifetime.
+        self._maintenance_drop_unconfirmed: set = set()
 
     @property
     def poll_interval(self) -> int:
@@ -492,6 +525,8 @@ class SyncHealthService:
             logger.debug("could not list git-enabled agents", exc_info=True)
             return
 
+        self._forget_agents_not_in(
+            {getattr(c, "agent_name", None) or c["agent_name"] for c in configs})
         if not configs:
             return
 
@@ -609,17 +644,43 @@ class SyncHealthService:
             last_check_at=now_iso,
         )
 
-        # Edge-triggered alert: only emit when we cross the threshold.
+        # #3254: sync failing is a condition on the platform-alert seam —
+        # reported on the crossing, re-read while it lasts (R9), and ended by the
+        # platform on the falling edge. The counter resets on a `success` and on
+        # nothing else, so the falling edge is evidence the sync recovered (R10).
         new_failures = updated["consecutive_failures"]
-        if prior_failures < ALERT_THRESHOLD <= new_failures:
-            self._emit_sync_failing_alert(agent_name, updated)
+        if new_failures >= ALERT_THRESHOLD:
+            if self._reading_due("sync_failing", agent_name,
+                                 edge=prior_failures < ALERT_THRESHOLD):
+                self._observe_sync_failing(agent_name, updated)
+        elif prior_failures >= ALERT_THRESHOLD:
+            platform_alerts.clear(agent_name, "sync_failing", agent_name)
+            self._forget_reading("sync_failing", agent_name)
 
-        # trinity-enterprise#706: a divergence freeze is in force → one
-        # sync_diverged item for the episode. Rule 2 (sync_failing) already
-        # has its own item above, so only the divergence cause raises this.
+        # trinity-enterprise#706: a divergence freeze in force is one condition
+        # per agent, raised once per episode when divergence is the freeze cause
+        # and re-read while the episode lasts (#3254 R9). Rule 2 (sync_failing)
+        # takes precedence over divergence as the freeze cause, so the cause
+        # moving away is not the divergence ending: an episode this process
+        # reported is still re-read under the precedence, from the policy's
+        # verdict with the precedence lifted, and the platform ends the row only
+        # when the `diverged_since` episode itself ends (R10). Sync failing has
+        # its own row, so a precedence never RAISES a divergence alert.
         verdict = sync_view(updated, config)
+        episode = updated.get("diverged_since")
         if verdict["freeze_cause"] == "divergence":
-            self._emit_sync_diverged_alert(agent_name, updated, verdict)
+            if self._reading_due("sync_diverged", agent_name, episode=episode):
+                self._observe_sync_diverged(agent_name, updated, verdict)
+        elif (verdict["freeze_cause"] == "sync_failing" and episode
+                and self._divergence_reported(agent_name, episode)
+                and self._reading_due("sync_diverged", agent_name, episode=episode)):
+            underneath = sync_view({**updated, "consecutive_failures": 0}, config)
+            if underneath["freeze_cause"] == "divergence":
+                self._observe_sync_diverged(agent_name, updated, underneath)
+        if (prior or {}).get("diverged_since") and not episode:
+            platform_alerts.clear(agent_name, "sync_diverged", agent_name)
+            self._forget_reading("sync_diverged", agent_name)
+            self._divergence_looked_up.pop(agent_name, None)
 
         # #2742: a self-healed wedge, announced once. No operator-queue item
         # and no DB column — the boot reap already fixed it, so this is a log
@@ -655,30 +716,51 @@ class SyncHealthService:
         else:
             self._lock_stuck_agents.discard(agent_name)
 
-        # #1595: edge-triggered git-bloat / maintenance-health alerts.
+        # #1595: git bloat and failing maintenance are two conditions with two
+        # subjects (#3254 AC 5), each reported on its crossing, re-read while
+        # over (R9), and ended by the platform when the agent's own measurement
+        # falls back under the threshold. An absent or garbage value keeps the
+        # stored one (upsert), so it never reads as a recovery (R10).
         new_git_dir_bytes = updated.get("git_dir_bytes") or 0
-        if prior_git_dir_bytes < GIT_DIR_ALERT_BYTES <= new_git_dir_bytes:
-            self._emit_git_bloat_alert(
-                agent_name, updated,
-                reason=(
-                    f".git has grown to {new_git_dir_bytes / 1024**3:.1f} GiB "
-                    f"(alert threshold {GIT_DIR_ALERT_BYTES / 1024**3:.1f} GiB)"
-                ),
-            )
+        if new_git_dir_bytes >= GIT_DIR_ALERT_BYTES:
+            if self._reading_due("git_bloat_size", agent_name,
+                                 edge=prior_git_dir_bytes < GIT_DIR_ALERT_BYTES):
+                self._observe_git_bloat(
+                    agent_name, "git_bloat_size", updated,
+                    reason=(
+                        f".git has grown to {new_git_dir_bytes / 1024**3:.1f} GiB "
+                        f"(alert threshold {GIT_DIR_ALERT_BYTES / 1024**3:.1f} GiB)"
+                    ),
+                )
+        elif prior_git_dir_bytes >= GIT_DIR_ALERT_BYTES:
+            platform_alerts.clear(agent_name, "git_bloat_size", agent_name)
+            self._forget_reading("git_bloat_size", agent_name)
         new_maintenance_failures = updated.get("maintenance_failures") or 0
-        if (
-            prior_maintenance_failures
-            < MAINTENANCE_FAILURES_ALERT_THRESHOLD
-            <= new_maintenance_failures
-        ):
-            self._emit_git_bloat_alert(
-                agent_name, updated,
-                reason=(
-                    f"git maintenance has failed {new_maintenance_failures} "
-                    "consecutive times — the repo may be too large to repack "
-                    "within its budget"
-                ),
-            )
+        if new_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD:
+            self._maintenance_drop_unconfirmed.discard(agent_name)
+            if self._reading_due(
+                "git_bloat_maintenance", agent_name,
+                edge=prior_maintenance_failures < MAINTENANCE_FAILURES_ALERT_THRESHOLD,
+            ):
+                self._observe_git_bloat(
+                    agent_name, "git_bloat_maintenance", updated,
+                    reason=(
+                        f"git maintenance has failed {new_maintenance_failures} "
+                        "consecutive times — the repo may be too large to repack "
+                        "within its budget"
+                    ),
+                )
+        elif (prior_maintenance_failures >= MAINTENANCE_FAILURES_ALERT_THRESHOLD
+              or agent_name in self._maintenance_drop_unconfirmed):
+            # Only a repack the agent itself reports resets its streak
+            # (agent_server routers/git.py); a zero without that outcome is its
+            # server's default for an unreadable state file, not a recovery.
+            if str(sync_state.get("maintenance_status") or "").startswith("repacked"):
+                platform_alerts.clear(agent_name, "git_bloat_maintenance", agent_name)
+                self._forget_reading("git_bloat_maintenance", agent_name)
+                self._maintenance_drop_unconfirmed.discard(agent_name)
+            else:
+                self._maintenance_drop_unconfirmed.add(agent_name)
 
     async def _fetch_git_status(self, agent_name: str) -> Optional[Dict]:
         """Fetch /api/git/status from the agent. None on unreachable."""
@@ -694,21 +776,86 @@ class SyncHealthService:
 
     # -------------------------- alerting --------------------------
 
-    def _emit_sync_failing_alert(self, agent_name: str, state: Dict) -> None:
-        """Insert a sync_failing operator-queue entry.
+    def _reading_due(self, kind: str, agent_name: str, *, edge: bool = False,
+                     episode: Optional[str] = None) -> bool:
+        """R9 (#3254): report a crossing at once, and a condition that persists
+        at most every ALERT_REFRESH_SECONDS. A new `episode` is a new condition."""
+        if edge:
+            return True
+        last = self._alert_read_at.get((kind, agent_name))
+        if last is None or last[0] != episode:
+            return True
+        return time.monotonic() - last[1] >= ALERT_REFRESH_SECONDS
 
-        The ID embeds the emission timestamp so each distinct failure series
-        produces a unique row. This method is only called on the edge where
-        consecutive_failures crosses from (threshold-1) → threshold, so we
-        fire at most once per series naturally.
+    def _note_reading(self, kind: str, agent_name: str, outcome: str,
+                      episode: Optional[str] = None) -> None:
+        """Remember a reading the seam took. `observe` never raises, so a failed
+        write is only its outcome: it is retried on the next poll, not in 6 h.
+        A failed re-read of an episode that already landed keeps the episode
+        (it is still reported) and is due at once."""
+        key = (kind, agent_name)
+        if outcome != platform_alerts.OBSERVED_FAILED:
+            self._alert_read_at[key] = (episode, time.monotonic())
+        elif self._alert_read_at.get(key, (object(),))[0] == episode:
+            self._alert_read_at[key] = (episode, float("-inf"))
+        else:
+            self._alert_read_at.pop(key, None)
+
+    def _divergence_reported(self, agent_name: str, episode: str) -> bool:
+        """Was this divergence episode reported (#3254 R9 under a precedence)?
+
+        This process's memo answers it. After a restart or a leadership hand-off
+        the memo is empty, so the seam's pending row is looked up: a row of this
+        episode means it was reported, and it is re-read at once (a restart
+        re-reads once). No row means it was not, and a precedence never raises
+        one; that miss is looked up again after ALERT_REFRESH_SECONDS, because
+        another worker may raise the row while this one is not the leader.
         """
-        now = utc_now_iso()
-        last_sync_at = state.get("last_sync_at") or now
-        item_id = f"sync-failing-{agent_name}-{now}"
+        last = self._alert_read_at.get(("sync_diverged", agent_name))
+        if last is not None and last[0] == episode:
+            return True
+        miss = self._divergence_looked_up.get(agent_name)
+        if (miss is not None and miss[0] == episode
+                and time.monotonic() - miss[1] < ALERT_REFRESH_SECONDS):
+            return False
+        try:
+            row = db.find_pending_operator_queue_by_subject(
+                agent_name, platform_alerts.subject_for("sync_diverged", agent_name))
+        except Exception:
+            logger.warning("could not look up %s's divergence alert", agent_name, exc_info=True)
+            return False  # looked up again on the next poll
+        if row and (row.get("context") or {}).get("diverged_since") == episode:
+            self._divergence_looked_up.pop(agent_name, None)
+            self._alert_read_at[("sync_diverged", agent_name)] = (episode, float("-inf"))
+            return True
+        self._divergence_looked_up[agent_name] = (episode, time.monotonic())
+        return False
+
+    def _forget_agents_not_in(self, live: Set[str]) -> None:
+        """#3254: the process memos follow the live git-enabled fleet, not its
+        history, so a deleted agent or one whose git was switched off leaves no
+        entry behind. An agent that returns re-reads at once (a restart's cost)."""
+        self._alert_read_at = {k: v for k, v in self._alert_read_at.items() if k[1] in live}
+        self._divergence_looked_up = {
+            a: v for a, v in self._divergence_looked_up.items() if a in live}
+        self._maintenance_drop_unconfirmed &= live
+
+    def _forget_reading(self, kind: str, agent_name: str) -> None:
+        self._alert_read_at.pop((kind, agent_name), None)
+
+    def _observe_sync_failing(self, agent_name: str, state: Dict) -> None:
+        """Report the sync-failing condition through the seam (#389, #3254).
+
+        One pending row per agent (subject `sync_failing:<agent>`), updated in
+        place with the latest reading, so a re-read re-states the count.
+        """
+        # Both agent-written (sync-state.json): bounded like the pull fields, so
+        # an oversized value cannot push the row past the queue's context belt.
+        last_sync_at = _pull_text(state.get("last_sync_at"), 64) or utc_now_iso()
         error = state.get("last_error_summary") or ""
         failures = state["consecutive_failures"]
         context = {
-            "last_error_summary": error,
+            "last_error_summary": error[:ALERT_ERROR_EXCERPT_CHARS],
             "last_sync_at": last_sync_at,
             "consecutive_failures": failures,
         }
@@ -732,53 +879,34 @@ class SyncHealthService:
         else:
             title = "Git sync failing"
             question = f"{agent_name}'s git sync has failed {failures} times in a row."
-        item = {
-            "id": item_id,
-            "agent_name": agent_name,
-            "type": "sync_failing",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": context,
-            "created_at": now,
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            logger.warning(
-                "sync_failing emitted for %s (failures=%s)",
-                agent_name, state["consecutive_failures"],
-            )
-        except Exception:
-            logger.exception("failed to emit sync_failing alert")
+        outcome = platform_alerts.observe(
+            agent_name, "sync_failing", agent_name,
+            priority="high", title=title, question=question, context=context,
+        )
+        self._note_reading("sync_failing", agent_name, outcome)
+        _alert_log(outcome)("sync_failing for %s (failures=%s): %s", agent_name, failures, outcome)
 
-    def _emit_sync_diverged_alert(self, agent_name: str, state: Dict, verdict: Dict) -> None:
-        """trinity-enterprise#706: one operator-queue item per divergence episode.
+    def _observe_sync_diverged(self, agent_name: str, state: Dict, verdict: Dict) -> None:
+        """trinity-enterprise#706: report the divergence freeze through the seam.
 
-        The id is deterministic per episode (`diverged_since` is set once), so
-        every repeat poll, a restart and a fail-open double leader converge on
-        ONE row via create_item's `(agent_name, request_id)` conflict target —
-        the `alert-budget-` precedent, with no new column. Not auto-resolved
-        when the episode ends; a new episode has a new id. The context carries
-        counts and the recommendation, never agent-authored error text.
+        One pending row per agent (subject `sync_diverged:<agent>`, #3254), so a
+        repeat poll, a restart and a fail-open double leader all land on it. A
+        new episode files a fresh row whoever ended the last one: `diverged_since`
+        is a material key, so a person's ending snoozes only its own episode.
+        The context carries counts and the recommendation, never agent-authored
+        error text.
         """
         diverged_since = state.get("diverged_since")
-        item_id = f"{SYNC_DIVERGED_ALERT_PREFIX}{agent_name}-{diverged_since}"
-        if self._diverged_alerted.get(agent_name) == item_id:
-            return
         age = sync_freeze_policy.format_age(verdict["divergence_age_s"] or 0)
-        item = {
-            "id": item_id,
-            "agent_name": agent_name,
-            "type": "sync_diverged",
-            "status": "pending",
-            "priority": "high",
-            "title": f"Agent diverged from GitHub for {age} — schedules paused",
-            "question": (
+        outcome = platform_alerts.observe(
+            agent_name, "sync_diverged", agent_name,
+            priority="high",
+            title=f"Agent diverged from GitHub for {age} — schedules paused",
+            question=(
                 f"{agent_name}: {verdict['freeze_reason']}. Its scheduled runs are "
                 "paused until it is back in step with its repository."
             ),
-            "context": {
+            context={
                 "ahead": state.get("ahead_working") or 0,
                 "behind": state.get("behind_working") or 0,
                 "dirty_files": state.get("dirty_files"),
@@ -786,46 +914,31 @@ class SyncHealthService:
                 "divergence_age_s": verdict["divergence_age_s"],
                 "recommendation": verdict["recommendation"],
             },
-            "created_at": utc_now_iso(),
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            self._diverged_alerted[agent_name] = item_id
-            logger.warning(
-                "sync_diverged raised for %s (%s)", agent_name, verdict["freeze_reason"]
-            )
-        except Exception:
-            logger.exception("failed to emit sync_diverged alert")
+        )
+        self._note_reading("sync_diverged", agent_name, outcome, episode=diverged_since)
+        _alert_log(outcome)("sync_diverged for %s (%s): %s",
+                            agent_name, verdict["freeze_reason"], outcome)
 
-    def _emit_git_bloat_alert(self, agent_name: str, state: Dict, *, reason: str) -> None:
-        """#1595: operator-queue entry for repo bloat / failing maintenance.
+    def _observe_git_bloat(self, agent_name: str, kind: str, state: Dict, *, reason: str) -> None:
+        """#1595: report repo bloat or failing maintenance through the seam.
 
-        Edge-triggered by the caller (prior DB row vs new value crosses the
-        threshold), so each episode fires once — mirrors
-        :meth:`_emit_sync_failing_alert`.
+        `kind` is `git_bloat_size` or `git_bloat_maintenance`: two conditions,
+        two subjects (#3254 AC 5), one row type (`git_bloat`).
         """
-        now = utc_now_iso()
-        item = {
-            "id": f"git-bloat-{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "git_bloat",
-            "status": "pending",
-            "priority": "high",
-            "title": "Agent git repo needs attention",
-            "question": f"{agent_name}: {reason}.",
-            "context": {
+        outcome = platform_alerts.observe(
+            agent_name, kind, agent_name,
+            priority="high",
+            title="Agent git repo needs attention",
+            question=f"{agent_name}: {reason}.",
+            context={
                 "git_dir_bytes": state.get("git_dir_bytes"),
                 "pack_count": state.get("pack_count"),
                 "loose_objects": state.get("loose_objects"),
                 "maintenance_failures": state.get("maintenance_failures"),
             },
-            "created_at": now,
-        }
-        try:
-            db.create_operator_queue_item(agent_name, item)
-            logger.warning("git_bloat emitted for %s: %s", agent_name, reason)
-        except Exception:
-            logger.exception("failed to emit git_bloat alert")
+        )
+        self._note_reading(kind, agent_name, outcome)
+        _alert_log(outcome)("%s for %s: %s (%s)", kind, agent_name, reason, outcome)
 
 
 # Module-level singleton mirrors operator_queue_service.
