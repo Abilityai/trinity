@@ -53,6 +53,7 @@ def idem_ops(monkeypatch, tmp_path):
             response_snapshot TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            claim_token TEXT,
             PRIMARY KEY (scope, idempotency_key)
         )
         """

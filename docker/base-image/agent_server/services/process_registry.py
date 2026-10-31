@@ -246,6 +246,19 @@ class ProcessRegistry:
         Cancelling an asyncio coroutine does not stop its executor thread or
         child. Retain ownership (including logs and the sweep allowlist) until
         a process exit is observed, so cancellation cannot hide active work.
+
+        #3408 (AC 3), decided: an abandoned live child stays INELIGIBLE for the
+        periodic orphan sweep. This registry still owns it (it is listed as
+        running and reachable by ``terminate()``), so it stays in
+        ``active_execution_pids()`` until its exit is observed; a sweep that
+        killed it would contradict what this registry reports. That is the
+        agent's view only: the backend may already have released the
+        execution's capacity and failed its row. What still ends the child is
+        its runtime's own deadline where one exists, or a terminate request,
+        which the backend watchdog sends only while the row is still running
+        and past its timeout. Nothing reattaches to the abandoned turn. A
+        runtime whose waiter can be abandoned therefore hands a second call
+        here to its reader worker, made once the exit is observed.
         """
         with self._lock:
             entry = self._processes.get(execution_id)

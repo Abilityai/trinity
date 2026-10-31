@@ -447,6 +447,22 @@ decisions, none obvious from the diff:
   room move, and scoping the test to human text would make exactly that relay
   arrive image-less — this bug, one hop along.
 
+**The sentence describes standing files, not this turn's upload (#4072).** The
+inbox is per person per agent, not per chat, so every file the person ever shared
+with the agent is listed on every turn, in the 1:1 chat and in every room. The
+old wording announced them as the client's fresh upload and told the agent to
+read whichever looked relevant, so agents opened a file from three
+conversations ago to answer an unrelated question. Every branch now hedges
+provenance (*"not necessarily with this message, and possibly from other
+conversations"*) and makes use conditional on *"the latest request"*, a referent
+that reads correctly for a 1:1 message and for a room delta alike. Each document
+also carries its age (*"shared 3 days ago"*, from the `uploaded_at` it already
+had, via `_age_phrase`), so *"summarise this"* still resolves to the file shared
+just now. The listing itself is unchanged: the agent can still find a file to
+offer help with. The true split between "attached to this message" and "already
+in your inbox" needs the per-turn attachment set, which only 1:1 chat records
+(#3265). It is a follow-up. Pinned by `tests/unit/test_4072_inbox_notice_wording.py`.
+
 Fail-safe throughout: no client email, an unreadable inbox or a raising collector
 each yield `("", [])` and the turn runs unchanged. `images` is `None` rather than
 `[]` when there is nothing, so a room without files is a byte-for-byte no-op.

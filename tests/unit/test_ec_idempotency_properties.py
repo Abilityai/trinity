@@ -42,7 +42,7 @@ _DDL = """
 CREATE TABLE idempotency_keys (
     scope TEXT NOT NULL, idempotency_key TEXT NOT NULL, execution_id TEXT,
     status TEXT NOT NULL, response_snapshot TEXT, created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL, PRIMARY KEY (scope, idempotency_key))
+    updated_at TEXT NOT NULL, claim_token TEXT, PRIMARY KEY (scope, idempotency_key))
 """
 
 _HEX = set("0123456789abcdef")

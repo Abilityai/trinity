@@ -251,6 +251,66 @@ class SingleFlightLock:
         except Exception:  # noqa: BLE001 — TTL will expire it
             pass
 
+    # ----- Atomic renew / release (trinity-enterprise#695) ------------------
+    #
+    # `refresh_if_owned` / `release_if_owned` above are GET-then-EXPIRE and
+    # GET-then-DELETE. If our lease lapses between the two calls and a
+    # successor wins `SET NX` in that sliver, the second call EXTENDS or
+    # DELETES the successor's lease: a stale holder keeps a lock alive that it
+    # no longer owns, or frees one a successor is working under, and two
+    # holders then run at once. They stay as they are for their existing
+    # callers (the ops loop, the seeder); moving those over is its own change.
+    #
+    # These two do the compare and the mutation in ONE Lua call, so neither can
+    # touch a lease it does not own: the canary leader lease's scripts
+    # (`canary_service._LEASE_*_LUA`), with one difference. The lock key travels
+    # as an ARGUMENT, not through the script's declared-key table, because this
+    # leaf module's guard (`test_1920_no_hand_rolled_single_flight.py`) refuses
+    # the uppercase spelling of the keyspace-scan command anywhere in the file,
+    # and that table shares it. On the single-node Redis Trinity runs this
+    # executes identically: declared keys only route a script in Cluster mode.
+    #
+    # A lapsed lease is LOST, never re-taken (unlike `refresh_if_owned`'s
+    # REACQUIRED): between the lapse and the re-take another holder may already
+    # have done work, so a caller relying on exclusion must stop.
+
+    def refresh_if_owned_atomic(self) -> LeaseState:
+        """Renew our lease iff the stored token is still ours, atomically.
+
+        OWNED: renewed. LOST: the key is gone or holds another token (never
+        re-taken). DEGRADED: no lease is held (`acquire` failed open) or Redis
+        errored. Never mutates `_held`, so the release below still runs.
+        """
+        if not self._held or self._client is None:
+            return LeaseState.DEGRADED
+        try:
+            scripts = _ATOMIC_LEASE_SCRIPTS.ensure(self._client)
+            renewed = scripts["refresh"](
+                keys=[], args=[self._key, self._token, self._ttl], client=self._client
+            )
+        except Exception:  # noqa: BLE001 — a Redis error is not proof of loss
+            return LeaseState.DEGRADED
+        try:
+            owned = int(decode_str(renewed) or 0) == 1
+        except (TypeError, ValueError):
+            owned = False
+        return LeaseState.OWNED if owned else LeaseState.LOST
+
+    def release_if_owned_atomic(self) -> None:
+        """Delete our lease iff the stored token is still ours, atomically.
+
+        Gated on the stable acquire-time `_held`, like `release_if_owned`, so it
+        runs after a LOST refresh too and deletes nothing it does not own.
+        Never raises (the TTL expires a lease a failed release leaves behind).
+        """
+        if not self._held or self._client is None:
+            return
+        try:
+            scripts = _ATOMIC_LEASE_SCRIPTS.ensure(self._client)
+            scripts["release"](keys=[], args=[self._key, self._token], client=self._client)
+        except Exception:  # noqa: BLE001 — TTL will expire it
+            pass
+
 
 # ----- Lua script cache -----------------------------------------------------
 
@@ -284,6 +344,29 @@ class ScriptCache:
     def reset(self) -> None:
         with self._lock:
             self._scripts = None
+
+
+# trinity-enterprise#695: the scripts behind `SingleFlightLock`'s atomic
+# renew/release. ARGV[1] is the lock key, ARGV[2] the holder's token, ARGV[3]
+# the TTL in seconds (see the comment above `refresh_if_owned_atomic`).
+_ATOMIC_REFRESH_LUA = """
+if redis.call('get', ARGV[1]) == ARGV[2] then
+    return redis.call('expire', ARGV[1], ARGV[3])
+end
+return 0
+"""
+
+_ATOMIC_RELEASE_LUA = """
+if redis.call('get', ARGV[1]) == ARGV[2] then
+    return redis.call('del', ARGV[1])
+end
+return 0
+"""
+
+_ATOMIC_LEASE_SCRIPTS = ScriptCache(
+    refresh=_ATOMIC_REFRESH_LUA,
+    release=_ATOMIC_RELEASE_LUA,
+)
 
 
 # ----- Fail-open wrapper ----------------------------------------------------

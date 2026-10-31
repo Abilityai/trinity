@@ -610,6 +610,15 @@ def spawn_task_terminal_event(
         ),
     )
     _spawn_named("#2523/#2524", _terminal_side_effects(execution_id))
+    # trinity-enterprise#1022: retrieval memory capture — a sibling for the same
+    # reason as the side effects above, never nested inside the emit. The
+    # service decides whose memory from the row, and is a cheap no-op while the
+    # platform switch is off.
+    try:
+        from services import memory_service
+        memory_service.spawn_retain_for_execution(execution_id)
+    except Exception as e:  # noqa: BLE001 — fail-open: never affect the billed terminal
+        logger.debug("ent#1022 retain not spawned for %s: %s", execution_id, e)
 
 
 async def _terminal_side_effects(execution_id: Optional[str]) -> None:

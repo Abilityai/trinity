@@ -153,6 +153,9 @@ def _run_terminate(*, agent_status="terminated", open_activity_id="act-1",
         patch.object(ce, "agent_httpx_client", lambda *a, **k: _AsyncCM(client)),
         patch.object(ce, "get_capacity_manager", return_value=mock_capacity),
         patch.object(ce, "activity_service", mock_activity),
+        # ent#875: this test is about the terminate orchestration, not the viewer tier;
+        # the stub caller is not a person, so declare the owner tier (no row scope).
+        patch.object(chat, "viewer_row_scope", return_value=None),
     ):
         result = _await(
             chat.terminate_agent_execution(

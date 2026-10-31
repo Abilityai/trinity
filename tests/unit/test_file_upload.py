@@ -438,28 +438,34 @@ class TestFileDeliveryFormat:
     """Test the chat injection format includes uploader attribution."""
 
     @pytest.mark.asyncio
-    async def test_injection_includes_verified_email(self):
+    @pytest.mark.parametrize("filename,mimetype,data", [
+        ("data.csv", "text/csv", b"col1,col2\n1,2\n"),
+        ("report.pdf", "application/pdf", b"%PDF-1.7\n%%EOF\n"),
+        ("report.pdf", "application/octet-stream", b"%PDF-1.7\n%%EOF\n"),
+    ])
+    async def test_injection_includes_verified_email(self, filename, mimetype, data):
         from adapters.message_router import ChannelMessageRouter
         from adapters.base import FileAttachment, NormalizedMessage
 
         adapter = MagicMock()
         adapter.channel_type = "telegram"
         adapter.get_source_identifier = MagicMock(return_value="telegram:bot:user")
-        adapter.download_file = AsyncMock(return_value=b"col1,col2\n1,2\n")
+        adapter.download_file = AsyncMock(return_value=data)
 
         message = NormalizedMessage(
             sender_id="user-123",
             text="see attached",
             channel_id="chat-456",
             timestamp="1234567890",
-            files=[FileAttachment(id="fid1", name="data.csv", mimetype="text/csv", size=14, url="fid1")],
+            files=[FileAttachment(id="fid1", name=filename, mimetype=mimetype, size=len(data), url="fid1")],
             metadata={"agent_name": "test-agent"},
         )
 
         container = MagicMock()
         router = ChannelMessageRouter()
 
-        with patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
+        with patch("services.upload_service.ALLOW_PDF_UPLOADS", True, create=True), \
+             patch("adapters.message_router.container_exec_run", new=AsyncMock()), \
              patch("services.upload_service.container_put_archive", new=AsyncMock(return_value=True)), \
              patch("services.upload_service.platform_audit_service") as mock_audit:
             mock_audit.log = AsyncMock()
@@ -472,7 +478,7 @@ class TestFileDeliveryFormat:
         assert upload_dir is not None
         joined = "\n".join(descriptions)
         assert "[File uploaded by alice@example.com]" in joined
-        assert "data.csv" in joined
+        assert filename in joined
         assert "saved to /home/developer/uploads/" in joined
 
     @pytest.mark.asyncio

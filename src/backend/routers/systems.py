@@ -13,13 +13,24 @@ from models import (
     BundledManifestSummary,
     ScheduleResponse,
     User,
+    SystemApplyRequest,
+    SystemApplyResponse,
     SystemDeployRequest,
     SystemDeployResponse,
 )
 from database import db
-from dependencies import get_current_user, require_role, reject_agent_principal, capability_fence
+from dependencies import (
+    get_current_user,
+    require_role,
+    require_person,
+    reject_agent_principal,
+    capability_fence,
+)
+from routers import tags as tags_router
+from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.system_service import (
     system_member_names,
+    apply_manifest,
     deploy_manifest,
     list_bundled_manifests,
     read_bundled_manifest,
@@ -79,6 +90,86 @@ async def deploy_system(
     if result.status == "failed":
         return JSONResponse(status_code=500, content=result.model_dump())
 
+    return result
+
+
+@router.post("/apply", response_model=SystemApplyResponse, dependencies=[Depends(require_person)])
+async def apply_system(
+    body: SystemApplyRequest,
+    request: Request,
+    current_user: User = Depends(require_role("creator"))
+):
+    """
+    Reconcile a live system to its manifest (trinity-enterprise#695).
+
+    Per declared member: absent -> create, present -> update the declared
+    fields in place, present but undeclared -> report as drift. Never
+    suffixes, never removes, never restarts an existing member. Thin wrapper
+    over `services.system_service.apply_manifest`.
+
+    A sibling of `POST /deploy`, not a `mode` field on it: create mode keeps a
+    zero-line diff, and a build without this route answers 405 here instead of
+    silently running create (an ignored `mode` field would suffix the fleet).
+
+    Persons only (`require_person`) plus `creator`. On EXISTING agents apply
+    reaches permission grants (human-only), other agents' schedules and the
+    platform prompt, so deploy's agent-callable `capability_fence` would be a
+    back door to all three.
+
+    `dry_run` defaults to TRUE. Status: 200 for `valid` / `invalid` (dry run)
+    and `applied` / `partial`; 409 `refused` with any non-retryable blocker,
+    503 `refused` with only retryable ones; 500 `failed`. 409, 503 and 500
+    carry the full report as the body; 400 (parse/validate, create's own
+    text) and 422 (a malformed or over-keyed body) do not.
+    """
+    result = await apply_manifest(
+        body.manifest,
+        current_user,
+        request,
+        dry_run=body.dry_run,
+    )
+
+    if not result.dry_run and result.status in ("applied", "partial", "failed"):
+        # The run reached execution: one audit row. A refused run changed
+        # nothing and writes none (the request log records the attempt).
+        try:
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="system_apply",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                target_type="system",
+                target_id=result.system_name,
+                endpoint=request.scope["path"],
+                request_id=getattr(request.state, "request_id", None),
+                details={
+                    # What happened, never the plan: a create that failed is
+                    # not a create, a refused write is not a write.
+                    "status": result.status,
+                    "created": result._created,
+                    "writes": result._writes_ok,
+                    "failed": len(result.failed),
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — the writes already happened
+            logger.warning(f"system_apply audit write failed for '{result.system_name}': {e}")
+            result.warnings.append(
+                "The changes were applied, but the platform audit record could not be written."
+            )
+        # The same thin trigger the tags API emits, identifiers only (#918,
+        # #305): a created member's `agent_created` broadcast fires before its
+        # tags exist, so a listener refreshing on it alone would miss them.
+        for name in result._tags_written:
+            await tags_router._broadcast_tags_changed(name)
+
+    if result.status == "refused":
+        retryable_only = all(b.retryable for b in result.blockers)
+        return JSONResponse(
+            status_code=503 if retryable_only else 409, content=result.model_dump()
+        )
+    if result.status == "failed":
+        return JSONResponse(status_code=500, content=result.model_dump())
     return result
 
 

@@ -486,17 +486,19 @@ passed `overflow_policy="queue_persistent"`. Two of the three producers can:
 |---|---|---|---|
 | `task_execution_service` | scheduler — **all cron** and its RETRY-001 retries — webhooks, reminders, loops, fan-out, A2A, operator resumes | `queue_persistent` **when `pull_owns_dispatch` is true**, else `reject` | **Yes**, for every autonomous trigger it carries |
 | `dispatch_admission_service` | sequential `chat_with_agent`, human chat | `queue_in_memory` | **No** |
-| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` |
+| `chat_execution_service` (`POST /task`) | parallel `chat_with_agent`, an agent's task to itself, MCP/manual task | `queue_persistent` | **Yes**, for `agent` / `event` / `self_task` |
 
 `POST /task` can only derive `triggered_by ∈ {self_task, agent, mcp, manual,
-event}`, contributing `agent` + `event`. `task_execution_service` contributes the
+event}`, contributing `agent`, `event` and `self_task` (#4105). `task_execution_service` contributes the
 autonomous triggers with **no synchronous result consumer**: `schedule`,
 `webhook`, `reminder` and `retry` (#2845 — RETRY-001's next attempt at a failed
 run), all of which reach it from the scheduler, which
 dispatches `async_mode=True` and then polls the DB for the terminal, plus `loop`
 (#2523) and `fan_out` (#2524) since their orchestrators stopped holding the work
 in a coroutine, plus `a2a` and `operator_response` (#2524) through
-`task_execution_service.dispatch_and_await_terminal`. The pullable set is
+`task_execution_service.dispatch_and_await_terminal`, plus `skill_gate` (#4105 —
+the wake of a requester whose gated request was decided; its caller ignores the
+result). The pullable set is
 therefore **every autonomous trigger** (`pull_pilot.PULL_REACHABLE_TRIGGERS`,
 which stays an enumerated allow-list on purpose — a trigger added to
 `_AUTONOMOUS_TRIGGERS` later must be classified, not inherit reach).
@@ -519,8 +521,10 @@ indistinguishable:
 Any pushed **autonomous** row on a pilot is now a real fault: check the backend
 actually has `PULL_MODE_PILOT_AGENTS` in its env (and see G1 in §6 — compose must
 forward it). The `[#2048]` diagnostic still exists but is unreachable by design —
-if you ever see it, a NEW trigger was added to `_AUTONOMOUS_TRIGGERS` without
-being classified against dispatch topology:
+if you ever see it, a trigger a producer writes is in no pull set (#4105:
+`self_task` was, and ran above `max_parallel_tasks` invisibly to M3 and S-02).
+It fires from `execute_task` and from `capacity_manager.acquire` (the `POST
+/task` route), once per agent and trigger:
 ```bash
 docker logs trinity-backend 2>&1 | grep '\[#2048\]'
 ```

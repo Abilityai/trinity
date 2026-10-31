@@ -161,8 +161,39 @@ class _DB:
             and r["status"] not in _TERMINAL
         ][:limit]
 
+    def rearm_lost_dispatch(self, lid, *, due_for):
+        # #3317: the real one decides under the loop row's lock; this fake is
+        # single-threaded, so it classifies the same way on current state.
+        row = self.loops.get(lid)
+        if row is None:
+            return "missing", None
+        if row["status"] in _TERMINAL:
+            return "terminal", None
+        if row.get("next_run_at") is not None:  # SQL: `next_run_at IS NULL`
+            return "parked", None
+        runs = self.list_loop_runs(lid)
+        open_run = next((r for r in runs if r["status"] == "running"), None)
+        if open_run is not None:
+            return "open_run", open_run
+        if any(r["run_number"] > (row["runs_completed"] or 0) for r in runs):
+            return "stuck", None
+        row["next_run_at"] = due_for(dict(row), runs)
+        return "armed", None
+
     # runs
     def start_loop_run(self, lid, run_number, *, execution_id=None):
+        # #3317: inserting run K is a claim, as the real one: a non-terminal
+        # loop with runs_completed == K-1 and no row numbered K or above. A win
+        # spends any pending park.
+        row = self.loops.get(lid)
+        if (
+            row is None
+            or row["status"] in _TERMINAL
+            or row["runs_completed"] != run_number - 1
+            or any(r["run_number"] >= run_number for r in self.runs.get(lid, []))
+        ):
+            return None
+        row["next_run_at"] = None
         rid = f"lr_{lid}_{run_number}"
         self.runs[lid].append({
             "id": rid, "loop_id": lid, "run_number": run_number,
