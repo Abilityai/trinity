@@ -116,6 +116,12 @@ class PortalPrincipal(NamedTuple):
     #: an authorization input): `portal_session:<minted_by>`, `platform_session`
     #: or `mcp_key:<scope>`.
     credential: str = "unknown"
+    #: trinity-enterprise#959 — the platform USERNAME, for one decision: which
+    #: room participant this credential reads as. Rooms seat a platform account
+    #: as `user`+username and a Workspace session as `workspace_user`+email
+    #: (ent#362) — two identity spaces — so the email alone cannot say which
+    #: rooms are the caller's. None for a portal token, which has no username.
+    username: str | None = None
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -230,6 +236,7 @@ async def get_portal_principal(
         email, True, is_person, _is_admin_principal(user),
         self_approves=is_person,
         credential="platform_session" if scope is None else f"mcp_key:{scope}",
+        username=user.username,
     )
 
 

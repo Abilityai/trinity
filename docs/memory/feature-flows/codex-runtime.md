@@ -25,10 +25,18 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
    `AGENTS.md`), creates `CODEX_HOME` under `$TMPDIR` (off the git-tracked repo),
    gitignores `.tmp/`. MCP config (`trinity_mcp.py`) writes `$CODEX_HOME/config.toml`.
 3. **Chat / Task.** `POST /api/chat` → `runtime.execute()`; `POST /api/task` →
-   `runtime.execute_headless()`. Both build `codex exec --json --skip-git-repo-check
-   -C /home/developer --sandbox <mode> -o <CODEX_HOME>/<exec_id>-last.txt
-   [-m model] [resume <thread_id>] -- -`, write the prompt to stdin, close
-   it, and stream the JSONL.
+   `runtime.execute_headless()`. Both build `codex exec -c model_provider="openai"
+   -c openai_base_url="" -c chatgpt_base_url="https://chatgpt.com/backend-api/"
+   --json --skip-git-repo-check -C /home/developer --sandbox <mode>
+   -o <CODEX_HOME>/<exec_id>-last.txt [-m model] [resume <thread_id>] -- -`,
+   write the prompt to stdin, close it, and stream the JSONL.
+   The three `-c` pins (trinity-enterprise#1001) keep the endpoint the platform's:
+   `$CODEX_HOME/config.toml` is agent-writable, `-c` beats every config layer the
+   agent can write, and the built-in `openai` provider cannot be redefined, so a
+   custom provider or base URL there would otherwise carry the API key or ChatGPT
+   token to its host. Before the turn, `execution_env.strip_protected_env_lines`
+   removes `.env`-protected names (proxy, TLS trust, loader names, …) from
+   `$CODEX_HOME/.env`, which the CLI loads over the process env at start.
    `<mode>` = `danger-full-access` normally (no inner bwrap sandbox — see Safety
    parity), `read-only` when the agent is read-only. Exec-level flags **precede**
    `resume` (the `resume` sub-subcommand rejects them — the turn-2+ continuity
@@ -195,7 +203,7 @@ best-effort + lazily from the `trinity.agent-runtime` label
 
 | Layer | File |
 |-------|------|
-| Base image | `docker/base-image/Dockerfile` (`@openai/codex@0.139.0`), `startup.sh` (AGENTS.md, CODEX_HOME) |
+| Base image | `docker/base-image/Dockerfile` (`@openai/codex@0.147.0`), `startup.sh` (AGENTS.md, CODEX_HOME) |
 | Runtime | `docker/base-image/agent_server/services/codex_runtime.py` |
 | Contract | `runtime_adapter.py` (`RuntimeCapabilities`, factory + validation), `models.py` (`ExecutionMetadata.status/error_code`) |
 | MCP | `agent_server/services/trinity_mcp.py`, `services/platform_prompt_service.py` (runtime-aware tool naming) |

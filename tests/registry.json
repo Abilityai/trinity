@@ -37,6 +37,38 @@
       "description": "trinity-enterprise#1007 item 7: create stamps the effective kind on the trinity.kind label; AgentStatus.kind reads it on the full and fast paths; absent, empty or unrecognised reads None (unknown), never a default; a rebuild from nothing carries no label; the ordinary recreate seeds labels from the old container (AST pin); every /info shape carries the label kind, overriding any agent-server value."
     },
     {
+      "file": "unit/test_ent1001_endpoint_env.py",
+      "feature": "trinity-enterprise#1001",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1001: .env cannot set proxy/TLS-trust names (every runtime), the runtime's own endpoint names (that runtime only) or AGENT_RUNTIME; container-baseline values still apply; Claude settings env pinned by a root-owned managed-settings.d drop-in written from the container env; Codex -c endpoint pins and $CODEX_HOME/.env stripping; Gemini spawns carry every pin against the CLI's own fill-only .env loader; CLI-version guards."
+    },
+    {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
