@@ -32,6 +32,7 @@ from models import (
     BundledManifestDetail,
     BundledManifestSummary,
     MANIFEST_MAX_BYTES,
+    SystemApplyAdoption,
     SystemApplyBlocker,
     SystemApplyChange,
     SystemApplyDrift,
@@ -2310,6 +2311,11 @@ class ApplyMemberState:
     resource_limits: Optional[Dict[str, Optional[str]]] = None
     restart_pending: bool = False
     blocked: bool = False
+    # trinity-enterprise#1030: a `naming: bare` member that is live and
+    # manageable but carries no system tag. Adopted by the plan (one additive
+    # tag write), never refused as claimed: that inference is prefix-based and
+    # does not exist for a bare name.
+    untagged: bool = False
 
 
 @dataclass
@@ -2564,6 +2570,14 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                     f"'{name}' has an ownership row but no container.",
                     f"Start '{name}' (its container is rebuilt from the workspace "
                     "volume), then re-apply.")
+        elif (roster_ok and snapshot.membership.tags_readable
+              and name not in snapshot.membership.members and manifest.naming == "bare"):
+            # trinity-enterprise#1030 (T1 = A): `naming: bare` + the declared
+            # name + a person's credential is the explicit statement; the plan
+            # adopts it. Residual, stated: a bare agent tagged with ANOTHER
+            # bare system's name cannot be told apart (no prefix evidence), so
+            # the plan SHOWS its tags and membership stays a union.
+            state.untagged = True
         elif roster_ok and snapshot.membership.tags_readable and name not in snapshot.membership.members:
             gate = ("member_claimed_by_another_system",
                     f"'{name}' carries another system's tag that claims it.",
@@ -2864,6 +2878,7 @@ class ApplyPlan:
     view_op: Optional[ApplyOp] = None
     warnings: List[str] = field(default_factory=list)
     default_resources: Optional[Dict[str, str]] = None
+    adopted: List["SystemApplyAdoption"] = field(default_factory=list)
 
 
 def _apply_change(field_name: str, action: str, code: str, *, current=None,
@@ -3017,6 +3032,18 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
     live_tags = set(_normalized_tags(state.tags))
     missing = [t for t in _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
                if t not in live_tags]
+    if state.untagged and manifest.name in missing:
+        # trinity-enterprise#1030: the system tag on an untagged bare member
+        # is an ADOPTION — written by the same additive `tag` op, reported
+        # under its own code so the dry run cannot read as a routine tag.
+        mp.changes.append(_apply_change(
+            "members", "write", "member_adopted",
+            current=sorted(live_tags), desired=[manifest.name],
+            note=("declared under naming: bare; the system tag records membership from "
+                  "here on. If one of the current tags is another system's name, this "
+                  "agent will belong to two systems")))
+        mp.ops.append(ApplyOp("tag", name, short, {"tag": manifest.name}))
+        missing = [t for t in missing if t != manifest.name]
     if missing:
         mp.changes.append(_apply_change("tags", "write", "tag_missing",
                                         current=sorted(live_tags), desired=missing))
@@ -3351,10 +3378,27 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                 f"More than one system view is marked as {system}'s auto-created view; "
                 "apply created none and changed none.")
 
+    # trinity-enterprise#1030 (T1 = A): adoption is the moment an agent joins
+    # the system's restart and teardown, so it is listed on its own and said
+    # in plain words, never folded silently into `update`.
+    adopted = [
+        SystemApplyAdoption(name=mp.name, tags=list(c.current or []))
+        for mp in members.values() if mp.verdict != "blocked"
+        for c in mp.changes if c.code == "member_adopted"
+    ]
+    if adopted:
+        names = ", ".join(a.name for a in adopted)
+        count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
+        warnings.append(
+            f"{count} will be adopted into '{system}' by adding the tag '{system}': "
+            f"{names}. From then on, restarting the system restarts them and a "
+            f"teardown of the system removes them too.")
+
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
+        adopted=adopted,
     )
 
 
@@ -3775,6 +3819,7 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         system_view=plan.system_view,
         failed=list(outcome.failed) if outcome else [],
         warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
+        adopted=list(plan.adopted),
     )
     if outcome is not None:
         response._tags_written = list(outcome.tags_written)

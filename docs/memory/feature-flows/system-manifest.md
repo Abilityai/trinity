@@ -650,6 +650,8 @@ a template resource that overrides a declared one) are resolved after the create
 read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
 and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
 
+**Bare adoption (trinity-enterprise#1030)**: `read_apply_snapshot` marks a bare, managed, tag-less member `ApplyMemberState.untagged` instead of gating it `member_claimed_by_another_system`; `_plan_existing_member` turns that into a `member_adopted` change plus a `tag` op for the system tag; `resolve_apply_plan` collects `ApplyPlan.adopted` and the restart/teardown warning; `_apply_report` copies it to `SystemApplyResponse.adopted`.
+
 #### export_manifest() (Lines 414-551)
 ```python
 def export_manifest(system_name: str, agents: List[Dict]) -> str:

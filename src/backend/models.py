@@ -1545,6 +1545,17 @@ class SystemApplyFailure(BaseModel):
     reason: str  # Sanitized, truncated (`system_service._failure_reason`)
 
 
+class SystemApplyAdoption(BaseModel):
+    """A live agent a `naming: bare` manifest adopts (trinity-enterprise#1030).
+
+    `tags` are the agent's tags before adoption: the platform keeps no registry
+    of system names, so it SHOWS them rather than guessing whether one is
+    another system's (in which case the agent will belong to two systems).
+    """
+    name: str
+    tags: List[str] = []
+
+
 class SystemApplyResponse(BaseModel):
     """Response from `POST /api/systems/apply` (trinity-enterprise#695).
 
@@ -1565,6 +1576,10 @@ class SystemApplyResponse(BaseModel):
     system_view: SystemApplyViewVerdict
     failed: List[SystemApplyFailure] = []
     warnings: List[str] = []
+    # trinity-enterprise#1030: agents this run adopts (dry run) or adopted
+    # into the system by tagging it, kept apart from `members` because adoption
+    # is when an agent joins `restart_system` / teardown's reach.
+    adopted: List[SystemApplyAdoption] = []
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is
     # not a create). Private: never serialized.

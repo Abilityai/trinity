@@ -57,6 +57,12 @@ def _manifest(*shorts: str, naming: str | None = None, extra: str = "") -> str:
     return f"{head}agents:\n{agents}\n{extra}"
 
 
+def _blocker(snapshot, code):
+    found = [b for b in snapshot.blockers if b.code == code]
+    assert found, f"no {code} blocker in {[(b.code, b.member) for b in snapshot.blockers]}"
+    return found
+
+
 def _parse(yaml_text: str):
     manifest = system_service.parse_manifest(yaml_text)
     warnings = system_service.validate_manifest(manifest)
@@ -184,6 +190,109 @@ class TestApplyUnderBare:
         assert snap.members["regent"].name == "regent"
         assert snap.members["regent"].status == "managed"
         assert snap.membership.evidence == {"regent": "tag"}
+
+
+# ===========================================================================
+# CP0b — bare adoption of a pre-existing untagged agent (T1 = A)
+# ===========================================================================
+
+class TestBareAdoption:
+    """A declared, live, manageable agent that carries no system tag is
+    ADOPTED under `naming: bare`: one additive tag write, planned in the dry
+    run and listed in `adopted[]`. `naming: bare` plus the declared name plus a
+    person's credential is the explicit statement; the prefix inference that
+    makes `member_claimed_by_another_system` true does not exist for a bare
+    name."""
+
+    def _three(self, world):
+        world.seed_agent("regent", tags=())
+        world.seed_agent("canon", tags=("ops",))
+        world.seed_agent("scout", tags=())
+
+    def test_the_snapshot_marks_them_untagged_never_claimed(self, world):
+        self._three(world)
+        snap = world.snapshot(_manifest("regent", "canon", "scout", naming="bare"))
+        assert snap.blockers == []
+        assert {s: m.untagged for s, m in snap.members.items()} == {
+            "regent": True, "canon": True, "scout": True}
+        assert {m.status for m in snap.members.values()} == {"managed"}
+
+    def test_the_dry_run_plans_one_adoption_write_each_and_no_create(self, ew):
+        self._three(ew)
+        res = W.apply(ew, _manifest("regent", "canon", "scout", naming="bare"), dry_run=True)
+        assert res.status == "valid"
+        assert [(m.name, m.verdict) for m in res.members] == [
+            ("regent", "update"), ("canon", "update"), ("scout", "update")]
+        canon = next(m for m in res.members if m.name == "canon")
+        (adopt,) = [c for c in canon.changes if c.code == "member_adopted"]
+        assert adopt.field == "members" and adopt.action == "write"
+        assert adopt.desired == [SYSTEM]
+        # E1: the agent's existing tags are SHOWN — the platform cannot know
+        # whether `ops` is another system's name.
+        assert adopt.current == ["ops"]
+        assert "two systems" in adopt.note
+        # The system tag is the adoption, not also a `tag_missing`.
+        assert not [c for c in canon.changes if c.code == "tag_missing"]
+        assert [(a.name, a.tags) for a in res.adopted] == [
+            ("regent", []), ("canon", ["ops"]), ("scout", [])]
+
+    def test_the_warning_names_restart_and_teardown_in_plain_words(self, ew):
+        self._three(ew)
+        res = W.apply(ew, _manifest("regent", "canon", "scout", naming="bare"), dry_run=True)
+        (line,) = [w for w in res.warnings if "adopted" in w]
+        assert "3 agents" in line and f"'{SYSTEM}'" in line
+        assert "restart" in line and "teardown" in line
+        assert "regent" in line and "canon" in line and "scout" in line
+
+    def test_the_real_run_tags_them_and_the_second_run_is_unchanged(self, ew):
+        self._three(ew)
+        yaml_text = _manifest("regent", "canon", "scout", naming="bare")
+        res = W.apply(ew, yaml_text, dry_run=False)
+        assert res.status == "applied", res
+        assert ew.create_calls == []
+        for name in ("regent", "canon", "scout"):
+            assert SYSTEM in db.get_agent_tags(name)
+        assert sorted(db.get_agent_tags("canon")) == sorted(["ops", SYSTEM])  # additive
+        again = W.apply(ew, yaml_text, dry_run=True)
+        assert {m.verdict for m in again.members} == {"unchanged"}
+        assert again.adopted == []
+        assert not [w for w in again.warnings if "adopted" in w]
+        snap = ew.snapshot(yaml_text)
+        assert snap.membership.evidence == {"regent": "tag", "canon": "tag", "scout": "tag"}
+
+    def test_an_extra_declared_tag_is_still_a_tag_missing(self, ew):
+        ew.seed_agent("regent", tags=())
+        res = W.apply(ew, _manifest("regent", naming="bare", extra="default_tags: [fleet]\n"),
+                      dry_run=True)
+        (m,) = res.members
+        assert [c.code for c in m.changes] == ["member_adopted", "tag_missing"]
+        assert next(c for c in m.changes if c.code == "tag_missing").desired == ["fleet"]
+
+    def test_prefixed_mode_keeps_todays_refusal(self, world):
+        """The evidence gate for prefix-only members is untouched."""
+        world.seed_agent("acme-a", tags=())
+        snap = world.snapshot(_manifest("a"))
+        (b,) = _blocker(snap, "membership_evidence_prefix_only")
+        assert b.member == "acme-a"
+        assert snap.members["a"].untagged is False
+
+    def test_prefixed_mode_still_refuses_a_name_claimed_elsewhere(self, world):
+        world.seed_agent("acme-extra-w", tags=("acme-extra",))
+        snap = world.snapshot(_manifest("extra-w"))
+        assert [(b.code, b.member) for b in snap.blockers] == [
+            ("member_claimed_by_another_system", "acme-extra-w")]
+
+    def test_an_unmanageable_bare_name_stays_the_uniform_refusal(self, world):
+        world.seed_agent("regent", owner=W.BOB, tags=())
+        snap = world.snapshot(_manifest("regent", naming="bare"))
+        assert [b.code for b in snap.blockers] == ["member_name_unavailable"]
+        assert snap.members["regent"].untagged is False
+
+    def test_deploy_of_a_bare_manifest_over_an_existing_name_still_suffixes(self, world):
+        world.seed_agent("regent", tags=())
+        res = asyncio.run(system_service.deploy_manifest(
+            _manifest("regent", naming="bare"), world.user(W.ALICE), dry_run=True))
+        assert [a["name"] for a in res.agents_to_create] == ["regent_2"]
 
 
 # ===========================================================================
