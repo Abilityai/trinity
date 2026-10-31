@@ -219,6 +219,9 @@ def test_the_must_act_kinds_never_expire_and_only_the_collision_ending_is_final(
     person = [k for k in pa.KINDS.values() if k.clears == pa.CLEARS_PERSON]
     assert {k.name for k in person} >= {"poison", "portal_inbox_collision"}
     assert all(k.lifetime is None for k in person)
+    # Load-bearing (#1402): the reaper parks only on a durable alert, so a budget
+    # refusal here would stop poison leases parking once the type is at its cap.
+    assert pa.KINDS["poison"].budgeted_type is None
     assert pa.KINDS["validation_failed"].clears == pa.CLEARS_LIFETIME_ONLY
     assert [k.name for k in pa.KINDS.values() if k.person_ending_is_final] == ["portal_inbox_collision"]
     assert pa.KINDS["portal_inbox_collision"].material_keys == ("claimants_digest",)
