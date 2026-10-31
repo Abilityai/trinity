@@ -29,8 +29,8 @@ Env:
                             POSTed to that Trinity's owner door
                             ``/api/agents/<MEMORY_EVAL_AGENT>/retrieval-memory/extract-preview``
                             with ``MEMORY_EVAL_BACKEND_TOKEN`` as the Bearer, and
-                            the extractor that answered (agent runtime / platform
-                            key) is recorded per case. Reconcile pairs still run
+                            the extractor that answered (the agent's subscription /
+                            the platform key) is recorded per case. Reconcile pairs still run
                             locally on the eval key. Without it, extraction runs
                             locally through the platform path on the eval key.
     MEMORY_EVAL_CREDENTIAL  which credential shape the eval key stands in for:
@@ -364,10 +364,10 @@ async def _extract_case_via_backend(case: Dict[str, Any], execution: Any, transc
         return {"transcript": transcript, "facts": [], "screened": [], "raw": None,
                 "skipped": f"preview {response.status_code}: {response.text[:200]}"}
     data = response.json()
-    LEDGER.calls.append({"tag": "extract", "requested": f"{data.get('extractor')}:{data.get('runtime') or 'platform'}",
-                         "model": f"{data.get('extractor')}:{data.get('runtime') or 'platform'}", "stop_reason": None, "usage": {}})
+    LEDGER.calls.append({"tag": "extract", "requested": f"{data.get('extractor')}:{data.get('subscription') or 'platform'}",
+                         "model": f"{data.get('extractor')}:{data.get('model') or '?'}", "stop_reason": None, "usage": {}})
     return {"transcript": transcript, "facts": data["facts"], "screened": data["screened"], "raw": json.dumps(data["facts"]),
-            "prompt_chars": None, "skipped": None, "extractor": data.get("extractor"), "runtime": data.get("runtime")}
+            "prompt_chars": None, "skipped": None, "extractor": data.get("extractor"), "subscription": data.get("subscription")}
 
 
 _JUDGE_PROMPT = """\

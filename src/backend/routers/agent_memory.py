@@ -214,9 +214,20 @@ async def extract_preview_endpoint(
             "code": "no_extractor", "reason": who["reason"],
             "message": f"Nothing would extract for this agent right now: {who['reason']}.",
         })
-    facts, screened = await memory_service._extract(agent_name, transcript, subject)
+    # The answer names who ACTUALLY answered, not the plan: a 429 fallback is
+    # the key and its model, and an upstream failure is a failure — never
+    # `facts: []`, which reads as "nothing worth remembering" and gets scored.
+    report: dict = {}
+    facts, screened = await memory_service._extract(agent_name, transcript, subject, report=report)
+    if not report.get("answered"):
+        raise HTTPException(status_code=502, detail={
+            "code": "extractor_failed", "extractor": report.get("kind"), "status": report.get("status"),
+            "message": f"The extractor did not answer ({report.get('reason') or 'request failed'}); nothing to preview.",
+        })
+    answered_on_subscription = report.get("kind") == model_gateway.KIND_SUBSCRIPTION
     return MemoryExtractPreviewOut(
         agent_name=agent_name, subject="person" if subject.is_person else "agent",
-        extractor=who["effective"], model=who["model"], subscription=who["subscription"],
+        extractor=report.get("kind"), model=report.get("model"),
+        subscription=who["subscription"] if answered_on_subscription else None,
         facts=facts, screened=screened, transcript_chars=len(transcript),
     )

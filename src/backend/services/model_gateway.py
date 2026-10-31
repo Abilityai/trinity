@@ -35,10 +35,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from utils.credential_sanitizer import sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -122,6 +124,15 @@ def has_platform_key() -> bool:
         return False
 
 
+def _agent_may_use_platform_key(agent_name: str) -> bool:
+    """`agent_ownership.use_platform_api_key` — only an explicit False refuses;
+    the column defaults on, and an unreadable value reads as the default."""
+    try:
+        return _db().get_use_platform_api_key(agent_name) is not False
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def mode() -> str:
     """The knob, normalised; anything unreadable or unknown reads as ``auto``."""
     try:
@@ -148,17 +159,25 @@ def resolve(agent_name: Optional[str] = None) -> Credential:
             db = _db()
             sub_id = db.get_agent_subscription_id(agent_name)
             if sub_id:
-                limited = bool(db.is_subscription_rate_limited(sub_id))
-                if limited:
-                    sub_reason = "the agent's subscription is rate-limited right now"
-                else:
-                    token = db.get_subscription_token(sub_id)
-                    if token:
-                        return Credential(KIND_SUBSCRIPTION, m, MODEL_ON_SUBSCRIPTION, token, sub_id)
-                    # #2766: an unreadable token is a fault to surface, never a
-                    # reason to bill an instance key the agent was not assigned.
+                # The token FIRST, whatever the limit says: a subscription-mode
+                # agent whose token cannot be read answers nobody (#2766) — an
+                # unreadable token is a fault to surface, never a reason to bill
+                # an instance key the agent was not assigned. With the limit
+                # checked first, a limited subscription with an unreadable token
+                # fell through to the key in `auto` (the merge-train finding).
+                token = db.get_subscription_token(sub_id)
+                if not token:
                     return Credential(KIND_NONE, m, None, None, sub_id,
                                       "the agent's subscription token is unreadable")
+                # The ONE `rate_limited_now` derivation (#2157 / #447): a fresh
+                # provider verdict wins in both directions, the 2h failure-row
+                # inference only when the provider could not answer — the same
+                # answer the Subscriptions card shows.
+                from services.subscription_headroom_service import rate_limited_now_cached
+                if rate_limited_now_cached(sub_id):
+                    sub_reason = "the agent's subscription is rate-limited right now"
+                else:
+                    return Credential(KIND_SUBSCRIPTION, m, MODEL_ON_SUBSCRIPTION, token, sub_id)
             else:
                 sub_reason = "the agent has no subscription assigned"
         except Exception as e:  # noqa: BLE001 — fail-soft, the caller keeps its fallback
@@ -167,8 +186,16 @@ def resolve(agent_name: Optional[str] = None) -> Credential:
     elif m in ("auto", "subscription"):
         sub_reason = "the call is not attributed to an agent"
 
-    # The platform's one auth-mode derivation (#471) names what is left.
-    auth_mode = derive_auth_mode(False, bool(api_key))
+    # The platform's one auth-mode derivation (#471) names what is left. Its
+    # key arm is the agent's `use_platform_api_key` (False = the operator
+    # asserting this agent never runs on the instance key), not merely whether
+    # a key exists; the platform itself always may.
+    may_use_key = bool(api_key) and (agent_name is None or _agent_may_use_platform_key(agent_name))
+    auth_mode = derive_auth_mode(False, may_use_key)
+    if m in ("auto", "platform_key") and agent_name and api_key and not may_use_key:
+        key_reason = "the agent is set not to use the platform key"
+        return Credential(KIND_NONE, m, None, None, None,
+                          f"{sub_reason} and {key_reason}" if sub_reason else key_reason)
     if m in ("auto", "platform_key") and auth_mode == "api_key":
         if sub_reason and m == "auto" and agent_name:
             logger.debug("[model] %s: %s — using the platform key", agent_name, sub_reason)
@@ -211,21 +238,42 @@ async def send(credential: Credential, body: Dict[str, Any], *, timeout: float =
         return None
 
 
-def _log_usage(purpose: str, credential: Credential, data: Dict[str, Any], started: float) -> None:
+def log_usage(purpose: str, credential: Credential, data: Dict[str, Any], started: float) -> None:
+    """The one bounded usage line every answered call leaves (purpose, credential
+    kind, model, tokens, latency). A caller that sends through ``send`` itself —
+    thread titles keep the upstream status for their health record — calls this
+    with the parsed body so its usage is logged like everyone else's."""
     usage = data.get("usage") or {}
     logger.info("[model] %s via %s %s: %s in / %s out, %d ms", purpose, credential.kind, data.get("model"),
                 usage.get("input_tokens", "?"), usage.get("output_tokens", "?"), int((time.monotonic() - started) * 1000))
 
 
+_log_usage = log_usage
+
+
+def _note(report: Optional[Dict[str, Any]], cred: Credential, **extra: Any) -> None:
+    """Fill a caller's ``report`` with who answered (or did not) — kind, model,
+    subscription id, never the secret."""
+    if report is None:
+        return
+    report.update({"kind": cred.kind, "subscription_id": cred.subscription_id,
+                   "model": extra.pop("model", None) or (cred.model if cred.kind != KIND_NONE else None)}, **extra)
+
+
 async def request(purpose: str, *, agent_name: Optional[str] = None, credential: Optional[Credential] = None,
                   prompt: Optional[str] = None, messages: Optional[List[Dict[str, Any]]] = None,
                   max_tokens: int = 512, timeout: float = 30.0, model: Optional[str] = None,
-                  tools: Optional[list] = None, tool_choice: Optional[dict] = None) -> Optional[Dict[str, Any]]:
+                  tools: Optional[list] = None, tool_choice: Optional[dict] = None,
+                  report: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """The Messages API response for one call, or None on any failure. In
-    ``auto`` a subscription that answers 429 steps aside to the platform key."""
+    ``auto`` a subscription that answers 429 steps aside to the platform key.
+    ``report`` (a dict the caller owns) is filled with who actually answered:
+    ``answered``, ``kind``, ``model``, ``subscription_id``, and ``status`` /
+    ``reason`` on a failure — the plan taken before the call is not the answer."""
     cred = credential or resolve(agent_name)
     if not cred.usable:
         logger.info("[model] %s: nobody to answer for %s: %s", purpose, agent_name or "platform", cred.reason)
+        _note(report, cred, answered=False, reason=cred.reason)
         return None
     started = time.monotonic()
     body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools, tool_choice=tool_choice)
@@ -238,18 +286,26 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
             body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools, tool_choice=tool_choice)
             response = await send(cred, body, timeout=timeout)
     if response is None:
+        _note(report, cred, answered=False, status=None, reason="request failed")
         return None
     if response.status_code != 200:
-        logger.error("[model] %s via %s: API %s: %s", purpose, cred.kind, response.status_code, response.text[:200])
+        # The body is scrubbed first: an upstream error that echoes the
+        # credential must not reach the log (the module's promise).
+        logger.error("[model] %s via %s: API %s: %s", purpose, cred.kind, response.status_code,
+                     sanitize_text(response.text or "")[:200])
+        _note(report, cred, answered=False, status=response.status_code, reason=f"API {response.status_code}")
         return None
     try:
         data = response.json()
     except Exception as e:  # noqa: BLE001
         logger.error("[model] %s: response unreadable: %s", purpose, type(e).__name__)
+        _note(report, cred, answered=False, status=200, reason="response unreadable")
         return None
     if not isinstance(data, dict):
+        _note(report, cred, answered=False, status=200, reason="response unreadable")
         return None
-    _log_usage(purpose, cred, data, started)
+    log_usage(purpose, cred, data, started)
+    _note(report, cred, answered=True, status=200, model=body.get("model"))
     return data
 
 
@@ -270,10 +326,12 @@ def first_text(data: Optional[Dict[str, Any]]) -> Optional[str]:
 
 
 async def complete(purpose: str, prompt: str, *, agent_name: Optional[str] = None,
-                   max_tokens: int = 512, timeout: float = 30.0, model: Optional[str] = None) -> Optional[str]:
+                   max_tokens: int = 512, timeout: float = 30.0, model: Optional[str] = None,
+                   report: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """The model's text for ``prompt`` as a single user message, or None."""
     return first_text(await request(purpose, agent_name=agent_name, prompt=prompt, max_tokens=max_tokens,
-                                    timeout=timeout, model=model))
+                                    timeout=timeout, model=model, report=report))
 
 
-__all__ = ["Credential", "complete", "first_text", "has_platform_key", "mode", "plan", "request", "resolve", "send"]
+__all__ = ["Credential", "complete", "first_text", "has_platform_key", "log_usage", "mode", "plan", "request",
+           "resolve", "send"]

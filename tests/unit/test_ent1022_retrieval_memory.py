@@ -62,7 +62,7 @@ class ScriptedHaiku:
         self.reconcile = reconcile
         self.prompts: list[tuple[str, str]] = []
 
-    async def complete(self, purpose, prompt, *, agent_name=None, max_tokens=512, timeout=30.0, model=None):
+    async def complete(self, purpose, prompt, *, agent_name=None, max_tokens=512, timeout=30.0, model=None, report=None):
         self.prompts.append((purpose, prompt))
         if purpose == "memory.extract":
             return json.dumps(self.extract) if not callable(self.extract) else self.extract(prompt)

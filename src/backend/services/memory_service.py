@@ -230,8 +230,8 @@ def status() -> Dict[str, Any]:
     platform_key = model_gateway.has_platform_key()
     if enabled and available and credential_mode == "platform_key" and not platform_key:
         # Recall still works (embeddings are local); capture cannot. In `auto`
-        # a running agent still captures on its own runtime (ent#1027), so the
-        # per-agent row says what each agent would do.
+        # a subscription agent still captures on its own subscription
+        # (ent#1027), so the per-agent row says what each agent would do.
         reason = "no platform Anthropic key — facts are recalled but none are captured"
     try:
         stats = db.memory_fact_stats()
@@ -508,17 +508,20 @@ def build_transcript(execution: Any, subject: memory_subject.MemorySubject) -> O
     return "\n".join(lines)
 
 
-async def _extract(agent_name: str, transcript: str, subject: memory_subject.MemorySubject) -> Tuple[List[str], List[str]]:
+async def _extract(agent_name: str, transcript: str, subject: memory_subject.MemorySubject,
+                   report: Optional[Dict[str, Any]] = None) -> Tuple[List[str], List[str]]:
     """``(facts, screened)``: the candidates that passed normalisation and the
     raw strings the screen dropped (clamped), so the journal can show what the
-    extractor proposed that never became a fact."""
+    extractor proposed that never became a fact. ``report`` (the gateway's) says
+    who actually answered, for a caller that must tell the owner."""
     scope_line = (
         "a specific person this agent serves — record facts about them and their work"
         if subject.is_person else
         "the agent's own work, nobody in particular — record what was decided, what was attempted and how it ended"
     )
     prompt = _EXTRACT_PROMPT.format(scope_line=scope_line, transcript=transcript, max_facts=MAX_FACTS_PER_RETAIN)
-    raw = await model_gateway.complete("memory.extract", prompt, agent_name=agent_name, max_tokens=800, timeout=RETAIN_TIMEOUT_S)
+    raw = await model_gateway.complete("memory.extract", prompt, agent_name=agent_name, max_tokens=800,
+                                       timeout=RETAIN_TIMEOUT_S, report=report)
     parsed = _parse_json_array(raw)
     if parsed is None:
         if raw is not None:

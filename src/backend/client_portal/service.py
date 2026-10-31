@@ -2238,8 +2238,10 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
 
     credential = _resolve_title_auth(agent_name)
     if not credential:
-        _record_title_outcome("no_credential",
-                              f"no ANTHROPIC_API_KEY and no subscription token for {agent_name}")
+        # The gateway's reason, not a fixed sentence: "token unreadable" and
+        # "no key" call for different remedies, and the notice quotes this.
+        reason = model_gateway.plan(agent_name).get("reason") or "no credential"
+        _record_title_outcome("no_credential", f"no credential for {agent_name}: {reason}")
         return None
 
     if reply:
@@ -2254,7 +2256,9 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
             message=(client_message or "")[:_TITLE_INPUT_CHARS],
         )
     # The platform's one model door (trinity-enterprise#1027); `send` rather
-    # than `complete` so the health record keeps the upstream status and reason.
+    # than `complete` so the health record keeps the upstream status and reason —
+    # and the usage line is logged here, like every other caller's.
+    started = time.monotonic()
     resp = await model_gateway.send(
         credential,
         credential.body(prompt=prompt, max_tokens=_TITLE_MAX_TOKENS, model=_TITLE_MODEL),
@@ -2272,7 +2276,9 @@ async def _generate_thread_title(agent_name: str, client_message: str, reply: st
         _record_title_outcome("failed", _title_failure_detail(resp.status_code, resp.text))
         return None
     try:
-        text_out = model_gateway.first_text(resp.json()) or ""
+        data = resp.json()
+        model_gateway.log_usage("workspace.title", credential, data, started)
+        text_out = model_gateway.first_text(data) or ""
     except Exception as e:  # noqa: BLE001
         logger.warning("portal title generation: unreadable response: %s", e)
         _record_title_outcome("failed", "unreadable response")

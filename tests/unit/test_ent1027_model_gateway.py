@@ -28,6 +28,7 @@ from models import MemoryExtractPreviewRequest, User
 from services import memory_embeddings as me
 from services import memory_service as ms
 from services import model_gateway as gw
+from services import subscription_headroom_service as headroom
 
 DIM = me.EMBED_DIM
 
@@ -140,14 +141,29 @@ class TestResolve:
             assert cred.kind == "api_key" and cred.model == gw.MODEL_ON_API_KEY
             assert cred.headers()["x-api-key"] == "sk-ant-api-test-key" and "authorization" not in cred.headers()
 
-    def test_an_unreadable_token_never_borrows_the_instance_key(self, transport, key, agent, monkeypatch):
+    @pytest.mark.parametrize("limited", [False, True])
+    def test_an_unreadable_token_never_borrows_the_instance_key(self, transport, key, agent, monkeypatch, limited):
         """#2766: a subscription-mode agent whose token cannot be read answers
-        nobody, in every mode — the instance key was never assigned to it."""
-        subscribed(monkeypatch, agent, token=None)
-        for m in gw.MODES[:2]:
+        nobody in `auto` and `subscription` — the instance key was never assigned
+        to it (`platform_key` is the admin's explicit choice of the key). The
+        merge-train found the rate-limit check running BEFORE the token read, so
+        a limited subscription with an unreadable token fell through to the key
+        in `auto`; the token is read first now, whatever the limit says."""
+        subscribed(monkeypatch, agent, token=None, limited=limited)
+        for m in ("auto", "subscription"):
             db.set_setting(gw.SETTING_CREDENTIAL, m)
             cred = gw.resolve(agent.name)
-            assert cred.kind == "none" and "unreadable" in cred.reason
+            assert cred.kind == "none" and "unreadable" in cred.reason, (m, limited, cred)
+
+    def test_a_token_read_that_raises_never_borrows_the_key_either(self, transport, key, agent, monkeypatch):
+        subscribed(monkeypatch, agent, limited=True)
+
+        def boom(_sid):
+            raise RuntimeError("decrypt failed")
+        monkeypatch.setattr(db, "get_subscription_token", boom)
+        for m in ("auto", "subscription"):
+            db.set_setting(gw.SETTING_CREDENTIAL, m)
+            assert gw.resolve(agent.name).kind == "none"
 
     def test_a_rate_limited_subscription_steps_aside_in_auto_only(self, transport, key, agent, monkeypatch):
         subscribed(monkeypatch, agent, limited=True)
@@ -155,6 +171,54 @@ class TestResolve:
         db.set_setting(gw.SETTING_CREDENTIAL, "subscription")
         cred = gw.resolve(agent.name)
         assert cred.kind == "none" and "rate-limited" in cred.reason
+
+    def test_the_rate_limit_gate_is_the_one_derivation(self, transport, key, agent, monkeypatch):
+        """#2157 / #447: `rate_limited_now` has ONE derivation —
+        `subscription_headroom_service.resolve_rate_limited_now` — in which a
+        fresh provider verdict wins in both directions and the 2h failure-row
+        inference is consulted only when the provider could not answer. The
+        gateway reads the same answer the Subscriptions card shows, so a
+        recovered subscription is not billed to the key for two hours, and a
+        provider 429 the inference has not caught up with steps aside at once."""
+        from datetime import datetime, timedelta, timezone
+
+        def snapshot(status, window_status, age_s=5):
+            fetched = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            return {"status": status, "fetched_at": fetched,
+                    "five_hour": {"utilization_pct": 32.0, "resets_at": None, "status": window_status}}
+        # The inference says limited; a fresh probe says allowed -> the subscription answers.
+        subscribed(monkeypatch, agent, limited=True)
+        monkeypatch.setattr(headroom, "_read_snapshot", lambda sid: (True, snapshot("ok", "allowed")))
+        assert gw.resolve(agent.name).kind == "subscription"
+        # The inference says fine; a fresh probe says 429 -> steps aside in auto, nobody in subscription mode.
+        subscribed(monkeypatch, agent, limited=False)
+        monkeypatch.setattr(headroom, "_read_snapshot", lambda sid: (True, snapshot("rate_limited", None)))
+        assert gw.resolve(agent.name).kind == "api_key"
+        db.set_setting(gw.SETTING_CREDENTIAL, "subscription")
+        cred = gw.resolve(agent.name)
+        assert cred.kind == "none" and "rate-limited" in cred.reason
+        # A stale probe decides nothing: the inference stands.
+        db.set_setting(gw.SETTING_CREDENTIAL, "auto")
+        monkeypatch.setattr(headroom, "_read_snapshot", lambda sid: (True, snapshot("rate_limited", None, age_s=24 * 3600)))
+        assert gw.resolve(agent.name).kind == "subscription"
+        # Redis could not be asked: the inference stands.
+        subscribed(monkeypatch, agent, limited=True)
+        monkeypatch.setattr(headroom, "_read_snapshot", lambda sid: (False, None))
+        assert gw.resolve(agent.name).kind == "api_key"
+
+    def test_an_agent_told_not_to_use_the_platform_key_answers_nobody(self, transport, key, agent):
+        """`use_platform_api_key = False` is the operator asserting this agent
+        never runs on the instance key (#471's third arm). The gateway honoured
+        the subscription arm and ignored this one; the platform itself and an
+        agent left at the default still use the key."""
+        db.set_use_platform_api_key(agent.name, False)
+        for m in ("auto", "platform_key"):
+            db.set_setting(gw.SETTING_CREDENTIAL, m)
+            cred = gw.resolve(agent.name)
+            assert cred.kind == "none" and "platform key" in cred.reason, (m, cred)
+            assert gw.resolve(None).kind == "api_key"
+        db.set_use_platform_api_key(agent.name, True)
+        assert gw.resolve(agent.name).kind == "api_key"
 
     @pytest.mark.parametrize("m,has_sub,has_key,expected", [
         ("auto", False, False, "none"),
@@ -222,6 +286,30 @@ class TestRequest:
         transport.script.append((429, {"error": {"type": "rate_limit_error", "message": "Error"}}))
         assert run(gw.complete("x", "P", agent_name=agent.name)) is None
         assert len(transport.calls) == 1
+
+    def test_an_upstream_error_body_is_scrubbed_before_it_is_logged(self, transport, key, agent, monkeypatch, caplog):
+        """The module promises never to log a secret; an upstream body that
+        echoes the credential went to the log verbatim."""
+        token = "sk-ant-oat01-" + "A" * 80
+        subscribed(monkeypatch, agent, token=token)
+        transport.script.append((401, {"error": {"type": "authentication_error", "message": f"invalid token {token}"}}))
+        with caplog.at_level("DEBUG"):
+            assert run(gw.complete("x", "P", agent_name=agent.name)) is None
+        assert token not in caplog.text and "A" * 40 not in caplog.text
+
+    def test_the_report_names_who_actually_answered(self, transport, key, agent, monkeypatch):
+        """A caller that must say who answered (the owner's preview) asks for a
+        report: after a 429 fallback it is the key and its model, not the plan;
+        an upstream failure is `answered: False` with the status."""
+        subscribed(monkeypatch, agent)
+        transport.script += [(429, {"error": {"type": "rate_limit_error", "message": "Error"}}), answer("ok", model=gw.MODEL_ON_API_KEY)]
+        report = {}
+        assert run(gw.complete("x", "P", agent_name=agent.name, report=report)) == "ok"
+        assert report["answered"] is True and report["kind"] == "api_key" and report["model"] == gw.MODEL_ON_API_KEY
+        transport.script.append((401, {"error": {"type": "authentication_error", "message": "nope"}}))
+        report = {}
+        assert run(gw.complete("x", "P", agent_name=agent.name, report=report)) is None
+        assert report["answered"] is False and report["kind"] == "subscription" and report["status"] == 401
 
     def test_failures_are_none_never_a_raise(self, transport, key):
         transport.script += [(500, {"error": "x"}), ConnectionError("down")]
@@ -302,14 +390,29 @@ class TestCallers:
         assert "I prefer PDF invoices" in transport.calls[0]["body"]["messages"][0]["content"]
         assert transport.calls[0]["body"]["model"] == gw.MODEL_ON_API_KEY
 
-    def test_thread_titles_follow_the_agent(self, transport, key, agent, monkeypatch):
+    def test_thread_titles_follow_the_agent(self, transport, key, agent, monkeypatch, caplog):
         from client_portal import service as svc
         subscribed(monkeypatch, agent)
         transport.script.append(answer("Invoice question"))
-        assert run(svc._generate_thread_title(agent.name, "where is my invoice?", "")) == "Invoice question"
+        with caplog.at_level("INFO", logger="services.model_gateway"):
+            assert run(svc._generate_thread_title(agent.name, "where is my invoice?", "")) == "Invoice question"
         call, = transport.calls
         assert call["headers"]["authorization"].startswith("Bearer ") and call["body"]["model"] == gw.MODEL_ON_SUBSCRIPTION
         assert svc.title_generation_health()["state"] == "ok"
+        # "usage logged per purpose" (the ent#1027 rescope): titles too, one bounded line.
+        usage = [r.getMessage() for r in caplog.records if r.getMessage().startswith("[model] workspace.title via subscription")]
+        assert len(usage) == 1 and " ms" in usage[0] and "3 in / 2 out" in usage[0]
+
+    def test_a_title_with_no_credential_records_the_gateways_reason(self, transport, key, agent, monkeypatch):
+        """The health record said "no ANTHROPIC_API_KEY and no subscription
+        token" whatever the cause; an unreadable token is the cause here, and
+        adding a key would not be used."""
+        from client_portal import service as svc
+        subscribed(monkeypatch, agent, token=None)
+        assert run(svc._generate_thread_title(agent.name, "where is my invoice?", "")) is None
+        health = svc.title_generation_health()
+        assert health["state"] == "no_credential" and "unreadable" in health["last_failure"]
+        assert transport.calls == []
 
     def test_compatibility_checks_go_through_the_door(self, transport, key, monkeypatch):
         from services.compatibility import ai_checks, spec
@@ -379,6 +482,10 @@ class TestHardening:
         key["key"] = ""
         out = run(ai_checks.run_ai({"files": {}}, ids))
         assert all(out[cid]["skip_reason"] == "no_api_key" for cid in ids)
+        # …and with no key either, a subscription agent's problem is still its
+        # subscription: `no_api_key` would send the admin to add a key it would not use.
+        out = run(ai_checks.run_ai({"files": {}}, ids, agent_name=agent.name))
+        assert all(out[cid]["skip_reason"] == "no_credential" for cid in ids)
 
 
 class TestStatusAndPreview:
@@ -409,6 +516,24 @@ class TestStatusAndPreview:
         assert out.model == gw.MODEL_ON_SUBSCRIPTION
         assert out.facts == ["Prefers invoices as PDF"] and len(out.screened) == 1
         assert db.list_memory_facts(agent.name, "ann@example.com", with_embedding=False) == []
+
+    def test_preview_reports_who_answered_and_an_upstream_failure_by_name(self, agent, memory_on, transport, key, monkeypatch):
+        """The preview said `subscription` / Haiku 4.5 after the key had
+        answered on a 429 fallback, and an upstream 401 came back 200 with
+        `facts: []` — "nothing worth remembering" — which the eval then scored."""
+        subscribed(monkeypatch, agent, name="lilu-max")
+        req = MemoryExtractPreviewRequest(message="send me invoices as pdf from now on", response="Will do.",
+                                          triggered_by="public", source_user_email="ann@example.com")
+        transport.script += [(429, {"error": {"type": "rate_limit_error", "message": "Error"}}),
+                             answer('["Prefers invoices as PDF"]', model=gw.MODEL_ON_API_KEY)]
+        out = self._call(agent, req, person(agent))
+        assert out.extractor == "api_key" and out.model == gw.MODEL_ON_API_KEY and out.subscription is None
+        assert out.facts == ["Prefers invoices as PDF"]
+        transport.script.append((401, {"error": {"type": "authentication_error", "message": "nope"}}))
+        with pytest.raises(HTTPException) as err:
+            self._call(agent, req, person(agent))
+        assert err.value.status_code == 502 and err.value.detail["code"] == "extractor_failed"
+        assert err.value.detail["extractor"] == "subscription" and err.value.detail["status"] == 401
 
     def test_preview_refusals(self, agent, memory_on, transport, key):
         with pytest.raises(HTTPException) as err:
