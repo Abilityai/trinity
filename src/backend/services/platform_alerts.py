@@ -181,8 +181,11 @@ _BUILTIN_KINDS = (
     Kind("system_seed", "system-seed-", _N, CLEARS_HOOK),
     Kind("git_token_scrub_refused", "ent615-git-token-scrub-", _D, CLEARS_HOOK),
     Kind("git_token_scrub_unreadable", "ent615-git-token-scrub-unreadable-", _D, CLEARS_HOOK),
-    Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood"),
-    Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK),
+    # #3254: an episode marker is a material key, so a person's ending snoozes
+    # re-reads of the SAME episode only; a new episode differs and files.
+    Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood",
+         material_keys=("episode_started_at",)),
+    Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,
          budgeted_type="effect_unguarded"),
@@ -191,9 +194,9 @@ _BUILTIN_KINDS = (
     Kind("poison", "poison-", None, CLEARS_PERSON),
     Kind("portal_inbox_collision", "portal-inbox-collision-", None, CLEARS_PERSON),
     Kind("gitignore_untracked", "gitignore-untracked-", None, CLEARS_PERSON,
-         budgeted_type="gitignore_untracked", event=True),
+         budgeted_type="gitignore_untracked", material_keys=("push_id",)),
     Kind("workspace_problem_report", "workspace-problem-", None, CLEARS_PERSON,
-         budgeted_type="workspace_problem_report", event=True),
+         budgeted_type="workspace_problem_report"),
 )
 
 KINDS: Dict[str, Kind] = {k.name: k for k in _BUILTIN_KINDS}
@@ -636,6 +639,7 @@ def observe(
     question: str,
     priority: str = "high",
     context: Optional[Mapping] = None,
+    keep_text: bool = False,  # #3254: a pending row keeps its text; the reading only counts
 ) -> str:
     """Report a new reading of a platform condition (#3246). Never raises.
 
@@ -682,7 +686,11 @@ def observe(
             from services import operator_queue_service as oqs
             cap = oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE
         out = db.create_platform_operator_queue_item(
-            agent_name, item, subject=subject, max_pending_for_type=cap)
+            agent_name, item, subject=subject, max_pending_for_type=cap,
+            keep_text=keep_text,
+            # #3254: the snooze decided again under the create's lock, on its own cutoff
+            snooze_since=_iso_z(now - snooze_window()),
+            snoozed=lambda ended: _snoozed_by(k, ended, priority, ctx))
         if out["outcome"] == OBSERVED_REFUSED_AT_BUDGET:
             from services import operator_queue_service as oqs
             _spawn(lambda: oqs._maybe_emit_alert_budget_episode(

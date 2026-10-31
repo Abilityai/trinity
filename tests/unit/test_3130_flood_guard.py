@@ -16,6 +16,13 @@ Pinned here:
     written once per state change and removed when nothing is held;
   * the backlog migration keeps the newest pending flood alert per agent and
     cancels the rest.
+
+#3254 re-pin (write-observation point, D13 class 2): the flood alert reports
+through ``platform_alerts.observe``, whose one locked create
+(``database.db.create_platform_operator_queue_item``: find → touch → typed
+count → insert) replaces the helper's ``oqs.db`` count + create. ``_seam``
+stands in for that create, with the budget's arithmetic and the fault
+injection moved onto it; every asserted outcome is unchanged.
 """
 import asyncio
 import json
@@ -44,8 +51,41 @@ from services.rate_limiter import RateLimitResult  # noqa: E402
 # Mocked sync harness (the test_1632 shape, with the count keyed on its kwargs)
 # ---------------------------------------------------------------------------
 
+def _seam(monkeypatch, db, *, flood_pending=0):
+    """#3254 re-pin: the seam's create, recorded. A capped call is the typed
+    budget read (refused once `flood_pending` fills the cap); `_flaky` injects
+    its failure here, where the write now happens."""
+    import database
+    from services import operator_resume_service
+
+    state = {"flood_pending": flood_pending, "fail_times": 0, "n": 0}
+    db.seam_state = state
+    db.seam_calls = []
+
+    def _create(agent, item, *, subject, max_pending_for_type=None, **_kw):
+        call = {"agent": agent, "item": item, "subject": subject,
+                "cap": max_pending_for_type, "outcome": "raised"}
+        db.seam_calls.append(call)
+        if max_pending_for_type is not None and state["flood_pending"] >= max_pending_for_type:
+            call["outcome"] = "refused_at_budget"
+            return {"outcome": "refused_at_budget", "row": None, "changed": False}
+        if str(item.get("id", "")).startswith("queue-flood-"):
+            state["n"] += 1
+            if state["fail_times"] is None or state["n"] <= state["fail_times"]:
+                raise RuntimeError("database is locked")
+        call["outcome"] = "created"
+        return {"outcome": "created", "row": {**item, "subject": subject}, "changed": True}
+
+    monkeypatch.setattr(database.db, "create_platform_operator_queue_item", _create)
+    monkeypatch.setattr(database.db, "find_pending_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(database.db, "find_person_ended_operator_queue_by_subject", lambda *a: None)
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda factory: None)
+    return db
+
+
 def _fake_db(pending=0, flood_pending=0):
     db = MagicMock()
+    db.flood_pending = flood_pending
     counts = []
 
     def _count(agent, item_type=None, exclude_request_id_prefixes=None):
@@ -81,6 +121,8 @@ def _pending(n, start=0):
 
 def _wire(monkeypatch, db, content, *, write_ok=True, rate_allowed=True):
     monkeypatch.setattr(oqs, "db", db)
+    if "seam_calls" not in vars(db):     # one seam per fake db, kept across re-wires
+        _seam(monkeypatch, db, flood_pending=db.flood_pending)
     state = {"content": content, "writes": []}
     client = MagicMock()
 
@@ -104,8 +146,17 @@ def _wire(monkeypatch, db, content, *, write_ok=True, rate_allowed=True):
 
 
 def _flood_alerts(db):
-    return [c.args[1] for c in db.create_operator_queue_item.call_args_list
-            if str(c.args[1].get("id", "")).startswith("queue-flood-")]
+    """Every flood-alert write attempted (raised ones included); a budget
+    refusal writes nothing, as the old helper never called create at cap."""
+    return [c["item"] for c in db.seam_calls
+            if str(c["item"].get("id", "")).startswith("queue-flood-")
+            and c["outcome"] != "refused_at_budget"]
+
+
+def _budget_reads(db):
+    """#3254 re-pin: the typed `queue_flood` budget read is the seam's capped call."""
+    return [c for c in db.seam_calls
+            if c["cap"] is not None and c["item"].get("type") == "queue_flood"]
 
 
 def _run(svc, agent="a", cycles=1):
@@ -215,7 +266,8 @@ class TestFloodAlertIsBoundedAndEdgeTriggered:
         assert len(alerts) == 1
         assert alerts[0]["type"] == "queue_flood"
         assert alerts[0]["priority"] == "high"
-        assert {"item_type": "queue_flood", "exclude": None} in db._counts
+        # #3254 re-pin: the typed budget read is the seam's, with the #1677 cap.
+        assert [c["cap"] for c in _budget_reads(db)] == [oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE]
 
     def test_a_sustained_over_cap_condition_alerts_once(self, monkeypatch):
         """The reported shape: over the cap for hours. Cycles span many cooldown
@@ -276,23 +328,16 @@ class TestAFailedCreateDoesNotConsumeTheEpisode:
     for a runaway agent is never. The cooldown stamp still spaces the retries."""
 
     def _flaky(self, db, fail_times):
-        calls = {"n": 0}
-
-        def _create(agent, item, **kw):
-            if str(item.get("id", "")).startswith("queue-flood-"):
-                calls["n"] += 1
-                if fail_times is None or calls["n"] <= fail_times:
-                    raise RuntimeError("database is locked")
-            return None
-
-        db.create_operator_queue_item.side_effect = _create
+        # #3254 re-pin: the fault is injected at the seam's create, where the
+        # flood alert is written now (R5: fault injection moves, never goes).
+        db.seam_state["fail_times"] = fail_times
 
     def test_a_failed_first_create_is_retried_after_the_cooldown(self, monkeypatch):
         clock = {"t": 1000.0}
         monkeypatch.setattr(oqs.time, "monotonic", lambda: clock["t"])
         db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
-        self._flaky(db, fail_times=1)
         svc, _ = _wire(monkeypatch, db, _file(_pending(3)))
+        self._flaky(db, fail_times=1)
         for _ in range(20):
             _run(svc)
             clock["t"] += oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1
@@ -304,8 +349,8 @@ class TestAFailedCreateDoesNotConsumeTheEpisode:
         clock = {"t": 1000.0}
         monkeypatch.setattr(oqs.time, "monotonic", lambda: clock["t"])
         db = _fake_db(pending=OPERATOR_QUEUE_MAX_PENDING_PER_AGENT)
-        self._flaky(db, fail_times=None)
         svc, _ = _wire(monkeypatch, db, _file(_pending(3)))
+        self._flaky(db, fail_times=None)
         windows = 6
         for _ in range(windows):
             _run(svc, cycles=5)  # 5 sync cycles inside one window
@@ -324,8 +369,7 @@ class TestAFailedCreateDoesNotConsumeTheEpisode:
         for _ in range(10):
             _run(svc)
             clock["t"] += oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS + 1
-        budget_reads = [c for c in db._counts if c["item_type"] == "queue_flood"]
-        assert len(budget_reads) == 1
+        assert len(_budget_reads(db)) == 1   # #3254 re-pin: the seam's capped read
         assert _flood_alerts(db) == []
 
 

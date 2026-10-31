@@ -16,7 +16,7 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Optional, List, Dict, Set, Tuple
+from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update, func, and_, or_, case, delete
@@ -802,7 +802,12 @@ class OperatorQueueOperations:
         """The newest row for `(agent, subject)` a PERSON ended at or after
         `since` (ISO-Z text, Invariant #16), any terminal status — the seam's
         snooze read (#3246). Served by `idx_operator_queue_agent_subject`."""
-        stmt = (
+        with get_engine().connect() as conn:
+            row = self._find_person_ended_by_subject(conn, agent_name, subject, since)
+        return self._row_to_item(row) if row else None
+
+    def _find_person_ended_by_subject(self, conn, agent_name: str, subject: str, since: str):
+        return conn.execute(
             select(*self._SELECT_COLS)
             .where(and_(
                 operator_queue.c.agent_name == agent_name,
@@ -814,10 +819,7 @@ class OperatorQueueOperations:
             ))
             .order_by(operator_queue.c.disposed_at.desc(), operator_queue.c.id.desc())
             .limit(1)
-        )
-        with get_engine().connect() as conn:
-            row = conn.execute(stmt).mappings().first()
-        return self._row_to_item(row) if row else None
+        ).mappings().first()
 
     def create_platform_item(
         self,
@@ -826,6 +828,9 @@ class OperatorQueueOperations:
         *,
         subject: Optional[str],
         max_pending_for_type: Optional[int] = None,
+        keep_text: bool = False,
+        snooze_since: Optional[str] = None,
+        snoozed: Optional[Callable[[Dict], bool]] = None,
     ) -> Dict:
         """Record a platform reading: find → touch → count → insert, in ONE
         locked transaction (#3246).
@@ -839,9 +844,22 @@ class OperatorQueueOperations:
         a lost CAS falls through to a fresh row. The find runs BEFORE the
         #1677 per-type count, so a would-be update is never refused at budget;
         `max_pending_for_type` is the cap for a budgeted kind (None: unbudgeted).
+        With `keep_text` a pending row is only counted (`_touch`); with no
+        pending row the reading files as usual (#3254). The choice is made here,
+        under the lock, so two readings that race (a Workspace thumbs-down and its
+        comment) end the same way in either order.
 
-        Returns `{"outcome": "created" | "updated" | "refused_at_budget",
-        "row", "changed"}`; `changed` is whether a RENDERED field (title /
+        The snooze is decided here too (#3254): when the find misses or the
+        touch's compare-and-set loses, the newest row a person ended for the
+        subject at or after `snooze_since` is read through THIS transaction's
+        connection, and if `snoozed(ended)` says so nothing is inserted
+        (`{"outcome": "snoozed"}`). The caller's own check runs before the lock,
+        so without this a person's ending that lands after that check — before
+        the locked find, or between the find and the compare-and-set — let a
+        fresh row through at once.
+
+        Returns `{"outcome": "created" | "updated" | "snoozed" |
+        "refused_at_budget", "row", "changed"}`; `changed` is whether a RENDERED field (title /
         question / priority / context minus `seen_count`) moved, so a bare
         repeat reading sends no broadcast. The partial unique index
         `uq_operator_queue_pending_subject` is the backstop for a lock that
@@ -856,13 +874,19 @@ class OperatorQueueOperations:
                     if subject is not None:
                         current = self._find_pending_by_subject(conn, agent_name, subject)
                         if current is not None:
-                            touched = self._touch(conn, current, item, now=now)
+                            touched = self._touch(conn, current, item, now=now,
+                                                  keep_text=keep_text)
                             if touched is not None:
                                 return touched
                     if attempt == 2:
                         # The index said a pending row existed and it is gone
                         # (ended between the two transactions): fall through.
                         pass
+                    if subject is not None and snoozed is not None and snooze_since:
+                        ended = self._find_person_ended_by_subject(
+                            conn, agent_name, subject, snooze_since)
+                        if ended is not None and snoozed(self._row_to_item(ended)):
+                            return {"outcome": "snoozed", "row": None, "changed": False}
                     if max_pending_for_type is not None:
                         pending = conn.execute(
                             select(func.count()).where(and_(
@@ -911,11 +935,19 @@ class OperatorQueueOperations:
                 # a pending row for the subject now exists — re-find and touch it.
                 continue
 
-    def _touch(self, conn, current, item: Dict, *, now: str) -> Optional[Dict]:
-        """Update the pending row `current` in place; None when the CAS lost."""
+    def _touch(self, conn, current, item: Dict, *, now: str,
+               keep_text: bool = False) -> Optional[Dict]:
+        """Update the pending row `current` in place; None when the CAS lost.
+
+        With `keep_text` (#3254) the reading is counted — `last_seen_at`,
+        `context.seen_count`, `expires_at` — and the title, question, priority
+        and context stand as they are: a reading that carries no words of its
+        own never rewrites one that did (trinity#3521's words-only rule)."""
         old_context = json.loads(current["context"]) if current["context"] else {}
         if not isinstance(old_context, dict):
             old_context = {}
+        if keep_text:
+            item = {"context": old_context, "expires_at": item.get("expires_at")}
         new_context = item.get("context")
         new_context = dict(new_context) if isinstance(new_context, dict) else {}
         seen = old_context.get("seen_count")
@@ -1015,41 +1047,6 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
-
-    def update_pending_problem_report(
-        self, agent_name: str, request_id: str, *, question: str, context: Dict,
-        now: Optional[str] = None,
-    ) -> bool:
-        """Rewrite a still-pending Workspace problem report's text (trinity#3521).
-
-        The Workspace records a thumbs-down on the click and sends the comment
-        as a second request with the same per-person / target / day id, which
-        `create_item`'s ON CONFLICT DO NOTHING turned into a no-op — the alert
-        kept saying there was no comment. This is the narrow update path that
-        `_problem_report_id`'s docstring placed at the sink.
-
-        Scoped by `(agent_name, request_id)` AND `type` AND `status='pending'`:
-        an item a person already ended is never rewritten or reopened, and a
-        row of another kind under the same id is never touched. Same db-sink
-        belts as an insert. Returns whether a row changed.
-        """
-        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
-            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
-        context_json = json.dumps(context) if context else None
-        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
-            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
-        stmt = (
-            update(operator_queue)
-            .where(and_(
-                operator_queue.c.agent_name == agent_name,
-                operator_queue.c.request_id == request_id,
-                operator_queue.c.type == "workspace_problem_report",
-                operator_queue.c.status == "pending",
-            ))
-            .values(question=question, context=context_json, last_seen_at=now or utc_now_iso())
-        )
-        with get_engine().begin() as conn:
-            return bool(conn.execute(stmt).rowcount)
 
     def list_pending_proposals_for_agent(
         self, agent_name: str, limit: int, raised_by: Optional[str] = None,

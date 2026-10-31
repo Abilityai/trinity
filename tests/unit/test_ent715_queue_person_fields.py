@@ -866,7 +866,7 @@ _NON_ROW_ACCESSORS = frozenset({
     "get_operator_queue_stats", "list_operator_queue_agent_names",
     "operator_queue_walk_alert_priorities", "operator_queue_item_exists",
     "prune_operator_queue_terminal_items", "clear_resolved_operator_queue_items",
-    "update_pending_problem_report", "mark_operator_queue_acknowledged",
+    "mark_operator_queue_acknowledged",   # #3254: update_pending_problem_report retired
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
 })
@@ -940,6 +940,9 @@ _ROW_READERS = {
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
+    (_OQS, "_maybe_emit_alert_budget_episode"): (
+        "internal", "the ids of the rows filling an agent's alert budget, digested into the "
+                    "episode marker (#3254); no row leaves"),
     (_OQS, "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),

@@ -756,6 +756,8 @@ def test_untracked_alert_is_budgeted_not_a_direct_create():
     idempotent) id. That is the `_alert_skill_not_found` (#1410) shape the budget
     seam exists for, so it routes through `create_bounded_alert` and its id
     prefix is reserved against agent pre-creation (the C2 suppression class).
+    (#3254: it reports through `platform_alerts.observe`, which applies the
+    same budget to its kind.)
     """
     import services.operator_queue_service as oqs
 
@@ -765,7 +767,7 @@ def test_untracked_alert_is_budgeted_not_a_direct_create():
 
 @pytest.mark.asyncio
 async def test_untracked_alert_names_the_paths_and_never_raises():
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
     gs = _gs()
     sw = _sweep()
@@ -773,32 +775,33 @@ async def test_untracked_alert_names_the_paths_and_never_raises():
         removed=tuple(f"f{i}" for i in range(25)),
         shadowed=("!content/keep.md -> content/",),
     )
-    with patch(
-        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
-    ) as create:
+    # #3254 re-pin (write-observation point + id shape): the alert reports
+    # through the platform-alert seam, keyed by the change-set digest; the seam
+    # mints the id under the kind's reserved prefix on the agent's queue.
+    import re
+    from services import platform_alerts
+    with patch("services.platform_alerts.observe", return_value="created") as create:
         await sw._emit_gitignore_untracked_alert("alpha", sweep)
-    assert create.await_count == 1
-    agent_name, item = create.await_args.args
+    assert create.call_count == 1
+    agent_name, kind, key = create.call_args.args
+    item = create.call_args.kwargs
     assert agent_name == "alpha"
-    assert item["type"] == "gitignore_untracked"
-    assert item["id"].startswith("gitignore-untracked-alpha-")
+    assert kind == "gitignore_untracked"
+    assert platform_alerts.KINDS[kind].budgeted_type == "gitignore_untracked"
+    assert platform_alerts.KINDS[kind].prefix == "gitignore-untracked-"
+    assert re.fullmatch(r"[0-9a-f]{32}", key)
     assert item["context"]["removed_count"] == 25
     assert len(item["context"]["removed_paths"]) == 20  # capped
     assert item["priority"] == "high"  # a removal is a confirmed destructive act
     assert item["context"]["shadowed_negations"] == ["!content/keep.md -> content/"]
 
     # An empty sweep files nothing at all.
-    with patch(
-        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
-    ) as create:
+    with patch("services.platform_alerts.observe", return_value="created") as create:
         await sw._emit_gitignore_untracked_alert("alpha", sw.GitignoreSweep())
-    assert create.await_count == 0
+    assert create.call_count == 0
 
     # And an alerting failure never reaches the Push.
-    with patch(
-        "services.operator_queue_service.create_bounded_alert",
-        new=AsyncMock(side_effect=RuntimeError("db down")),
-    ):
+    with patch("services.platform_alerts.observe", side_effect=RuntimeError("db down")):
         await sw._emit_gitignore_untracked_alert("alpha", sweep)
 
 
@@ -813,7 +816,7 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     an addition is the worse half, because it is already in the remote's
     history and may need a credential rotated rather than a file restored.
     """
-    from unittest.mock import AsyncMock, patch
+    from unittest.mock import patch
 
     gs = _gs()
     sw = _sweep()
@@ -837,12 +840,11 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     assert "newly un-ignored" in out.message
 
     # 4. the durable operator-queue entry — the surface that outlives the session
-    with patch(
-        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
-    ) as create:
+    # (#3254 re-pin: reported through the platform-alert seam)
+    with patch("services.platform_alerts.observe", return_value="created") as create:
         await sw._emit_gitignore_untracked_alert("alpha", sweep)
-    assert create.await_count == 1
-    _, item = create.await_args.args
+    assert create.call_count == 1
+    item = create.call_args.kwargs
     assert item["context"]["unignored_paths"] == [".ssh/id_rsa", ".ssh/authorized_keys"]
     assert item["context"]["unignored_count"] == 2
     assert item["context"]["removed_count"] == 0
@@ -858,11 +860,9 @@ async def test_a_newly_unignored_path_is_reported_on_every_surface():
     advice_only = sw.GitignoreSweep(shadowed=("!content/keep.md -> content/",))
     assert advice_only.changed_tracking is False
     assert advice_only.summary_line() == ""
-    with patch(
-        "services.operator_queue_service.create_bounded_alert", new=AsyncMock()
-    ) as create:
+    with patch("services.platform_alerts.observe", return_value="created") as create:
         await sw._emit_gitignore_untracked_alert("alpha", advice_only)
-    assert create.await_count == 0
+    assert create.call_count == 0
 
 
 # ---------------------------------------------------------------------------
