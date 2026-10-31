@@ -69,6 +69,12 @@ def world(db_backend, monkeypatch, tmp_path):
         return real_set_grant(agent_name, capability, granted, actor)
 
     monkeypatch.setattr(capability_grant_service, "set_grant", spy)
+
+    def no_revoke(*a, **k):
+        raise AssertionError(f"revoke_agent_capability{a}: apply never revokes")
+
+    # The direct DB revoke, beside the service's: neither is a path here.
+    monkeypatch.setattr(db, "revoke_agent_capability", no_revoke)
     W.install_executor_seams(w, monkeypatch)
     start = w.docker.start
 
@@ -185,10 +191,17 @@ class TestSharedGate:
 
     def test_no_write_in_this_checkpoint_revokes(self):
         """`set_grant(..., False, ...)` has no caller in the apply engine or
-        its grants group — the manifest adds, never removes (rule 1)."""
+        its grants group, and neither has the DB's own revoke — the manifest
+        adds, never removes (rule 1)."""
         for path in (_BACKEND / "services" / "system_apply" / "grants.py",
                      _BACKEND / "services" / "system_service.py"):
             tree = ast.parse(path.read_text())
+            names = {getattr(n.func, "attr", getattr(n.func, "id", None))
+                     for n in ast.walk(tree) if isinstance(n, ast.Call)}
+            names |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+            names |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)
+                      for a in n.names}
+            assert "revoke_agent_capability" not in names, path.name
             calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
                      and getattr(n.func, "attr", getattr(n.func, "id", None)) == "set_grant"]
             assert calls or path.name == "system_service.py"
@@ -306,6 +319,16 @@ class TestExecute:
         assert ("grants", "report", "grant_extra") in _codes(_member(res))
         assert not [a for a in world.audit if "revoke" in a["event_action"]]
         assert not [c for c in world.calls if c[0] == "grant"]
+
+    def test_a_real_run_that_writes_a_grant_loses_none_it_held(self, world):
+        """Re-read after the run: every capability held before is still held."""
+        world.seed_agent(LEAD)
+        db.grant_agent_capability(LEAD, "schedules.manage", "admin")
+        before = set(_held(LEAD))
+        res = _apply(world, _manifest(["agents.manage"]), world.user(W.ADMIN), dry_run=False)
+        assert res.status == "applied", res.failed
+        after = set(_held(LEAD))
+        assert before <= after and after == before | {"agents.manage"}
 
     def test_a_held_back_caller_writes_no_grant_on_a_real_run(self, world):
         world.seed_agent(LEAD)
@@ -446,6 +469,7 @@ class TestExport:
         world.seed_agent(LEAD)
         def boom(_n):
             raise RuntimeError("db locked")
+        W.install_seat_reader(monkeypatch)
         monkeypatch.setattr(db, "list_agent_capabilities", boom)
         text, doc = self._export([LEAD])
         assert text.splitlines()[0] == f"# unobserved: could not be read: grants of {LEAD}"

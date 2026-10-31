@@ -278,6 +278,24 @@ def install_executor_seams(world: "World", monkeypatch) -> None:
             monkeypatch.setattr(docker_utils, fn, _recorder)
 
 
+class _HoldsNoSeat:
+    """An assignment provider that can say an agent holds no seat."""
+
+    def assignment_for(self, agent_name, triggered_by):
+        return None
+
+    def seat_for(self, agent_name):
+        return {"case": "none", "role_id": None, "seats": []}
+
+
+def install_seat_reader(monkeypatch) -> None:
+    """An install whose provider can read seats, so an export's `# unobserved:`
+    line names only what a test made unreadable (ent#1030: without a reader
+    every member's seat is named there). Restored by `monkeypatch`."""
+    from services import assignment_provider
+    monkeypatch.setattr(assignment_provider, "_provider", _HoldsNoSeat())
+
+
 def apply(world: "World", manifest_yaml: str, username: str = ALICE, *, dry_run: bool):
     return asyncio.run(system_service.apply_manifest(
         manifest_yaml, world.user(username), None, dry_run=dry_run,

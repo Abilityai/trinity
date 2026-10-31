@@ -122,6 +122,25 @@ class TestParse:
         warnings = _validate(_manifest(top_extra=["permissions:", "  preset: full-mesh"]))
         assert any("resolves over deployed members only" in w and "canon" in w for w in warnings)
 
+    def test_every_key_a_declared_only_member_ignores_is_named_in_one_warning(self):
+        """Parsed, never reported, never applied: a body key the run drops must
+        be said, not swallowed (rider 9 item 8)."""
+        extra = ["skills: [s1]", "skill_sets: [set1]", "grants: [agents.manage]",
+                 "gates: {s1: {approver: owner}}", "seat: lead-role",
+                 "person_seats: [{role: fleet-owner, kind: approver}]",
+                 "schedules: [{name: n, cron: '0 * * * *', message: m}]",
+                 "tags: [t]", "resources: {cpu: '1'}", "kind: agent"]
+        warnings = _validate(_manifest(canon_extra=extra))
+        hits = [w for w in warnings if "declared-only" in w and "'canon'" in w]
+        assert len(hits) == 1, warnings
+        for key in ("skills", "skill_sets", "grants", "gates", "seat", "person_seats",
+                    "schedules", "tags", "resources", "kind"):
+            assert f" {key}" in hits[0] or f"{key}," in hits[0], (key, hits[0])
+        assert "template" not in hits[0].split(":", 1)[1]
+
+    def test_a_bare_declared_only_member_draws_no_ignored_key_warning(self):
+        assert not [w for w in _validate(_manifest()) if "ignored" in w]
+
     def test_the_recognised_key_text_stays_the_create_mode_text(self):
         warnings = _validate(_manifest(canon_extra=["credentials: {}"]))
         assert warnings == ["Agent 'canon': ignored unknown key(s): credentials. Recognised "
@@ -170,18 +189,28 @@ class TestApply:
         assert _member(res, CANON).verdict == "blocked"
 
     def test_a_live_declared_only_member_is_reported_and_never_touched(self, world):
+        """Reported, and nothing started, stopped or written for it — checked
+        at the Docker recorders and over every table row that names it."""
         world.seed_agent(LEAD)
-        world.seed_agent(CANON, tags=(SYSTEM, "keep"))
+        world.seed_agent(CANON, tags=(SYSTEM, "keep"), status="stopped")
         db.add_agent_permission(CANON, LEAD, W.ALICE)
-        before = (sorted(db.get_agent_tags(CANON)), sorted(db.get_permitted_agents(CANON)))
-        text = _manifest(top_extra=["permissions:", "  preset: full-mesh"])
+
+        def rows_naming_canon():
+            return {t: [r for r in rows if any(CANON in v for v in r)]
+                    for t, rows in W.Witness.dump_tables().items()}
+
+        before = rows_naming_canon()
+        text = _manifest(canon_extra=["tags: [extra]"],
+                         top_extra=["permissions:", "  preset: full-mesh"])
         res = _apply(world, text, dry_run=False)
         canon = _member(res, CANON)
         assert canon.verdict == "declared_only"
         assert ("members", "report", "declared_only_member_live") in _codes(canon)
         assert res.drift == [] and res.failed == []
         assert world.docker.get(CANON) is not None and db.get_agent_owner(CANON)
-        assert (sorted(db.get_agent_tags(CANON)), sorted(db.get_permitted_agents(CANON))) == before
+        assert [e for e in world.docker.events if CANON in repr(e)] == []
+        assert world.docker.get(CANON).status == "stopped"
+        assert rows_naming_canon() == before
 
     def test_a_preset_resolves_over_deployed_members_only(self, world):
         world.seed_agent(LEAD)

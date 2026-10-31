@@ -320,6 +320,7 @@ class TestExport:
         world.seed_agent(LEAD)
         def boom(_n):
             raise RuntimeError("db locked")
+        W.install_seat_reader(monkeypatch)
         monkeypatch.setattr(db, "get_agent_skills", boom)
         text, doc = self._export([LEAD])
         assert text.splitlines()[0] == f"# unobserved: could not be read: skills of {LEAD}"

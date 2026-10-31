@@ -311,7 +311,8 @@ def _export(world, names, **kw):
 
 class TestExportNaming:
 
-    def test_all_prefixed_infers_prefixed_and_is_todays_text(self, world):
+    def test_all_prefixed_infers_prefixed_and_is_todays_text(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
         for n in ("acme-a", "acme-b"):
             world.seed_agent(n)
         text, doc = _export(world, ["acme-a", "acme-b"])
@@ -367,7 +368,8 @@ class TestExportPermissions:
     def _edges(self, doc):
         return {k: sorted(v) for k, v in (doc.get("permissions") or {}).get("explicit", {}).items()}
 
-    def test_explicit_edges_equal_the_stored_ones(self, world):
+    def test_explicit_edges_equal_the_stored_ones(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
         names = ["acme-a", "acme-b", "acme-c"]
         for n in names:
             world.seed_agent(n)
@@ -392,6 +394,7 @@ class TestExportPermissions:
         assert doc["permissions"] == {"preset": "full-mesh"}
 
     def test_a_failed_read_is_named_in_the_text_never_a_silent_empty_block(self, world, monkeypatch, caplog):
+        W.install_seat_reader(monkeypatch)
         for n in ("acme-a", "acme-b"):
             world.seed_agent(n)
         db.add_agent_permission("acme-a", "acme-b", W.ALICE)

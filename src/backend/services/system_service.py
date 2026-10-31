@@ -96,6 +96,12 @@ _UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
 DECLARED_ONLY_EXPORT_HEADER = ("# unobserved: declared-only members (deploy: false) are not "
                                "stored platform-side and are not exported")
 
+# trinity-enterprise#1030 CP5: what a `deploy: false` member may carry and
+# nothing reads — `template` is the only key it is checked against (catalog),
+# and `folders` / explicit `permissions` are refused outright.
+_DECLARED_ONLY_IGNORED_KEYS = ("skills", "skill_sets", "grants", "gates", "seat",
+                               "person_seats", "schedules", "tags", "resources", "kind")
+
 # trinity-enterprise#1030 CP3: the fields one `gates:` entry may carry — the
 # gate map's own write request (`SkillGateSetRequest`).
 _GATE_ENTRY_KEYS = ("approver", "deadline_hours")
@@ -400,6 +406,16 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             raise ValueError(
                 f"Agent '{agent_name}' is declared-only (deploy: false) and cannot declare "
                 f"folders: a member that is not deployed shares and mounts nothing")
+        # Everything else it declares is parsed and never applied or
+        # reported; say so once, naming every such key.
+        if not config.deploy:
+            ignored = [key for key in _DECLARED_ONLY_IGNORED_KEYS
+                       if getattr(config, key) is not None]
+            if ignored:
+                warnings.append(
+                    f"Agent '{agent_name}' is declared-only (deploy: false); ignored key(s): "
+                    f"{', '.join(ignored)}. A member that is not deployed is named, never "
+                    f"configured: nothing it declares is written or reported.")
 
     # Validate schedules (if any)
     for agent_name, config in manifest.agents.items():
@@ -1518,6 +1534,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             held_seat = apply_seats.export_member(full_name)
             if held_seat:
                 config["seat"] = held_seat
+        except apply_seats.SeatUnobserved:
+            # No provider can say: named in the text like a failed read, but
+            # an expected state of the install, so not logged.
+            unobserved_reads.append(f"seat of {full_name}")
         except Exception as e:
             logger.warning(f"Failed to get the seat of {full_name}: {e}")
             unobserved_reads.append(f"seat of {full_name}")
@@ -2245,7 +2265,8 @@ async def deploy_manifest(
             if gates_held_back:
                 all_warnings.append(gates_held_back)
             from services.system_apply import seats as apply_seats
-            seats_held_back = apply_seats.deploy_hold_back_warning(agent_names, manifest.agents)
+            seats_held_back = apply_seats.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
             if seats_held_back:
                 all_warnings.append(seats_held_back)
 
@@ -2488,9 +2509,10 @@ async def deploy_manifest(
                 all_warnings.append(f"Failed to write grants: {reason}")
 
         # 10d. The seat each created member holds (trinity-enterprise#1030
-        # CP4), through the assignment module's optional writer only; without
-        # it every declared seat is listed as held back. Person seats are
-        # never filled. Best-effort, like 7-10c.
+        # CP4), through the assignment module's optional writer only, and —
+        # like 10c — only for an admin in a signed-in session; otherwise every
+        # declared seat is listed as held back. Person seats are never filled.
+        # Best-effort, like 7-10c.
         if any(cfg.seat is not None for cfg in manifest.agents.values()):
             from services.system_apply import seats as apply_seats
             try:

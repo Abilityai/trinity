@@ -19,12 +19,19 @@ nothing in this repo writes a seat.
   "no hook" is not.
 * `plan` — `seat_missing` / `seat_differs` writes when the writer exists,
   otherwise `seat_unobserved`; `seat_filled` / `seat_vacant` /
-  `seat_unobserved` reports for person seats, never a write.
+  `seat_unobserved` reports for person seats, never a write — and
+  `seat_unobserved` for a member apply will create, which has nothing to read.
 * `run` — op `seat_set` through `assignment_provider.write_seat`; a refusal is
   recorded in `failed[]` with the module's code.
-* `export_member` — `seat:` when the provider says the agent holds one.
+* `export_member` — `seat:` when the provider says the agent holds one;
+  without a provider that can say, the export names the gap instead.
   Person seats are not exported: the seam answers per seat, it does not list.
-* `deploy` — create mode's phase, after grants.
+* `deploy` — create mode's phase, after grants, behind the grant phase's own
+  principal check: `deploy_system` is agent-callable, so anything but an
+  admin in a signed-in session writes no seat and is told.
+
+The core judges the principal before any write reaches the provider; the
+actor it passes is the username, for attribution only.
 """
 from __future__ import annotations
 
@@ -41,11 +48,14 @@ OP_KIND = "seat_set"
 PERSON_SEAT_KINDS = ("primary", "approver", "collaborator", "viewer")
 PERSON_SEAT_KEYS = ("role", "kind")
 UNOBSERVED_CODE = "seat_unobserved"
+DEPLOY_HELD_BACK_CODE = "seats_require_interactive_admin"
 _UNOBSERVED_NOTE = ("no assignment module on this install answers this; the seat is "
                     "neither read nor written, which is not the same as in sync")
 _DIFFERS_NOTE = ("another declaration may hold this seat; apply moves it only on a "
                  "real run")
 _PERSON_NOTE = "apply never fills a person seat: a person assigns themselves or is assigned"
+_NOT_YET_NOTE = ("the member does not exist yet, so nothing was read; apply never fills a "
+                 "person seat")
 
 
 def _looks_like_email(value: Any) -> bool:
@@ -116,6 +126,10 @@ class SeatReadFailed(RuntimeError):
     """The provider failed or answered malformed: retryable, never unobserved."""
 
 
+class SeatUnobserved(RuntimeError):
+    """No provider on this install can say which seat an agent holds."""
+
+
 def read_member(name: str, cfg) -> Tuple[Optional[Dict[str, Any]], Dict[Tuple[str, str], str]]:
     """`(seat, person_seats)` for a live member. `seat` is None when the
     writer is not installed (unobserved), else `{"case", "role_id"}`;
@@ -141,9 +155,12 @@ def read_member(name: str, cfg) -> Tuple[Optional[Dict[str, Any]], Dict[Tuple[st
 
 def export_member(name: str) -> Optional[str]:
     """The seat the agent HOLDS, as `seat:` declares it; None when it holds
-    none or the install cannot say. Raises `SeatReadFailed` on a provider
+    none. Raises `SeatUnobserved` when no provider can say (no `seat:` there
+    means "cannot say", not "holds none"), and `SeatReadFailed` on a provider
     error or an answer that is not a role id (never exported)."""
     answer = assignment_provider.resolve_seat(name)
+    if answer["reason"] in ("no_provider", "unsupported"):
+        raise SeatUnobserved("the seat this agent holds")
     if answer["reason"] in ("error", "malformed"):
         raise SeatReadFailed("the seat this agent holds")
     if answer["case"] != "holds":
@@ -176,18 +193,17 @@ def plan(mp, *, seat: Optional[Dict[str, Any]], people: Optional[Dict[Tuple[str,
             mp.ops.append(make_op(OP_KIND, name, short, {"role_id": cfg.seat}))
     if cfg.person_seats:
         installed = assignment_provider.person_seat_reader_installed()
+        unobserved_note = _NOT_YET_NOTE if installed and creating else _UNOBSERVED_NOTE
         by_code: Dict[str, List[Dict[str, str]]] = {}
         for entry in cfg.person_seats:
-            if not installed:
+            if not installed or creating:
                 status = "unobserved"
-            elif creating:
-                status = "vacant"
             else:
                 status = (people or {}).get((entry["role"], entry["kind"]), "unobserved")
             by_code.setdefault(f"seat_{status}", []).append(dict(entry))
         for code in ("seat_vacant", "seat_filled", UNOBSERVED_CODE):
             if code in by_code:
-                note = _UNOBSERVED_NOTE if code == UNOBSERVED_CODE else _PERSON_NOTE
+                note = unobserved_note if code == UNOBSERVED_CODE else _PERSON_NOTE
                 mp.changes.append(apply_change(PERSON_STEP, "report", code,
                                                desired=by_code[code], note=note))
 
@@ -197,7 +213,9 @@ class _Refused(Exception):
 
 
 def _actor(user) -> Optional[str]:
-    return getattr(user, "email", None) or getattr(user, "username", None)
+    """Attribution only — the username, as `set_grant` and `assign_skill`
+    record it. The principal was judged before this is called."""
+    return getattr(user, "username", None)
 
 
 async def run(op, actor, out, attempt) -> None:
@@ -218,21 +236,30 @@ def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, str]:
             if short in agent_names and cfg.seat is not None}
 
 
-def deploy_hold_back_warning(agent_names: Dict[str, str], agents_config: Dict) -> Optional[str]:
-    """Create mode: without the writer, no seat is written and the caller is
-    told which were held back."""
+def deploy_hold_back_warning(agent_names: Dict[str, str], agents_config: Dict,
+                             current_user) -> Optional[str]:
+    """Create mode: without the writer, or for any caller but an admin in a
+    signed-in session (the grant phase's gate — an agent key's name is its
+    admin owner's, so a provider handed only a name could not tell them
+    apart), no seat is written and the caller is told which were held back."""
+    from dependencies import is_interactive_admin
     wanted = _wanted(agent_names, agents_config)
-    if not wanted or assignment_provider.seat_writer_installed():
+    if not wanted:
         return None
     listing = "; ".join(f"{n}: {r}" for n, r in wanted.items())
-    return (f"Seats not written ({UNOBSERVED_CODE}): no assignment module on this install "
-            f"writes a seat. Held back: {listing}.")
+    if not assignment_provider.seat_writer_installed():
+        return (f"Seats not written ({UNOBSERVED_CODE}): no assignment module on this install "
+                f"writes a seat. Held back: {listing}.")
+    if is_interactive_admin(current_user):
+        return None
+    return (f"Seats not written ({DEPLOY_HELD_BACK_CODE}): seating an agent requires an admin "
+            f"in a signed-in session, the same gate as a grant. Held back: {listing}.")
 
 
 def deploy(agent_names: Dict[str, str], agents_config: Dict, current_user) -> List[str]:
     """Create mode's `seat:` phase, after grants: best-effort, one warning per
-    refusal. Person seats are never filled."""
-    warning = deploy_hold_back_warning(agent_names, agents_config)
+    refusal, never past the gate above. Person seats are never filled."""
+    warning = deploy_hold_back_warning(agent_names, agents_config, current_user)
     if warning is not None:
         return [warning]
     warnings: List[str] = []

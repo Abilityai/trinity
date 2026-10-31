@@ -110,9 +110,19 @@ def _apply(world, text, *, dry_run):
         create_agent_fn=world.create, start_agent_fn=world.docker.start))
 
 
-def _deploy(world, text, *, dry_run=False):
+def _deploy(world, text, *, dry_run=False, user=None):
     return asyncio.run(system_service.deploy_manifest(
-        text, world.user(W.ALICE), None, dry_run=dry_run, create_agent_fn=world.create))
+        text, user or world.user(W.ADMIN), None, dry_run=dry_run, create_agent_fn=world.create))
+
+
+def _agent_key(world):
+    """An agent's injected key, resolved to its admin owner carrying the role."""
+    return world.user(W.ADMIN).model_copy(update={"mcp_scope": "agent", "agent_name": "orchestrator"})
+
+
+def _user_key(world):
+    """An admin's own MCP key: passes `assert_admin`, fails the interactive gate."""
+    return world.user(W.ADMIN).model_copy(update={"mcp_scope": "user"})
 
 
 def _member(res, name=LEAD):
@@ -255,7 +265,7 @@ class TestWrite:
         assert p.calls == []
         res = _apply(world, _manifest("lead-role"), dry_run=False)
         assert res.status == "applied", res.failed
-        assert p.calls == [("set_seat", LEAD, "lead-role", f"{W.ALICE}@example.com")]
+        assert p.calls == [("set_seat", LEAD, "lead-role", W.ALICE)]
         assert p.held[LEAD] == "lead-role"
         assert _codes(_member(_apply(world, _manifest("lead-role"), dry_run=True))) == []
 
@@ -284,7 +294,23 @@ class TestWrite:
         res = _apply(world, _manifest("lead-role"), dry_run=False)
         assert res.status == "applied", res.failed
         assert [c.name for c in world.create_calls] == [LEAD] and p.calls == [
-            ("set_seat", LEAD, "lead-role", f"{W.ALICE}@example.com")]
+            ("set_seat", LEAD, "lead-role", W.ALICE)]
+
+    def test_person_seats_on_a_member_apply_will_create_are_unobserved_not_vacant(self, world):
+        """The member does not exist yet, so nothing was read: the report says
+        so instead of inferring `vacant`."""
+        p = _Full(people={("fleet-owner", "approver"): True})
+        assignment_provider.register_provider(p)
+        res = _apply(world, _manifest(person_seats=PEOPLE), dry_run=True)
+        m = _member(res)
+        assert m.verdict == "create"
+        assert [(c.field, c.action, c.code, c.desired) for c in m.changes
+                if c.field == "person_seats"] == [
+            ("person_seats", "report", "seat_unobserved", PEOPLE)]
+        note = next(c.note for c in m.changes if c.field == "person_seats")
+        assert "does not exist yet" in note and "nothing was read" in note
+        assert p.calls == []
+        assert res.summary["roles"]["unobserved"] == 1
 
     def test_person_seats_are_reported_and_never_filled(self, world):
         p = _Full(people={("fleet-owner", "approver"): True, ("reviewer", "viewer"): False})
@@ -372,10 +398,26 @@ class TestNoEmail:
         assert HOLDER not in text
         assert text.splitlines()[0].startswith("# unobserved:") and f"seat of {LEAD}" in text
 
-    def test_export_without_a_provider_emits_no_seat(self, world):
+    @pytest.mark.parametrize("provider", [None, "without_seat_for"])
+    def test_export_without_a_seat_reader_names_the_gap_like_a_raise(self, world, provider):
+        """No `seat:` is "cannot say", not "holds none": the `# unobserved:`
+        line names it, the same as a provider raise does."""
+        if provider:
+            class _NoSeatFor:
+                def assignment_for(self, agent_name, triggered_by):
+                    return None
+            assignment_provider.register_provider(_NoSeatFor())
         world.seed_agent(LEAD)
-        _text, doc = self._export()
+        text, doc = self._export()
         assert "seat" not in doc["agents"]["lead"]
+        assert text.splitlines()[0] == f"# unobserved: could not be read: seat of {LEAD}"
+
+    def test_export_of_an_agent_that_holds_no_seat_names_no_gap(self, world):
+        assignment_provider.register_provider(_Full())
+        world.seed_agent(LEAD)
+        text, doc = self._export()
+        assert "seat" not in doc["agents"]["lead"]
+        assert "seat of" not in text
 
 
 # ===========================================================================
@@ -403,7 +445,33 @@ class TestDeploy:
         assignment_provider.register_provider(p)
         res = _deploy(world, _manifest("lead-role", PEOPLE))
         assert res.status == "deployed", res.warnings
-        assert p.calls == [("set_seat", LEAD, "lead-role", f"{W.ALICE}@example.com")]
+        # The actor is attribution only, and it is the username — the same
+        # actor `set_grant` and `assign_skill` record, never an email.
+        assert p.calls == [("set_seat", LEAD, "lead-role", W.ADMIN)]
+        assert not [w for w in res.warnings if "seat" in w.lower()]
+
+    @pytest.mark.parametrize("who", ["agent_key", "admin_user_key", "non_admin_person"])
+    def test_any_other_deployer_writes_no_seat_and_is_told(self, world, who):
+        """`deploy_system` is `capability_fence("agents.manage")`, which an agent
+        key satisfies. The provider is handed only a name, and an agent key's
+        name is its admin owner's, so the core judges the principal and a
+        manifest deployed by anything but a signed-in admin writes no seat."""
+        user = {"agent_key": lambda: _agent_key(world),
+                "admin_user_key": lambda: _user_key(world),
+                "non_admin_person": lambda: world.user(W.ALICE)}[who]()
+        p = _Full()
+        assignment_provider.register_provider(p)
+        res = _deploy(world, _manifest("lead-role"), user=user)
+        assert res.status == "deployed", res.failed
+        assert [c for c in p.calls if c[0] == "set_seat"] == [] and p.held == {}
+        held = [w for w in res.warnings if "seats_require_interactive_admin" in w]
+        assert len(held) == 1 and f"{LEAD}: lead-role" in held[0]
+        dry = _deploy(world, _manifest("lead-role"), dry_run=True, user=user)
+        assert any("seats_require_interactive_admin" in w for w in dry.warnings)
+
+    def test_the_dry_run_of_a_signed_in_admin_holds_nothing_back(self, world):
+        assignment_provider.register_provider(_Full())
+        res = _deploy(world, _manifest("lead-role"), dry_run=True)
         assert not [w for w in res.warnings if "seat" in w.lower()]
 
     def test_a_refused_seat_is_a_warning_and_the_deploy_stands(self, world):

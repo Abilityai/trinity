@@ -636,6 +636,7 @@ class TestExport:
         def boom(_n):
             raise RuntimeError("db locked")
 
+        W.install_seat_reader(monkeypatch)
         monkeypatch.setattr(db, "list_agent_skill_gates", boom)
         text, doc = self._export([LEAD])
         assert text.splitlines()[0] == f"# unobserved: could not be read: gates of {LEAD}"

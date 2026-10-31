@@ -135,12 +135,16 @@ class AssignmentProvider(Protocol):
     # def approver_roles_for(self, agent_name: str) -> Optional[dict]: ...
 
     # OPTIONAL (trinity-enterprise#1030): seat ``agent_name`` in canon role
-    # ``role_id`` on behalf of ``created_by`` — the first WRITE on this seam,
-    # how a system manifest's ``seat:`` reaches the record. The provider
-    # evaluates its own admin predicate for ``created_by`` and answers
-    # ``{"changed": bool}`` or its refusal ``{"refused": code}``. Read through
-    # ``getattr`` by :func:`write_seat`; a provider that predates it (or no
-    # provider) leaves ``seat:`` unobserved and NOTHING writes a seat.
+    # ``role_id`` — the first WRITE on this seam, how a system manifest's
+    # ``seat:`` reaches the record. The core has ALREADY judged the principal
+    # before it calls this (create mode: an admin in a signed-in session;
+    # apply: the person-only route's own gate), so ``created_by`` — the
+    # caller's username — is attribution only. A provider must never re-judge
+    # from it: an agent key resolves to its owner, so the name alone cannot
+    # tell an agent from its admin. Answers ``{"changed": bool}`` or a refusal
+    # of the write itself ``{"refused": code}``. Read through ``getattr`` by
+    # :func:`write_seat`; a provider that predates it (or no provider) leaves
+    # ``seat:`` unobserved and NOTHING writes a seat.
     # def set_seat(self, agent_name: str, role_id: str, created_by: str) -> Optional[dict]: ...
 
     # OPTIONAL (trinity-enterprise#1030): whether a PERSON fills the seat
@@ -520,7 +524,8 @@ class SeatWriterUnavailable(RuntimeError):
 def write_seat(agent_name: str, role_id: str, created_by: Optional[str]) -> Dict[str, Any]:
     """Seat ``agent_name`` in ``role_id`` through the provider's ``set_seat``.
 
-    ``{"changed": bool}`` or ``{"refused": code}``. Raises
+    ``{"changed": bool}`` or ``{"refused": code}``. The caller has already
+    judged the principal; ``created_by`` is attribution only. Raises
     :class:`SeatWriterUnavailable` without the hook (callers check
     :func:`seat_writer_installed` first) and ``ValueError`` on a malformed
     answer; a provider raise propagates — a write's failure is the caller's
