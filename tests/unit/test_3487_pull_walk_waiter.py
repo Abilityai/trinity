@@ -45,6 +45,13 @@ async def test_a_workspace_caller_on_a_pilot_gets_one_success_after_a_refusal(
     monkeypatch.setattr(pcs, "channel_completion_report", MagicMock())
     monkeypatch.setattr(pcs, "_spawn_breaker_verdict", lambda *a, **k: None)
     monkeypatch.setattr(sync_waiter, "SYNC_WAITER_POLL_INTERVAL", 0.05)
+    # #3879: hermetic Redis. The claim stamps the worker poll and the refusal
+    # scrubs against the staged runtime secrets, both through a blocking Redis
+    # client on the event loop. With no Redis and nothing in this process that
+    # had already memoised it as down, the connects outlasted the waiter's 10 s
+    # budget, the waiter timed out, and that read as "woken by the refusal".
+    monkeypatch.setattr(pcs, "record_worker_poll", lambda *_a: None)
+    monkeypatch.setattr(pcs, "get_staged_values", lambda: [])
 
     claim = pcs.claim_next_task(AGENT, "worker-1")
     waiter = asyncio.create_task(sync_waiter.wait_for_sync_terminal("w1", 10))

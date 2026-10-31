@@ -97,7 +97,7 @@ const handleAdminLogin = async () => {
 }
 ```
 
-`afterLogin()` (#3406) is `router.push(safeRedirect(route.query.redirect))`, shared by every non-SSO success path (password, email code, both second-factor steps, and the already-signed-in check on mount). A page with its own sign-in, such as an `authorized` shared canvas, links to `/login?redirect=<itself>`, and `utils/safeRedirect.js` honours that only when it is an in-app path. With no redirect, or an unsafe one, the destination is `/` as before. SSO still lands on `/`.
+`afterLogin()` (#3406) is `router.push(safeRedirect(route.query.redirect))`, shared by every non-SSO success path (password, email code, both second-factor steps, and the already-signed-in check on mount). A page with its own sign-in, such as an `authorized` shared canvas, links to `/login?redirect=<itself>`, and `utils/safeRedirect.js` honours that only when it is an in-app path. With no redirect, or an unsafe one, the destination is `/` as before. SSO still lands on `/`. Since #3444 the two automatic ways here write the query too — the router guard for a logged-out deep link, and the 401 reaction for a session that died mid-use (`utils/platformSession.js::loginLocation`) — and the guard sends a signed-in visit to `/login?redirect=X` straight to X.
 
 ### State Management
 
@@ -693,7 +693,7 @@ JWT token payload for admin login:
 
 - Login before setup completed: Should redirect to `/setup`
 - Empty password: Submit button should be disabled
-- Token expiry: After 7 days, should redirect to `/login`
+- Token expiry: After 7 days, the next 401 redirects to `/login?redirect=<the page>`, and signing in returns there (#3444)
 - Rate limited (#591): 5 failures per account / 15 min or 30 per client address / 5 min return 429 with TTL countdown; the address is the canonical client (ent#873), not the proxy's
 - Redis unavailable (M-005): Rate limiting bypassed with warning logged
 - Invalid hash format (M-003): Returns 401 same as wrong password (no information leakage)

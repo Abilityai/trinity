@@ -97,6 +97,8 @@ Owners can tighten guardrails for specific agents. Overrides are additive -- you
 | `extra_path_deny` | list (max 50) | Additional paths to protect |
 | `disallowed_tools` | list (max 50) | Claude Code tools to disable |
 
+A task that stops at its turn limit fails with HTTP `422` and the error code `max_turns` (on the `X-Trinity-Error-Code` response header), and the execution's error reads *Task exceeded turn limit*. This applies to whichever cap stopped the task: the `max_turns_task` guardrail, or a tighter per-task `max_turns` sent with `POST /api/agents/{name}/task`. Retrying the same task stops at the same limit. The error text names the cap that bound and its remedy: if the guardrail stopped it, raise `max_turns_task`; if the caller's per-task `max_turns` stopped it, send a larger per-task value (it may not exceed the guardrail). Either way, splitting the work into smaller tasks also helps.
+
 ### Configure via UI
 
 1. Open the agent detail page

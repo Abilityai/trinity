@@ -1294,17 +1294,20 @@ def test_build_portal_system_prompt_composes_memory(memory_db):
     # empty for a client with no memory + no public prompt
     assert service._build_portal_system_prompt("atlas", "nobody@example.com") is None
 
-def test_resolve_title_auth_prefers_api_key_then_subscription(monkeypatch):
-    """ent#186 follow-up: an explicit ANTHROPIC_API_KEY wins; otherwise the title
-    call borrows the agent's OWN subscription OAuth token (Bearer + oauth beta);
-    with neither credential the resolver returns None so the derived title stands."""
+def test_resolve_title_auth_follows_the_agent(monkeypatch):
+    """ent#186 follow-up, re-ordered by #2766 and resolved by the platform's one
+    model door since trinity-enterprise#1027: an agent on API-key auth uses the
+    instance key; an agent on a subscription uses its OWN subscription OAuth
+    token (Bearer + oauth beta); with neither credential the resolver returns
+    None so the derived title stands."""
     from client_portal import service
     import database
     db = database.db if hasattr(database, "db") else database.get_db()
 
-    # 1. API key present → x-api-key scheme, no subscription lookup needed.
+    # 1. API key present, no subscription → x-api-key scheme.
     monkeypatch.setattr(_services_module("settings_service"), "get_anthropic_api_key", lambda: "sk-ant-test")
-    h = service._resolve_title_auth("atlas")
+    monkeypatch.setattr(db, "get_agent_subscription_id", lambda a: None)
+    h = service._resolve_title_auth("atlas").headers()
     assert h["x-api-key"] == "sk-ant-test"
     assert "authorization" not in h and "anthropic-beta" not in h
 
@@ -1312,7 +1315,7 @@ def test_resolve_title_auth_prefers_api_key_then_subscription(monkeypatch):
     monkeypatch.setattr(_services_module("settings_service"), "get_anthropic_api_key", lambda: "")
     monkeypatch.setattr(db, "get_agent_subscription_id", lambda a: "sub-1")
     monkeypatch.setattr(db, "get_subscription_token", lambda s: "oauth-tok-108")
-    h = service._resolve_title_auth("atlas")
+    h = service._resolve_title_auth("atlas").headers()
     assert h["authorization"] == "Bearer oauth-tok-108"
     assert h["anthropic-beta"] == service._OAUTH_BETA
     assert "x-api-key" not in h

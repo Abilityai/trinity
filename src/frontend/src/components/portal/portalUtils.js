@@ -652,10 +652,14 @@ export function titleGenerationNotice(health) {
   if (!health || typeof health !== 'object') return null
   const when = health.last_failure_at ? ` Last attempt: ${health.last_failure_at}.` : ''
   if (health.state === 'no_credential') {
+    // The health record quotes the model gateway's reason (an unreadable
+    // subscription token, no platform key the agent may use…), so the remedy
+    // is named by the cause rather than always "add a key".
+    const why = health.last_failure ? ` (${health.last_failure})` : ''
     return {
       level: 'warning',
       title: "Workspace chat titles aren't being generated",
-      body: `No Anthropic API key and no subscription token was available for the agent, so new chats keep a title taken from their first message. Add an API key under Credentials, or assign the agent a subscription.${when}`,
+      body: `No credential could answer for the agent${why}, so new chats keep a title taken from their first message. Assign the agent a Claude subscription the platform can read, or let it use the platform API key under Credentials.${when}`,
     }
   }
   if (health.state === 'failing') {
