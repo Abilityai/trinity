@@ -81,7 +81,7 @@ class TestTheNamingKey:
         assert warnings == []
 
     def test_bare_is_read_and_is_not_an_unknown_key(self):
-        manifest, warnings = _parse(_manifest("regent", naming="bare"))
+        manifest, warnings = _parse(_manifest("scout-lead", naming="bare"))
         assert manifest.naming == "bare"
         assert "naming" not in manifest.unknown_keys
         assert warnings == []
@@ -102,8 +102,8 @@ class TestTheNamingKey:
         assert "naming must be 'prefixed' or 'bare'" in str(e.value.detail)
 
     def test_a_member_may_be_named_like_its_system_under_bare(self):
-        manifest, _ = _parse(_manifest(SYSTEM, "regent", naming="bare"))
-        assert system_service.declared_names(manifest) == {SYSTEM: SYSTEM, "regent": "regent"}
+        manifest, _ = _parse(_manifest(SYSTEM, "scout-lead", naming="bare"))
+        assert system_service.declared_names(manifest) == {SYSTEM: SYSTEM, "scout-lead": "scout-lead"}
 
 
 class TestOneNameResolver:
@@ -114,9 +114,9 @@ class TestOneNameResolver:
         assert system_service.declared_names(manifest) == {"a": "acme-a", "b": "acme-b"}
 
     def test_bare_names_are_the_keys(self):
-        manifest, _ = _parse(_manifest("regent", "canon", naming="bare"))
-        assert system_service.member_name(manifest, "regent") == "regent"
-        assert system_service.declared_names(manifest) == {"regent": "regent", "canon": "canon"}
+        manifest, _ = _parse(_manifest("scout-lead", "catalog-entry", naming="bare"))
+        assert system_service.member_name(manifest, "scout-lead") == "scout-lead"
+        assert system_service.declared_names(manifest) == {"scout-lead": "scout-lead", "catalog-entry": "catalog-entry"}
 
     def test_no_member_name_is_spelled_outside_the_resolver(self):
         """Three f-strings of one rule is how #2373 became a bug in three
@@ -149,47 +149,47 @@ class TestDeployUnderBare:
 
     def test_the_dry_run_previews_bare_names(self, world):
         res = asyncio.run(system_service.deploy_manifest(
-            _manifest("regent", "canon", naming="bare"), world.user(W.ALICE), dry_run=True))
-        assert [a["name"] for a in res.agents_to_create] == ["regent", "canon"]
+            _manifest("scout-lead", "catalog-entry", naming="bare"), world.user(W.ALICE), dry_run=True))
+        assert [a["name"] for a in res.agents_to_create] == ["scout-lead", "catalog-entry"]
         assert res.failed == []
 
     def test_a_taken_bare_name_still_suffixes_in_create_mode(self, world):
-        world.seed_agent("regent", tags=())
+        world.seed_agent("scout-lead", tags=())
         res = asyncio.run(system_service.deploy_manifest(
-            _manifest("regent", naming="bare"), world.user(W.ALICE), dry_run=True))
-        assert [a["name"] for a in res.agents_to_create] == ["regent_2"]
-        assert any("'regent' already exists" in w for w in res.warnings)
+            _manifest("scout-lead", naming="bare"), world.user(W.ALICE), dry_run=True))
+        assert [a["name"] for a in res.agents_to_create] == ["scout-lead_2"]
+        assert any("'scout-lead' already exists" in w for w in res.warnings)
 
     def test_a_real_deploy_creates_and_tags_the_bare_name(self, ew, monkeypatch):
         async def _no_start(names):
             return {n: "started" for n in names}
         monkeypatch.setattr(system_service, "start_all_agents", _no_start)
         res = asyncio.run(system_service.deploy_manifest(
-            _manifest("regent", naming="bare"), ew.user(W.ALICE), create_agent_fn=ew.create))
-        assert res.agents_created == ["regent"]
-        assert [c.name for c in ew.create_calls] == ["regent"]
+            _manifest("scout-lead", naming="bare"), ew.user(W.ALICE), create_agent_fn=ew.create))
+        assert res.agents_created == ["scout-lead"]
+        assert [c.name for c in ew.create_calls] == ["scout-lead"]
         # The system tag is the membership record a bare name cannot carry.
-        assert SYSTEM in db.get_agent_tags("regent")
+        assert SYSTEM in db.get_agent_tags("scout-lead")
 
     def test_prefixed_deploy_is_unchanged(self, world):
         res = asyncio.run(system_service.deploy_manifest(
-            _manifest("regent"), world.user(W.ALICE), dry_run=True))
-        assert [a["name"] for a in res.agents_to_create] == ["acme-regent"]
+            _manifest("scout-lead"), world.user(W.ALICE), dry_run=True))
+        assert [a["name"] for a in res.agents_to_create] == ["acme-scout-lead"]
 
 
 class TestApplyUnderBare:
 
     def test_an_absent_bare_member_is_created_under_its_bare_name(self, ew):
-        res = W.apply(ew, _manifest("regent", naming="bare"), dry_run=True)
-        assert [(m.name, m.verdict) for m in res.members] == [("regent", "create")]
+        res = W.apply(ew, _manifest("scout-lead", naming="bare"), dry_run=True)
+        assert [(m.name, m.verdict) for m in res.members] == [("scout-lead", "create")]
 
     def test_a_tagged_bare_member_is_reconciled_not_refused(self, world):
-        world.seed_agent("regent")  # tagged `acme` by its deploy
-        snap = world.snapshot(_manifest("regent", naming="bare"))
+        world.seed_agent("scout-lead")  # tagged `acme` by its deploy
+        snap = world.snapshot(_manifest("scout-lead", naming="bare"))
         assert snap.blockers == []
-        assert snap.members["regent"].name == "regent"
-        assert snap.members["regent"].status == "managed"
-        assert snap.membership.evidence == {"regent": "tag"}
+        assert snap.members["scout-lead"].name == "scout-lead"
+        assert snap.members["scout-lead"].status == "managed"
+        assert snap.membership.evidence == {"scout-lead": "tag"}
 
 
 # ===========================================================================
@@ -205,26 +205,26 @@ class TestBareAdoption:
     name."""
 
     def _three(self, world):
-        world.seed_agent("regent", tags=())
-        world.seed_agent("canon", tags=("ops",))
+        world.seed_agent("scout-lead", tags=())
+        world.seed_agent("catalog-entry", tags=("ops",))
         world.seed_agent("scout", tags=())
 
     def test_the_snapshot_marks_them_untagged_never_claimed(self, world):
         self._three(world)
-        snap = world.snapshot(_manifest("regent", "canon", "scout", naming="bare"))
+        snap = world.snapshot(_manifest("scout-lead", "catalog-entry", "scout", naming="bare"))
         assert snap.blockers == []
         assert {s: m.untagged for s, m in snap.members.items()} == {
-            "regent": True, "canon": True, "scout": True}
+            "scout-lead": True, "catalog-entry": True, "scout": True}
         assert {m.status for m in snap.members.values()} == {"managed"}
 
     def test_the_dry_run_plans_one_adoption_write_each_and_no_create(self, ew):
         self._three(ew)
-        res = W.apply(ew, _manifest("regent", "canon", "scout", naming="bare"), dry_run=True)
+        res = W.apply(ew, _manifest("scout-lead", "catalog-entry", "scout", naming="bare"), dry_run=True)
         assert res.status == "valid"
         assert [(m.name, m.verdict) for m in res.members] == [
-            ("regent", "update"), ("canon", "update"), ("scout", "update")]
-        canon = next(m for m in res.members if m.name == "canon")
-        (adopt,) = [c for c in canon.changes if c.code == "member_adopted"]
+            ("scout-lead", "update"), ("catalog-entry", "update"), ("scout", "update")]
+        catalog_entry = next(m for m in res.members if m.name == "catalog-entry")
+        (adopt,) = [c for c in catalog_entry.changes if c.code == "member_adopted"]
         assert adopt.field == "members" and adopt.action == "write"
         assert adopt.desired == [SYSTEM]
         # E1: the agent's existing tags are SHOWN — the platform cannot know
@@ -232,37 +232,37 @@ class TestBareAdoption:
         assert adopt.current == ["ops"]
         assert "two systems" in adopt.note
         # The system tag is the adoption, not also a `tag_missing`.
-        assert not [c for c in canon.changes if c.code == "tag_missing"]
+        assert not [c for c in catalog_entry.changes if c.code == "tag_missing"]
         assert [(a.name, a.tags) for a in res.adopted] == [
-            ("regent", []), ("canon", ["ops"]), ("scout", [])]
+            ("scout-lead", []), ("catalog-entry", ["ops"]), ("scout", [])]
 
     def test_the_warning_names_restart_and_teardown_in_plain_words(self, ew):
         self._three(ew)
-        res = W.apply(ew, _manifest("regent", "canon", "scout", naming="bare"), dry_run=True)
+        res = W.apply(ew, _manifest("scout-lead", "catalog-entry", "scout", naming="bare"), dry_run=True)
         (line,) = [w for w in res.warnings if "adopted" in w]
         assert "3 agents" in line and f"'{SYSTEM}'" in line
         assert "restart" in line and "teardown" in line
-        assert "regent" in line and "canon" in line and "scout" in line
+        assert "scout-lead" in line and "catalog-entry" in line and "scout" in line
 
     def test_the_real_run_tags_them_and_the_second_run_is_unchanged(self, ew):
         self._three(ew)
-        yaml_text = _manifest("regent", "canon", "scout", naming="bare")
+        yaml_text = _manifest("scout-lead", "catalog-entry", "scout", naming="bare")
         res = W.apply(ew, yaml_text, dry_run=False)
         assert res.status == "applied", res
         assert ew.create_calls == []
-        for name in ("regent", "canon", "scout"):
+        for name in ("scout-lead", "catalog-entry", "scout"):
             assert SYSTEM in db.get_agent_tags(name)
-        assert sorted(db.get_agent_tags("canon")) == sorted(["ops", SYSTEM])  # additive
+        assert sorted(db.get_agent_tags("catalog-entry")) == sorted(["ops", SYSTEM])  # additive
         again = W.apply(ew, yaml_text, dry_run=True)
         assert {m.verdict for m in again.members} == {"unchanged"}
         assert again.adopted == []
         assert not [w for w in again.warnings if "adopted" in w]
         snap = ew.snapshot(yaml_text)
-        assert snap.membership.evidence == {"regent": "tag", "canon": "tag", "scout": "tag"}
+        assert snap.membership.evidence == {"scout-lead": "tag", "catalog-entry": "tag", "scout": "tag"}
 
     def test_an_extra_declared_tag_is_still_a_tag_missing(self, ew):
-        ew.seed_agent("regent", tags=())
-        res = W.apply(ew, _manifest("regent", naming="bare", extra="default_tags: [fleet]\n"),
+        ew.seed_agent("scout-lead", tags=())
+        res = W.apply(ew, _manifest("scout-lead", naming="bare", extra="default_tags: [fleet]\n"),
                       dry_run=True)
         (m,) = res.members
         assert [c.code for c in m.changes] == ["member_adopted", "tag_missing"]
@@ -283,16 +283,16 @@ class TestBareAdoption:
             ("member_claimed_by_another_system", "acme-extra-w")]
 
     def test_an_unmanageable_bare_name_stays_the_uniform_refusal(self, world):
-        world.seed_agent("regent", owner=W.BOB, tags=())
-        snap = world.snapshot(_manifest("regent", naming="bare"))
+        world.seed_agent("scout-lead", owner=W.BOB, tags=())
+        snap = world.snapshot(_manifest("scout-lead", naming="bare"))
         assert [b.code for b in snap.blockers] == ["member_name_unavailable"]
-        assert snap.members["regent"].untagged is False
+        assert snap.members["scout-lead"].untagged is False
 
     def test_deploy_of_a_bare_manifest_over_an_existing_name_still_suffixes(self, world):
-        world.seed_agent("regent", tags=())
+        world.seed_agent("scout-lead", tags=())
         res = asyncio.run(system_service.deploy_manifest(
-            _manifest("regent", naming="bare"), world.user(W.ALICE), dry_run=True))
-        assert [a["name"] for a in res.agents_to_create] == ["regent_2"]
+            _manifest("scout-lead", naming="bare"), world.user(W.ALICE), dry_run=True))
+        assert [a["name"] for a in res.agents_to_create] == ["scout-lead_2"]
 
 
 # ===========================================================================
@@ -320,13 +320,13 @@ class TestExportNaming:
         assert not text.startswith("#")
 
     def test_none_prefixed_infers_bare_and_round_trips(self, world):
-        for n in ("regent", "canon"):
+        for n in ("scout-lead", "catalog-entry"):
             world.seed_agent(n)
-        text, doc = _export(world, ["regent", "canon"])
+        text, doc = _export(world, ["scout-lead", "catalog-entry"])
         assert doc["naming"] == "bare"
-        assert list(doc["agents"]) == ["regent", "canon"]
+        assert list(doc["agents"]) == ["scout-lead", "catalog-entry"]
         manifest, _ = _parse(text)
-        assert system_service.declared_names(manifest) == {"regent": "regent", "canon": "canon"}
+        assert system_service.declared_names(manifest) == {"scout-lead": "scout-lead", "catalog-entry": "catalog-entry"}
         # The round trip: applying the export to the live system it came from
         # changes nothing.
         snap = world.snapshot(text)
@@ -348,12 +348,12 @@ class TestExportNaming:
         _, doc = _export(world, ["acme-a", "helper"], naming="bare")
         assert doc["naming"] == "bare"
         assert list(doc["agents"]) == ["acme-a", "helper"]
-        _, doc = _export(world, ["regent"], naming="prefixed")
+        _, doc = _export(world, ["scout-lead"], naming="prefixed")
         assert "naming" not in doc and doc["agents"] == {}
 
     def test_an_unknown_override_is_refused(self, world):
         with pytest.raises(ValueError, match="naming must be 'prefixed' or 'bare'"):
-            system_service.export_manifest(SYSTEM, _agents("regent"), naming="flat")
+            system_service.export_manifest(SYSTEM, _agents("scout-lead"), naming="flat")
 
 
 class TestExportRoute:

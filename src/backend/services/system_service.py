@@ -1463,7 +1463,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
 
     if unprefixed:
         # trinity-enterprise#1030: the log line above reaches an operator; a
-        # Regent diffing this text against its committed file needs the
+        # reconciler diffing this text against its committed file needs the
         # omission IN the text. A comment, so the parser never sees it.
         yaml_output = (
             f"# unobserved: members omitted (no '{prefix}' prefix): "
