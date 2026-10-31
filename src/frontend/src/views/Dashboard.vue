@@ -523,6 +523,7 @@ import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useNetworkStore } from '@/stores/network'
+import { useAuthStore } from '@/stores/auth'
 import { useSystemViewsStore } from '@/stores/systemViews'
 import { storeToRefs } from 'pinia'
 import FleetGrid from '@/components/FleetGrid.vue'
@@ -536,6 +537,13 @@ const networkStore = useNetworkStore()
 const systemViewsStore = useSystemViewsStore()
 const route = useRoute()
 const router = useRouter()
+
+// #3445: the Dashboard's own socket follows the platform session, as the
+// app-wide one does from App.vue — closed when the session ends, reopened with
+// a fresh ticket for the next one. Registered in setup, not in the awaiting
+// onMounted, so it stops with the component; the socket still opens on mount.
+const authStore = useAuthStore()
+watch(() => authStore.token, (token) => networkStore.followToken(token))
 
 // ?view= deep-link intent (trinity-enterprise#260 D2) — a route WATCH, not an
 // onMounted read, so navigating to `/?view=list` while the Dashboard is already

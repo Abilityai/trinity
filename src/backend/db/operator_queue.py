@@ -877,14 +877,28 @@ class OperatorQueueOperations:
                     if subject is not None:
                         context["seen_count"] = 1
                     values_item = {**item, "context": context or None}
-                    request_id, values = self._insert_values(
-                        agent_name, values_item, channel=None, raised_by=None,
-                        subject=subject, last_seen_at=now,
-                    )
-                    conn.execute(
-                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                            index_elements=["agent_name", "request_id"])
-                    )
+                    # #4050: the caller's id is `<prefix><key>-<timestamp>`, and
+                    # two kinds can share a prefix and key (and an event repeats
+                    # its id) in one instant. `DO NOTHING` then wrote nothing and
+                    # the re-select returned the OTHER reading's row as
+                    # `created`. A conflict re-mints this reading's id instead,
+                    # so `created` always names the row this call inserted.
+                    for _ in range(3):
+                        request_id, values = self._insert_values(
+                            agent_name, values_item, channel=None, raised_by=None,
+                            subject=subject, last_seen_at=now,
+                        )
+                        inserted = conn.execute(
+                            make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                                index_elements=["agent_name", "request_id"])
+                        ).rowcount
+                        if inserted:
+                            break
+                        values_item = {**values_item,
+                                       "id": f"{item['id']}-{uuid.uuid4().hex[:8]}"}
+                    else:
+                        raise RuntimeError(
+                            f"operator-queue id {item['id']!r} for {agent_name} kept colliding")
                     row = conn.execute(select(*self._SELECT_COLS).where(and_(
                         operator_queue.c.agent_name == agent_name,
                         operator_queue.c.request_id == request_id,
@@ -1194,6 +1208,8 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1273,6 +1289,19 @@ class OperatorQueueOperations:
             for not_prefixed in self._request_id_not_prefixed_ci(owner_only_request_id_prefixes):
                 conds.append(or_(not_prefixed, operator_queue.c.agent_name.in_(owners))
                              if owners else not_prefixed)
+        # trinity-enterprise#980: an addressee-only row (a steward's proposal) is
+        # listed only to the person it is addressed to — its single addressee or
+        # one of its `resolved_to`, the same match as `addressed_to_email` above.
+        # Keyed on the addressee, NOT the agent's owner: the addressee need not
+        # own the agent, and its owner need not be able to open what it names.
+        if addressee_only_request_id_prefixes:
+            viewer = (addressee_email or "").strip().lower()
+            for not_prefixed in self._request_id_not_prefixed_ci(addressee_only_request_id_prefixes):
+                conds.append(or_(
+                    not_prefixed,
+                    func.lower(operator_queue.c.addressed_to_email) == viewer,
+                    self._resolved_to_contains(viewer),
+                ) if viewer else not_prefixed)
         return conds
 
     def count_items(self, **filters) -> int:
@@ -1317,6 +1346,8 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
@@ -1373,6 +1404,8 @@ class OperatorQueueOperations:
             exclude_request_id_prefixes=exclude_request_id_prefixes,
             owner_only_request_id_prefixes=owner_only_request_id_prefixes,
             owner_agent_names=owner_agent_names,
+            addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
+            addressee_email=addressee_email,
         )
         if conds is None:
             return []

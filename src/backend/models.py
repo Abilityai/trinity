@@ -2181,6 +2181,111 @@ class OperatorResumeUpdate(BaseModel):
     enabled: bool
 
 
+class MemoryOptOutUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/retrieval-memory (trinity-enterprise#1022).
+
+    Per-agent opt-OUT of retrieval memory. The platform switch
+    (``trinity_memory_enabled``, default off) is the deliberate act; this lets
+    an owner keep one agent out once the platform is on.
+    """
+    opt_out: bool
+
+
+class MemoryFactOut(BaseModel):
+    """One retrieval-memory fact as the owner view sees it (trinity-enterprise#1022).
+
+    Never carries the embedding — the owner reads text, provenance and usage.
+    """
+    id: str
+    agent_name: str
+    user_email: str
+    text: str
+    source: str
+    execution_id: Optional[str] = None
+    updated_by_execution_id: Optional[str] = None
+    recall_count: int = 0
+    last_recalled_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class MemoryExtractPreviewRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/extract-preview
+    (trinity-enterprise#1027): one exchange, run through the real transcript →
+    extract → screen path on whatever would answer for this agent, nothing
+    stored. The owner's prompt-tuning tool, and the eval's way to score the
+    prompt on the runtime it will actually use."""
+    message: str = Field(..., min_length=1, max_length=20000)
+    response: Optional[str] = Field(default=None, max_length=20000)
+    error: Optional[str] = Field(default=None, max_length=4000)
+    status: str = Field(default="success", max_length=32)
+    triggered_by: str = Field(default="schedule", max_length=32)
+    source_user_email: Optional[str] = Field(default=None, max_length=320)
+
+
+class MemoryExtractPreviewOut(BaseModel):
+    agent_name: str
+    subject: str                      # "agent" | "person"
+    extractor: str                    # "subscription" | "api_key" — the credential that answered
+    model: Optional[str] = None
+    subscription: Optional[str] = None
+    facts: list[str]
+    screened: list[str]
+    transcript_chars: int
+
+class MemorySearchRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/search — the agent door
+    (trinity-enterprise#1028). The scope is resolved from the execution row by
+    the whose-memory rule; the caller never names a person."""
+    execution_id: str = Field(..., min_length=1, max_length=200)
+    query: str = Field(..., min_length=1, max_length=500)
+    k: int = Field(default=10, ge=1, le=50)
+
+
+class MemorySearchHit(BaseModel):
+    """One ranked fact from a search (trinity-enterprise#1028): the text, the
+    rendered ``(date, kind of run) text`` line the prompt would carry,
+    provenance, and both numbers — ``relevance`` (the cosine the gate saw) and
+    ``score`` (relevance × recency, what the order used)."""
+    id: str
+    text: str
+    line: str
+    source: str
+    execution_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    relevance: float
+    score: float
+
+
+class MemorySearchResponse(BaseModel):
+    """What the agent door returns: which scope answered and the hits."""
+    agent_name: str
+    scope: str            # "agent" | "person"
+    hits: list[MemorySearchHit]
+
+
+class MemoryFactEventOut(BaseModel):
+    """One row of the retrieval-memory journal (trinity-enterprise#1022).
+
+    What happened to a fact — or to a candidate that never became one — and
+    which execution did it: the lineage behind every live fact, and the corpus
+    the extraction prompt is tuned against.
+    """
+    id: str
+    agent_name: str
+    user_email: str
+    fact_id: Optional[str] = None
+    op: str
+    execution_id: Optional[str] = None
+    candidate_text: Optional[str] = None
+    previous_text: Optional[str] = None
+    neighbour_ids: Optional[str] = None
+    score: Optional[float] = None
+    actor: Optional[str] = None
+    created_at: str
+
+
 class McpExposedUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/mcp-exposed (#846).
 
