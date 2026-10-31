@@ -24,6 +24,20 @@ Env:
     MEMORY_EVAL_JUDGE_MODEL judge model id (default: claude-opus-5-5)
     MEMORY_EVAL_LIMIT       cap on cases per corpus (pilot runs)
     MEMORY_EVAL_REPS        reps per case (default 1)
+    MEMORY_EVAL_VIA_BACKEND=<url>  score the prompt on the runtime an agent will
+                            actually use (trinity-enterprise#1027): each case is
+                            POSTed to that Trinity's owner door
+                            ``/api/agents/<MEMORY_EVAL_AGENT>/retrieval-memory/extract-preview``
+                            with ``MEMORY_EVAL_BACKEND_TOKEN`` as the Bearer, and
+                            the extractor that answered (the agent's subscription /
+                            the platform key) is recorded per case. Reconcile pairs still run
+                            locally on the eval key. Without it, extraction runs
+                            locally through the platform path on the eval key.
+    MEMORY_EVAL_CREDENTIAL  which credential shape the eval key stands in for:
+                            `platform` (default: the platform-key shape, Haiku
+                            5.5) or `subscription` (plain Bearer + OAuth beta,
+                            Haiku 4.5 — what an agent on a subscription
+                            extracts with; needs an OAuth token as the key).
     MEMORY_EVAL_DRY_RUN=1   no API calls: a fake extractor echoes the gold and
                             a string-matching judge grades it — proves the
                             harness, the metrics and the report, costs nothing
@@ -46,7 +60,7 @@ What it measures (every property is its own metric, never one blended score):
 
 The production code path is exercised as-is: ``memory_service.build_transcript``
 → ``_extract`` → ``normalize_fact`` (the screen) and ``_reconcile``, through
-``anthropic_messages.complete`` with its real request body. The only
+``model_gateway.complete`` with its real request body. The only
 substitution is the key.
 
 Outputs ``results.jsonl`` (one row per case × rep, `grade` as a metric dict),
@@ -69,7 +83,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
-from services import anthropic_messages as am
+from services import model_gateway as gw
 from services import memory_service as ms
 from services import memory_subject
 from services import user_memory_guard as guard
@@ -132,6 +146,11 @@ _OAUTH_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 
 def _auth_shape(key: Optional[str]) -> str:
+    """How the EXTRACTOR authenticated. The subscription shape is the plain
+    production request (Bearer + OAuth beta, no identity line); the platform
+    shape on an OAuth token needs the identity line (judge calls always do)."""
+    if (os.environ.get("MEMORY_EVAL_CREDENTIAL") or "platform") == "subscription":
+        return "subscription: plain bearer + oauth beta"
     return "oauth_bearer+identity_system" if (key or "").startswith("sk-ant-oat") else "api_key"
 
 
@@ -156,7 +175,7 @@ def _apply_auth(headers: Dict[str, str], body: Dict[str, Any]) -> None:
 
 def _recording_client(tag_holder: Dict[str, str]):
     """An ``httpx.AsyncClient`` subclass whose ``post`` records the response
-    body into the ledger under the tag ``anthropic_messages.complete`` is
+    body into the ledger under the purpose ``model_gateway.complete`` is
     running for, with jittered backoff on 429/529 (attempts recorded)."""
     import httpx
 
@@ -193,8 +212,8 @@ async def _judge_call(prompt: str, *, model: str, max_tokens: int = 4000, timeou
     import httpx  # noqa: F401 — the subclass above is bound to the real module
     async with client_cls(timeout=timeout) as client:
         response = await client.post(
-            am._API_URL,
-            headers={"x-api-key": os.environ["MEMORY_EVAL_API_KEY"], "anthropic-version": am._API_VERSION,
+            gw.API_URL,
+            headers={"x-api-key": os.environ["MEMORY_EVAL_API_KEY"], "anthropic-version": gw.API_VERSION,
                      "content-type": "application/json"},
             json={"model": model, "max_tokens": max_tokens, "output_config": {"effort": "medium"},
                   "messages": [{"role": "user", "content": prompt}]},
@@ -300,22 +319,55 @@ async def _extract_case(case: Dict[str, Any], tag_holder: Dict[str, str], *, dry
             text = ms.normalize_fact(item)
             (facts if text else screened).append(text or item)
         return {"transcript": transcript, "facts": facts, "screened": screened, "raw": raw, "skipped": None}
+    via_backend = os.environ.get("MEMORY_EVAL_VIA_BACKEND")
+    if via_backend:
+        return await _extract_case_via_backend(case, execution, transcript, via_backend)
     captured: Dict[str, Any] = {}
-    real_complete = am.complete
+    real_complete = gw.complete
 
-    async def spy(prompt, **kw):
-        tag_holder["tag"] = kw.get("tag", "extract")
-        out = await real_complete(prompt, **kw)
+    async def spy(purpose, prompt, **kw):
+        tag_holder["tag"] = purpose
+        out = await real_complete(purpose, prompt, **kw)
         captured["raw"] = out
         captured["prompt_chars"] = len(prompt)
         return out
-    am.complete = spy
+    gw.complete = spy
     try:
-        facts, screened = await ms._extract(transcript, subject)
+        facts, screened = await ms._extract(EVAL_AGENT, transcript, subject)
     finally:
-        am.complete = real_complete
+        gw.complete = real_complete
     return {"transcript": transcript, "facts": facts, "screened": screened, "raw": captured.get("raw"),
             "prompt_chars": captured.get("prompt_chars"), "skipped": None}
+
+
+EVAL_AGENT = "memory-eval"   # the agent name the local platform path is planned for (never a container)
+
+
+async def _extract_case_via_backend(case: Dict[str, Any], execution: Any, transcript: str, base_url: str) -> Dict[str, Any]:
+    """The same case through a running Trinity's owner preview door, so the
+    facts come from the runtime that agent really extracts on."""
+    import httpx
+    agent = os.environ.get("MEMORY_EVAL_AGENT") or ""
+    token = os.environ.get("MEMORY_EVAL_BACKEND_TOKEN") or ""
+    if not agent or not token:
+        raise RuntimeError("MEMORY_EVAL_VIA_BACKEND needs MEMORY_EVAL_AGENT and MEMORY_EVAL_BACKEND_TOKEN")
+    body = {
+        "message": getattr(execution, "message", None) or "", "response": getattr(execution, "response", None),
+        "error": getattr(execution, "error", None), "status": str(getattr(execution, "status", "") or "success"),
+        "triggered_by": getattr(execution, "triggered_by", None) or "schedule",
+        "source_user_email": getattr(execution, "source_user_email", None),
+    }
+    async with httpx.AsyncClient(timeout=180.0) as client:
+        response = await client.post(f"{base_url.rstrip('/')}/api/agents/{agent}/retrieval-memory/extract-preview",
+                                     headers={"Authorization": f"Bearer {token}"}, json=body)
+    if response.status_code != 200:
+        return {"transcript": transcript, "facts": [], "screened": [], "raw": None,
+                "skipped": f"preview {response.status_code}: {response.text[:200]}"}
+    data = response.json()
+    LEDGER.calls.append({"tag": "extract", "requested": f"{data.get('extractor')}:{data.get('subscription') or 'platform'}",
+                         "model": f"{data.get('extractor')}:{data.get('model') or '?'}", "stop_reason": None, "usage": {}})
+    return {"transcript": transcript, "facts": data["facts"], "screened": data["screened"], "raw": json.dumps(data["facts"]),
+            "prompt_chars": None, "skipped": None, "extractor": data.get("extractor"), "subscription": data.get("subscription")}
 
 
 _JUDGE_PROMPT = """\
@@ -433,7 +485,7 @@ async def _reconcile_pair(pair: Dict[str, Any], *, dry: bool) -> Dict[str, Any]:
         fid = f"fact{pair['gold_target']}" if pair.get("gold_target") is not None else None
         got = {"op": op, "id": fid, "text": pair["candidate"] if op in ("ADD", "UPDATE") else None}
     else:
-        ops = await ms._reconcile([pair["candidate"]], [existing])
+        ops = await ms._reconcile(EVAL_AGENT, [pair["candidate"]], [existing])
         got = ops[0]
     target = int(got["id"][4:]) if got.get("id") and str(got["id"]).startswith("fact") else None
     op_ok = got["op"] == pair["gold_op"]
@@ -561,7 +613,17 @@ def test_extraction_quality(monkeypatch):
     tag_holder: Dict[str, str] = {"tag": "extract"}
     if not dry:
         monkeypatch.setattr("services.settings_service.get_anthropic_api_key", lambda: key)
-        monkeypatch.setattr(am.httpx, "AsyncClient", _recording_client(tag_holder))
+        monkeypatch.setattr(gw.httpx, "AsyncClient", _recording_client(tag_holder))
+        # The eval key stands in for ONE credential kind (MEMORY_EVAL_CREDENTIAL):
+        # `platform` — the platform-key shape (Haiku 5.5, thinking off); or
+        # `subscription` — the subscription shape (plain Bearer + OAuth beta,
+        # Haiku 4.5), which is what an agent on a subscription extracts with.
+        kind = os.environ.get("MEMORY_EVAL_CREDENTIAL") or "platform"
+        if kind == "subscription":
+            cred = gw.Credential(gw.KIND_SUBSCRIPTION, "auto", gw.MODEL_ON_SUBSCRIPTION, key, "eval-sub")
+        else:
+            cred = gw.Credential(gw.KIND_API_KEY, "auto", gw.MODEL_ON_API_KEY, key)
+        monkeypatch.setattr(gw, "resolve", lambda name=None: cred)
 
     gold = _load_gold()
     cases = [dict(c, tags=["gold", *c["tags"]]) for c in gold["extraction"]]
@@ -603,7 +665,7 @@ def test_extraction_quality(monkeypatch):
         row = {
             "prompt_id": pid, "rep": rep, "tags": case["tags"],
             "prompt": extraction.get("transcript") or "", "status": "ok", "stop_reason": "end_turn",
-            "model": ms.anthropic_messages.HAIKU_MODEL, "grade": grade, "evidence": evidence,
+            "model": (gw.resolve(EVAL_AGENT).model if not dry else "dry"), "grade": grade, "evidence": evidence,
             "latency_s": round(time.time() - t0, 2),
             "meta": {"gold": case.get("gold") or [], "optional": case.get("optional") or [], "facts": extraction["facts"],
                      "screened": extraction.get("screened") or [], "expect_empty": bool(case.get("expect_empty")),
@@ -637,7 +699,7 @@ def test_extraction_quality(monkeypatch):
     tag_holder["tag"] = "extract"
     recon = asyncio.run(run_all())
     (out / "reconcile.json").write_text(json.dumps(recon, indent=1, ensure_ascii=False), encoding="utf-8")
-    settings = {"when": datetime.now(timezone.utc).isoformat(timespec="seconds"), "extractor_model": am.HAIKU_MODEL,
+    settings = {"when": datetime.now(timezone.utc).isoformat(timespec="seconds"), "extractor_model": ("dry" if dry else f"{gw.resolve(EVAL_AGENT).kind}:{gw.resolve(EVAL_AGENT).model}"),
                 "judge_model": judge_model, "reps": reps, "dry": dry, "auth_shape": _auth_shape(key), **LEDGER.summary()}
     (out / "_state.json").write_text(json.dumps({
         "metrics": [{"id": "recall", "label": "recall", "kind": "continuous"}, {"id": "precision", "label": "precision", "kind": "continuous"},

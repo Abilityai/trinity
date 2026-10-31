@@ -1,7 +1,7 @@
 # mcp: memory.ts (search_memory) — the agent door; the owner-tier configuration and views are UI-only (trinity-enterprise#1022, #1028)
 """Retrieval memory per agent (trinity-enterprise#1022, MEM-002).
 
-Six routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
+Eight routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
 clearly apart from ``/user-memory``, the MEM-001 write door the agent itself
 calls:
 
@@ -10,6 +10,9 @@ calls:
 * ``GET  …/facts``      — the owner view of one scope's facts (ent#962's readers rule).
 * ``DELETE …/facts/{id}`` — forget one fact (soft delete, recorded with who).
 * ``GET  …/events``     — the journal: what happened to a fact, or in one execution.
+* ``POST …/extract-preview`` — the owner runs one exchange through the real extraction on
+  whatever would answer for this agent, nothing stored (trinity-enterprise#1027).
+
 * ``GET  …/search``     — the owner's search over one scope (trinity-enterprise#1028).
 * ``POST …/search``     — the agent door: MCP ``search_memory``, the scope read off the
   execution row by the whose-memory rule, never from the caller.
@@ -21,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -39,6 +43,8 @@ from dependencies import (
 from db.memory_facts import EVENT_OPS
 from models import TaskExecutionStatus
 from models import (
+    MemoryExtractPreviewOut,
+    MemoryExtractPreviewRequest,
     MemoryFactEventOut,
     MemoryFactOut,
     MemoryOptOutUpdate,
@@ -46,7 +52,7 @@ from models import (
     MemorySearchRequest,
     MemorySearchResponse,
 )
-from services import memory_service, memory_subject
+from services import memory_service, memory_subject, model_gateway
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
 logger = logging.getLogger(__name__)
@@ -68,6 +74,7 @@ def _agent_status(agent_name: str) -> dict:
         "embedding_model": platform["embedding_model"],
         "fact_count": stats["count"],
         "last_retained_at": stats["last_retained_at"],
+        "extractor": model_gateway.plan(agent_name),
     }
 
 
@@ -180,6 +187,61 @@ async def list_retrieval_memory_events_endpoint(
     )
     return [MemoryFactEventOut(**{k: row.get(k) for k in MemoryFactEventOut.model_fields}) for row in rows]
 
+
+
+# --------------------------------------------------------------------------- #
+# Extract preview (trinity-enterprise#1027)
+# --------------------------------------------------------------------------- #
+
+@router.post("/{agent_name}/retrieval-memory/extract-preview", response_model=MemoryExtractPreviewOut)
+async def extract_preview_endpoint(
+    agent_name: OwnedAgentByName,
+    body: MemoryExtractPreviewRequest,
+    current_user: User = Depends(require_person),
+):
+    """One exchange through the real path — the whose-memory rule, the
+    transcript builder, the extractor that would answer for this agent right
+    now, the screen — and the facts it would keep, stored nowhere. The owner's
+    way to see what a run leaves behind and tune the prompt against it."""
+    reject_agent_principal(current_user)
+    row = SimpleNamespace(
+        id="preview", agent_name=agent_name, triggered_by=body.triggered_by, status=body.status,
+        message=body.message, response=body.response, error=body.error,
+        source_user_email=body.source_user_email, source_channel=None, source_channel_client=None, schedule_id=None,
+    )
+    subject = memory_subject.resolve(row)
+    if subject.kind == memory_subject.SKIP:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_no_subject", "reason": subject.reason,
+            "message": "This exchange serves no one whose memory is kept (an anonymous or group turn, or a trigger outside the allowlist).",
+        })
+    transcript = memory_service.build_transcript(row, subject)
+    if not transcript:
+        raise HTTPException(status_code=422, detail={"code": "transcript_empty", "message": "Nothing to extract from: message, response and error are all blank."})
+    who = model_gateway.plan(agent_name)
+    if who["effective"] == "none":
+        raise HTTPException(status_code=422, detail={
+            "code": "no_extractor", "reason": who["reason"],
+            "message": f"Nothing would extract for this agent right now: {who['reason']}.",
+        })
+    # The answer names who ACTUALLY answered, not the plan: a 429 fallback is
+    # the key and its model, and an upstream failure is a failure — never
+    # `facts: []`, which reads as "nothing worth remembering" and gets scored.
+    report: dict = {}
+    facts, screened = await memory_service._extract(agent_name, transcript, subject, report=report)
+    if not report.get("answered") or report.get("unparsed"):
+        why = "its answer was not a JSON array of facts" if report.get("unparsed") else (report.get("reason") or "request failed")
+        raise HTTPException(status_code=502, detail={
+            "code": "extractor_failed", "extractor": report.get("kind"), "status": report.get("status"),
+            "message": f"The extractor did not answer usably ({why}); nothing to preview.",
+        })
+    answered_on_subscription = report.get("kind") == model_gateway.KIND_SUBSCRIPTION
+    return MemoryExtractPreviewOut(
+        agent_name=agent_name, subject="person" if subject.is_person else "agent",
+        extractor=report.get("kind"), model=report.get("model"),
+        subscription=who["subscription"] if answered_on_subscription else None,
+        facts=facts, screened=screened, transcript_chars=len(transcript),
+    )
 
 # --------------------------------------------------------------------------- #
 # Search (trinity-enterprise#1028)

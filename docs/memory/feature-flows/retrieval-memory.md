@@ -61,20 +61,20 @@ never raising).
 2. Builds the transcript: the request's tail (last 4,000 chars) and the outcome,
    **credential-redacted** (`utils/credential_sanitizer.sanitize_text`) and
    margined (`│ `) like the summarizer's input.
-3. Brakes: a platform Anthropic key must exist; per-agent daily budget
+3. Brakes: a credential to extract with (`model_gateway.resolve`, below); per-agent daily budget
    (`trinity_memory_daily_retain_limit`, default 200 executions/24 h); per-scope
    Redis lease (`SET NX EX 60`, 3 × 2 s retries, then skip this turn);
    `asyncio.Semaphore(4)` per process; 20 s call timeout.
-4. **Extract** — one Haiku call on the platform key (`services/anthropic_messages.complete`,
-   the same call the summarizer makes; `claude-haiku-5-5`, thinking off, low
-   effort, the first TEXT block read) → ≤ 10 one-line facts, each `sanitize_text`'d,
+4. **Extract** — one small model call through the platform's one model door,
+   `services/model_gateway.complete` (which credential and model is below) →
+   ≤ 10 one-line facts, each `sanitize_text`'d,
    clamped to 500 chars and screened by `user_memory_guard.prepare_summary`
    (a fact that trips a rule is dropped, the rule logged, and the candidate
    journaled as `screened`).
 5. Embeds the candidates; finds each one's neighbours (plain cosine ≥ 0.60 —
    no recency here, whether two facts say the same thing has nothing to do
    with when) in the scope.
-6. **Reconcile** — one Haiku call when any candidate has neighbours: ADD /
+6. **Reconcile** — one more model call, same route, when any candidate has neighbours: ADD /
    UPDATE id / DELETE id / NONE. An id not in that candidate's neighbour set is
    refused → NONE. A missing or unreadable answer means "nothing is a duplicate".
 7. Applies the ops; the partial unique index on `(agent_name, user_email, text_hash)
@@ -92,6 +92,55 @@ never raising).
    against: `op = screened` is "what the extractor proposed that never became
    a fact", `op = none` beside its `neighbour_ids` is "what reconcile judged a
    duplicate".
+
+### Which credential — `services/model_gateway.py` (trinity-enterprise#1027)
+The backend's one model door, shared with the MEM-001 summarizer, Workspace
+thread titles and the compatibility AI checks (each had its own `httpx` call,
+credential lookup and request shape before). **The credential follows the
+agent** (#2766, #471's one derivation): a job attributed to an agent on a Claude
+subscription runs on that agent's own setup token — same credential, same bill
+as its chat — through the Messages API's OAuth beta; an agent on API-key auth,
+or a job with no agent behind it, runs on the instance's platform key; a
+subscription-mode agent whose token cannot be read answers nobody rather than
+borrowing an instance key it was never assigned. The token is read **before**
+the rate-limit check (the merge-train found the limit checked first, so a
+limited subscription with an unreadable token fell through to the key in
+`auto`). "Rate-limited" is the platform's ONE derivation —
+`subscription_headroom_service.rate_limited_now_cached` →
+`resolve_rate_limited_now` (#2157 / #447): a fresh provider verdict wins in both
+directions, the 2h failure-row inference only when the provider could not
+answer — so the gateway agrees with the Subscriptions card and a recovered
+subscription is not billed to the key for two hours. The key arm honours the
+agent's `use_platform_api_key` (False = the operator asserting this agent never
+runs on the instance key; the platform itself always may). On a
+subscription-only install a Gemini or Codex agent therefore captures nothing
+until a platform key exists — ruled "ship as is" at merge-train Gate 1
+(2026-10-31), tracked in trinity-enterprise#1038. **The model follows the
+credential**: measured 2026-10-30 on a real setup token, plain Bearer with the
+OAuth beta, `claude-haiku-4-5` answers 200 while Haiku 5.5, Sonnet 4.6 / 5.5
+and Opus 4.6 / 5.5 answer 429 `Error` unless the request claims to be Claude
+Code — so a subscription always runs `MODEL_ON_SUBSCRIPTION` (Haiku 4.5) and
+never impersonates the client the token was issued for, and the platform key
+runs `MODEL_ON_API_KEY` (`claude-haiku-5-5`, thinking off, low effort, the first
+TEXT block read). The knob is `trinity_model_credential` (Settings → General):
+`auto` (default — the rule above; a subscription that is rate-limited, or
+answers 429 mid-call, steps aside to the platform key when there is one),
+`subscription` (the agent's subscription or nobody), `platform_key` (the key or
+nobody). Every answered call logs one bounded usage line (purpose, credential
+kind, model, tokens, latency) — thread titles too, through `log_usage` after
+their own `send`; an upstream error body is scrubbed (`sanitize_text`) before
+it is logged; nothing in the agent container is involved.
+
+`POST …/retrieval-memory/extract-preview` (owner, person-only) runs one exchange
+through the real path on whatever credential would answer for that agent and
+returns the facts, the screened candidates and who **actually** answered
+(`extractor`, `model`, `subscription`, from the gateway's `report` — after a 429
+fallback that is the key and Haiku 5.5, not the plan), storing nothing; an
+upstream failure is 502 `extractor_failed` with the status, never `facts: []`
+that reads as "nothing worth remembering" — the owner's prompt-tuning tool and
+the eval's way (`MEMORY_EVAL_VIA_BACKEND`) to score the prompt on a live agent;
+`MEMORY_EVAL_CREDENTIAL=subscription` scores it locally on the subscription
+shape and model.
 
 ## Recall
 `memory_service.recall(agent_name, user_email, query, execution_id=…)` is
@@ -202,9 +251,10 @@ Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
 | GET | `/api/agents/{name}/retrieval-memory/facts?user_email=&limit=&offset=` | OwnedAgentByName + `require_person` | the owner view (ent#962 readers rule) |
 | DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
 | GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget/search (422 otherwise) |
+| POST | `/api/agents/{name}/retrieval-memory/extract-preview` | OwnedAgentByName + `require_person` | one exchange through the real extraction on whatever credential would answer for this agent, nothing stored (ent#1027); 422 `memory_no_subject` / `transcript_empty` / `no_extractor` |
 | GET | `/api/agents/{name}/retrieval-memory/search?q=&k=&user_email=` | OwnedAgentByName + `require_person` | the owner's search over one scope (ent#1028): hits with `line`, `relevance`, `score`, provenance; 422 `query_empty` / `invalid_email` / `memory_off`, 503 `memory_unavailable` |
 | POST | `/api/agents/{name}/retrieval-memory/search` | `assert_own_agent` → 403 `agent_only` for a human → `assert_agent_access` (the agent door, MCP `search_memory`; the agent's own key only) | `{execution_id, query, k≤50}` — the scope read off the execution by the whose-memory rule; 422 `memory_no_subject` with the reason when the run serves no one |
-| GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) |
+| GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) — with `credential_mode` and `platform_key` |
 
 The switch is written through the generic `PUT /api/settings/trinity_memory_enabled`.
 
@@ -270,6 +320,38 @@ off filenames, "sent" for "drafted", the wrong party's intent), which the gold
 set does not exercise. Open: a real-row training split for that class, the
 10-fact cap, and facts over the 200-character ask (stored intact, the clamp is
 500; the judge counts them as format misses).
+
+Re-scored 2026-10-30 on the **subscription shape** (Haiku 4.5, plain Bearer +
+OAuth beta — what an agent on a subscription extracts with since ent#1027,
+`MEMORY_EVAL_CREDENTIAL=subscription`): gold recall 100%, precision 92%,
+specificity 100%, format 100%, zero leaks; held-out real rows (before the last
+rule) precision 84%, ungrounded 7%, 12% more facts over the 200-character ask.
+The first pass on this model stored the attacker's address from the
+`injection_in_response` case as part of a "flagged and did not act on it" fact
+— Haiku 5.5 never did — so the prompt now says text the agent refused, flagged
+or ignored is not worth remembering at all, not even as "flagged X" (that
+wording produced meta-facts the judge rejected on two injection cases); with
+it the leak is gone and recall is back to 100%. Reconcile on this model is 10
+of 12: a "no longer" fact becomes an UPDATE to the negated wording instead of a
+DELETE, and a NONE carries a neighbour id (ignored by `_reconcile`). Read the
+two models' numbers as the platform-key and subscription baselines; they are
+not the same extractor.
+
+**The model door (trinity-enterprise#1027).** `tests/unit/test_ent1027_model_gateway.py`
+pins resolution (a subscription agent uses its own token even when a key
+exists, an unreadable token never borrows the key — limited or not, raising or
+not — a rate-limited subscription steps aside in `auto` only, the rate-limit
+gate is the one derivation with a fresh verdict beating the inference both
+ways, `use_platform_api_key = False` answers nobody, the knob matrix, a db
+failure reads as nobody, the plan never carries the secret), the request (the
+platform-key one-shot shape, the plain subscription shape pinned to its model,
+the 429 fallback in `auto` only, failures as None, a scrubbed error log, the
+`report` naming who answered, the first TEXT block, tools passing through), the four
+callers going through the door (memory captures on the subscription with no
+platform key, the summarizer, thread titles following the agent, the
+compatibility checks), the honest status on both cards and the owner preview.
+`test_2766_title_auth_follows_agent.py` keeps its #2766 pins against the
+gateway's resolver.
 
 **Search (trinity-enterprise#1028).** `tests/unit/test_ent1028_memory_search.py`
 drives `search_records` (past the recall tail, journaled with the query,

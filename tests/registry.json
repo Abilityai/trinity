@@ -7129,6 +7129,17 @@
         "unit"
       ],
       "description": "Retrieval-memory search: `search_records` ranks past the recall tail with no prompt budget and journals every hit as a `search` row carrying the query; the owner GET door (person-only, scope by email, 422 query_empty / invalid_email / memory_off); the agent POST door (MCP search_memory) resolving the scope off the execution by the whose-memory rule — agent scope on a headless run, the served person's scope on a person turn, 422 memory_no_subject with the reason otherwise — refusing an agent key that names another agent, a missing or foreign execution, and capping k through the model."
+    },
+    {
+      "file": "unit/test_ent1027_model_gateway.py",
+      "feature": "trinity-enterprise#1027",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "The backend's one model door (`services/model_gateway`): the credential follows the agent — its own subscription token, the platform key for an api-key agent or an agent-less job, nobody when a subscription token cannot be read (never a borrowed key); the model follows the credential (Haiku 4.5 on a subscription, Haiku 5.5 on the key, a model override honoured on the key only); `trinity_model_credential` ∈ auto/subscription/platform_key with the 429-on-subscription fallback in auto only; the request/send/complete surface over a scripted transport; the migrated callers (memory extract/reconcile, the MEM-001 summarizer, thread titles, the compatibility AI checks) executed through the door; the honest `extractor` plan on the platform card and the per-agent row; the owner's extract-preview door (facts + screened + who answered, nothing stored; 422 memory_no_subject / transcript_empty / no_extractor; an agent principal refused)."
     }
   ]
 }

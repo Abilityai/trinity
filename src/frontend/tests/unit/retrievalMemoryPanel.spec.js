@@ -30,7 +30,8 @@ import RetrievalMemoryToggle from '../../src/components/agent-settings/Retrieval
 function platformStatus(over = {}) {
   return {
     enabled: false, available: false, reason: null, embedding_model: 'm', backend: 'sqlite',
-    fact_count: 0, last_retained_at: null, daily_retain_limit: 200, ...over,
+    fact_count: 0, last_retained_at: null, daily_retain_limit: 200,
+    credential_mode: 'auto', platform_key: true, ...over,
   }
 }
 
@@ -60,6 +61,51 @@ describe('RetrievalMemoryPanel (Settings → General)', () => {
     expect(axios.put).toHaveBeenCalledWith('/api/settings/trinity_memory_enabled', { value: 'true' })
     expect(w.get('[data-testid="retrieval-memory-status"]').text()).toMatch(/3 facts stored/)
     expect(w.get('[data-testid="retrieval-memory-toggle"]').attributes('aria-checked')).toBe('true')
+  })
+
+  // trinity-enterprise#1027 — where extraction runs.
+  it('shows the current extractor mode in the select', async () => {
+    api.get.mockResolvedValue({ data: platformStatus({ credential_mode: 'subscription' }) })
+    const w = mount(RetrievalMemoryPanel)
+    await flushPromises()
+    expect(w.get('[data-testid="retrieval-memory-extractor"]').element.value).toBe('subscription')
+  })
+
+  it('changing the extractor writes trinity_model_credential through the store and reloads', async () => {
+    api.get.mockResolvedValueOnce({ data: platformStatus({ credential_mode: 'auto' }) })
+    axios.put.mockResolvedValue({ data: { key: 'trinity_model_credential', value: 'platform_key' } })
+    api.get.mockResolvedValueOnce({ data: platformStatus({ credential_mode: 'platform_key' }) })
+    const w = mount(RetrievalMemoryPanel)
+    await flushPromises()
+    await w.get('[data-testid="retrieval-memory-extractor"]').setValue('platform_key')
+    await flushPromises()
+    expect(axios.put).toHaveBeenCalledWith('/api/settings/trinity_model_credential', { value: 'platform_key' })
+    expect(w.get('[data-testid="retrieval-memory-extractor"]').element.value).toBe('platform_key')
+  })
+
+  it('platform-only without a platform key says nothing is captured', async () => {
+    api.get.mockResolvedValue({ data: platformStatus({ enabled: true, available: true, credential_mode: 'platform_key', platform_key: false }) })
+    const w = mount(RetrievalMemoryPanel)
+    await flushPromises()
+    expect(w.get('[data-testid="retrieval-memory-extractor-status"]').text()).toMatch(/No platform key — nothing is captured/)
+  })
+
+  it('subscription mode says only agents on a subscription are covered', async () => {
+    api.get.mockResolvedValue({ data: platformStatus({ enabled: true, available: true, credential_mode: 'subscription' }) })
+    const w = mount(RetrievalMemoryPanel)
+    await flushPromises()
+    expect(w.get('[data-testid="retrieval-memory-extractor-status"]').text()).toMatch(/Only agents on a subscription are covered/)
+  })
+
+  it('a failed extractor change shows an inline error and reloads the saved value', async () => {
+    api.get.mockResolvedValue({ data: platformStatus({ credential_mode: 'auto' }) })
+    axios.put.mockRejectedValue(new Error('boom'))
+    const w = mount(RetrievalMemoryPanel)
+    await flushPromises()
+    await w.get('[data-testid="retrieval-memory-extractor"]').setValue('subscription')
+    await flushPromises()
+    expect(w.find('[data-testid="inline-error"]').exists()).toBe(true)
+    expect(w.get('[data-testid="retrieval-memory-extractor"]').element.value).toBe('auto')
   })
 
   it('an "on but unavailable" platform names the reason instead of reporting success', async () => {
