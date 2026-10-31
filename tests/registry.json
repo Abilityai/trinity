@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_declared_only.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
+    },
+    {
       "file": "unit/test_ent1030_seats.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",

@@ -317,7 +317,8 @@ class TestExportNaming:
         text, doc = _export(world, ["acme-a", "acme-b"])
         assert "naming" not in doc
         assert list(doc["agents"]) == ["a", "b"]
-        assert not text.startswith("#")
+        # CP5 (T6 = A): the one header every export carries, and nothing else.
+        assert text.splitlines()[0] == system_service.DECLARED_ONLY_EXPORT_HEADER
 
     def test_none_prefixed_infers_bare_and_round_trips(self, world):
         for n in ("scout-lead", "catalog-entry"):
@@ -378,7 +379,8 @@ class TestExportPermissions:
                                            if t in names)
                   for n in names if [t for t in db.get_permitted_agents(n) if t in names]}
         assert self._edges(doc) == stored == {"a": ["b", "c"], "c": ["a"]}
-        assert not text.startswith("#")
+        # CP5 (T6 = A): the one header every export carries, and nothing else.
+        assert text.splitlines()[0] == system_service.DECLARED_ONLY_EXPORT_HEADER
 
     def test_a_full_mesh_exports_the_preset(self, world):
         names = ["acme-a", "acme-b"]

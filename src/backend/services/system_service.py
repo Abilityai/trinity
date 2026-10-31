@@ -81,13 +81,20 @@ _KNOWN_AGENT_KEYS = frozenset({
     "kind",  # trinity-enterprise#704
     "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
     "seat", "person_seats",  # trinity-enterprise#1030 CP4
+    "deploy",  # trinity-enterprise#1030 CP5
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
 _UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
-                                  "seat", "person_seats"})
+                                  "seat", "person_seats", "deploy"})
+
+# trinity-enterprise#1030 CP5 (T6 = A): nothing platform-side records a
+# `deploy: false` member, so no export can carry one. Every export says so in
+# its text, where a reconciler diffing it against its committed file sees it.
+DECLARED_ONLY_EXPORT_HEADER = ("# unobserved: declared-only members (deploy: false) are not "
+                               "stored platform-side and are not exported")
 
 # trinity-enterprise#1030 CP3: the fields one `gates:` entry may carry — the
 # gate map's own write request (`SkillGateSetRequest`).
@@ -223,6 +230,8 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             if value is not None and not (
                     isinstance(value, list) and all(isinstance(v, str) for v in value)):
                 raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
+        if "deploy" in agent_config and not isinstance(agent_config["deploy"], bool):
+            raise ValueError(f"Agent '{agent_name}' deploy must be true or false")
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
@@ -239,6 +248,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             seat=apply_seats.parse_seat(agent_name, agent_config.get("seat")),
             person_seats=apply_seats.parse_person_seats(
                 agent_name, agent_config.get("person_seats")),
+            deploy=agent_config.get("deploy", True),  # trinity-enterprise#1030 CP5
         )
 
     # Parse permissions
@@ -366,6 +376,30 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 for target in targets:
                     if target not in agent_names:
                         raise ValueError(f"Unknown agent in permissions: {target}")
+            # trinity-enterprise#1030 CP5: a member that is not deployed has
+            # no edges to declare.
+            for source, targets in manifest.permissions.explicit.items():
+                for short in [source, *targets]:
+                    if not manifest.agents[short].deploy:
+                        raise ValueError(
+                            f"Permissions name declared-only member '{short}' (deploy: false): "
+                            f"a member that is not deployed can neither call nor be called")
+
+        # trinity-enterprise#1030 CP5: a preset is derived, so it resolves over
+        # the deployed members only and says so; never a refusal.
+        declared_only = sorted(s for s, c in manifest.agents.items() if not c.deploy)
+        if manifest.permissions.preset in ("full-mesh", "orchestrator-workers") and declared_only:
+            warnings.append(
+                f"Permission preset '{manifest.permissions.preset}' resolves over deployed "
+                f"members only; declared-only members (deploy: false) get no edges: "
+                f"{', '.join(declared_only)}.")
+
+    # trinity-enterprise#1030 CP5: a declared-only member mounts nothing.
+    for agent_name, config in manifest.agents.items():
+        if not config.deploy and config.folders is not None:
+            raise ValueError(
+                f"Agent '{agent_name}' is declared-only (deploy: false) and cannot declare "
+                f"folders: a member that is not deployed shares and mounts nothing")
 
     # Validate schedules (if any)
     for agent_name, config in manifest.agents.items():
@@ -1632,6 +1666,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+    yaml_output = DECLARED_ONLY_EXPORT_HEADER + "\n" + yaml_output  # CP5, T6 = A
     if unobserved_reads:
         yaml_output = (f"# unobserved: could not be read: {', '.join(unobserved_reads)}\n"
                        + yaml_output)
@@ -2098,12 +2133,22 @@ async def deploy_manifest(
             raise HTTPException(status_code=400, detail=str(e))
 
         # 3. Resolve agent names (handle conflicts)
+        # trinity-enterprise#1030 CP5: a `deploy: false` member is skipped and
+        # listed, never created; every later phase reads `agent_names`.
+        declared_only = [_member_name(manifest.name, s, manifest.naming)
+                         for s, c in manifest.agents.items() if not c.deploy]
         agent_names, name_warnings = resolve_agent_names(
             manifest.name,
-            manifest.agents,
+            {s: c for s, c in manifest.agents.items() if c.deploy},
             naming=manifest.naming,
         )
         all_warnings = validation_warnings + name_warnings
+        if declared_only:
+            # The response contract is pinned (ent#695 AC6), so the skip is
+            # listed where every caller already reads: the warnings.
+            all_warnings.append(
+                f"Not deployed — declared-only (deploy: false): {', '.join(declared_only)}. "
+                f"Deploy creates no agent for them and changes nothing they name.")
 
         # 4. If dry_run, return preview
         if dry_run:
@@ -2217,6 +2262,8 @@ async def deploy_manifest(
         created_agents = []
         failed: list[SystemDeployFailure] = []
         for short_name, config in manifest.agents.items():
+            if short_name not in agent_names:  # declared-only (CP5)
+                continue
             final_name = agent_names[short_name]
 
             try:
@@ -2610,6 +2657,12 @@ class ApplyMemberState:
     # observed on this install) and each declared person seat's status.
     seat: Optional[Dict[str, object]] = None
     person_seats: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    # trinity-enterprise#1030 CP5: a `deploy: false` member. Only two facts
+    # are read: whether its name is live, and whether its template is one the
+    # catalog offers. Nothing else is read, gated or written.
+    declared_only: bool = False
+    live: bool = False
+    template_in_catalog: Optional[bool] = None
 
 
 @dataclass
@@ -2694,6 +2747,23 @@ def _evidence_remedy(name: str, system_name: str, declared: bool) -> str:
         f"system (e.g. '{system_name}-extra'), tag it with THAT system's name, "
         f"which takes it out of this one. Or rename it."
     )
+
+
+def _template_in_catalog(template: str) -> bool:
+    """trinity-enterprise#1030 CP5: is a declared-only member's template one
+    the catalog offers? `github:` asks the catalog (#3545); `local:` asks the
+    one resolver create mode uses (curated root, then the deploy-local store),
+    so "in the catalog" means "a deploy would find it". Raises on a failed
+    read; an id the resolver refuses is not in the catalog."""
+    from services import template_service
+    if template.startswith("github:"):
+        return template_service.is_catalog_github_template(template[len("github:"):])
+    from services.agent_service import crud
+    try:
+        path = crud._resolve_local_template_dir(template[len("local:"):])
+    except HTTPException:
+        return False
+    return (path / "template.yaml").exists()
 
 
 async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> ApplySnapshot:
@@ -2810,6 +2880,16 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"whether '{name}' exists", e))
             state.blocked = True
+            continue
+        if not manifest.agents[short].deploy:  # trinity-enterprise#1030 CP5
+            state.declared_only, state.live = True, bool(taken)
+            try:
+                state.template_in_catalog = _template_in_catalog(manifest.agents[short].template)
+            except Exception as e:  # noqa: BLE001
+                blockers.append(_read_failed(name, f"the template catalog for '{name}'", e))
+                state.blocked = True
+            if not taken and not docker_ok:
+                state.blocked = True  # P-B: liveness unknown
             continue
         if not taken:
             if not docker_ok:
@@ -3159,6 +3239,10 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
                                 "gate map's own write; undeclared gates reported, never cleared"),
     "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
                                "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.deploy": ("report-only", "false names a member without running it "
+                                 "(declared_only): template_in_catalog / template_not_in_catalog / "
+                                 "declared_only_member_live reported; never created, reconciled "
+                                 "or deleted"),
     "SystemAgentConfig.person_seats": ("report-only", "seats a person must fill, by role and kind, "
                                        "never a person; reported filled / vacant / unobserved, "
                                        "never filled"),
@@ -3625,6 +3709,32 @@ def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers
         apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp)
 
 
+_DECLARED_ONLY_LIVE_NOTE = (
+    "a live agent holds this name; apply never deletes it and never reconciles it. Remove "
+    "`deploy: false` to manage it as a member, or delete it by hand if it is unwanted")
+_TEMPLATE_NOT_IN_CATALOG_NOTE = (
+    "apply never adds a template to the catalog; an admin adds it in Settings")
+
+
+def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState) -> None:
+    """trinity-enterprise#1030 CP5: a `deploy: false` member is named, never
+    run — reports only, no op, whatever else it declares."""
+    if state.blocked:
+        mp.verdict = "blocked"
+        return
+    mp.verdict = "declared_only"
+    template = mp.config.template
+    if state.template_in_catalog:
+        mp.changes.append(_apply_change("template", "report", "template_in_catalog",
+                                        desired=template))
+    else:
+        mp.changes.append(_apply_change("template", "report", "template_not_in_catalog",
+                                        desired=template, note=_TEMPLATE_NOT_IN_CATALOG_NOTE))
+    if state.live:
+        mp.changes.append(_apply_change("members", "report", "declared_only_member_live",
+                                        current=mp.name, note=_DECLARED_ONLY_LIVE_NOTE))
+
+
 def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState]) -> None:
     """trinity-enterprise#1030 CP4: `seat:` and `person_seats:`, through the
     assignment module's optional hooks; unobserved without them."""
@@ -3657,7 +3767,9 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     agent_names = declared_names(manifest)
     declared_final = set(agent_names.values())
     blockers: List[SystemApplyBlocker] = list(snapshot.blockers)
-    desired_edges = _desired_edges(agent_names, manifest.permissions)
+    # trinity-enterprise#1030 CP5: edges resolve over deployed members only.
+    desired_edges = _desired_edges(
+        {s: n for s, n in agent_names.items() if manifest.agents[s].deploy}, manifest.permissions)
     warnings: List[str] = []
 
     members: Dict[str, ApplyMemberPlan] = {}
@@ -3667,6 +3779,10 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         mp = ApplyMemberPlan(name=name, short_name=short, verdict="unchanged", config=cfg)
         members[short] = mp
         before = len(blockers)
+
+        if state.declared_only:  # trinity-enterprise#1030 CP5
+            _plan_declared_only(mp, state)
+            continue
 
         folders_error = _folders_error(cfg.folders)
         if folders_error:
@@ -4017,7 +4133,8 @@ async def execute_apply_plan(
                 f"; '{mp.name}' was created but not tagged '{system}', so the next apply "
                 f"refuses it until you add the tag (POST /api/agents/{mp.name}/tags/{system})")
 
-    exists = {mp.name for mp in plan.members.values() if not mp.creating} | set(out.created)
+    exists = {mp.name for mp in plan.members.values()
+              if not mp.creating and mp.verdict != "declared_only"} | set(out.created)
 
     # 2. The remaining writes, phase by phase, filtered to members that exist.
     ops = [op for mp in plan.members.values() for op in mp.ops]

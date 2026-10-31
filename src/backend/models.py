@@ -1326,6 +1326,10 @@ class SystemAgentConfig(BaseModel):
     # PERSON must fill, by role and kind — never a person, reported only.
     seat: Optional[str] = None
     person_seats: Optional[List[Dict[str, str]]] = None
+    # trinity-enterprise#1030 CP5: `deploy: false` names a member the system
+    # has without running it (verdict `declared_only`): never created, never
+    # reconciled, never deleted, and not stored platform-side.
+    deploy: bool = True
 
 
 class SystemPermissions(BaseModel):
@@ -1515,7 +1519,7 @@ class SystemApplyMember(BaseModel):
     """One declared member and what apply does to it."""
     name: str
     short_name: str
-    verdict: Literal["create", "update", "unchanged", "blocked"]
+    verdict: Literal["create", "update", "unchanged", "blocked", "declared_only"]
     changes: List[SystemApplyChange] = []
     # A stored configuration the running container does not have yet, from the
     # platform's own drift predicates; independent of this run's writes. Apply
