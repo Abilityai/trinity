@@ -87,6 +87,9 @@ def _drive_terminate(agent_status: str):
         patch.object(ce, "get_capacity_manager", return_value=capacity),
         patch.object(ce, "activity_service", activity),
         patch.object(chat.httpx, "AsyncClient", lambda *a, **kw: _FakeClient(agent_resp)),
+        # ent#875: this test is about the terminate orchestration, not the viewer tier;
+        # the stub caller is not a person, so declare the owner tier (no row scope).
+        patch.object(chat, "viewer_row_scope", return_value=None),
     ):
         result = _await(
             chat.terminate_agent_execution(

@@ -111,8 +111,14 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(sss.db, "set_setting", settings.set)
     monkeypatch.setattr(sss.db, "count_non_system_agents", lambda: 0)
     monkeypatch.setattr(sss.db, "is_agent_name_reserved", lambda n: False)
-    opq = MagicMock()
-    monkeypatch.setattr(sss.db, "create_operator_queue_item", opq)
+    # #3254 re-pin (write-observation point): the seed alarms report through
+    # the platform alert seam, so the seam is where they are recorded — not
+    # `db.create_operator_queue_item`, which the seeder no longer calls. Rows
+    # are asserted in test_3254_housekeeping_alerts.py.
+    observe = MagicMock(return_value="created")
+    clear = MagicMock(return_value=0)
+    monkeypatch.setattr(sss.platform_alerts, "observe", observe)
+    monkeypatch.setattr(sss.platform_alerts, "clear", clear)
     monkeypatch.setattr(
         sss.db, "get_user_by_username",
         lambda u: {"id": 1, "username": "admin", "email": "a@example.com", "role": "admin"},
@@ -129,13 +135,21 @@ def env(monkeypatch, tmp_path):
     monkeypatch.setattr(system_service, "deploy_manifest", deploy)
 
     return types.SimpleNamespace(
-        settings=settings, deploy=deploy, opq=opq,
+        settings=settings, deploy=deploy, observe=observe, clear=clear,
         bundled=bundled, monkeypatch=monkeypatch,
     )
 
 
 def _run(fresh=True):
     return asyncio.run(svc.ensure_seeded(fresh=fresh))
+
+
+def _alarm_subject(observe):
+    """#3254 re-pin (id shape): (host, kind, key) of the one seam reading —
+    the deterministic `system-seed-<kind>` id became the subject
+    `system_seed:<kind>` on `trinity-system`."""
+    observe.assert_called_once()
+    return observe.call_args.args
 
 
 # --- the real bundled manifest -------------------------------------------------
@@ -310,10 +324,7 @@ def test_unreadable_override_fails_loudly_and_never_falls_back(env, tmp_path):
     env.deploy.assert_not_awaited()
     assert env.settings.get("default_system_seeded") is None
     assert result["action"] == "manifest_unavailable"
-    env.opq.assert_called_once()
-    agent_name, item = env.opq.call_args.args
-    assert agent_name == "trinity-system"
-    assert item["id"] == "system-seed-override-unreadable"
+    assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "override-unreadable")
 
 
 def test_empty_env_means_bundled(env):
@@ -346,8 +357,7 @@ def test_partial_deploy_sets_flag_and_alerts(env):
     info = json.loads(env.settings.get("default_system_seed_info"))
     assert info["status"] == "partial"
     assert info["agents_failed"] == 1
-    env.opq.assert_called_once()
-    assert env.opq.call_args.args[1]["id"] == "system-seed-partial"
+    assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "partial")
     assert result["status"] == "partial"
 
 
@@ -358,8 +368,7 @@ def test_failed_deploy_does_not_burn_flag(env):
     result = _run()
 
     assert env.settings.get("default_system_seeded") is None
-    env.opq.assert_called_once()
-    assert env.opq.call_args.args[1]["id"] == "system-seed-failed"
+    assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "failed")
     assert result["action"] == "create_failed"
 
 
@@ -372,8 +381,7 @@ def test_deploy_exception_never_raises_and_does_not_burn_flag(env):
     assert env.settings.get("default_system_seeded") is None
     assert result["action"] == "create_failed"
     assert result["status"] == "error"
-    env.opq.assert_called_once()
-    assert env.opq.call_args.args[1]["id"] == "system-seed-error"
+    assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "error")
 
 
 # --- existence backstop ----------------------------------------------------------
@@ -395,8 +403,7 @@ def test_reserved_agent_name_converges_flag_without_deploying(env):
     assert info["status"] == "converged"
     assert result["action"] == "already_exists"
     # 1/2 agents reserved ⇒ interrupted seed ⇒ the converge path alerts.
-    env.opq.assert_called_once()
-    assert env.opq.call_args.args[1]["id"] == "system-seed-partial"
+    assert _alarm_subject(env.observe) == ("trinity-system", "system_seed", "partial")
 
 
 def test_fully_reserved_fleet_converges_silently(env):
@@ -408,7 +415,7 @@ def test_fully_reserved_fleet_converges_silently(env):
 
     env.deploy.assert_not_awaited()
     assert env.settings.get("default_system_seeded") == "true"
-    env.opq.assert_not_called()
+    env.observe.assert_not_called()  # #3254 re-pin (write-observation point)
     assert result["action"] == "already_exists"
 
 
@@ -721,12 +728,10 @@ def test_cornelius_failure_raises_operator_alert(orch, action):
 
     asyncio.run(ensure_first_run_seeded())
 
-    orch.env.opq.assert_called_once()
-    agent_name, item = orch.env.opq.call_args.args
-    assert agent_name == "trinity-system"
-    assert item["id"] == "system-seed-cornelius-failed"
-    assert "backend logs" in item["question"]
-    assert item["context"]["message"] == "Failed to seed Cornelius: boom"
+    assert _alarm_subject(orch.env.observe) == ("trinity-system", "system_seed", "cornelius-failed")
+    reading = orch.env.observe.call_args.kwargs
+    assert "backend logs" in reading["question"]
+    assert reading["context"]["message"] == "Failed to seed Cornelius: boom"
 
 
 @pytest.mark.parametrize(
@@ -737,7 +742,7 @@ def test_cornelius_success_and_skips_raise_no_alert(orch, action):
 
     asyncio.run(ensure_first_run_seeded())
 
-    orch.env.opq.assert_not_called()
+    orch.env.observe.assert_not_called()  # #3254 re-pin (write-observation point)
 
 
 def test_cornelius_belt_except_also_alerts(orch):
@@ -751,8 +756,7 @@ def test_cornelius_belt_except_also_alerts(orch):
 
     result = asyncio.run(ensure_first_run_seeded())
 
-    orch.env.opq.assert_called_once()
-    assert orch.env.opq.call_args.args[1]["id"] == "system-seed-cornelius-failed"
+    assert _alarm_subject(orch.env.observe) == ("trinity-system", "system_seed", "cornelius-failed")
     # And the fleet seeder still ran (never-raises contract preserved).
     assert ("fleet", True, "true") in orch.calls
     assert result == {"action": "created"}
@@ -773,8 +777,7 @@ def test_cornelius_alert_message_is_credential_sanitized(orch):
 
     asyncio.run(ensure_first_run_seeded())
 
-    item = orch.env.opq.call_args.args[1]
-    msg = item["context"]["message"]
+    assert _alarm_subject(orch.env.observe) == ("trinity-system", "system_seed", "cornelius-failed")
+    msg = orch.env.observe.call_args.kwargs["context"]["message"]
     assert "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ab" not in msg
     assert "github.com/acme/private.git" in msg  # the URL itself survives
-    assert item["id"] == "system-seed-cornelius-failed"

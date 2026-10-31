@@ -14,6 +14,7 @@ they compare against are package-owned (O1) and read as `_oq.X`, and the
 settings read goes through `deps.db`.
 """
 
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -76,6 +77,34 @@ def is_owner_only(item: dict) -> bool:
     like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
     candidate = item.get("request_id") or ""
     return str(candidate).strip().lower().startswith(_oq.OWNER_ONLY_ID_PREFIXES)
+
+
+def is_addressee_only(item: dict) -> bool:
+    """Is this row readable only by the person it is addressed to (and admins)
+    (trinity-enterprise#980)? Compared like `is_owner_only`."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(_oq.ADDRESSEE_ONLY_ID_PREFIXES)
+
+
+def is_addressed_to(item: dict, email: Optional[str]) -> bool:
+    """Is `email` this row's addressee — its single `addressed_to_email` or one
+    of its `resolved_to` — compared case-insensitively? The Python twin of the
+    SQL `addressed_to_email` filter (trinity-enterprise#816). An empty `email`
+    is nobody's addressee."""
+    viewer = (email or "").strip().lower()
+    if not viewer:
+        return False
+    if str(item.get("addressed_to_email") or "").strip().lower() == viewer:
+        return True
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    if not isinstance(resolved, list):
+        return False
+    return viewer in {str(p).strip().lower() for p in resolved}
 
 
 # =========================================================================

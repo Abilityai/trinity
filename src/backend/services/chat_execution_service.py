@@ -144,6 +144,26 @@ async def broadcast_collaboration_event(
         print("[Warning] WebSocket manager not set, skipping collaboration broadcast")
 
 
+async def release_admission(name: str, *, execution_id: str, capacity, idem) -> None:
+    """Undo an admission whose turn never reached ``run_chat_turn`` (#3998).
+
+    ``admit_chat_request`` acquires the capacity slot (keyed on the admission's
+    execution id) and claims the Idempotency-Key; only ``run_chat_turn``'s
+    ``finally`` releases them. When the execution setup between the two raises
+    (the row insert, an activity, the session), neither was released: the slot
+    stayed held until the cleanup sweep or its TTL, and a retry with the same
+    key answered 409 until the claim expired. ``capacity`` is None for a pull
+    pilot's admission, which holds no slot. Never raises.
+    """
+    if capacity is not None:
+        try:
+            await capacity.release(name, execution_id)
+        except Exception:  # noqa: BLE001 — the caller re-raises the real error
+            logger.exception("[Chat] releasing the slot of %s after a failed setup raised",
+                             execution_id)
+    idempotency_service.fail(idem)
+
+
 async def prepare_chat_execution(
     *,
     name: str,
@@ -206,6 +226,9 @@ async def prepare_chat_execution(
             # #2806: from admission — None for a non-agent principal (a root).
             chain_depth=chain_depth,
         ),
+        # #3989: the row takes the admission id, which is also the capacity
+        # slot member, so canary S-01 and the slot views resolve to this row.
+        execution_id=chat_execution_id,
     )
     task_execution_id = task_execution.id if task_execution else None
     idempotency_service.attach_execution(idem, task_execution_id)
@@ -214,8 +237,7 @@ async def prepare_chat_execution(
     )
 
     # trinity-enterprise#752: the self-approval is recorded on THIS row — the
-    # id `build_chat_payload` sends — never on the admission's capacity-slot
-    # id, which no agent ever sees. Such a turn also runs in its own session.
+    # id `build_chat_payload` sends. Such a turn also runs in its own session.
     isolated_session = bool(gate is not None and not gate.ungated and gate.self_approved_by)
     if gate is not None:
         await skill_gate_service.record_self_approval(
@@ -256,6 +278,16 @@ async def prepare_chat_execution(
         user_email=current_user.email or current_user.username,
         subscription_id=_chat_subscription_id,
     )
+    # #3380: name the thread on the row, so a watchdog-claimed result (#2944)
+    # can still write its reply there. Fail-open: a missing link only means a
+    # recovered turn's reply stays on the row, as before.
+    if task_execution_id:
+        try:
+            db.set_execution_chat_session(task_execution_id, session.id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[Chat] Could not link execution {task_execution_id} to its chat session: {e}"
+            )
 
     # Track chat start activity
     # triggered_by: "agent" for agent-to-agent, "mcp" for user MCP calls, "user" for UI chat
@@ -443,7 +475,12 @@ async def _finalize_chat_success(
     tool_calls_json = sanitize_execution_log(tool_calls_json)
     sanitized_response = sanitize_response(response_data.get("response", ""))
 
-    assistant_message = db.add_chat_message(
+    # #3380: if the watchdog claimed this turn first, it already wrote the reply
+    # into the thread. Read before this dispatcher's own SUCCESS, which wins
+    # over a SUCCESS row and would overwrite the notice the check reads.
+    from services.cleanup_service import recovered_reply_written
+
+    assistant_message = None if recovered_reply_written(task_execution_id) else db.add_chat_message(
         session_id=session.id,
         agent_name=name,
         user_id=current_user.id,
@@ -465,7 +502,7 @@ async def _finalize_chat_success(
         activity_id=chat_activity_id,
         status=ActivityState.COMPLETED,
         details={
-            "related_chat_message_id": assistant_message.id,
+            "related_chat_message_id": assistant_message.id if assistant_message else None,
             "context_used": session_data.get("context_tokens"),
             "context_max": session_data.get("context_window"),
             "cost_usd": metadata.get("cost_usd"),
@@ -480,7 +517,7 @@ async def _finalize_chat_success(
             activity_id=collaboration_activity_id,
             status=ActivityState.COMPLETED,
             details={
-                "related_chat_message_id": assistant_message.id,
+                "related_chat_message_id": assistant_message.id if assistant_message else None,
                 "response_length": len(response_data.get("response", "")),
                 "execution_time_ms": execution_time_ms,
                 "execution_id": task_execution_id,
@@ -529,8 +566,8 @@ async def _finalize_chat_success(
 
     # Add execution metadata to response
     response_data["execution"] = {
-        "id": execution.id,  # Queue ID (transient)
-        "task_execution_id": task_execution_id,  # Database ID (permanent)
+        "id": execution.id,  # Same as task_execution_id (#3989); kept for clients
+        "task_execution_id": task_execution_id,  # Database ID
         "queue_status": queue_result,
         "was_queued": is_queued,
         # #2958 AC3: None, or {events, trigger, pre_tokens, post_tokens, duration_ms}.
@@ -689,12 +726,16 @@ def _classify_agent_http_failure(
     older agent image answers it 503), the agent answered 503 → AUTH,
     429 → BILLING, never answered → NETWORK, any other agent status →
     AGENT_ERROR."""
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import is_model_rejection, is_prompt_too_long
 
     if agent_status_code is None:
         return TaskExecutionErrorCode.NETWORK
     if is_model_rejection(error_msg):
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
+    # #3849: the API refused the prompt's length — a 503 from the agent, but
+    # not a credential fault.
+    if is_prompt_too_long(error_msg):
+        return TaskExecutionErrorCode.AGENT_ERROR
     if agent_status_code == 503:
         return TaskExecutionErrorCode.AUTH
     if agent_status_code == 429:
@@ -817,7 +858,11 @@ async def _apply_sub003_autoswitch(
             )
         raise ChatDispatchError(429, error_msg, headers=code_headers)
 
-    if agent_status_code == 503 or is_auth_failure(error_msg):
+    from services.failure_classifier import is_prompt_too_long, is_turn_limit
+
+    # #3984 / #3849: no credential changes a turn cap or a prompt's length.
+    credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+    if not credential_independent and (agent_status_code == 503 or is_auth_failure(error_msg)):
         try:
             switch_result = await handle_subscription_failure(
                 agent_name=name,
@@ -1464,6 +1509,7 @@ async def run_pulled_chat_turn(
 
         result = turn.result
         execution_id = result.execution_id or task_execution_id
+        adopted_row = False
         if (
             getattr(getattr(result, "error_code", None), "value", None)
             == TaskExecutionErrorCode.TIMEOUT.value
@@ -1475,6 +1521,7 @@ async def run_pulled_chat_turn(
             row_result = result_from_execution_row(execution_id)
             if row_result is not None and row_result.status in _SYNC_BACKLOG_TERMINAL:
                 result = row_result
+                adopted_row = True
             else:
                 receipt = {
                     "status": "queued_timeout",
@@ -1526,7 +1573,13 @@ async def run_pulled_chat_turn(
         if _staged:
             response_text = scrub_text(_staged, response_text)
 
-        assistant_message = db.add_chat_message(
+        # #3380: a row adopted after the wait ran out may be one the watchdog
+        # claimed, which already wrote this reply into the thread.
+        from services.cleanup_service import recovered_reply_written
+
+        assistant_message = None if (
+            adopted_row and recovered_reply_written(execution_id)
+        ) else db.add_chat_message(
             session_id=session.id,
             agent_name=name,
             user_id=current_user.id,
@@ -1547,7 +1600,7 @@ async def run_pulled_chat_turn(
             collaboration_activity_id,
             ActivityState.COMPLETED,
             details={
-                "related_chat_message_id": assistant_message.id,
+                "related_chat_message_id": assistant_message.id if assistant_message else None,
                 "execution_time_ms": execution_time_ms,
                 "execution_id": execution_id,
             },
@@ -2415,7 +2468,12 @@ _SYNC_BACKLOG_TERMINAL = (
 
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
-    429 (at-capacity) / 504 (timed out) / 503. Raises ChatDispatchError.
+    422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
+    refused, #3012) / 503. Raises ChatDispatchError.
+
+    #3988: the turn limit answers 422 — the agent's own status — and always
+    carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
+    from the 422 this route already answers for invalid input (#2806).
 
     #2661: releases the idempotency claim before raising. Both sync branches
     call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
@@ -2436,6 +2494,13 @@ def _map_task_failure(name, result, *, idem):
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
         code_headers = _error_code_headers(getattr(result, "error_code", None))
+        if getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.MAX_TURNS.value
+        ):
+            # #3988: checked before the prose matches below — the detail carries
+            # the CLI's raw text, and a "timed out" in it would answer 504, which
+            # the MCP client reads as its own wait running out.
+            raise ChatDispatchError(422, result.error, headers=code_headers)
         if "at capacity" in (result.error or "") or getattr(
             getattr(result, "error_code", None), "value", None
         ) == TaskExecutionErrorCode.CAPACITY.value:
@@ -2498,17 +2563,30 @@ async def _dispatch_async(
     )
 
     if cap_result.state == "queued_persistent":
-        logger.info(
-            f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
-        )
+        # #3625: on a pull pilot the queue is the only route, so "queued" says
+        # nothing about load. Reserve "at capacity" for a push overflow.
+        if cap_result.pull:
+            logger.info(
+                f"[Task Async] Agent '{name}' (pull) — execution {execution_id} "
+                f"queued for worker claim"
+            )
+            queued_message = (
+                f"Task queued for the worker pool of agent '{name}'. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
+        else:
+            logger.info(
+                f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
+            )
+            queued_message = (
+                f"Agent at capacity; task queued. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
         _queued_payload = {
             "status": "queued",
             "execution_id": execution_id,
             "agent_name": name,
-            "message": (
-                f"Agent at capacity; task queued. Poll GET "
-                f"/api/agents/{name}/executions/{execution_id} for results."
-            ),
+            "message": queued_message,
             "async_mode": True,
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
@@ -2560,14 +2638,16 @@ async def _dispatch_async(
     return _accepted_payload
 
 
-async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem):
+async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem, pull=False):
     """Sync backlog long-poll (#498): wait for the drain terminal, or reconstruct
     a minimal result from the row (non-drain terminal flip), translate failure,
     and build the response. Side effects were handled inside the drain — not repeated.
     """
     sync_wait_cap = 2 * sync_effective_timeout
+    # #3625: a pull pilot always queues; "at capacity" only on a push overflow.
+    queued_how = "(pull) —" if pull else "at capacity —"
     logger.info(
-        f"[Task Sync] Agent '{name}' at capacity — execution {execution_id} "
+        f"[Task Sync] Agent '{name}' {queued_how} execution {execution_id} "
         f"queued to backlog; long-polling up to {sync_wait_cap}s"
     )
     try:
@@ -2771,6 +2851,7 @@ async def _dispatch_sync(
             execution_id=execution_id,
             sync_effective_timeout=sync_effective_timeout,
             idem=idem,
+            pull=cap_result.pull,
         )
     return await _dispatch_sync_immediate(
         request=request,

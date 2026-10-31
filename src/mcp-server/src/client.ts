@@ -172,6 +172,30 @@ export function operatorQueueListTarget(params: OperatorQueueListParams = {}): s
   return `/api/operator-queue${qs ? `?${qs}` : ""}`;
 }
 
+export interface ReportListParams {
+  report_type?: string;
+  hours?: number;
+  search?: string;
+  agent?: string;
+  limit?: number;
+  offset?: number;
+  /** #3300: narrowing-only, one query parameter per name (the ent#815 shape). */
+  agent_names?: string[];
+}
+
+/** The request target for `GET /api/reports` — exported so the tool can bound
+ * its size before sending (#3300, as `operatorQueueListTarget`). */
+export function reportListTarget(params: ReportListParams = {}): string {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (k === "agent_names") continue;
+    if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
+  }
+  for (const name of params.agent_names ?? []) qs.append("agent_names", name);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  return `/api/reports${suffix}`;
+}
+
 export const CHAT_RECOVERY_TRIGGERS = ["mcp", "agent"] as const;
 
 /** #2661: `/task` additionally sees `self_task` rows (SELF-EXEC-001). */
@@ -2693,20 +2717,8 @@ export class TrinityClient {
    * The backend scopes to the caller's accessible agents; an agent-scoped key is
    * narrowed further to {self} ∪ permitted by the tool layer.
    */
-  async listReports(params: {
-    report_type?: string;
-    hours?: number;
-    search?: string;
-    agent?: string;
-    limit?: number;
-    offset?: number;
-  }): Promise<ReportSummary[]> {
-    const qs = new URLSearchParams();
-    for (const [k, v] of Object.entries(params)) {
-      if (v !== undefined && v !== null && v !== "") qs.append(k, String(v));
-    }
-    const suffix = qs.toString() ? `?${qs.toString()}` : "";
-    return this.request("GET", `/api/reports${suffix}`);
+  async listReports(params: ReportListParams): Promise<ReportSummary[]> {
+    return this.request("GET", reportListTarget(params));
   }
 
   /**
@@ -2988,6 +3000,40 @@ export class TrinityClient {
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/user-memory`,
+      data
+    );
+  }
+
+  /**
+   * Search the agent's retrieval memory (trinity-enterprise#1028). The scope —
+   * the person the execution serves, or the agent's own work on a headless run
+   * — is resolved server-side from `execution_id`, never from the caller.
+   */
+  async searchMemory(
+    agentName: string,
+    data: {
+      execution_id: string;
+      query: string;
+      k?: number;
+    }
+  ): Promise<{
+    agent_name: string;
+    scope: "agent" | "person";
+    hits: Array<{
+      id: string;
+      text: string;
+      line: string;
+      source: string;
+      execution_id: string | null;
+      created_at: string;
+      updated_at: string | null;
+      relevance: number;
+      score: number;
+    }>;
+  }> {
+    return this.request(
+      "POST",
+      `/api/agents/${encodeURIComponent(agentName)}/retrieval-memory/search`,
       data
     );
   }
@@ -4283,6 +4329,11 @@ export class TrinityClient {
   /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
   async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
+  }
+
+  /** trinity-enterprise#980: the steward proposes people and owners; the creator approves once. */
+  async proposeProjectChanges(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("POST", this.projectPath(projectId, "/proposals"), turn, body);
   }
 
   // --- Role assignments (trinity-enterprise#500) ----------------------------

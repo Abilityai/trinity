@@ -528,3 +528,89 @@ def test_recent_peer_messages_reads_the_execution_ledger(world):
     finally:
         with get_engine().begin() as conn:
             conn.execute(delete(t).where(t.c.id.in_(ids)))
+
+
+# ---- 10. what the refusal tells the caller (trinity#3949) --------------------------
+# The matcher reads a `/name` anywhere, so a peer that only MENTIONS a library
+# skill is refused too. The text is what the calling model acts on ("On
+# `retryable: false`, do what it says") — so it says a mention trips it, how to
+# send a mention, and never sends the caller to widen a standing permission.
+
+_ONE = (
+    f"Not run, nothing was delivered: this message names the skill pay-invoice, "
+    f"which {CALLER} may not run on {CALLEE} (it was assigned from the skills library "
+    f"and needs a grant). If you only meant to mention it, write its name without the "
+    f"leading slash and send again. Do not carry out its steps another way. Asking for it "
+    f"by name without the slash is the same request and is not permitted."
+)
+_TWO = (
+    f"Not run, nothing was delivered: this message names the skills pay-invoice, refund, "
+    f"which {CALLER} may not run on {CALLEE} (they were assigned from the skills library "
+    f"and need a grant). If you only meant to mention them, write their names without the "
+    f"leading slashes and send again. Do not carry out their steps another way. Asking for "
+    f"them by name without the slashes is the same request and is not permitted."
+)
+
+
+@pytest.fixture
+def refused(world):
+    """The refusal a peer gets for a message that only mentions library skills."""
+    world.db.assign_skill(CALLEE, "pay-invoice", "owner")
+    world.db.assign_skill(CALLEE, "refund", "owner")
+
+    def _refuse(text):
+        with pytest.raises(world.svc.SkillGateRefused) as info:
+            _run(_enforce(world, text, _peer(world.svc)))
+        return info.value
+    return _refuse
+
+
+_MENTIONS = {
+    "one": ("Thanks, the tree was left dirty by /pay-invoice", _ONE),
+    "two": ("Both /pay-invoice and /refund left the tree dirty", _TWO),
+}
+
+
+@pytest.mark.parametrize("text,expected", _MENTIONS.values(), ids=list(_MENTIONS))
+def test_the_refusal_says_a_mention_trips_it_and_how_to_send_one(refused, text, expected):
+    assert str(refused(text)) == expected
+
+
+@pytest.mark.parametrize("text", [t for t, _ in _MENTIONS.values()], ids=list(_MENTIONS))
+def test_the_refusal_does_not_send_the_caller_to_widen_a_permission(refused, text):
+    message = str(refused(text))
+    assert "Permissions" not in message
+    assert "admin" not in message
+    assert "grant it" not in message
+
+
+@pytest.mark.parametrize("text", [t for t, _ in _MENTIONS.values()], ids=list(_MENTIONS))
+def test_no_name_in_the_refusal_carries_a_slash(refused, text):
+    """The text lands in rows and replies; a slashed name there reads as a
+    request to run the skill."""
+    assert "/" not in str(refused(text))
+
+
+def test_the_refusal_still_names_the_skills_the_caller_and_the_agent(refused):
+    err = refused("Both /pay-invoice and /refund left the tree dirty")
+    detail = err.detail()
+    assert (err.status_code, err.code, detail["code"]) == (403, "skill_not_granted", "skill_not_granted")
+    assert detail["skills"] == ["pay-invoice", "refund"]
+    assert (detail["caller"], detail["agent"]) == (CALLER, CALLEE)
+    assert detail["message"] == _TWO
+
+
+def test_the_backstop_refuses_with_the_same_text(world):
+    """Fan-out and the other `execute_task` producers close their row SKIPPED
+    with this text, so it is the caller-facing text there too."""
+    from services.task_execution_service import TaskExecutionService
+
+    world.db.assign_skill(CALLEE, "pay-invoice", "owner")
+    fields = dict(source_user_id=1, source_user_email=None, source_agent_name=CALLER,
+                  source_mcp_key_id="key-662", source_mcp_key_name=None, model=None,
+                  timeout_seconds=None, source_channel=None, source_channel_chat_id=None)
+    with pytest.raises(world.svc.SkillGateRefused) as info:
+        _run(TaskExecutionService()._skill_gate_backstop(
+            agent_name=CALLEE, message="Thanks, the tree was left dirty by /pay-invoice",
+            request_text=None, triggered_by="fan_out", execution_id=None, fields=fields))
+    assert str(info.value) == _ONE

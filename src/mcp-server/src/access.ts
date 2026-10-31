@@ -285,6 +285,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
+  apply_system: {
+    kind: "none",
+    why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
+  },
   // --- docs.ts ---
   get_agent_requirements: { kind: "none", why: "no agent target" },
   ask_trinity: { kind: "none", why: "no agent target" },
@@ -395,6 +399,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   send_voice_reply: { kind: "enforce", param: "agent_name" },  // also: effect-guarded per execution (#1084)
   // --- memory.ts ---
   write_user_memory: { kind: "enforce", param: "agent_name" },
+  search_memory: { kind: "enforce", param: "agent_name" },  // ent#1028 — same self-fence as the write
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
@@ -470,6 +475,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
   import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  // `agents` are never acted on by the caller: the backend checks each against the project
+  // CREATOR's roster, nothing happens until the creator approves, and adding one someone else
+  // owns still raises that owner's consent ask (R39). The steward gate is projects.manage.
+  propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#980: projects/proposals.py — creator approval + the agent owner's consent ask" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- connector.ts (connector / anonymous tiers) ---

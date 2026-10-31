@@ -37,6 +37,16 @@ logger = logging.getLogger(__name__)
 # hours should see the widened window in the logs.
 _LONG_WINDOW_LOG_SECONDS = 1800
 
+# #4001: `fetch`, `pull`, `commit`, `merge` and `rebase` each run `git
+# maintenance run --auto` when a repo-local config re-enables it, and wait for
+# it. A bounded platform child then dies at its timeout mid-repack and strands
+# `objects/maintenance.lock`, which git never expires — auto-maintenance is off
+# for that repo from then on, silently. Command-line `-c` outranks repo config.
+# Every git child spawned here carries it; the raw `subprocess.run` git sites in
+# `routers/git.py` prepend it themselves. The platform's own maintenance is an
+# explicit `repack`/`prune` (#4000), which this does not touch.
+GIT_NO_AUTO_MAINTENANCE = ("-c", "maintenance.auto=false")
+
 
 def _get_registry():
     """Resolve the process registry lazily (avoids import cycles; fail-open).
@@ -104,8 +114,14 @@ def run_registered(
             window, argv[0] if argv else "?",
         )
 
+    argv = list(argv)
+    spawn = argv
+    if argv and argv[0] == "git":
+        # #4001. The child only: results and exceptions keep the caller's argv
+        # (`_with_stash` reads the verb from `exc.cmd[1]`).
+        spawn = [argv[0], *GIT_NO_AUTO_MAINTENANCE, *argv[1:]]
     proc = subprocess.Popen(
-        list(argv),
+        spawn,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

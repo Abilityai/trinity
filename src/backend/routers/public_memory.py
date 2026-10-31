@@ -30,7 +30,7 @@ from models import WriteUserMemoryRequest
 from database import db
 from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
-from services import schedule_seat_memory, user_memory_guard
+from services import memory_subject, schedule_seat_memory, user_memory_guard
 
 logger = logging.getLogger(__name__)
 
@@ -79,34 +79,30 @@ async def write_user_memory(
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
 
+    # trinity-enterprise#1022: the ONE "whose memory" rule, shared with the
+    # retrieval memory's capture seam — `services/memory_subject.resolve`. The
+    # seat (ent#637), the one-to-one channel speaker (ent#419 AC 4 / ent#549)
+    # and the signed-in person of a public turn resolve here; this endpoint
+    # keeps its own refusals for everything else.
     triggered_by = (execution.triggered_by or "").lower()
-    # ent#637: a scheduled run addressed to one person (ent#498) serves that
-    # seat. The seat comes off the row's Workspace destination — stamped
-    # backend-side after the roster/block checks — never from the caller, so
-    # MEM-001's "the agent never names the user" holds for this trigger too.
-    seat = schedule_seat_memory.seat_for_execution(execution)
-    if seat:
-        user_email = seat
-    elif triggered_by in _CHANNEL_TRIGGERS:
-        # ent#419 AC 4: a channel turn writes only for the verified speaker of a
-        # one-to-one conversation — the router stamps `source_channel_client`
-        # for exactly that (ent#549, the rule `turn_audience` already reads). A
-        # group turn carries the UNLOCKER's address in `source_user_email`, is
-        # never shown that person's memory, and has other members' text in its
-        # prompt, so it writes no one's memory.
-        user_email = (getattr(execution, "source_channel_client", None) or "").strip().lower()
-        if not user_email:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "memory_not_one_to_one",
-                    "message": (
-                        "Memory is written only in a one-to-one conversation with a verified "
-                        "person. This channel turn is a group conversation or an unverified "
-                        "sender, so no one's memory can be written from it."
-                    ),
-                },
-            )
+    subject = memory_subject.resolve(execution)
+    seat = subject.user_email if subject.reason == memory_subject.REASON_SEAT else None
+    if subject.is_person and subject.reason in (
+        memory_subject.REASON_SEAT, memory_subject.REASON_CHANNEL_ONE_TO_ONE,
+    ):
+        user_email = subject.user_email
+    elif subject.reason == memory_subject.REASON_CHANNEL_NOT_ONE_TO_ONE:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "memory_not_one_to_one",
+                "message": (
+                    "Memory is written only in a one-to-one conversation with a verified "
+                    "person. This channel turn is a group conversation or an unverified "
+                    "sender, so no one's memory can be written from it."
+                ),
+            },
+        )
     elif triggered_by in _USER_FACING_TRIGGERS:
         user_email = execution.source_user_email
     else:

@@ -368,7 +368,44 @@ async def _execute_claude_code_once(
             process.stdin.write(prompt)
             process.stdin.close()
         except BaseException:
-            registry.unregister(execution_id)
+            # #3408: since #3307 `unregister()` keeps a live child, so a write
+            # that fails while the child lives (an unencodable prompt, say) must
+            # end it first: no reader exists yet and its stdin is still open.
+            # The kill waits up to ~2s, so it runs off the event loop; this
+            # coroutine's `loop` is assigned only further down.
+            # Best-effort and logged, never raised: the caller must see the
+            # handoff error, and the pipes close even if the kill fails.
+            def _abort_handoff():
+                try:
+                    _terminate_process_group(process, graceful_timeout=0, pgid=process_pgid, execution_tag=execution_id)
+                except Exception:
+                    logger.exception(f"[Chat] killing {execution_id} after its failed handoff raised")
+                finally:
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(f"[Chat] pipe close after failed handoff of {execution_id} raised", exc_info=True)
+
+            try:
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            except Exception:
+                # The executor refused (shut down, or no thread to start): log it,
+                # keep the live child owned, and still re-raise the handoff error.
+                logger.exception(f"[Chat] could not start the teardown of {execution_id} after its failed handoff")
+                teardown = None
+            if teardown is None:
+                registry.unregister(execution_id)
+            else:
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this await
+                    # was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        registry.unregister(execution_id)
+                    else:
+                        teardown.add_done_callback(lambda _: registry.unregister(execution_id))
             raise
 
         stderr_lines: List[str] = []

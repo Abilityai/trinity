@@ -9,6 +9,7 @@ import uuid
 import asyncio
 import subprocess
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -23,6 +24,7 @@ from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from .execution_env import build_execution_env
+from .subprocess_lifecycle import _capture_pgid
 from .gemini_cli_args import (
     RESUME_MISSING_MARKER,
     build_chat_argv,
@@ -303,7 +305,14 @@ class GeminiRuntime(AgentRuntime):
                 text=True,
                 bufsize=1,  # Line buffered
                 env=build_execution_env({EXECUTION_TAG_NAME: execution_id}),
+                # #4064: lead its own process group, like Claude/Codex. Without
+                # it the child shared the agent server's group, and a terminate
+                # resolved its pgid to the server's own (the container's PID-1
+                # shell group), so a cancel could stop the whole container.
+                start_new_session=True,
             )
+            # #4064: capture now; after wait() reaps the child the pid is gone.
+            process_pgid = _capture_pgid(process)
             # #2433: Gemini never registered with the process registry, so every
             # Gemini turn longer than the watchdog's 60s grace was false-orphaned
             # by the backend (absent from /api/executions/running), and a cancel
@@ -312,7 +321,7 @@ class GeminiRuntime(AgentRuntime):
             # `finally` around the reader below.
             _registered_id = execution_id
             get_process_registry().register(
-                _registered_id, process, metadata={"type": "chat", "runtime": "gemini"}
+                _registered_id, process, metadata={"type": "chat", "runtime": "gemini", "pgid": process_pgid}
             )
 
             # Write prompt to stdin and close it.
@@ -328,7 +337,48 @@ class GeminiRuntime(AgentRuntime):
                 process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
-                get_process_registry().unregister(_registered_id)
+                # #3408: since #3307 `unregister()` keeps a live child, so a
+                # write that fails while the child lives must end it first (no
+                # reader yet, stdin still open). The pid, not the group: since
+                # #4064 the child leads its own group, but the post-turn cgroup
+                # sweep already reaps descendants, so this path stays as #3408
+                # shaped it. Off the event loop; `loop` is assigned only below.
+                # Best-effort and logged, never raised: the caller must see the
+                # handoff error, and the pipes close even if the kill fails.
+                def _abort_handoff():
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"[Gemini] pid={process.pid} did not exit after SIGKILL ({_registered_id})")
+                    except Exception:
+                        logger.exception(f"[Gemini] killing {_registered_id} after its failed handoff raised")
+                    finally:
+                        for pipe in (process.stdin, process.stdout, process.stderr):
+                            try:
+                                pipe.close()
+                            except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                                logger.debug(f"[Gemini] pipe close after failed handoff of {_registered_id} raised", exc_info=True)
+
+                try:
+                    teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                except Exception:
+                    # The executor refused (shut down, or no thread to start): log it,
+                    # keep the live child owned, and still re-raise the handoff error.
+                    logger.exception(f"[Gemini] could not start the teardown of {_registered_id} after its failed handoff")
+                    teardown = None
+                if teardown is None:
+                    get_process_registry().unregister(_registered_id)
+                else:
+                    try:
+                        await asyncio.shield(teardown)
+                    finally:
+                        # Release only once the child is dead: now, or, if this
+                        # await was cancelled mid-teardown, when the teardown ends.
+                        if teardown.done():
+                            get_process_registry().unregister(_registered_id)
+                        else:
+                            teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output (runs in thread pool)
@@ -384,11 +434,37 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
+            # #3408: the child is spawned and its prompt written before the
+            # reader is submitted, so the reader, even one still queued behind
+            # the single shared worker, must run to drain and reap it. A
+            # cancelled waiter shields the worker and hands it the release
+            # (#3307's chat shape in claude_code.py). There is no outer
+            # timeout here, and none is added.
+            waiter_abandoned = threading.Event()
+
+            def read_owned_subprocess_output():
+                try:
+                    return read_subprocess_output()
+                finally:
+                    if waiter_abandoned.is_set():
+                        loop.call_soon_threadsafe(
+                            lambda: get_process_registry().unregister(_registered_id)
+                        )
+
+            worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+            # The waiter can end before this worker. Consume its eventual
+            # exception without changing what an active await sees.
+            worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             try:
-                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+                stderr_output, return_code = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             finally:
                 # #2433: always unregister — a timeout/pipe error above must not
                 # leave a dead handle that /api/executions/running keeps reporting.
+                # #3307: retained (a no-op) while the child lives; the worker
+                # above then releases it once the exit is observed.
                 get_process_registry().unregister(_registered_id)
 
             # Check for errors
@@ -761,14 +837,16 @@ class GeminiRuntime(AgentRuntime):
                 text=True,
                 bufsize=1,
                 env=build_execution_env({EXECUTION_TAG_NAME: session_id}),
+                start_new_session=True,  # #4064: see the chat path above
             )
+            process_pgid = _capture_pgid(process)
             # #2433: register under the backend's execution id (`session_id` IS
             # `execution_id` when the backend supplied one) so the watchdog's
             # proof-of-life sees the run and a cancel-while-pending is consumed
             # at spawn. See the chat path above.
             _registered_id = session_id
             get_process_registry().register(
-                _registered_id, process, metadata={"type": "task", "runtime": "gemini"}
+                _registered_id, process, metadata={"type": "task", "runtime": "gemini", "pgid": process_pgid}
             )
 
             # Write prompt to stdin and close it.
@@ -784,7 +862,39 @@ class GeminiRuntime(AgentRuntime):
                 process.stdin.write(compose_prompt(system_prompt, prompt))
                 process.stdin.close()
             except BaseException:
-                get_process_registry().unregister(_registered_id)
+                # #3408: as on the chat path above: the pid, not the group.
+                def _abort_handoff():
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(f"[Headless Task {session_id}] pid={process.pid} did not exit after SIGKILL")
+                    except Exception:
+                        logger.exception(f"[Headless Task {session_id}] kill after the failed handoff raised")
+                    finally:
+                        for pipe in (process.stdin, process.stdout, process.stderr):
+                            try:
+                                pipe.close()
+                            except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                                logger.debug(f"[Headless Task {session_id}] pipe close after failed handoff raised", exc_info=True)
+
+                try:
+                    teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+                except Exception:
+                    # The executor refused (shut down, or no thread to start): log it,
+                    # keep the live child owned, and still re-raise the handoff error.
+                    logger.exception(f"[Headless Task {session_id}] could not start the teardown after its failed handoff")
+                    teardown = None
+                if teardown is None:
+                    get_process_registry().unregister(_registered_id)
+                else:
+                    try:
+                        await asyncio.shield(teardown)
+                    finally:
+                        if teardown.done():
+                            get_process_registry().unregister(_registered_id)
+                        else:
+                            teardown.add_done_callback(lambda _: get_process_registry().unregister(_registered_id))
                 raise
 
             # Helper function that reads subprocess output
@@ -802,9 +912,30 @@ class GeminiRuntime(AgentRuntime):
                         self._process_stream_line(line, execution_log, metadata, tool_start_times, tool_names, response_parts, model)
                 except Exception as e:
                     logger.error(f"[Headless Task {session_id}] Error: {e}")
+                    # #3408: end the child and observe its exit before raising
+                    # (the inner timeout and any per-line error). The waiter's
+                    # `finally: unregister()` keeps a live child (#3307), so a
+                    # raise with the child alive left its entry registered with
+                    # nothing to release it. The pid, as on the handoff path (the
+                    # cgroup sweep reaps descendants). An exit not observed keeps
+                    # the entry, truthfully.
+                    try:
+                        process.kill()
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            f"[Headless Task {session_id}] Gemini child did not "
+                            "exit after SIGKILL — it stays registered"
+                        )
+                    except Exception:
+                        logger.exception(
+                            f"[Headless Task {session_id}] killing the Gemini "
+                            "child raised on error path — continuing"
+                        )
                     # Issue #817 follow-up: even on error, run the cgroup
                     # sweep so leaked descendants don't survive the failed
-                    # task.
+                    # task. After the kill above the dead child is off the
+                    # allowlist, so its descendants are no longer spared.
                     try:
                         kill_cgroup_orphans(extra_pids=_sweep_allowlist_pids())
                     except Exception:
@@ -837,11 +968,37 @@ class GeminiRuntime(AgentRuntime):
 
             # Run the blocking subprocess reading in a thread pool
             loop = asyncio.get_event_loop()
+            # #3408: the child is spawned and its prompt written before the
+            # reader is submitted, so the reader, even one still queued behind
+            # the single shared worker, must run to drain and reap it. A
+            # cancelled waiter shields the worker and hands it the release
+            # (#3307's chat shape in claude_code.py). There is no outer
+            # timeout here, and none is added.
+            waiter_abandoned = threading.Event()
+
+            def read_owned_subprocess_output():
+                try:
+                    return read_subprocess_output()
+                finally:
+                    if waiter_abandoned.is_set():
+                        loop.call_soon_threadsafe(
+                            lambda: get_process_registry().unregister(_registered_id)
+                        )
+
+            worker = loop.run_in_executor(_executor, read_owned_subprocess_output)
+            # The waiter can end before this worker. Consume its eventual
+            # exception without changing what an active await sees.
+            worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
             try:
-                stderr_output, return_code = await loop.run_in_executor(_executor, read_subprocess_output)
+                stderr_output, return_code = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             finally:
                 # #2433: always unregister — a timeout/pipe error above must not
                 # leave a dead handle that /api/executions/running keeps reporting.
+                # #3307: retained (a no-op) while the child lives; the worker
+                # above then releases it once the exit is observed.
                 get_process_registry().unregister(_registered_id)
 
             # Check for errors
