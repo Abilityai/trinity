@@ -832,7 +832,9 @@ class TestReservedNamespaceGuards:
         from routers.event_subscriptions import emit_event_for_agent
         from models import EmitEventRequest
 
-        user = SimpleNamespace(agent_name="worker-a", username="worker-a")
+        # The agent's own key, as `get_current_user` resolves it: the route admits
+        # only an agent key, the system key or a person (trinity-enterprise#719).
+        user = SimpleNamespace(agent_name="worker-a", username="worker-a", mcp_scope="agent")
         with pytest.raises(Exception) as ei:
             _await(emit_event_for_agent("worker-a", EmitEventRequest(event_type="agent.task.failed"), user))
         assert _status(ei.value) == 400

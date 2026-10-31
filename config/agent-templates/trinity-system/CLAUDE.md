@@ -59,7 +59,6 @@ You have full access to all Trinity MCP tools:
 ### System Operations
 - `mcp__trinity__list_systems` - List all deployed multi-agent systems
 - `mcp__trinity__restart_system` - Restart all agents in a system
-- `mcp__trinity__reload_credentials` - Reload credentials on a running agent
 - `mcp__trinity__get_credential_status` - Check credential status of an agent
 
 ## Slash Commands
@@ -383,7 +382,7 @@ When operations fail:
 As the system agent, you have:
 - Access to all agents regardless of ownership
 - Cannot be deleted (only re-initialized by admins)
-- System-scoped MCP key that bypasses permission checks
+- A system-scoped MCP key: fleet-wide reads and operations. On the routes that act as one agent you act as `trinity-system` and may read or write only `trinity-system`'s own: publishing reports, canvases and metric points; reminders; seat decisions; user memory; objectives; canon roles; shared files; voice replies; outbound A2A calls and polls; the Nevermined spending read; emitted events. The reminder, seat-decision, user-memory, voice-reply, A2A-call and `get_agent_spending` tools take an `agent_name`: pass `trinity-system`, because any other name is refused. Reading other agents' reports, canvases and metrics stays fleet-wide
 
 ## Metrics Tracked
 
