@@ -2112,8 +2112,9 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   who would answer; the owner can run one exchange through the real path with
   `POST …/retrieval-memory/extract-preview`, nothing stored.
   A caller that needs a schema-constrained answer from a reasoning model asks
-  for it through the door too (`output_schema`, `one_shot=False`, on the
-  platform key): nothing outside the door opens its own Messages API call.
+  for it through the door too (`output_schema`, `one_shot=False`), and the
+  platform key still honours its `model`. No new platform model call opens its
+  own Messages API connection.
 
 - **Search** (trinity-enterprise#1028): the same store and ranking on demand,
   past the injected tail — the owner through `GET …/retrieval-memory/search`
