@@ -697,6 +697,8 @@ marker, which `agent_git_config` does not have yet.
 
 **Naming on export (trinity-enterprise#1030)**: `export_manifest(system_name, agents, *, naming=None)` — `naming` overrides (the route's `?naming=`); None infers `bare` when `_member_short_name` finds no prefixed member, else `prefixed`. `_member_short_name(full, system, naming)` returns the full name under `bare`, so the agents loop and both permission loops key members through the one helper. Omitted members put a leading `# unobserved:` comment line on the YAML.
 
+**Skills (trinity-enterprise#1030)**: `services/system_apply/skills.py` owns `skills:` / `skill_sets:` — `read_library` (one verdict per declared name, into `ApplySnapshot.skill_verdicts` / `skill_set_verdicts`), `read_member` (individual rows + `skill_set_service.held_sets`, into `ApplyMemberState.skills` / `skill_sets`), `plan` (called from `resolve_apply_plan` via `_plan_skills` for created and managed members), `run` (`_run_op` kinds `skill_assign` / `skill_set_assign`, last in `_APPLY_OP_PHASES`). Writes call `skill_assignment_service.assign_and_deliver` / `assign_set_and_deliver`, the sequence the skills router's assign route now also calls. Deploy: `assign_manifest_skills` (step 10b). Export: per member after tags.
+
 ### Router Layer (`src/backend/routers/systems.py`)
 
 > **ent#124 (2026-07-24):** the full deploy orchestration (parse → validate →

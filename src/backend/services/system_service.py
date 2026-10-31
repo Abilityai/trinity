@@ -79,7 +79,13 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
     "kind",  # trinity-enterprise#704
+    "skills", "skill_sets",  # trinity-enterprise#1030
 })
+
+# trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
+# read, never unknown, but left out of the pinned "Recognised per-agent keys
+# are:" text.
+_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets"})
 
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
@@ -179,6 +185,12 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
+        for list_key in ("skills", "skill_sets"):  # trinity-enterprise#1030
+            value = agent_config.get(list_key)
+            if value is not None and not (
+                    isinstance(value, list) and all(isinstance(v, str) for v in value)):
+                raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
+
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
             resources=agent_config.get("resources"),
@@ -186,6 +198,8 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             schedules=agent_config.get("schedules"),
             tags=agent_config.get("tags"),  # ORG-001 Phase 4
             kind=agent_config.get("kind"),  # trinity-enterprise#704
+            skills=agent_config.get("skills"),  # trinity-enterprise#1030
+            skill_sets=agent_config.get("skill_sets"),
         )
 
     # Parse permissions
@@ -380,7 +394,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             warnings.append(
                 f"Agent '{_agent}': ignored unknown key(s): {', '.join(_keys)}. "
                 f"Recognised per-agent keys are: "
-                f"{', '.join(sorted(_KNOWN_AGENT_KEYS))}."
+                f"{', '.join(sorted(_KNOWN_AGENT_KEYS - _UNLISTED_AGENT_KEYS))}."
             )
 
     if manifest.unknown_keys:
@@ -1063,6 +1077,65 @@ def configure_tags(
 # view that merely filters the same tag — is this string plus the system tag in
 # `filter_tags`. One constant, formatted by the writer and by every reader, so
 # the two cannot drift into two vocabularies for one fact.
+async def assign_manifest_skills(
+    agent_names: Dict[str, str],
+    agents_config: Dict[str, SystemAgentConfig],
+    current_user: User,
+) -> List[str]:
+    """Create mode's `skills:` / `skill_sets:` phase (trinity-enterprise#1030).
+
+    Assigns each created member's declared skills, then its sets, through the
+    assign routes' sequence. Returns warnings; never raises past one member.
+    An agent key assigns only if it holds skills.manage — the skill routes'
+    own capability (T8) — and is told what was held back. A name the library
+    cannot assign is skipped with the route's refusal code.
+    """
+    from dependencies import acting_agent_name, capability_refusal
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    from services import skill_assignment_service
+    from services.system_apply import skills as apply_skills
+
+    warnings: List[str] = []
+    wanted = {short: apply_skills.declared(cfg) for short, cfg in agents_config.items()
+              if short in agent_names and (cfg.skills or cfg.skill_sets)}
+    if not wanted:
+        return warnings
+    refusal = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE)
+    if refusal is not None:
+        held = ", ".join(f"{agent_names[s]}: {', '.join(n + [f'set:{x}' for x in sets])}"
+                         for s, (n, sets) in wanted.items())
+        warnings.append(f"Skills not assigned: this key does not hold skills.manage "
+                        f"({refusal[0]}). Held back: {held}.")
+        return warnings
+    acting = acting_agent_name(current_user)
+    for short, (names, set_names) in wanted.items():
+        name = agent_names[short]
+        ok = []
+        for n in names:
+            verdict = apply_skills.library_verdict_skill(n)
+            if verdict is None:
+                ok.append(n)
+            else:
+                warnings.append(f"Skill '{n}' not assigned to '{name}': {verdict[0]}.")
+        try:
+            if ok:
+                await skill_assignment_service.assign_and_deliver(
+                    name, ok, current_user, acting_agent=acting)
+            for set_name in set_names:
+                verdict = apply_skills.library_verdict_set(set_name)
+                if verdict is not None:
+                    warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
+                                    f"{verdict[0]} ({verdict[1]}).")
+                    continue
+                await skill_assignment_service.assign_set_and_deliver(
+                    name, set_name, current_user, acting_agent=acting)
+        except Exception as e:  # noqa: BLE001 — the next member still gets its skills
+            reason, _ = _failure_reason(e)
+            logger.exception(f"Skill assignment failed for '{name}'")
+            warnings.append(f"Failed to assign skills to '{name}': {reason}")
+    return warnings
+
+
 SYSTEM_VIEW_AUTO_DESCRIPTION = "Auto-created for {system_name} system deployment"
 
 
@@ -1233,6 +1306,9 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # what it could not represent. Renaming them into the prefix would rewrite
     # the fleet from an export path.
     unprefixed: List[str] = []
+    # trinity-enterprise#1030: reads that failed, named in a `# unobserved:`
+    # header so an export never reads as "nothing here" when it means "unknown".
+    unobserved_reads: List[str] = []
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
@@ -1324,6 +1400,20 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                 config["tags"] = non_prefix_tags
         except Exception as e:
             logger.warning(f"Failed to get tags for {full_name}: {e}")
+
+        # trinity-enterprise#1030: individual skill assignments and held sets.
+        # A failed read is NAMED in the text, never an absent key, which a
+        # reconciler would read as "assign nothing".
+        try:
+            from services.system_apply import skills as apply_skills
+            skill_names, set_names = apply_skills.read_member(full_name)
+            if skill_names:
+                config["skills"] = skill_names
+            if set_names:
+                config["skill_sets"] = set_names
+        except Exception as e:
+            logger.warning(f"Failed to get skills for {full_name}: {e}")
+            unobserved_reads.append(f"skills of {full_name}")
 
         agent_configs[short_name] = config
 
@@ -1461,6 +1551,9 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+    if unobserved_reads:
+        yaml_output = (f"# unobserved: could not be read: {', '.join(unobserved_reads)}\n"
+                       + yaml_output)
     if unprefixed:
         # trinity-enterprise#1030: the log line above reaches an operator; a
         # reconciler diffing this text against its committed file needs the
@@ -2192,6 +2285,18 @@ async def deploy_manifest(
             logger.exception(f"Tag configuration failed for system '{manifest.name}'")
             all_warnings.append(f"Failed to configure tags: {reason}")
 
+        # 10b. Skills and skill sets (trinity-enterprise#1030), after the tags
+        # and before the starts, so a created member's first start delivers
+        # them. Best-effort, like 7-10.
+        if any(cfg.skills or cfg.skill_sets for cfg in manifest.agents.values()):
+            try:
+                all_warnings.extend(await assign_manifest_skills(
+                    created_map, manifest.agents, current_user))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Skill assignment failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to assign skills: {reason}")
+
         # 11. Create System View (ORG-001 Phase 4, optional)
         # create_system_view self-guards (returns None on error).
         system_view_id = None
@@ -2352,6 +2457,10 @@ class ApplyMemberState:
     # tag write), never refused as claimed: that inference is prefix-based and
     # does not exist for a bare name.
     untagged: bool = False
+    # trinity-enterprise#1030: individually assigned skills and held sets,
+    # read only when the member declares `skills:` / `skill_sets:`.
+    skills: List[str] = field(default_factory=list)
+    skill_sets: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2373,6 +2482,10 @@ class ApplySnapshot:
     # is a blocker, never an exception after the first write.
     default_resources: Optional[Dict[str, str]] = None
     views: List = field(default_factory=list)
+    # trinity-enterprise#1030: one library verdict per declared skill / set
+    # name (None = assignable), read once for the whole manifest.
+    skill_verdicts: Dict = field(default_factory=dict)
+    skill_set_verdicts: Dict = field(default_factory=dict)
 
 
 def _member_container(name: str):
@@ -2634,6 +2747,9 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             state.schedules = list(db.list_agent_schedules(name) or [])
             state.folders = db.get_shared_folder_config(name)
             state.resource_limits = db.get_resource_limits(name)
+            from services.system_apply import skills as apply_skills
+            if apply_skills.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030
+                state.skills, state.skill_sets = apply_skills.read_member(name)
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
             state.blocked = True
@@ -2666,6 +2782,16 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                 f"ever tagged it{'' if is_declared else ', and the manifest does not declare it'}.",
                 _evidence_remedy(member, system, is_declared),
             ))
+
+    # 3b. trinity-enterprise#1030: the library verdict for every declared
+    # skill and set, once for the manifest.
+    if any(cfg.skills or cfg.skill_sets for cfg in manifest.agents.values()):
+        from services.system_apply import skills as apply_skills
+        try:
+            snapshot.skill_verdicts, snapshot.skill_set_verdicts = (
+                apply_skills.read_library(manifest))
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the skills library", e))
 
     # 4. The default resources for members to create that declare none.
     if any(st.status == "absent" and not st.blocked and not manifest.agents[st.short_name].resources
@@ -2860,6 +2986,8 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemAgentConfig.schedules": ("reconciled", "matched by name; see schedule.*"),
     "SystemAgentConfig.tags": ("reconciled", "added, never replaced"),
     "SystemAgentConfig.kind": ("create-only", "nothing readable stores it"),
+    "SystemAgentConfig.skills": ("reconciled", "library skills assigned when missing; extras reported"),
+    "SystemAgentConfig.skill_sets": ("reconciled", "skill sets assigned when missing; extras reported"),
     "schedule.name": ("reconciled", "the match key"),
     "schedule.cron": ("reconciled", "updated in place"),
     "schedule.message": ("reconciled", "updated in place"),
@@ -2875,6 +3003,9 @@ _APPLY_OP_STEP = {
     "tag": "tag", "edge": "permissions", "folders": "folders", "resources": "resources",
     "created_resources": "resources", "schedule_create": "schedules",
     "schedule_update": "schedules", "created_schedules": "schedules",
+    # trinity-enterprise#1030: after every other member write (the gates a
+    # skill brings are written with it, before delivery), before the starts.
+    "skill_assign": "skills", "skill_set_assign": "skill_sets",
 }
 _APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
 
@@ -3287,6 +3418,19 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
         mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
 
 
+def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                 snapshot: ApplySnapshot, blockers: List) -> None:
+    """trinity-enterprise#1030: `skills:` / `skill_sets:`. `state` is None for
+    a member apply will create."""
+    from services.system_apply import skills as apply_skills
+    apply_skills.plan(
+        mp, held_skills=None if state is None else state.skills,
+        held_sets=None if state is None else state.skill_sets,
+        skill_verdicts=snapshot.skill_verdicts, set_verdicts=snapshot.skill_set_verdicts,
+        blockers=blockers, apply_change=_apply_change, apply_blocker=_apply_blocker,
+        make_op=ApplyOp)
+
+
 def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> ApplyPlan:
     """The per-member verdicts, the drift, every blocker, and the write-set.
 
@@ -3321,10 +3465,12 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         if state.status == "absent" and not state.blocked:
             mp.creating = True
             _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            _plan_skills(mp, None, snapshot, blockers)
             mp.verdict = "create"
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
                                   declared_final, normalized_resources, blockers)
+            _plan_skills(mp, state, snapshot, blockers)
             mp.verdict = "update" if mp.ops else "unchanged"
         else:
             mp.verdict = "blocked"
@@ -3735,6 +3881,11 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt) -
             op.args["schedule_id"], current_user.username, op.args["fields"]))
     elif op.kind == "created_schedules":
         await _apply_created_schedules(op, current_user, out, attempt)
+    elif op.kind in ("skill_assign", "skill_set_assign"):  # trinity-enterprise#1030
+        from dependencies import acting_agent_name
+        from services.system_apply import skills as apply_skills
+        await apply_skills.run(op, current_user, out, attempt, apply_change=_apply_change,
+                               acting_agent=acting_agent_name(current_user))
 
 
 async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:

@@ -399,4 +399,5 @@ def test_apply_op_phase_order():
     assert system_service._APPLY_OP_PHASES == (
         "tag", "edge", "folders", "resources", "created_resources",
         "schedule_create", "schedule_update", "created_schedules",
+        "skill_assign", "skill_set_assign",  # CP1
     )

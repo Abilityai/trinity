@@ -1306,6 +1306,11 @@ class SystemAgentConfig(BaseModel):
     # the agent) or "deployment" (a deployment of a codebase). Omitted → the
     # platform default (AgentConfig.kind, ent#705).
     kind: Optional[Literal["agent", "deployment"]] = None
+    # trinity-enterprise#1030: library skills and skill sets (ent#530) this
+    # member holds. Additive: what is missing is assigned, an extra is
+    # reported, nothing is ever unassigned.
+    skills: Optional[List[str]] = None
+    skill_sets: Optional[List[str]] = None
 
 
 class SystemPermissions(BaseModel):

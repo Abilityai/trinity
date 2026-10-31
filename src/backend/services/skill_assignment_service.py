@@ -50,6 +50,18 @@ async def deliver_assigned_skills(
         }
 
 
+def conflict_names(agent_name: str) -> List[str]:
+    """Assigned names whose library package was NOT written because the agent
+    has its own skill of that name (#2914 `conflict`). Read BEFORE an
+    unassign: the own skill is what runs, so its gate is the own skill's and
+    stays (trinity-enterprise#753, decision 1)."""
+    try:
+        return [r.skill_name for r in db.get_agent_skills(agent_name)
+                if getattr(r, "delivery_status", None) == "conflict"]
+    except Exception:  # noqa: BLE001 — a missed snapshot keeps nothing extra; never block the write
+        return []
+
+
 async def sync_gates(
     agent_name: str,
     current_user,
@@ -145,3 +157,32 @@ async def assign_and_deliver(
     await broadcast_skills_changed(agent_name)
     return {"assigned": list(rows), "rows": rows, "already": already,
             "delivery": delivery, "gates": gates}
+
+
+async def assign_set_and_deliver(
+    agent_name: str,
+    set_name: str,
+    actor,
+    *,
+    acting_agent: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Assign a library skill set (ent#530), gate, deliver the new members,
+    broadcast — the set route's sequence, for a system manifest's
+    `skill_sets:` field. Raises `skill_set_service.SetError` before any write
+    for a set that cannot be assigned.
+
+    Returns `skill_set_service.assign`'s result plus `delivery` and `gates`.
+    """
+    from services import skill_set_service
+
+    conflict = conflict_names(agent_name)
+    result = await asyncio.to_thread(
+        skill_set_service.assign, agent_name, set_name, actor.username, acting_agent)
+    # ent#753: gated before delivered. No package is removed here, so a gate
+    # on a member the re-plan dropped stays until the start path prunes it.
+    gates = await sync_gates(agent_name, actor,
+                             removed=result.get("removed") or [], conflict=conflict)
+    delivery = (await deliver_assigned_skills(agent_name, result["added"])
+                if result["added"] else None)
+    await broadcast_skills_changed(agent_name)
+    return {**result, "delivery": delivery, "gates": gates}

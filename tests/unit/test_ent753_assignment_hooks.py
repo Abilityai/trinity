@@ -78,6 +78,7 @@ EXPECTED_SITES = frozenset({
     "services/skills_sync_service.py::SkillsLibrarySyncService._reinject_agent",
     # ent#1030: the single-skill assign route delegates its write here.
     "services/skill_assignment_service.py::assign_and_deliver",
+    "services/skill_assignment_service.py::assign_set_and_deliver",
 })
 
 
