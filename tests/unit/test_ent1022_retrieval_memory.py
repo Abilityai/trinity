@@ -225,6 +225,30 @@ class TestSubject:
 # Capture
 # --------------------------------------------------------------------------- #
 
+class TestLooksLikeEmail:
+    """CodeQL py/polynomial-redos: the `user_email` query value reaches this regex."""
+
+    @pytest.mark.parametrize("value", ["a@example.com", "first.last+tag@mail.example.co.uk"])
+    def test_accepts_an_address(self, value):
+        assert memory_subject.looks_like_email(value)
+
+    @pytest.mark.parametrize("value", [None, "", "nobody", "a@b", "a@@b.c", "a b@c.d", "anonymous (10.0.0.1)", "a@b..c", "a@.b.c", "a@b.c."])
+    def test_refuses_what_is_not_one(self, value):
+        assert not memory_subject.looks_like_email(value)
+
+    def test_an_otherwise_valid_address_past_the_cap_is_refused(self):
+        assert not memory_subject.looks_like_email("a" * 400 + "@example.com")
+
+    def test_the_backtracking_shape_inside_the_cap_is_refused(self):
+        # The alert's own witness, kept under the cap so only the regex decides it.
+        assert not memory_subject.looks_like_email("!@!." + "!." * 150 + "@")
+
+    def test_the_pattern_has_no_overlap_to_backtrack_over(self):
+        # A dot may not sit inside the runs on either side of a domain separator:
+        # that overlap is what made the match quadratic. Same shape as the portal's.
+        assert memory_subject._EMAIL_RE.pattern == r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$"
+
+
 class TestCapture:
     def test_terminal_spawner_hands_the_execution_to_retain(self, monkeypatch):
         """The production wiring: `spawn_task_terminal_event` is the ONE seam."""
