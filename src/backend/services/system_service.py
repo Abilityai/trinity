@@ -1452,17 +1452,21 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         manifest_dict = {"name": system_name, "naming": "bare",
                          **{k: v for k, v in manifest_dict.items() if k != "name"}}
 
-    # Get permissions (try to detect preset pattern)
+    # Get permissions (try to detect preset pattern). Read through
+    # `get_permitted_agents` (target names), the facade method apply's
+    # snapshot uses; `get_agent_permissions` never existed, so until
+    # trinity-enterprise#1030 every export dropped this block behind a
+    # WARNING.
     try:
         # Check first agent's permissions to infer pattern
         if agents:
             first_agent = agents[0]['name']
-            perms = db.get_agent_permissions(first_agent)
+            perms = db.get_permitted_agents(first_agent)
 
             if perms:
                 # Try to detect full-mesh pattern
                 all_agents_names = [a['name'] for a in agents]
-                permitted_targets = [p["target_agent"] for p in perms]
+                permitted_targets = list(perms)
 
                 # Full-mesh: agent can call all other agents
                 expected_targets = [n for n in all_agents_names if n != first_agent]
@@ -1470,9 +1474,9 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                     # Verify other agents also have full-mesh
                     is_full_mesh = True
                     for agent in agents:
-                        agent_perms = db.get_agent_permissions(agent['name'])
+                        agent_perms = db.get_permitted_agents(agent['name'])
                         expected = [n for n in all_agents_names if n != agent['name']]
-                        actual = [p["target_agent"] for p in agent_perms]
+                        actual = list(agent_perms)
                         if set(actual) != set(expected):
                             is_full_mesh = False
                             break
@@ -1496,12 +1500,12 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                             short_name = _member_short_name(agent['name'], system_name, naming)
                             if short_name is None:
                                 continue
-                            agent_perms = db.get_agent_permissions(agent['name'])
+                            agent_perms = db.get_permitted_agents(agent['name'])
                             targets = [
                                 t for t in (
-                                    _member_short_name(p["target_agent"], system_name, naming)
-                                    for p in agent_perms
-                                    if p["target_agent"] in member_names
+                                    _member_short_name(target, system_name, naming)
+                                    for target in agent_perms
+                                    if target in member_names
                                 ) if t is not None
                             ]
                             if targets:
@@ -1518,15 +1522,15 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                         short_name = _member_short_name(agent['name'], system_name, naming)
                         if short_name is None:
                             continue
-                        agent_perms = db.get_agent_permissions(agent['name'])
+                        agent_perms = db.get_permitted_agents(agent['name'])
                         # #2373: membership, not the prefix — `acme` must not
                         # export an edge to an `acme-extra` agent as though it
                         # were its own member.
                         targets = [
                             t for t in (
-                                _member_short_name(p["target_agent"], system_name, naming)
-                                for p in agent_perms
-                                if p["target_agent"] in member_names
+                                _member_short_name(target, system_name, naming)
+                                for target in agent_perms
+                                if target in member_names
                             ) if t is not None
                         ]
                         if targets:
@@ -1537,6 +1541,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
 
     except Exception as e:
         logger.warning(f"Failed to export permissions for system {system_name}: {e}")
+        # trinity-enterprise#1030: an absent `permissions:` reads as "no
+        # edges"; say in the text that they were not read.
+        manifest_dict.pop("permissions", None)
+        unobserved_reads.append("permissions")
 
     # #2373: the instance-global `trinity_prompt` is NOT exported.
     #

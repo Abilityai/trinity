@@ -322,9 +322,11 @@ class TestExportNaming:
     def test_none_prefixed_infers_bare_and_round_trips(self, world):
         for n in ("scout-lead", "catalog-entry"):
             world.seed_agent(n)
+        db.add_agent_permission("scout-lead", "catalog-entry", W.ALICE)
         text, doc = _export(world, ["scout-lead", "catalog-entry"])
         assert doc["naming"] == "bare"
         assert list(doc["agents"]) == ["scout-lead", "catalog-entry"]
+        assert doc["permissions"] == {"explicit": {"scout-lead": ["catalog-entry"]}}
         manifest, _ = _parse(text)
         assert system_service.declared_names(manifest) == {"scout-lead": "scout-lead", "catalog-entry": "catalog-entry"}
         # The round trip: applying the export to the live system it came from
@@ -354,6 +356,51 @@ class TestExportNaming:
     def test_an_unknown_override_is_refused(self, world):
         with pytest.raises(ValueError, match="naming must be 'prefixed' or 'bare'"):
             system_service.export_manifest(SYSTEM, _agents("scout-lead"), naming="flat")
+
+
+class TestExportPermissions:
+    """The exported edges are the stored ones. `export_manifest` read them
+    through a facade method that does not exist, so every export dropped
+    `permissions:` behind a log line."""
+
+    def _edges(self, doc):
+        return {k: sorted(v) for k, v in (doc.get("permissions") or {}).get("explicit", {}).items()}
+
+    def test_explicit_edges_equal_the_stored_ones(self, world):
+        names = ["acme-a", "acme-b", "acme-c"]
+        for n in names:
+            world.seed_agent(n)
+        for src, dst in (("acme-a", "acme-b"), ("acme-a", "acme-c"), ("acme-c", "acme-a")):
+            db.add_agent_permission(src, dst, W.ALICE)
+        db.add_agent_permission("acme-b", "outsider", W.ALICE)  # not a member: not exported
+        text, doc = _export(world, names)
+        stored = {n[len("acme-"):]: sorted(t[len("acme-"):] for t in db.get_permitted_agents(n)
+                                           if t in names)
+                  for n in names if [t for t in db.get_permitted_agents(n) if t in names]}
+        assert self._edges(doc) == stored == {"a": ["b", "c"], "c": ["a"]}
+        assert not text.startswith("#")
+
+    def test_a_full_mesh_exports_the_preset(self, world):
+        names = ["acme-a", "acme-b"]
+        for n in names:
+            world.seed_agent(n)
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        db.add_agent_permission("acme-b", "acme-a", W.ALICE)
+        _, doc = _export(world, names)
+        assert doc["permissions"] == {"preset": "full-mesh"}
+
+    def test_a_failed_read_is_named_in_the_text_never_a_silent_empty_block(self, world, monkeypatch, caplog):
+        for n in ("acme-a", "acme-b"):
+            world.seed_agent(n)
+        db.add_agent_permission("acme-a", "acme-b", W.ALICE)
+        def boom(_n):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(db, "get_permitted_agents", boom)
+        with caplog.at_level("WARNING"):
+            text, doc = _export(world, ["acme-a", "acme-b"])
+        assert "permissions" not in doc
+        assert text.splitlines()[0] == "# unobserved: could not be read: permissions"
+        assert any("Failed to export permissions" in r.getMessage() for r in caplog.records)
 
 
 class TestExportRoute:
