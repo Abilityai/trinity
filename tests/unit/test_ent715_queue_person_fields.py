@@ -577,10 +577,10 @@ def _sync(monkeypatch, responded, *entries):
     client = MagicMock()
     client.read_file = AsyncMock(return_value={"success": True, "content": content})
     client.write_file = AsyncMock(return_value={"success": True})
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
-    monkeypatch.setattr(oqs, "_audit_sync", AsyncMock())
+    monkeypatch.setattr(oqs.deps, "_audit_sync", AsyncMock())
     asyncio.run(oqs.OperatorQueueSyncService()._sync_agent("a"))
     return db, client
 
@@ -883,7 +883,7 @@ _NON_ROW_ACCESSORS = frozenset({
 _READ_CLASSES = frozenset({"door", "filtered", "person", "addressee", "agent", "ruled", "internal"})
 _PORTAL_ASKS = "client_portal/asks/service.py"
 _ASKS = "services/ask_service.py"
-_OQS = "services/operator_queue_service.py"
+_OQS = "services/operator_queue_service/__init__.py"
 _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"

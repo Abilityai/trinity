@@ -120,7 +120,7 @@ def _pending(n, start=0):
 
 
 def _wire(monkeypatch, db, content, *, write_ok=True, rate_allowed=True):
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     if "seam_calls" not in vars(db):     # one seam per fake db, kept across re-wires
         _seam(monkeypatch, db, flood_pending=db.flood_pending)
     state = {"content": content, "writes": []}
@@ -138,7 +138,7 @@ def _wire(monkeypatch, db, content, *, write_ok=True, rate_allowed=True):
 
     client.read_file = AsyncMock(side_effect=_read)
     client.write_file = AsyncMock(side_effect=_write)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(rate_allowed, 10, 0 if rate_allowed else 60, 60))
     oqs.reset_alert_budget_state()
@@ -432,7 +432,7 @@ class TestIngestionMarker:
         db = _fake_db()
         svc, state = _wire(monkeypatch, db, _file(_pending(1), platform={"ingestion": held}))
         from services.agent_client import AgentClient  # noqa: F401 — type only
-        client = oqs.AgentClient("a")
+        client = oqs.deps.AgentClient("a")
         out = asyncio.run(svc._write_responses_to_agent(
             "a", client, json.loads(state["content"]), [], [], True, content_sha="x"))
         assert out is None

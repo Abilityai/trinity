@@ -1458,8 +1458,8 @@ def _run_cycle(monkeypatch, states, *, expired=(), expire_raises=None, db=None):
             raise expire_raises
         return SimpleNamespace(rows=list(expired))
 
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "ask_service", SimpleNamespace(expire=_expire))
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "ask_service", SimpleNamespace(expire=_expire))
     # `_poll_cycle` imports `agent_container_states` at CALL time, which resolves
     # through `sys.modules` — own that key (the #1446 / #1595 ledger rule): a test
     # earlier in a full run can leave a different module object there, and a
@@ -1528,10 +1528,10 @@ class TestFileIngestProvenance:
         body = json.dumps({"$schema": "operator-queue-v1", "requests": [hostile]})
         client.read_file = AsyncMock(return_value={"success": True, "content": body})
         client.write_file = AsyncMock(return_value={"success": True})
-        monkeypatch.setattr(oqs, "db", db)
-        monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+        monkeypatch.setattr(oqs.deps, "db", db)
+        monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
         monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
-        monkeypatch.setattr(oqs, "_audit_sync", AsyncMock())
+        monkeypatch.setattr(oqs.deps, "_audit_sync", AsyncMock())
         monkeypatch.setattr(oqs, "_validated_addressee", lambda agent, raw: None)
         asyncio.run(oqs.OperatorQueueSyncService()._sync_agent("agent-611-file"))
         call = db.create_operator_queue_item.call_args

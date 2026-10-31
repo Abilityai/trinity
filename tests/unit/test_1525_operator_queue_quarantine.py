@@ -53,13 +53,13 @@ def _fake_db(create_side_effect):
 
 
 def _wire(monkeypatch, db, requests=(_REQ,)):
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     client = MagicMock()
     client.read_file = AsyncMock(return_value={
         "success": True,
         "content": json.dumps({"requests": list(requests)}),
     })
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     svc = OperatorQueueSyncService()
     svc._write_responses_to_agent = AsyncMock()
     return svc

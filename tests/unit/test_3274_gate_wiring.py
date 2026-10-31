@@ -125,8 +125,8 @@ def test_every_leader_poll_cycle_runs_the_skill_gate_sweep(monkeypatch):
     db = MagicMock()
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.mark_operator_queue_undelivered_for_stopped_agents.return_value = []
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "ask_service", SimpleNamespace(expire=lambda: SimpleNamespace(rows=[])))
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "ask_service", SimpleNamespace(expire=lambda: SimpleNamespace(rows=[])))
     monkeypatch.setitem(sys.modules, "services.docker_service",
                         SimpleNamespace(agent_container_states=lambda: {}))
     ws = MagicMock()

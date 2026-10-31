@@ -488,14 +488,14 @@ class TestAging:
         pytest.param("abc", oqs.OPERATOR_QUEUE_AGING_HOURS_DEFAULT, id="r127-garbage-falls-back"),
     ])
     def test_aging_hours(self, monkeypatch, raw, expected):
-        monkeypatch.setattr(oqs.db, "get_setting_value", lambda k, d: raw)
+        monkeypatch.setattr(oqs.deps.db, "get_setting_value", lambda k, d: raw)
         assert oqs.aging_hours() == expected
 
     def test_aging_hours_survives_a_db_raise(self, monkeypatch):
         """r128"""
         def boom(*a):
             raise RuntimeError("db down")
-        monkeypatch.setattr(oqs.db, "get_setting_value", boom)
+        monkeypatch.setattr(oqs.deps.db, "get_setting_value", boom)
         assert oqs.aging_hours() == oqs.OPERATOR_QUEUE_AGING_HOURS_DEFAULT
 
 

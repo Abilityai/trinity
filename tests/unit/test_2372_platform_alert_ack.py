@@ -120,7 +120,7 @@ def _fake_db(index=None):
 
 
 def _wire(monkeypatch, db, requests):
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     state = {"content": json.dumps({"requests": requests}), "writes": []}
     client = MagicMock()
 
@@ -134,7 +134,7 @@ def _wire(monkeypatch, db, requests):
 
     client.read_file = AsyncMock(side_effect=_read)
     client.write_file = AsyncMock(side_effect=_write)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     oqs.reset_alert_budget_state()
     return OperatorQueueSyncService(), state
