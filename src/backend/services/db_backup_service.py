@@ -472,10 +472,20 @@ class DBBackupService:
                     "status": status,
                     "trigger": trigger,
                     "backup_dir": backup_dir,
-                    "last_success_at": db.get_setting_value("db_backup_last_success_at", None),
+                    "last_success_at": self._last_success_at(db),
                 },
             )
             logger.warning("[DBBackup] operator alarm %s: %s", outcome, title)
+
+    @staticmethod
+    def _last_success_at(db) -> Optional[str]:
+        """The failure alarm's episode marker; None when unreadable (logged). Read
+        after the status write, so a failing read must not lose the alarm."""
+        try:
+            return db.get_setting_value("db_backup_last_success_at", None)
+        except Exception:  # noqa: BLE001 — a durable failure always has its alarm
+            logger.error("[DBBackup] could not read the last success", exc_info=True)
+            return None
 
     async def _staleness_check(self) -> None:
         """BKUP-013b: while the last success is older than 3 days, re-alarm at

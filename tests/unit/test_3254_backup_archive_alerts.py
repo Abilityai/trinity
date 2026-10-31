@@ -270,6 +270,24 @@ class TestBackupFailure:
         assert _pending(db, backup.host) == []
         _assert_platform_ended(db, row)
 
+    def test_an_unreadable_episode_marker_still_files_the_alarm(self, db, backup, monkeypatch):
+        """The marker is read after the status write: a durable `failed` always
+        has its alarm, and the outcome never raises into the scheduler."""
+        real_get = db.get_setting_value
+
+        def _get(key, default=None):
+            if key == "db_backup_last_success_at":
+                raise RuntimeError("settings read failed")
+            return real_get(key, default)
+
+        monkeypatch.setattr(db, "get_setting_value", _get)
+        _record(backup, "failed", error="boom")
+
+        assert backup.settings["db_backup_last_status"] == "failed"
+        rows = _pending(db, backup.host)
+        assert len(rows) == 1
+        assert rows[0]["context"]["last_success_at"] is None
+
     def test_only_an_ok_ends_it(self, db, backup, clock):
         """A further failure or a no-space skip is not evidence of recovery,
         and continued failure does not re-read the edge alarm: the
