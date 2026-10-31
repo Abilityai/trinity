@@ -1052,10 +1052,11 @@ async def _apply_fork_to_own(
             detail={
                 "error": (
                     f"Template '{config.template}' requires fork-to-own "
-                    f"creation: provide fork_to_own.destination_repo (and "
-                    f"fork_to_own.github_pat, unless your personal GitHub "
-                    f"token is saved in Settings) so the agent's repo is your "
-                    f"own, not the shared template."
+                    f"creation: provide fork_to_own.destination_repo so the "
+                    f"agent's repo is your own, not the shared template. The "
+                    f"fork uses your personal GitHub token saved in Settings. "
+                    f"MCP tools never carry a token; a direct API call may "
+                    f"send its own fork_to_own.github_pat."
                 ),
                 "code": "FORK_TO_OWN_REQUIRED",
             },
