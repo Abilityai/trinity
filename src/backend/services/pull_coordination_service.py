@@ -276,6 +276,12 @@ def claim_next_task(agent_name: str, worker_id: str) -> Optional[Dict[str, Any]]
     return _build_claim_response(row, cap=cap)
 
 
+_TERMINAL_STATUSES = frozenset({
+    TaskExecutionStatus.SUCCESS, TaskExecutionStatus.FAILED,
+    TaskExecutionStatus.CANCELLED, TaskExecutionStatus.SKIPPED,
+})
+
+
 async def open_claim_activity(execution_id: str) -> Optional[str]:
     """#3932: open the claimed turn's CHAT_START activity. Push opens it at
     dispatch (``execute_task`` step 3); a pull row is queued before that step,
@@ -287,10 +293,16 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
     the reaper closes the dead attempt's bar by id, possibly after this claim,
     so reusing it would leave the live attempt with none. Best-effort: never
     blocks the claim.
+
+    #3982: terminate can win the status CAS between the claim and the insert,
+    find no bar to close, and leave this one ``started`` until the 120-minute
+    sweep fabricates its duration. So a terminal row opens nothing, and a row
+    that turns terminal during the insert gets its bar closed here (the close
+    is a CAS, so racing terminate's own close is a no-op).
     """
     try:
         row = db.get_execution(execution_id)
-        if row is None:
+        if row is None or row.status in _TERMINAL_STATUSES:
             return None
         if not row.redelivery_count and db.get_open_activity_id_for_execution(execution_id):
             return None
@@ -300,7 +312,7 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
             meta = {}
         from services.task_execution_service import start_dispatch_activity
 
-        return await start_dispatch_activity(
+        activity_id = await start_dispatch_activity(
             agent_name=row.agent_name,
             message=row.message,
             execution_id=execution_id,
@@ -313,6 +325,11 @@ async def open_claim_activity(execution_id: str) -> Optional[str]:
                 "redelivery_count": row.redelivery_count or 0,
             },
         )
+        after = db.get_execution(execution_id)
+        if activity_id and after is not None and after.status in _TERMINAL_STATUSES:
+            await activity_service.close_execution_activity(
+                execution_id, after.status, activity_id=activity_id)
+        return activity_id
     except Exception as e:  # noqa: BLE001 — a claim must never fail on the timeline
         logger.warning("[#3932] could not open the claim activity for %s: %s",
                        execution_id, type(e).__name__)
@@ -563,11 +580,35 @@ def _switch_failure_kind(
     #3012: a worker older than #3012 reports a model the CLI refused as 503 →
     ``auth``. No subscription can fix that, so the text overrides the code.
     """
-    from services.failure_classifier import is_model_rejection
+    from services.failure_classifier import (
+        is_model_rejection,
+        is_prompt_too_long,
+        is_turn_limit,
+    )
 
     if is_model_rejection(error_text):
         return None
+    # #3984 / #3849: a worker reports the agent's prompt-length 503 as `auth`;
+    # no credential changes a turn cap or a prompt's length.
+    if is_turn_limit(error_text) or is_prompt_too_long(error_text):
+        return None
     return _SWITCH_FAILURE_KINDS.get((error_code or "").strip().lower())
+
+
+def _recode_credential_independent_auth(error_code: str, error_text: str) -> str:
+    """The code a worker's ``auth`` terminal really carries, from its text.
+
+    Mirrors ``execution_envelope.terminal_from_callback_payload`` (#1083): a
+    model rejection is ``model_unsupported`` (#3012), a prompt-length refusal
+    ``agent_error`` (#3849); anything else keeps ``auth``.
+    """
+    from services.failure_classifier import is_model_rejection, is_prompt_too_long
+
+    if is_model_rejection(error_text):
+        return "model_unsupported"
+    if is_prompt_too_long(error_text):
+        return "agent_error"
+    return error_code
 
 
 def _spawn_breaker_verdict(agent_name: str, row_status, is_auth: bool) -> None:
@@ -727,6 +768,14 @@ def apply_task_result(
         content = scrub_text(_staged, content)
         execution_log = scrub_obj(_staged, execution_log)
 
+    # #3849 / #3012: a worker labels the agent's prompt-length 503 (and a
+    # pre-#3012 image's model rejection) `auth`. No credential fixes either, so
+    # recode from the text — as the #1083 callback does — before the AUTH
+    # dispatch breaker counts it or the row is stored as `[auth] …`. FAILED only:
+    # the cancelled-but-auth trust guard below keeps the worker's own label.
+    if status == "failed" and (error_code or "").strip().lower() == "auth":
+        error_code = _recode_credential_independent_auth(error_code, content or "")
+
     # Map the typed reply status → row status (mirror the #1083 3-way map). An
     # auth failure the agent mislabels "cancelled" must NOT become a clean cancel
     # (backend trust boundary): only `auth` matters for that guard here.
@@ -785,6 +834,9 @@ def apply_task_result(
         # No error_code column on schedule_executions — fold the typed class into
         # the persisted error text so it survives for observability.
         err_text = sanitized_content or ""
+        if row_status == TaskExecutionStatus.CANCELLED:
+            # #3618: the text the terminate route writes; the reply stays in `response`.
+            err_text = "Execution terminated by user"
         if error_code:
             err_text = f"[{error_code}] {err_text}".strip()
         if (error_code or "").strip().lower() == "timeout":

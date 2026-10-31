@@ -242,7 +242,7 @@ self-signup and SSO first sign-in keep writing.
 /login → POST /api/auth/email/verify → _finalizeLogin (ends any Workspace client sign-in)
       → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
-/workspace → App.vue connect() → POST /api/ws/ticket (marked) → /ws
+/workspace → App.vue token watch → followToken → POST /api/ws/ticket (marked) → /ws (#3445)
            → GET /api/enterprise/client-portal/my-agents (portal door) → roster
 operator URL → router guard → /workspace          any operator route → 403 workspace_only
 ```

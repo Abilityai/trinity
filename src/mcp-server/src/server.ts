@@ -47,7 +47,8 @@ import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
 import { createAssignmentTools } from "./tools/assignments.js";
-import { configureAudit, withAudit } from "./audit.js";
+import { configureAudit, logSessionRevival, withAudit } from "./audit.js";
+import { revivalRequests } from "./session-front.js";
 import { installLogRedaction } from "./log-redaction.js";
 import type { McpAuthContext } from "./types.js";
 import { EXECUTION_ID_HEADER, parseExecutionIdHeader } from "./tools/execution_id.js";
@@ -561,6 +562,13 @@ export async function createServer(config: ServerConfig = {}) {
               // #2392: per-request — fastmcp re-authenticates every POST.
               executionId: parseExecutionIdHeader(readHeader(request.headers[EXECUTION_ID_HEADER])),
             };
+            // #4060: the session front's synthetic revival initialize. Audited
+            // here because only this path knows who the key belongs to.
+            const revived = revivalRequests.get(request as any);
+            if (revived !== undefined) {
+              revivalRequests.delete(request as any);
+              logSessionRevival(authContext, revived);
+            }
             return authContext;
           }
 

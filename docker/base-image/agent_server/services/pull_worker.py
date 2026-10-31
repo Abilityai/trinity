@@ -479,14 +479,12 @@ async def _run_and_report(
         terminated = bool(execution_id and registry.was_terminated(execution_id))
         # #679 / #3114: a terminated turn reports `cancelled` (result_callback
         # parity). Auth and rate-limit terminals keep their class so the breaker
-        # and SUB-003 still see them.
+        # and SUB-003 still see them. #3618: a failed body's `content` is the
+        # failure text, so it is replaced; a finished turn keeps its reply.
         if terminated and body.get("error_code") not in ("auth", "billing"):
-            body = {
-                **body,
-                "status": "cancelled",
-                "error_code": None,
-                "error": "Execution terminated by user",
-            }
+            body = {**body, "status": "cancelled", "error_code": None}
+            if finish_success is not True:
+                body["content"] = "Execution terminated by user"
             finish_success = None
         body = _with_walk_metadata(body, capable=capable, override=override, terminated=terminated)
 

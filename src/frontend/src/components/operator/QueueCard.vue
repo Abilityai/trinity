@@ -97,6 +97,17 @@
       <GatedSkillRequest v-if="isGateCard(item)" :item="item" class="px-4 pt-3 pb-4" />
       <QueueProposal v-else-if="item.proposal" :proposal="item.proposal" class="px-4 pb-4" />
 
+      <!-- trinity-enterprise#980: an approval addressed to someone else — said
+           up front, with no controls, rather than learned from a refusal. -->
+      <p
+        v-if="addressedWaiting"
+        class="mx-4 mb-4 rounded-lg bg-status-info-50 dark:bg-status-info-900/20 px-3 py-2 text-sm text-status-info-700 dark:text-status-info-300"
+        data-testid="queue-addressed-waiting"
+      >
+        Waiting on <span class="font-semibold">{{ addressedWaiting }}</span>.
+        Only they can decide this, from their Workspace Inbox.
+      </p>
+
       <!-- Context (collapsible) -->
       <div v-if="item.context && Object.keys(item.context).length > 0" class="px-4 pb-4">
         <button
@@ -250,7 +261,7 @@ import BaseBadge from '../base/BaseBadge.vue'
 import InlineError from '../InlineError.vue'
 import QueueProposal from './QueueProposal.vue'
 import GatedSkillRequest from './GatedSkillRequest.vue'
-import { isGateCard, gateReadOnly, gateRejecting } from '../../utils/skillGateCard'
+import { isGateCard, gateReadOnly, gateRejecting, addressedReadOnly, addressedWaitingOn } from '../../utils/skillGateCard'
 
 const props = defineProps({
   item: { type: Object, required: true }
@@ -281,7 +292,9 @@ const agentAvatarUrl = computed(() => {
 
 const selectedOption = ref(null)
 const responseText = ref('')
-const readOnly = computed(() => gateReadOnly(props.item))   // trinity-enterprise#755
+// trinity-enterprise#755 (a skill gate's card) and #980 (any approval addressed to someone else).
+const readOnly = computed(() => gateReadOnly(props.item) || addressedReadOnly(props.item))
+const addressedWaiting = computed(() => addressedWaitingOn(props.item))
 const rejecting = computed(() => gateRejecting(props.item, selectedOption.value))
 const showContext = ref(false)
 

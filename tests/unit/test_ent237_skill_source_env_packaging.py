@@ -95,8 +95,12 @@ def test_the_code_default_is_not_duplicated_in_compose():
     drift, and the bare pass-through means compose never needs to know it.
     """
     from_config = (_REPO / "src" / "backend" / "config.py").read_text()
-    m = re.search(r'"TRINITY_DEFAULT_SKILL_SOURCE",\s*"([^"]+)"', from_config)
-    assert m, "config.py no longer declares the default — update this guard"
+    # The default is the named built-in catalog URL (trinity-enterprise#529:
+    # only a default seeded from it follows the bundled pin).
+    m = re.search(r'BUNDLED_SKILL_SOURCE_URL\s*=\s*"([^"]+)"', from_config)
+    assert m and re.search(
+        r'"TRINITY_DEFAULT_SKILL_SOURCE",\s*BUNDLED_SKILL_SOURCE_URL', from_config
+    ), "config.py no longer declares the default — update this guard"
     default = m.group(1)
 
     for compose in COMPOSE_FILES:
