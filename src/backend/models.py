@@ -1321,6 +1321,11 @@ class SystemAgentConfig(BaseModel):
     # admission is the route's; a stored gate the manifest does not name is
     # reported, never cleared.
     gates: Optional[Dict[str, Dict[str, Any]]] = None
+    # trinity-enterprise#1030 CP4: the canon seat the AGENT holds, written
+    # only through an assignment module's optional writer; and the seats a
+    # PERSON must fill, by role and kind — never a person, reported only.
+    seat: Optional[str] = None
+    person_seats: Optional[List[Dict[str, str]]] = None
 
 
 class SystemPermissions(BaseModel):

@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_seats.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips; deploy seats through the hook or lists what it held back."
+    },
+    {
       "file": "unit/test_ent1030_gates.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",

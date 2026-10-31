@@ -80,12 +80,14 @@ _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
     "kind",  # trinity-enterprise#704
     "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
+    "seat", "person_seats",  # trinity-enterprise#1030 CP4
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
-_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates"})
+_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
+                                  "seat", "person_seats"})
 
 # trinity-enterprise#1030 CP3: the fields one `gates:` entry may carry — the
 # gate map's own write request (`SkillGateSetRequest`).
@@ -205,6 +207,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
     # and those are precisely the fields people try first. A manifest that half
     # works while saying nothing is worse than one that is refused.
     unknown_agent_keys = {}
+    from services.system_apply import seats as apply_seats  # trinity-enterprise#1030 CP4
     for agent_name, agent_config in data["agents"].items():
         if not isinstance(agent_config, dict):
             raise ValueError(f"Agent '{agent_name}' config must be an object")
@@ -232,6 +235,10 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             skill_sets=agent_config.get("skill_sets"),
             grants=agent_config.get("grants"),  # trinity-enterprise#1030 CP2
             gates=_parse_gates(agent_name, agent_config.get("gates")),  # CP3
+            # CP4: the shapes are refused by name; a person seat never names a person.
+            seat=apply_seats.parse_seat(agent_name, agent_config.get("seat")),
+            person_seats=apply_seats.parse_person_seats(
+                agent_name, agent_config.get("person_seats")),
         )
 
     # Parse permissions
@@ -1469,6 +1476,18 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             logger.warning(f"Failed to get gates for {full_name}: {e}")
             unobserved_reads.append(f"gates of {full_name}")
 
+        # trinity-enterprise#1030 CP4: the seat the agent holds, when an
+        # assignment module can say. Person seats are not exported: the seam
+        # answers per seat and never lists who fills what.
+        try:
+            from services.system_apply import seats as apply_seats
+            held_seat = apply_seats.export_member(full_name)
+            if held_seat:
+                config["seat"] = held_seat
+        except Exception as e:
+            logger.warning(f"Failed to get the seat of {full_name}: {e}")
+            unobserved_reads.append(f"seat of {full_name}")
+
         agent_configs[short_name] = config
 
     if templateless:
@@ -2163,6 +2182,10 @@ async def deploy_manifest(
                 agent_names, manifest.agents, current_user)
             if gates_held_back:
                 all_warnings.append(gates_held_back)
+            from services.system_apply import seats as apply_seats
+            seats_held_back = apply_seats.deploy_hold_back_warning(agent_names, manifest.agents)
+            if seats_held_back:
+                all_warnings.append(seats_held_back)
 
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
@@ -2400,6 +2423,19 @@ async def deploy_manifest(
                 logger.exception(f"Grant phase failed for system '{manifest.name}'")
                 all_warnings.append(f"Failed to write grants: {reason}")
 
+        # 10d. The seat each created member holds (trinity-enterprise#1030
+        # CP4), through the assignment module's optional writer only; without
+        # it every declared seat is listed as held back. Person seats are
+        # never filled. Best-effort, like 7-10c.
+        if any(cfg.seat is not None for cfg in manifest.agents.values()):
+            from services.system_apply import seats as apply_seats
+            try:
+                all_warnings.extend(apply_seats.deploy(created_map, manifest.agents, current_user))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Seat phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write seats: {reason}")
+
         # 11. Create System View (ORG-001 Phase 4, optional)
         # create_system_view self-guards (returns None on error).
         system_view_id = None
@@ -2570,6 +2606,10 @@ class ApplyMemberState:
     # trinity-enterprise#1030 CP3: every stored gate row by skill key
     # (tombstones included), read only when the member declares `gates:`.
     gates: Dict[str, dict] = field(default_factory=dict)
+    # trinity-enterprise#1030 CP4: the seat the member holds (None = not
+    # observed on this install) and each declared person seat's status.
+    seat: Optional[Dict[str, object]] = None
+    person_seats: Dict[Tuple[str, str], str] = field(default_factory=dict)
 
 
 @dataclass
@@ -2870,6 +2910,10 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             if manifest.agents[state.short_name].gates is not None:  # trinity-enterprise#1030 CP3
                 from services.system_apply import gates as apply_gates
                 state.gates = apply_gates.read_member(name)
+            from services.system_apply import seats as apply_seats
+            if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
+                state.seat, state.person_seats = apply_seats.read_member(
+                    name, manifest.agents[state.short_name])
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
             state.blocked = True
@@ -3113,6 +3157,11 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
                                  "extras reported, never revoked"),
     "SystemAgentConfig.gates": ("reconciled", "explicit skill gates set or rewritten through the "
                                 "gate map's own write; undeclared gates reported, never cleared"),
+    "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
+                               "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.person_seats": ("report-only", "seats a person must fill, by role and kind, "
+                                       "never a person; reported filled / vacant / unobserved, "
+                                       "never filled"),
     "schedule.name": ("reconciled", "the match key"),
     "schedule.cron": ("reconciled", "updated in place"),
     "schedule.message": ("reconciled", "updated in place"),
@@ -3137,6 +3186,9 @@ _APPLY_OP_STEP = {
     # trinity-enterprise#1030 CP2: a capability after the member's skills, so a
     # created member starts holding what the manifest says it holds.
     "grant": "grants",
+    # trinity-enterprise#1030 CP4: the agent's own seat, last, through the
+    # assignment module's optional writer.
+    "seat_set": "seat",
 }
 _APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
 
@@ -3573,6 +3625,16 @@ def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers
         apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp)
 
 
+def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState]) -> None:
+    """trinity-enterprise#1030 CP4: `seat:` and `person_seats:`, through the
+    assignment module's optional hooks; unobserved without them."""
+    from services.system_apply import seats as apply_seats
+    apply_seats.plan(
+        mp, seat=None if state is None else state.seat,
+        people=None if state is None else state.person_seats, creating=state is None,
+        apply_change=_apply_change, make_op=ApplyOp)
+
+
 def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
                  snapshot: ApplySnapshot, blockers: List) -> None:
     """trinity-enterprise#1030 CP2: `grants:`. Written only when the caller
@@ -3621,6 +3683,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             _plan_gates(mp, None, blockers)
             _plan_skills(mp, None, snapshot, blockers)
             _plan_grants(mp, None, snapshot, blockers)
+            _plan_seats(mp, None)
             mp.verdict = "create"
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
@@ -3628,6 +3691,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             _plan_gates(mp, state, blockers)
             _plan_skills(mp, state, snapshot, blockers)
             _plan_grants(mp, state, snapshot, blockers)
+            _plan_seats(mp, state)
             mp.verdict = "update" if mp.ops else "unchanged"
         else:
             mp.verdict = "blocked"
@@ -3742,12 +3806,15 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         warnings.append(grants_warning)
     from services.system_apply import gates as apply_gates
     gates_summary = apply_gates.summarize(members)
+    from services.system_apply import seats as apply_seats
+    roles_summary = apply_seats.summarize(members)
 
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted, summary={"grants": grants_summary, "gates": gates_summary},
+        adopted=adopted, summary={"grants": grants_summary, "gates": gates_summary,
+                 "roles": roles_summary},
     )
 
 
@@ -4061,6 +4128,9 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
         from services.system_apply import gates as apply_gates
         await apply_gates.run(op, current_user, out, attempt, request=request,
                               apply_change=_apply_change)
+    elif op.kind == "seat_set":  # trinity-enterprise#1030 CP4
+        from services.system_apply import seats as apply_seats
+        await apply_seats.run(op, current_user, out, attempt)
 
 
 async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:

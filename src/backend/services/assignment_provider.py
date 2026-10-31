@@ -134,6 +134,23 @@ class AssignmentProvider(Protocol):
     # them per role through the SAME function `enforce` uses (ent#754).
     # def approver_roles_for(self, agent_name: str) -> Optional[dict]: ...
 
+    # OPTIONAL (trinity-enterprise#1030): seat ``agent_name`` in canon role
+    # ``role_id`` on behalf of ``created_by`` — the first WRITE on this seam,
+    # how a system manifest's ``seat:`` reaches the record. The provider
+    # evaluates its own admin predicate for ``created_by`` and answers
+    # ``{"changed": bool}`` or its refusal ``{"refused": code}``. Read through
+    # ``getattr`` by :func:`write_seat`; a provider that predates it (or no
+    # provider) leaves ``seat:`` unobserved and NOTHING writes a seat.
+    # def set_seat(self, agent_name: str, role_id: str, created_by: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#1030): whether a PERSON fills the seat
+    # ``role_id`` of ``kind`` on ``agent_name`` — the report a manifest's
+    # ``person_seats:`` asks for. ``{"filled": bool}``; never a person — any
+    # other key is dropped here. Read through ``getattr`` by
+    # :func:`resolve_person_seat`; a provider that predates it leaves the
+    # person seats unobserved. Nothing ever fills a person seat through it.
+    # def person_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
+
 
 _provider: Optional[AssignmentProvider] = None
 
@@ -477,3 +494,69 @@ def resolve_served_seat(agent_name: Optional[str], person_email: Optional[str]) 
         return _fallback()
     source = answer["source"]
     return {"role_id": answer.get("role_id") if source != "none" else None, "source": source}
+
+
+# --- trinity-enterprise#1030: seats a system manifest declares --------------
+
+def seat_writer_installed() -> bool:
+    """Can ``seat:`` be both read and written on this install? Only when a
+    provider answers ``seat_for`` AND ``set_seat``; otherwise the class is
+    unobserved — never "in sync", never a blocker."""
+    provider = _provider
+    return (provider is not None and getattr(provider, "seat_for", None) is not None
+            and getattr(provider, "set_seat", None) is not None)
+
+
+def person_seat_reader_installed() -> bool:
+    """Can ``person_seats:`` be observed on this install?"""
+    provider = _provider
+    return provider is not None and getattr(provider, "person_seat_status", None) is not None
+
+
+class SeatWriterUnavailable(RuntimeError):
+    """``set_seat`` was called on an install without the hook."""
+
+
+def write_seat(agent_name: str, role_id: str, created_by: Optional[str]) -> Dict[str, Any]:
+    """Seat ``agent_name`` in ``role_id`` through the provider's ``set_seat``.
+
+    ``{"changed": bool}`` or ``{"refused": code}``. Raises
+    :class:`SeatWriterUnavailable` without the hook (callers check
+    :func:`seat_writer_installed` first) and ``ValueError`` on a malformed
+    answer; a provider raise propagates — a write's failure is the caller's
+    to record, never swallowed here."""
+    provider = _provider
+    fn = getattr(provider, "set_seat", None) if provider is not None else None
+    if fn is None:
+        raise SeatWriterUnavailable("no seat writer is installed")
+    answer = fn(agent_name, role_id, created_by)
+    if not isinstance(answer, Mapping):
+        raise ValueError("the seat writer returned a malformed answer")
+    refused = answer.get("refused")
+    if refused is not None:
+        code = refused if isinstance(refused, str) and ROLE_ID_RE.fullmatch(refused) else "refused"
+        return {"refused": code}
+    return {"changed": bool(answer.get("changed"))}
+
+
+def resolve_person_seat(agent_name: str, role_id: str, kind: str) -> str:
+    """``filled`` / ``vacant`` / ``unobserved`` (no hook, or the hook answers
+    ``None``) / ``error`` (a raise or a malformed answer — a READ failure,
+    which a caller must not read as unobserved). Never a person."""
+    provider = _provider
+    fn = getattr(provider, "person_seat_status", None) if provider is not None else None
+    if fn is None:
+        return "unobserved"
+    try:
+        answer = fn(agent_name, role_id, kind)
+    except Exception:  # noqa: BLE001 — answered as a read failure, never a raise
+        logger.warning("[assignment_provider] provider.person_seat_status failed for %s/%s",
+                       agent_name, role_id, exc_info=True)
+        return "error"
+    if answer is None:
+        return "unobserved"
+    if not isinstance(answer, Mapping) or not isinstance(answer.get("filled"), bool):
+        logger.warning("[assignment_provider] provider.person_seat_status returned a "
+                       "malformed answer for %s/%s", agent_name, role_id)
+        return "error"
+    return "filled" if answer["filled"] else "vacant"
