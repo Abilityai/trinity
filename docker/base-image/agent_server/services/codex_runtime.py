@@ -61,7 +61,7 @@ from ..utils.credential_sanitizer import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, strip_protected_env_lines
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .subprocess_lifecycle import (
@@ -336,6 +336,14 @@ def calculate_codex_cost(
 # ---------------------------------------------------------------------------
 
 _API_KEY_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+# trinity-enterprise#1001: the endpoint keys of `config.toml`, held at the CLI's
+# own defaults for every turn (read from Codex 0.147.0: `openai_base_url = ""` is
+# ignored, so the built-in URL applies; `chatgpt_base_url` defaults to this).
+_ENDPOINT_PINS = (
+    "-c", 'model_provider="openai"',
+    "-c", 'openai_base_url=""',
+    "-c", 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
+)
 _AGENT_HOME = "/home/developer"
 # ent#787: root-owned, written by the backend as root; it decides while it
 # exists. The agent-owned home copy decides only while it is missing (same
@@ -1127,6 +1135,12 @@ class CodexRuntime(AgentRuntime):
         resume_thread_id: Optional[str],
     ) -> List[str]:
         cmd = ["codex", "exec"]
+        # trinity-enterprise#1001: `$CODEX_HOME/config.toml` is agent-writable
+        # (under `$TMPDIR`), and a provider or base URL there decides where the
+        # API key or ChatGPT token goes. `-c` beats every config layer the agent
+        # can write, and the built-in `openai` provider cannot be redefined, so
+        # these three pins put the endpoint back in the platform's hands.
+        cmd += _ENDPOINT_PINS
         # Exec-level flags belong to `codex exec`, NOT to the `resume`
         # sub-subcommand. In codex 0.139.0, `exec resume [OPTIONS] [SESSION_ID]
         # [PROMPT]` has a NARROWER option set and rejects -C/--sandbox/--json/-o
@@ -1178,6 +1192,21 @@ class CodexRuntime(AgentRuntime):
 
         api_key = _load_openai_api_key()
         codex_home = _ensure_codex_home()
+        # trinity-enterprise#1001: the CLI loads `$CODEX_HOME/.env` over the
+        # process env, so the names `.env` may not set are taken out of it
+        # before anything below spawns `codex`. A line that cannot be removed
+        # refuses the turn: the CLI would apply it.
+        try:
+            strip_protected_env_lines(Path(codex_home) / ".env")
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"{codex_home}/.env sets a variable an agent's files may not set (a proxy, "
+                    f"TLS-trust, endpoint or loader variable) and could not be rewritten: {exc}. "
+                    "Remove that line or restore the file's permissions."
+                ),
+            ) from exc
 
         # #1971: an API key is required only when there is no SUBSCRIPTION
         # credential. A ChatGPT-plan Codex agent has no API key by design, and
