@@ -5921,6 +5921,34 @@ def _migrate_skill_sources_follow_bundled_pin(cursor, conn):
     conn.commit()
 
 
+def _migrate_platform_alert_subjects_resweep(cursor, conn):
+    """#3254 — the #3246 upgrade sweep, run a second time. Data only.
+
+    `platform_alert_subjects` swept the platform-alert backlog once, on the
+    upgrade that carried it. The emitters #3254 moves onto the seam kept
+    filing rows with no `subject` until each move landed, and the seam
+    cannot see such a row: `observe` would file a second pending row beside
+    it, `clear` could not end it, and the snooze could not see a person's
+    ending of it. This re-runs the unchanged `run_platform_alert_sweep` over
+    them: the subject's existing holder keeps the slot whatever its age
+    (#3255's rule), else the newest stays; the rest end as one `superseded`
+    batch. Agent-raised and gate rows, and the gitignore and problem-report
+    rows (no subject, no lifetime), are never touched; a git-bloat row gets
+    a lifetime only. A fresh install has no rows and plans nothing; a second
+    run plans nothing. Runs at import, before any emitter starts.
+
+    Mirrored by the Alembic revision 0111_platform_alert_resweep.
+    """
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6101,4 +6129,5 @@ MIGRATIONS = [
     ("agent_memory_facts", _migrate_agent_memory_facts),
     ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
     ("agent_memory_provenance", _migrate_agent_memory_provenance),
+    ("platform_alert_subjects_resweep", _migrate_platform_alert_subjects_resweep),
 ]
