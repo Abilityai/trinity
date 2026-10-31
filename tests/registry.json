@@ -33,6 +33,18 @@
       "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
     },
     {
+      "file": "unit/test_4002_setup_hook_tmpdir.py",
+      "feature": "#4002",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "startup",
+        "compatibility",
+        "unit"
+      ],
+      "description": "setup.sh protected from the orphan sweep, default TMPDIR emptied at boot, F-014 setup outcome check"
+    },
+    {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
       "feature": "#4000",
       "added": "2026-10-27",
@@ -901,6 +913,17 @@
         "unit"
       ],
       "description": "#3246 merge-train fix: the platform ending seam works from every thread origin — `platform_alerts.clear` / `observe` driven through `asyncio.to_thread` (the loop's default executor, which anyio does not own — the headroom sweep and the skills reconcile) still land the `platform_cleared` audit row and the `operator_queue_cancelled` / sync trigger with no 'could not schedule' warning; `spawn_on_loop` from the default executor and from a plain `threading.Thread` once the host loop is known; `main.py::lifespan` captures the host loop before any boot phase; with no running loop, no anyio portal and no live host loop it still raises loudly (never a silent no-op), and a captured loop that was closed is not a target. No Docker."
+    },
+    {
+      "file": "unit/test_4052_conftest_name_pinned.py",
+      "feature": "#4052",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4052: a bare `from conftest import ...` in a unit file resolves to tests/conftest.py even with tests/unit at sys.path[0], and tests/unit/conftest.py is never executed a second time as top-level `conftest`."
     },
     {
       "file": "unit/test_ent665_send_idempotency_key.py",
@@ -1925,6 +1948,17 @@
         "circuit-breaker"
       ],
       "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening — HTTP errors, read/write/pool failures, and protocol errors are excluded"
+    },
+    {
+      "file": "unit/test_4050_platform_alert_id_collision.py",
+      "feature": "#4050",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4050: at a frozen clock, both kinds of a shared-prefix pair (git_bloat_*, db_backup_*) and a repeated event are separate rows; create_platform_item re-mints a colliding id and never returns created for a row it did not insert."
     },
     {
       "file": "integration/test_circuit_breaker.py",
@@ -2966,6 +3000,17 @@
       "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
     },
     {
+      "file": "unit/test_4053_person_kind_never_platform_ended.py",
+      "feature": "#4053",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4053: platform_alerts.clear/reconcile refuse every clears=\"person\" kind at runtime (ends nothing, returns 0, logs ERROR), however the kind is passed; the row stays pending; a hook kind still clears."
+    },
+    {
       "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
       "feature": "#2027",
       "added": "2026-08-05",
@@ -3986,6 +4031,17 @@
       "description": "GitHub evaluates a workflow string that contains any ${{ }} as ONE expression and refuses the file at parse time above 21,000 characters (#2625: deploy-dev.yml's ssh script embeds three expressions; the #2578 comments took it from 17,837 to 21,923, the first dev push after #2622 came up as a run named after the file with zero jobs, and the notify-failure job that files the #2204 incident never ran — PyYAML and bash -n accept such a file and a dev-push-only workflow is never parsed before merge). Walks EVERY string in EVERY workflow (.yml and .yaml) and composite-action manifest, measured as the parsed scalar in UTF-8 bytes, and fails any expression-bearing one past 20,000 (1,000 in hand), with a vacuity check that the deploy script is found and carries expressions, mutations proving the guard rejects the deploy script padded back past the cap and an expression-bearing string wherever it sits (run, with-input, env), and that a long string WITHOUT an expression is left alone. Structural fix (no expression in the script at all) is #2626."
     },
     {
+      "file": "unit/test_3998_chat_setup_releases_admission.py",
+      "feature": "#3998",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "reliability",
+        "execution"
+      ],
+      "description": "#3998: a /chat turn whose execution setup raises releases its capacity slot and idempotency claim (pull pilot: claim only); a setup that succeeds leaves both to run_chat_turn's finally."
+    },
+    {
       "file": "unit/test_2995_deploy_health_gate.py",
       "feature": "#2995",
       "added": "2026-09-28",
@@ -4958,6 +5014,16 @@
       "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
     },
     {
+      "file": "../src/mcp-server/src/fan_out_turn_scope.test.ts",
+      "feature": "#3944",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "fan_out's Idempotency-Key is scoped to the caller's turn (the #3296 rule): same tasks from the same turn keep one key; from a different turn a different key; a scheduler retry derives attempt 1's key (delegationTurnScope); no turn (absent or manual) is byte-identical to the pre-#3944 key and reads no execution row; async mode keeps its own key with the turn appended; an unreadable row scopes to the turn and the call still goes out. Reverting the fix turns 4 of the 6 red."
+    },
+    {
       "file": "unit/test_ent465_suggestions.py",
       "feature": "trinity-enterprise#465",
       "added": "2026-09-24",
@@ -5883,6 +5949,26 @@
         "unit"
       ],
       "description": "trinity-enterprise#753: the agent_skill_gates table on both tracks (the registered SQLite entry run twice; the Alembic revision extends the single head), the PK in tables.py (ON CONFLICT on a tables.py-built database), the write merging unsent fields under the lock, writes only to a live agent, rename/soft-delete/purge through the AGENT_REFS cascade, facade signature parity, and the read seam: list_skill_gates skips tombstones and a failed read raises so read_gates refuses 503 (never {}); a gate written mixed-case holds through the real matcher."
+    },
+    {
+      "file": "unit/test_3300_list_reports_agent_scope.py",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "GET /api/reports takes a narrowing-only agent_names applied in SQL before limit: with an agent key's reach saturated by a spawned child's newer reports, the page without agent_names is the child's, and with agent_names=[self, peer] the permitted peer's older reports are returned; it never widens (an unreachable name yields nothing); an admin is narrowed to exactly the names; it composes with ?agent=; omitted changes nothing; >500 names or a blank name is a named 422; the shared narrow_to_names helper only narrows. Ignoring agent_names in the route turns 7 of 10 red."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/list_reports_scope.test.ts",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "A broad list_reports under an agent key reads its permits strictly first and sends {self} ∪ permitted as agent_names; a page the backend narrowed comes back with exactly {count, reports}; a row the belt drops is reported as withheld + a warning; a failed permissions read is permissions_unavailable with nothing listed; a permit set past 500 is refused before sending; a user key and a scoped listing send no agent_names. Not sending agent_names, or a silent belt, each turns one red."
     },
     {
       "file": "unit/test_ent753_gate_map_service.py",
