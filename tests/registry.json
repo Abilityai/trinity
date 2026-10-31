@@ -12,6 +12,16 @@
       "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
     },
     {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
