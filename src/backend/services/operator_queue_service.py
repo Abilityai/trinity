@@ -2783,7 +2783,12 @@ class OperatorQueueSyncService:
         snooze silences re-reads of the acknowledged episode for the snooze
         window and a NEW episode files at once. A leader failover or restart
         loses the in-memory episode, so a persisting flood counts as a new
-        episode there and may file once more. It used to be one
+        episode there and may file once more. The marker is worker-local too:
+        with Redis down the leader lease fails open
+        (`_try_acquire_leadership`), each worker stamps its own
+        `episode_started_at`, and another worker's re-read can file past a
+        person's ending, at most one extra row per extra worker per re-read
+        window. It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
