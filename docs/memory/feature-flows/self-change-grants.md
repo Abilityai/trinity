@@ -98,6 +98,17 @@ enforce_agent_capability → capability_refusal(user, cap)
                                                   audit: capability_refused
 ```
 
+## Reading grants over MCP (trinity-enterprise#991)
+
+`get_agent_capability_grants(agent_name)` (`src/mcp-server/src/tools/permissions.ts`)
+reads `GET /api/agents/{name}/capability-grants` and returns it verbatim. The route's
+scope is unchanged: an agent key reads itself or an agent it spawned, never an edge
+peer; a person key reads only as owner or admin (ent#756). The access row is
+`baselined` on that `OwnedAgentByName` fence, not `enforce`, because the MCP edge gate
+would admit an edge peer the route refuses. A refusal (the uniform 404) comes back as an
+error saying "refused, not 'no grants'". There is no write tool: granting stays an
+admin's interactive action.
+
 ## Upgrade effect
 
 After deploy, no agent holds the three new capabilities. An orchestrating agent
