@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, assert_not_share_viewer
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -884,13 +884,24 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 # ============================================================================
 
 @router.post("/{agent_name}/start")
+@ops_write_route(
+    "#3180: starts one agent; the target policy refuses the system agent and "
+    "ephemeral agents, and a start that would mint the agent a key is refused"
+)
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
     # they spawned (interim until #948 capability tokens).
     enforce_agent_spawn_scope(current_user, agent_name)
     try:
-        result = await start_agent_internal(agent_name)
+        # #3180: an ops_write key may not undo a person's containment, so its
+        # start never mints the agent a key (409 ops_write_would_mint_key).
+        # `getattr(..., None)` as in `enforce_agent_spawn_scope`: the default can
+        # only mean "not an ops_write key", and the resolver always sets it.
+        result = await start_agent_internal(
+            agent_name,
+            allow_key_mint=getattr(current_user, "mcp_scope", None) != OPS_WRITE_SCOPE,
+        )
         invalidate_context_stats_cache()  # PERF-269
         credentials_status = result.get("credentials_injection", "unknown")
         credentials_result = result.get("credentials_result", {})
@@ -973,6 +984,10 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 
 
 @router.post("/{agent_name}/stop")
+@ops_write_route(
+    "#3180: stops one agent; the target policy refuses the system agent and "
+    "ephemeral agents"
+)
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
@@ -1111,6 +1126,10 @@ async def force_release_agent(
 
 
 @router.post("/{agent_name}/circuit-breaker/reset")
+@ops_write_route(
+    "#3180: re-closes one agent's breakers, which re-open on the next failure; "
+    "the admin gate still runs"
+)
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
@@ -1126,7 +1145,10 @@ async def reset_circuit_breaker_endpoint(
     # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
     # agent principals. Swapping this ONE call site is the fix; adding the
     # rejection to `require_role` itself would break ghost spawning.
-    current_user: User = Depends(require_admin),
+    #
+    # #3180: `require_admin_allowing("ops_write")` is the same gate with that one
+    # bounded scope opted in (census ADMIN_WIDENED); `role == "admin"` still runs.
+    current_user: User = Depends(require_admin_allowing("ops_write")),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 

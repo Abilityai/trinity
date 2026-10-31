@@ -9,6 +9,7 @@ from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
     OPS_SCOPE,
+    OPS_WRITE_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
     agent_principal_name,
@@ -38,17 +39,18 @@ async def create_mcp_api_key_endpoint(
 
     Scope is `user` unless explicitly requested. `portal_delegate` (ent#163) is
     admin-only: it lets the holder act as any end user who has portal access, so
-    it must never be self-issuable by an ordinary account.
+    it must never be self-issuable by an ordinary account. `ops` (#2323) and
+    `ops_write` (#3180) are admin-only bounded machine credentials.
     """
     requested_scope = (getattr(key_data, "scope", None) or "user").strip()
     if requested_scope != "user":
-        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE):
+        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE, OPS_WRITE_SCOPE):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported key scope '{requested_scope}'",
             )
-        if requested_scope == OPS_SCOPE:
-            # #2323 — minting a credential is a GRANT, and the guards used for
+        if requested_scope in (OPS_SCOPE, OPS_WRITE_SCOPE):
+            # #2323 / #3180 — minting a credential is a GRANT, and the guards used for
             # `portal_delegate` below are the wrong shape for this one: both
             # `reject_agent_principal` and `assert_admin`'s named rejections are
             # no-ops for an ops principal, so an ops key could mint ops keys.

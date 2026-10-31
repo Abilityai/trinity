@@ -289,6 +289,28 @@ describe("#848 canAccess is enforced at call time, not just advertisement", () =
     });
   });
 
+  // #3180 — the bounded machine scopes are not operators: `OPERATOR_SCOPES`
+  // stays {user, agent, system}, so an `ops_write` (or `ops`) session gets no
+  // MCP tools, and naming one directly is a not-found, never a dispatch.
+  for (const scope of ["ops_write", "ops"]) {
+    it(`an ${scope} session cannot LIST or CALL an operator tool`, async () => {
+      await withProbeServer(scope, async (client, ran) => {
+        const listed = (await client.listTools()).tools.map((t) => t.name);
+        assert.deepEqual(listed, [], `no tool may be advertised to an ${scope} session`);
+        await assert.rejects(
+          () => client.callTool({ name: "operator_tool", arguments: {} }),
+          (err: unknown) => {
+            const msg = String((err as Error)?.message ?? err);
+            assert.match(msg, /not found|unknown tool|method not found/i, `got: ${msg}`);
+            return true;
+          }
+        );
+        assert.equal(ran.operator, 0, `SECURITY: an ${scope} session ran an operator tool`);
+        assert.equal(ran.anon, 0);
+      });
+    });
+  }
+
   it("an operator session can call the operator tool (gate is not blanket-deny)", async () => {
     await withProbeServer("user", async (client, ran) => {
       const listed = (await client.listTools()).tools.map((t) => t.name).sort();

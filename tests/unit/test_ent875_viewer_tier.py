@@ -56,6 +56,7 @@ def _db(monkeypatch):
     (_p("owner", scope="agent", agent_name="sibling"), "key"),
     (_p("trinity-system", scope="system"), "key"),
     (_p("owner", scope="ops"), "key"),
+    (_p("owner", scope="ops_write"), "key"),                     # #3180
     (_p("owner", scope="connector", connector_agent="shared-agent"), "key"),
     # Fail closed: nothing below is listed as a key, so none inherits the key view.
     (_p("owner", scope="portal_delegate", portal_delegate=True), "other"),
@@ -85,6 +86,7 @@ def test_a_principal_with_no_mcp_scope_attribute_fails_closed():
     (_p("teammate", scope="user"), dep.VIEWER_SHARE),
     (_p("owner", scope="agent", agent_name="sibling"), dep.VIEWER_KEY),
     (_p("owner", scope="ops"), dep.VIEWER_KEY),
+    (_p("owner", scope="ops_write"), dep.VIEWER_KEY),
     (_p("owner", scope="connector", connector_agent="shared-agent"), dep.VIEWER_KEY),
     (_p("owner", scope="portal_delegate", portal_delegate=True), dep.VIEWER_SHARE),
     (_p("owner", scope="robot"), dep.VIEWER_SHARE),
@@ -124,6 +126,7 @@ def test_a_share_holder_is_scoped_to_their_own_id():
 @pytest.mark.parametrize("principal", [
     _p("owner"), _p("admin", role="admin"),
     _p("owner", scope="agent", agent_name="sibling"), _p("owner", scope="ops"),
+    _p("owner", scope="ops_write"),
     _p("owner", scope="connector", connector_agent="shared-agent"),
 ])
 def test_owner_admin_and_key_tiers_see_every_row(principal):

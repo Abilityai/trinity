@@ -112,6 +112,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // tools until verify_login upgrades it (#848),
   // portal_delegate=trusted issuer that exchanges an end-user email for a portal
   // session and nothing else (ent#163).
+  // ops / ops_write=bounded machine credentials for ops tooling (#2323 reads,
+  // #3180 writes); neither is in OPERATOR_SCOPES, so neither gets MCP tools.
   //
   // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
   // a runtime string outside the declared union — the backend column is
@@ -120,7 +122,7 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "ops_write";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;

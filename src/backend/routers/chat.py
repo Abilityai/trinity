@@ -22,6 +22,7 @@ from dependencies import (
     assert_owns_or_admin,
     is_fleet_admin,
     resolve_source_agent,
+    ops_write_route,
     row_is_viewers,
     viewer_row_scope,
 )
@@ -1017,6 +1018,7 @@ async def close_chat_session(
 # ============================================================================
 
 @router.post("/{name}/executions/{execution_id}/terminate")
+@ops_write_route("#3180: cancels one execution on an agent the key owner reaches")
 async def terminate_agent_execution(
     execution_id: str,
     task_execution_id: Optional[str] = None,

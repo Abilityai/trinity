@@ -362,7 +362,24 @@ def public_skills_result(raw) -> dict:
     return out
 
 
-async def start_agent_internal(agent_name: str) -> dict:
+# #3180: a start that would mint the agent a platform key, refused for a caller
+# that may not do that (an `ops_write` key). A person revoking or deleting the
+# agent's key is how it is contained, so only a person may undo that.
+_WOULD_MINT_KEY_MESSAGE = (
+    "Starting this agent would issue it a new platform key: its key is revoked, "
+    "deleted, missing or not its own, or its container must be rebuilt. An "
+    "ops-write key never does that, so a person has to start this agent."
+)
+
+
+def _refuse_key_mint(reason: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "ops_write_would_mint_key", "reason": reason, "message": _WOULD_MINT_KEY_MESSAGE},
+    )
+
+
+async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) -> dict:
     """
     Internal function to start an agent.
 
@@ -371,6 +388,11 @@ async def start_agent_internal(agent_name: str) -> dict:
 
     Args:
         agent_name: Name of the agent to start
+        allow_key_mint: False refuses (409 ``ops_write_would_mint_key``, before
+            any side effect) a start that would mint the agent a platform key:
+            the #1559 rebuild of a missing container (``reason:
+            container_missing``) and the #1854 drift heal (``reason:
+            key_drift``). #3180: an ``ops_write`` start passes False.
 
     Returns:
         dict with start status and trinity_injection result
@@ -388,6 +410,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         owner = db.get_agent_owner(agent_name)
         if not owner:
             raise HTTPException(status_code=404, detail="Agent not found")
+        if not allow_key_mint:
+            _refuse_key_mint("container_missing")
         container = await recreate_missing_container(agent_name)
 
     # Check if container needs recreation for shared folders, API key, resource limits, or capabilities
@@ -400,6 +424,13 @@ async def start_agent_internal(agent_name: str) -> dict:
     # other predicates are satisfied by the recreate's own derived-env rules; a
     # missing/stale MCP key is not, because the plaintext is unrecoverable.
     mcp_key_match = check_agent_mcp_key_matches(container, agent_name)
+    # #3180: an unsatisfied key predicate is exactly when the heal below mints.
+    # The verdict does not ask WHY the key is unrecognized: a person's revoke
+    # leaves an inactive row, but a person's delete leaves no row, which is
+    # also what the platform's own prune leaves, so the two cannot be told
+    # apart and neither is healed for a caller that may not mint.
+    if not mcp_key_match and not allow_key_mint:
+        _refuse_key_mint("key_drift")
     needs_recreation = (
         not shared_folder_match or
         not check_public_folder_mount_matches(container, agent_name) or
