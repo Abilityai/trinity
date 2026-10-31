@@ -28,7 +28,7 @@
         "unit",
         "systems"
       ],
-      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
+      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; one warning per declared-only member names every key it ignores; a live one is never started, stopped or written (Docker recorders + every row naming it); deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
     },
     {
       "file": "unit/test_ent1030_seats.py",
@@ -39,7 +39,7 @@
         "systems",
         "security"
       ],
-      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips; deploy seats through the hook or lists what it held back."
+      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved; unobserved with a not-yet-exists note on a member apply will create); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips, and without a seat reader names each seat in its # unobserved: line; deploy seats through the hook only for an admin in a signed-in session (agent key, an admin's user key and a non-admin are held back with seats_require_interactive_admin, nothing written) and passes the username as attribution."
     },
     {
       "file": "unit/test_ent1030_gates.py",
@@ -7203,6 +7203,26 @@
         "unit"
       ],
       "description": "The backend's one model door (`services/model_gateway`): the credential follows the agent — its own subscription token, the platform key for an api-key agent or an agent-less job, nobody when a subscription token cannot be read (never a borrowed key); the model follows the credential (Haiku 4.5 on a subscription, Haiku 5.5 on the key, a model override honoured on the key only); `trinity_model_credential` ∈ auto/subscription/platform_key with the 429-on-subscription fallback in auto only; the request/send/complete surface over a scripted transport; the migrated callers (memory extract/reconcile, the MEM-001 summarizer, thread titles, the compatibility AI checks) executed through the door; the honest `extractor` plan on the platform card and the per-agent row; the owner's extract-preview door (facts + screened + who answered, nothing stored; 422 memory_no_subject / transcript_empty / no_extractor; an agent principal refused)."
+    },
+    {
+      "file": "unit/test_ent1030_naming.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1030_skills.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
     }
   ]
 }
