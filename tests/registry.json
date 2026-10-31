@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1007_ask_to_canon_role.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing"
+      ],
+      "description": "trinity-enterprise#1007 item 1: ask_operator `to: role:<id>` — the sink resolves a canon role on the raising agent's own roster with ent#881 reachability, stores the id lower-cased (a mixed-case retry replays without differs), and refuses every arm by name (role_unavailable / role_unassigned / role_cannot_open_agent; a malformed id is invalid_to naming the form) with the role's label and never a person; the gate's _can_open delegates to role_addressing.can_open_agent and its patch surface still governs _approvers."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",

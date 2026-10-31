@@ -5,7 +5,8 @@ Every outbound object an agent produces for a human — an ask, a report, a
 message — carries one field, ``to``, whose value is a **role**, never a person:
 ``primary | approver | viewer | operator``. This module is the ONE resolution
 rule behind all three, so an ask and a report addressed ``to: approver`` cannot
-reach different people.
+reach different people. An ask — and only an ask — may also name a canon role
+by id, ``role:<id>`` (:func:`resolve_role_id_for_ask`, trinity-enterprise#1007).
 
 Resolution order:
 
@@ -36,10 +37,14 @@ logger = logging.getLogger(__name__)
 
 ROLES = ("primary", "approver", "viewer", "operator")
 
-#: trinity-enterprise#848: a skill gate's approver may be a canon role, stored
-#: as ``role:<id>`` beside the kinds. Only the gate speaks this form — ``ROLES``
-#: and :func:`resolve` (what an agent's ask / report / message may address) do
-#: not know it, so an agent cannot address a role id.
+#: A canon role, stored and addressed as ``role:<id>`` beside the four kinds
+#: (trinity-enterprise#848). Two readers speak the form: the skill gate, whose
+#: approver may be a role id (:func:`resolve_role_id`), and — since
+#: trinity-enterprise#1007 — the ask sink, where an agent's own ``to`` may name
+#: one (:func:`resolve_role_id_for_ask`: the raising agent's own roster,
+#: reachability applied, every arm refused by name). ``ROLES`` and
+#: :func:`resolve` — what a report or a message may address — still do not
+#: know it, so those two surfaces refuse a role id ``invalid_to``.
 ROLE_ID_PREFIX = "role:"
 
 
@@ -70,7 +75,11 @@ def role_label(value: Any) -> str:
 
 class RoleRefused(Exception):
     """The role cannot address anyone. ``code`` is the named reason:
-    ``invalid_to`` (not a role) or ``role_unassigned`` (nobody fills it)."""
+    ``invalid_to`` (not a role) or ``role_unassigned`` (nobody fills it); an
+    ask to a canon role id (:func:`resolve_role_id_for_ask`) also names
+    ``role_unavailable`` (no provider can answer) and ``role_cannot_open_agent``
+    (nobody seated can open the agent). ``message`` names the role's label,
+    never a person."""
 
     def __init__(self, code: str, role: str, message: str):
         super().__init__(code)
@@ -162,6 +171,77 @@ def resolve_role_id(agent_name: str, role_id: str) -> Resolution:
         "role_unassigned", role,
         f"Nobody fills the {role_label(role)} role for this agent yet.",
     )
+
+
+def can_open_agent(agent_name: str, email: str) -> bool:
+    """Can this person reach a decision raised on ``agent_name``?
+    (trinity-enterprise#881)
+
+    A decision is made in the Workspace (the agent on the person's roster:
+    owned or shared) or in Operations (an operator or admin with access to the
+    agent). A platform account is asked ``can_user_access_agent`` — owner,
+    shared or admin, which covers both doors; an email with no account only has
+    the Workspace, so the agent must be shared with it. Fails closed: an
+    unreadable lookup is "cannot open", which refuses by name rather than waits
+    silently. The one rule for a gate's approver (``skill_gate_service._can_open``
+    delegates here) and for an ask to a canon role (trinity-enterprise#1007).
+    """
+    try:
+        user = db.get_user_by_email(email)
+        if user:
+            return bool(db.can_user_access_agent(user["username"], agent_name))
+        from client_portal.service import agent_on_roster
+        return bool(agent_on_roster(agent_name, email, include_owned=False))
+    except Exception:  # noqa: BLE001
+        logger.warning("[role_addressing] could not tell whether a person can open %s",
+                       agent_name, exc_info=True)
+        return False
+
+
+def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
+    """Resolve canon role ``role_id`` (the parsed, lower-cased id) for an ASK
+    raised by ``agent_name`` (trinity-enterprise#1007): the people seated in it
+    on this agent's OWN roster who can open the agent. Raises ``RoleRefused``
+    on every arm, each named for its remedy — unlike :func:`resolve_role_id`,
+    which folds the gate's arms into one ``role_unassigned``:
+
+    * ``role_unavailable`` — no assignments provider answers for the role
+      (none registered, no answer, or it failed): address ``primary`` or
+      ``operator`` instead.
+    * ``role_unassigned`` — the provider answered: nobody is seated.
+    * ``role_cannot_open_agent`` — everyone seated is outside the agent
+      (:func:`can_open_agent`), so they would never see the ask.
+
+    No owner or operator fallback: a role id reaches the people it names, or
+    nobody. Several reachable people are all recorded; ``single`` only when
+    exactly one. The message names the role's label, never a person.
+    """
+    from services import assignment_provider
+
+    role = f"{ROLE_ID_PREFIX}{role_id}"
+    label = role_label(role)
+    people = assignment_provider.resolve_role_id_people(agent_name, role_id)
+    if people is None:
+        raise RoleRefused(
+            "role_unavailable", role,
+            f"The {label} role cannot be addressed on this install right now: canon "
+            "roles need the assignments module to answer. Address the ask to primary "
+            "or operator.",
+        )
+    if not people:
+        raise RoleRefused(
+            "role_unassigned", role,
+            f"Nobody fills the {label} role for this agent yet. Ask the agent's owner "
+            "to seat someone, or address the ask to primary or operator.",
+        )
+    reachable = [p for p in people if can_open_agent(agent_name, p)]
+    if not reachable:
+        raise RoleRefused(
+            "role_cannot_open_agent", role,
+            f"The {label} for {agent_name} cannot open {agent_name}, so they would "
+            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+        )
+    return Resolution(role, reachable, reachable[0] if len(reachable) == 1 else None, True)
 
 
 _deprecation_logged: set = set()
