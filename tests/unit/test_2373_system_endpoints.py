@@ -287,7 +287,7 @@ def test_export_round_trips_kind_so_a_deployment_stays_pull_only(monkeypatch):
         "acme-fork": types.SimpleNamespace(source_mode=True, auto_sync_enabled=True),
     }
     monkeypatch.setattr(svc.db, "get_git_config", lambda n: rows.get(n), raising=False)
-    monkeypatch.setattr(svc.db, "get_agent_permissions", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "get_permitted_agents", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "list_agent_schedules", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "get_agent_tags", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "get_agent_folder_config", lambda n: None, raising=False)
@@ -507,7 +507,7 @@ def test_a_member_without_the_prefix_is_skipped_from_the_export_not_mangled(monk
                         lambda names: {"bot": ["content-production"],
                                        "assistant": ["content-production"]},
                         raising=False)
-    monkeypatch.setattr(svc.db, "get_agent_permissions", lambda n: [], raising=False)
+    monkeypatch.setattr(svc.db, "get_permitted_agents", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "list_agent_schedules", lambda n: [], raising=False)
 
     agents = [

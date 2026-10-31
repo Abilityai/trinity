@@ -14,7 +14,7 @@ from dependencies import (
     viewer_row_scope,
     require_person_or_capability,
     require_admin,
-    reject_non_interactive_principal,
+    assert_interactive_admin,
     OwnedAgentByName,
     get_current_user,
     AuthorizedAgentByName,
@@ -838,7 +838,7 @@ async def set_agent_capability_grant(
     grant-vs-use: an admin in a signed-in session only — never a key, never an
     agent, and answering a `permission-request` ask does not do it. Idempotent
     both ways; every change is audited."""
-    reject_non_interactive_principal(admin_user)
+    assert_interactive_admin(admin_user)  # the one spelling of the grant gate (ent#1030)
     from services import capability_grant_service
     from services.capability_grant_service import CapabilityGrantRefused
 
@@ -848,26 +848,9 @@ async def set_agent_capability_grant(
     except CapabilityGrantRefused as e:
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     if result["changed"]:
-        try:  # best-effort: the grant has already committed
-            await platform_audit_service.log(
-                event_type=AuditEventType.AUTHORIZATION,
-                # One verb per capability whichever door granted it (#3236
-                # review): `skills.manage` keeps the skill-manager route's
-                # verb, so an audit query for it finds both doors.
-                event_action=(
-                    ("skill_manager_grant" if body.granted else "skill_manager_revoke")
-                    if capability == "skills.manage"
-                    else ("capability_grant" if body.granted else "capability_revoke")
-                ),
-                source="api",
-                actor_user=admin_user,
-                actor_ip=request.client.host if request.client else None,
-                endpoint=request.scope["path"],
-                request_id=getattr(request.state, "request_id", None),
-                target_type="agent",
-                target_id=agent_name,
-                details={"capability": capability, "granted": body.granted},
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("capability grant audit failed for %s", agent_name)
+        # One verb per capability whichever door granted it (#3236 review);
+        # the shared helper is what keeps this door and the manifest's equal.
+        await capability_grant_service.audit_grant_change(
+            agent_name, capability, body.granted, admin_user, request=request,
+            log=platform_audit_service.log)
     return SkillManagerGrantResult(**result)

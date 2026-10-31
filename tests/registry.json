@@ -1,6 +1,100 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_export_access.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030: a manifest export says no more than the direct read routes: grants and seat for owner or admin, gates through the gate read's allowlist, withheld groups named uniformly whether or not anything is held, no principal reads none, and the route hands the caller to the exporter. resources export the effective value (stored override first), an unreadable override is named instead of falling back to the label, and re-applying an export keeps a pending limit."
+    },
+    {
+      "file": "unit/test_ent1030_summary.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP6: SystemApplyResponse.summary has skills/grants/gates/roles/members each with write/report/unobserved (grants keeps held_back); one manifest exercising every group under an interactive admin, a non-admin creator and an admin's own MCP key (S8), dry run and real run counting alike and the second dry run writing nothing; member.unobserved lists roles without the provider hooks; a read error (person seats, skills) is the retryable blocker, never unobserved, and a blocked member is counted in no group; two bare manifests on one agent add and never remove (S6); the deploy preview's configured counts appear only for a member that declares a group."
+    },
+    {
+      "file": "../src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1030 CP6: ManifestPreview mounted in jsdom — the one 'after create, also configured' line sums every agent's configured counts with plurals, says person seats are reported and never filled, and renders nothing when no agent declares a configuration group."
+    },
+    {
+      "file": "unit/test_ent1030_declared_only.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; one warning per declared-only member names every key it ignores; a live one is never started, stopped or written (Docker recorders + every row naming it); deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
+    },
+    {
+      "file": "unit/test_ent1030_seats.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved; unobserved with a not-yet-exists note on a member apply will create); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips, and without a seat reader names each seat in its # unobserved: line; deploy seats through the hook only for an admin in a signed-in session (agent key, an admin's user key and a non-admin are held back with seats_require_interactive_admin, nothing written) and passes the username as attribution."
+    },
+    {
+      "file": "unit/test_ent1030_gates.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read. A gate that did not land holds its skill, or a set carrying it, on deploy and apply, including a write that raised; the deploy dry run names the refusal."
+    },
+    {
+      "file": "unit/test_ent1030_grants.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP2: a manifest member's grants: are written only by an admin in a signed-in session (the grant route's own gate, dependencies.assert_interactive_admin, spelled once); every other caller gets grant_requires_interactive_admin + summary.grants.held_back + one warning, never a blocker; an agent key deploying a manifest writes no grant; extras are reported, never revoked; the service's refusals land in failed[]; route and apply share the audit verbs."
+    },
+    {
+      "file": "unit/test_ent1030_naming.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1030_skills.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
+    },
+    {
       "file": "unit/test_ent1007_ask_to_canon_role.py",
       "feature": "trinity-enterprise#1007",
       "added": "2026-10-31",

@@ -146,6 +146,13 @@ def write_templates(root) -> None:
         (root / name / "template.yaml").write_text(body)
 
 
+def owner_viewer() -> User:
+    """The agent's owner, reading an export of it. Export shows governance
+    groups only to a caller the direct read routes admit."""
+    row = db.get_user_by_username(ALICE)
+    return User(id=row["id"], username=ALICE, role=row["role"], email=row.get("email"))
+
+
 def make_world(monkeypatch, tmp_path=None) -> World:
     """Users, the Docker fakes and the seams. Call inside a `db_backend` test."""
     # CAROL is an `operator`: past the Workspace floor, below `creator`.
@@ -276,6 +283,24 @@ def install_executor_seams(world: "World", monkeypatch) -> None:
             async def _recorder(*a, _fn=fn, **k):
                 world.docker.events.append((_fn, a))
             monkeypatch.setattr(docker_utils, fn, _recorder)
+
+
+class _HoldsNoSeat:
+    """An assignment provider that can say an agent holds no seat."""
+
+    def assignment_for(self, agent_name, triggered_by):
+        return None
+
+    def seat_for(self, agent_name):
+        return {"case": "none", "role_id": None, "seats": []}
+
+
+def install_seat_reader(monkeypatch) -> None:
+    """An install whose provider can read seats, so an export's `# unobserved:`
+    line names only what a test made unreadable (ent#1030: without a reader
+    every member's seat is named there). Restored by `monkeypatch`."""
+    from services import assignment_provider
+    monkeypatch.setattr(assignment_provider, "_provider", _HoldsNoSeat())
 
 
 def apply(world: "World", manifest_yaml: str, username: str = ALICE, *, dry_run: bool):

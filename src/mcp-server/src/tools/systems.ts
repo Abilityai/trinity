@@ -230,7 +230,8 @@ export function createSystemTools(
         "The manifest defines the system name, agents, permissions, schedules, and shared folders. " +
         "Supports dry_run mode for validation without deployment — a dry run resolves each `local:` template, "
         + "so `status: 'invalid'` with a populated `failed[]` means the manifest would not deploy cleanly. " +
-        "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'). " +
+        "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'); " +
+        "with `naming: bare` the agent key is the full agent name. " +
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
@@ -241,6 +242,7 @@ export function createSystemTools(
           .describe(
             "YAML manifest as a string. Format:\n" +
             "name: system-name\n" +
+            "naming: bare  # optional: agent keys are full agent names; default prefixed ('{name}-{agent}')\n" +
             "description: System description\n" +
             "prompt: System-wide instructions (optional)\n" +
             "agents:\n" +
@@ -249,6 +251,13 @@ export function createSystemTools(
             "    kind: deployment  # optional: 'agent' (default; own branch + auto-push when the repo is the creator's own) or 'deployment' (pull-only)\n" +
             "    folders: {expose: true, consume: true}\n" +
             "    schedules: [{name: daily, cron: '0 9 * * *', message: '...'}]\n" +
+            "    skills: [skill-name]  # optional, additive; also skill_sets: [set-name]\n" +
+            "    gates: {skill-name: {approver: primary, deadline_hours: 24}}  # optional approval map\n" +
+            "    grants: [agents.manage]  # optional; written only for an admin in a signed-in session\n" +
+            "    seat: role-id  # optional canon seat the agent holds; written only for an admin in a signed-in session; person_seats: [{role, kind}] names no person\n" +
+            "  catalog-entry:\n" +
+            "    template: github:Org/other\n" +
+            "    deploy: false  # optional: named in the system, never created\n" +
             "permissions:\n" +
             "  preset: full-mesh  # or orchestrator-workers, none, explicit"
           ),
@@ -389,12 +398,21 @@ export function createSystemTools(
         system_name: z
           .string()
           .describe(
-            "System prefix to export (e.g., 'content-production'). " +
-            "All agents matching '{system_name}-*' will be included."
+            "System name to export (e.g., 'content-production'). " +
+            "Members are the agents carrying the system's tag (every deploy and apply writes it), " +
+            "plus untagged agents named '{system_name}-*' as a fallback."
+          ),
+        naming: z
+          .enum(["prefixed", "bare"])
+          .optional()
+          .describe(
+            "How agent keys are written. Omitted: 'bare' when no member carries the " +
+            "'{system_name}-' prefix, else 'prefixed' (members without the prefix are omitted " +
+            "and named in a leading '# unobserved:' comment). 'bare' keys every member by its full name."
           ),
       }),
       execute: async (
-        { system_name }: { system_name: string },
+        { system_name, naming }: { system_name: string; naming?: "prefixed" | "bare" },
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
@@ -403,7 +421,8 @@ export function createSystemTools(
         // Backend returns YAML as text/plain
         const yaml = await apiClient.request<string>(
           "GET",
-          `/api/systems/${encodeURIComponent(system_name)}/manifest`
+          `/api/systems/${encodeURIComponent(system_name)}/manifest` +
+            (naming ? `?naming=${encodeURIComponent(naming)}` : "")
         );
 
         return yaml;
@@ -550,7 +569,11 @@ export function createSystemTools(
         + "and a `detail`: read those. Every entry in "
         + "`blockers[]` names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
         + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
-        + "remedy says which tag to add (tag_agent). "
+        + "remedy says which tag to add (tag_agent). Under `naming: bare` an untagged agent the manifest "
+        + "declares is adopted instead (one tag write, listed in `adopted[]`). "
+        + "Per-member skills, skill_sets, gates, grants, seat and person_seats are additive: an "
+        + "absent key or a held extra is reported, never revoked; grants are written only for an "
+        + "admin in a signed-in session. `summary` counts write | report | unobserved per group. "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
         + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
         + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
@@ -561,7 +584,11 @@ export function createSystemTools(
           .string()
           .describe(
             "The system manifest as a YAML string, in the format deploy_system takes (name, "
-            + "description, prompt, agents, permissions). Members are named '{name}-{agent}'."
+            + "description, prompt, agents, permissions). Members are named '{name}-{agent}', or by "
+            + "their agent key under `naming: bare`. Per member, optionally: skills, skill_sets, "
+            + "gates ({skill: {approver, deadline_hours}}), grants, seat (a canon role id), "
+            + "person_seats ([{role, kind}], never a person or an email) and deploy: false (a "
+            + "declared-only member: verdict declared_only, never created or deleted)."
           ),
         dry_run: z
           .boolean()

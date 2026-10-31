@@ -59,7 +59,7 @@ def quiet_db(monkeypatch):
     db.get_agent_folder_config.return_value = None
     db.list_agent_schedules.return_value = []
     db.get_agent_tags.return_value = []
-    db.get_agent_permissions.return_value = []
+    db.get_permitted_agents.return_value = []
     # Unstubbed, this returns a truthy MagicMock that lands in the manifest and
     # blows up `yaml.dump`.
     db.get_setting_value.return_value = None

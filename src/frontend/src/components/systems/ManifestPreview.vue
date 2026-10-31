@@ -123,6 +123,11 @@
       <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
         Names are provisional — they are resolved again at deploy, so an agent created in the
         meantime can shift them.
+        <!-- trinity-enterprise#1030: what the created agents are configured with
+             after create. Anything held back is in the notes below. -->
+        <span v-if="configuredLine" class="mt-1 block" data-testid="manifest-configured-line">
+          {{ configuredLine }}
+        </span>
       </p>
     </section>
 
@@ -295,6 +300,34 @@ const permissionGrantCount = computed(
 )
 
 const enabledScheduleCount = computed(() => schedules.value.filter(s => s.enabled).length)
+
+// trinity-enterprise#1030: the backend adds `configured` counts to an agent
+// only when it declares one of the configuration groups; summed into one line.
+const CONFIGURED_LABELS = [
+  ['skills', 'skill', 'skills'],
+  ['skill_sets', 'skill set', 'skill sets'],
+  ['gates', 'approval gate', 'approval gates'],
+  ['grants', 'admin grant', 'admin grants'],
+  ['seat', 'agent seat', 'agent seats'],
+]
+const configuredLine = computed(() => {
+  const totals = {}
+  for (const a of agents.value) {
+    for (const [key, n] of Object.entries(a.configured || {})) {
+      totals[key] = (totals[key] || 0) + n
+    }
+  }
+  const parts = CONFIGURED_LABELS
+    .filter(([key]) => totals[key])
+    .map(([key, one, many]) => `${totals[key]} ${totals[key] === 1 ? one : many}`)
+  const people = totals.person_seats || 0
+  if (!parts.length && !people) return ''
+  let line = parts.length ? `After create, also configured: ${parts.join(', ')}.` : ''
+  if (people) {
+    line += `${line ? ' ' : ''}${people} person seat${people === 1 ? '' : 's'} reported, never filled.`
+  }
+  return line
+})
 
 const needsAcknowledgement = computed(
   () => Boolean(props.preview.prompt_updated) || enabledScheduleCount.value > 0
