@@ -333,6 +333,10 @@ class AgentStatus(BaseModel):
     # answer. `pushes` (ent#704) is whether it auto-pushes; fork-to-own is
     # source_mode AND pushes, so the UI must never infer it from source_mode.
     git_mode: Optional[dict] = None
+    # trinity-enterprise#1007: the create-time kind, read from the `trinity.kind`
+    # label. None = unknown (created before the label, rebuilt by
+    # recreate_missing_container, or the system agent) — never a default.
+    kind: Optional[Literal["agent", "deployment"]] = None
 
     class Config:
         json_encoders = {

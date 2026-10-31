@@ -84,6 +84,42 @@
       "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
     },
     {
+      "file": "unit/test_ent1007_ask_to_canon_role.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing"
+      ],
+      "description": "trinity-enterprise#1007 item 1: ask_operator `to: role:<id>` — the sink resolves a canon role on the raising agent's own roster with ent#881 reachability, stores the id lower-cased (a mixed-case retry replays without differs), and refuses every arm by name (role_unavailable / role_unassigned / role_cannot_open_agent; a malformed id is invalid_to naming the form) with the role's label and never a person; the gate's _can_open delegates to role_addressing.can_open_agent and its patch surface still governs _approvers."
+    },
+    {
+      "file": "unit/test_ent1007_mcp_fork_body.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "mcp",
+        "agent-create",
+        "fork-to-own"
+      ],
+      "description": "trinity-enterprise#1007 item 6: the body MCP create_agent sends for a fork (import_intent fork + fork_to_own {destination_repo}) survives models.AgentConfig with github_pat None and private defaulting True; private:false is carried; the agents.manage create gate still refuses a non-holder agent key before anything is created."
+    },
+    {
+      "file": "unit/test_ent1007_agent_kind_label.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "agent-create",
+        "docker-labels",
+        "mcp"
+      ],
+      "description": "trinity-enterprise#1007 item 7: create stamps the effective kind on the trinity.kind label; AgentStatus.kind reads it on the full and fast paths; absent, empty or unrecognised reads None (unknown), never a default; a rebuild from nothing carries no label; the ordinary recreate seeds labels from the old container (AST pin); every /info shape carries the label kind, overriding any agent-server value."
+    },
+    {
       "file": "unit/test_ent1001_endpoint_env.py",
       "feature": "trinity-enterprise#1001",
       "added": "2026-10-29",
