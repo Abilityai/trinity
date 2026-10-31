@@ -27,6 +27,11 @@ issued for; the platform key runs ``MODEL_ON_API_KEY`` (thinking off, low
 effort — one-shot answers, ``max_tokens`` is the text budget). A caller's
 ``model`` override applies to the platform key only.
 
+A caller on a reasoning model opts out of that one-shot shape with
+``one_shot=False`` (``thinking: disabled`` is a 400 on Sonnet 5.5 / Opus 5.5; the
+model's own default stands, and ``max_tokens`` then covers its thinking too) and
+asks for a constrained answer with ``output_schema``.
+
 Never raises on the request path, never logs a secret or a prompt. Every
 answered call leaves one bounded usage line (purpose, credential kind, model,
 tokens, latency) for Vector.
@@ -84,7 +89,8 @@ class Credential:
 
     def body(self, *, prompt: Optional[str] = None, messages: Optional[List[Dict[str, Any]]] = None,
              max_tokens: int = 512, model: Optional[str] = None,
-             tools: Optional[list] = None, tool_choice: Optional[dict] = None) -> Dict[str, Any]:
+             tools: Optional[list] = None, tool_choice: Optional[dict] = None,
+             output_schema: Optional[dict] = None, one_shot: bool = True) -> Dict[str, Any]:
         """The request body for this credential. ``model`` overrides only on
         the platform key — a subscription runs the one model the gateway serves."""
         chosen = (model or MODEL_ON_API_KEY) if self.kind == KIND_API_KEY else MODEL_ON_SUBSCRIPTION
@@ -93,10 +99,12 @@ class Credential:
             "max_tokens": int(max_tokens),
             "messages": messages if messages is not None else [{"role": "user", "content": prompt or ""}],
         }
-        if self.kind == KIND_API_KEY and chosen.split("-")[2:3] and chosen.split("-")[2].startswith("5"):
+        if one_shot and self.kind == KIND_API_KEY and chosen.split("-")[2:3] and chosen.split("-")[2].startswith("5"):
             # This generation thinks by default; these are one-shot answers.
             body["thinking"] = {"type": "disabled"}
             body["output_config"] = {"effort": "low"}
+        if output_schema is not None:
+            body.setdefault("output_config", {})["format"] = {"type": "json_schema", "schema": output_schema}
         if tools:
             body["tools"] = tools
         if tool_choice:
@@ -265,6 +273,7 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
                   prompt: Optional[str] = None, messages: Optional[List[Dict[str, Any]]] = None,
                   max_tokens: int = 512, timeout: float = 30.0, model: Optional[str] = None,
                   tools: Optional[list] = None, tool_choice: Optional[dict] = None,
+                  output_schema: Optional[dict] = None, one_shot: bool = True,
                   report: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """The Messages API response for one call, or None on any failure. In
     ``auto`` a subscription that answers 429 steps aside to the platform key.
@@ -279,7 +288,8 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
         _note(report, cred, answered=False, reason=cred.reason)
         return None
     started = time.monotonic()
-    body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools, tool_choice=tool_choice)
+    body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools,
+                     tool_choice=tool_choice, output_schema=output_schema, one_shot=one_shot)
     response = await send(cred, body, timeout=timeout)
     if response is not None and response.status_code == 429 and cred.kind == KIND_SUBSCRIPTION and cred.mode == "auto":
         # The AGENT's key arm, not the platform's: an agent flagged off the
@@ -290,7 +300,8 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
         if fallback.kind == KIND_API_KEY:
             logger.info("[model] %s: subscription rate-limited for %s — using the platform key", purpose, agent_name)
             cred = fallback
-            body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools, tool_choice=tool_choice)
+            body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools,
+                             tool_choice=tool_choice, output_schema=output_schema, one_shot=one_shot)
             response = await send(cred, body, timeout=timeout)
     if response is None:
         _note(report, cred, answered=False, status=None, reason="request failed")
