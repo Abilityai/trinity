@@ -21,6 +21,7 @@ from collections import defaultdict
 
 from database import db
 from services.docker_service import get_agent_container
+from services import memory_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     build_voice_capability_prompt,
@@ -795,7 +796,10 @@ class ChannelMessageRouter:
                 user_memory = db.get_or_create_public_user_memory(
                     agent_name, verified_email
                 )
-                memory_system_prompt = format_user_memory_block(user_memory)
+                # trinity-enterprise#1022: retrieval memory for this message —
+                # same gate as the block (verified + one-to-one), fail-open.
+                retrieved = await memory_service.recall(agent_name, verified_email, message.text)
+                memory_system_prompt = format_user_memory_block(user_memory, retrieved=retrieved)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
