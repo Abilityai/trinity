@@ -1835,3 +1835,111 @@ class TestRearmDueAt:
         monkeypatch.setattr(ls, "datetime", _Frozen)
         due = ls.LoopService._rearm_due_for({}, [self._closed("2026-10-27T11:59:00.000000Z")])
         assert due == "2026-10-27T12:02:00.000000Z"
+
+
+# ---------------------------------------------------------------------------
+# #4057 — a park-sourced dispatch replays the post-run decision of the run
+# before it, so a dead advance between run N's close and its gates still ends
+# the loop the way run N said to
+# ---------------------------------------------------------------------------
+
+
+class TestParkReplaysThePostRunDecision:
+    @staticmethod
+    def _fault_once(db, name, *, on_call=1):
+        calls = {"n": 0}
+
+        def _hook(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == on_call:
+                raise RuntimeError("database is locked")
+
+        db.hooks[name] = _hook
+
+    @staticmethod
+    def _recover(ls, db, lid):
+        """A booting worker's reconcile, then the sweep once the park is due."""
+        svc = ls.LoopService()
+        assert _run(svc.reconcile_after_restart()) == 1
+        db.set_loop(lid, next_run_at=_iso(datetime.utcnow() - timedelta(seconds=1)))
+        _run(svc.dispatch_due_loops())
+
+    def test_a_matched_stop_signal_still_ends_the_loop(self, env):
+        """The issue's reproduction: run 1 returned the stop signal, its
+        progress write faulted, and recovery ran the loop to max_runs."""
+        ls, db, ts = env
+        self._fault_once(db, "update_loop_progress")
+        ts.script = [{"response": "all DONE"}, {"response": "r2"}, {"response": "r3"}]
+        lid = _start(ls, max_runs=3, stop_signal="DONE")
+        assert _loop(db, lid)["status"] == "running", "control: the advance died before its gates"
+
+        self._recover(ls, db, lid)
+
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("completed", "stop_signal_matched")
+        assert _nums(db, lid) == [1] and len(ts.calls) == 1
+
+    def test_an_abort_after_failure_still_ends_the_loop(self, env):
+        ls, db, ts = env
+        self._fault_once(db, "update_loop_progress")
+        ts.script = [{"status": "failed", "error": "boom"}, {"response": "r2"}]
+        lid = _start(ls, max_runs=3)  # on_failure="abort"
+
+        self._recover(ls, db, lid)
+
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("failed", "error")
+        assert "Iteration 1: boom" in (loop.get("error") or "")
+        assert _nums(db, lid) == [1] and len(ts.calls) == 1
+
+    def test_no_progress_still_ends_the_loop(self, env):
+        ls, db, ts = env
+        self._fault_once(db, "update_loop_progress", on_call=2)  # run 2's write
+        ts.script = [{"response": "same"}, {"response": "same"}, {"response": "r3"}]
+        lid = _start(ls, max_runs=5, no_progress_threshold=2)
+
+        self._recover(ls, db, lid)
+
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("stopped", "no_progress")
+        assert _nums(db, lid) == [1, 2] and len(ts.calls) == 2
+
+    def test_an_approval_hold_still_stops_the_loop(self, env):
+        ls, db, ts = env
+        db.gate_records["exec_1"] = {"id": "g1"}
+        self._fault_once(db, "finalize_loop")  # the hold's own finalize dies
+        ts.script = [{"status": "skipped"}, {"response": "r2"}]
+        lid = _start(ls, max_runs=3)
+        assert [r["status"] for r in _runs(db, lid)] == ["skipped"], "control: run 1 was held"
+        assert _loop(db, lid)["status"] == "running"
+
+        self._recover(ls, db, lid)
+
+        loop = _loop(db, lid)
+        assert (loop["status"], loop["stop_reason"]) == ("stopped", "approval_required")
+        assert _nums(db, lid) == [1] and len(ts.calls) == 1
+
+    def test_the_next_run_renders_the_previous_response_of_run_n(self, env):
+        ls, db, ts = env
+        self._fault_once(db, "update_loop_progress")
+        ts.script = [{"response": "answer one"}, {"response": "r2"}, {"response": "r3"}]
+        lid = _start(ls, max_runs=2, message_template="prev={{previous_response}}")
+        assert _loop(db, lid)["last_response"] != "answer one", "control: run 1's write was lost"
+
+        self._recover(ls, db, lid)
+
+        assert ts.calls[1]["message"] == "prev=answer one"
+        assert _loop(db, lid)["stop_reason"] == "max_runs_reached"
+
+    def test_a_progress_write_never_moves_the_loop_backwards(self, env):
+        """A slow worker's progress for run 1 landing after the loop reached
+        run 2 writes nothing."""
+        ls, db, ts = env
+        ts.script = [{"response": "r1"}, {"response": "r2"}]
+        lid = _start(ls, max_runs=2)
+        assert _loop(db, lid)["runs_completed"] == 2
+
+        db.ops.update_loop_progress(lid, runs_completed=1, last_response="stale", failed_runs=7)
+
+        loop = _loop(db, lid)
+        assert (loop["runs_completed"], loop["last_response"]) == (2, "r2")

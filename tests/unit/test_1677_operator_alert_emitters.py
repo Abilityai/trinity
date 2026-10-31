@@ -89,8 +89,6 @@ _ALLOWED_CALLERS = {
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
-    ("services/retention_guard.py", "announce_refusal"):
-        "platform-only: edge-gated (fresh) + idempotent id (#1644)",
     ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
         "platform-only: fires only for schedules the operator enabled validation "
         "on; cadence operator-bound (#1632 classification)",

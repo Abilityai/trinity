@@ -385,6 +385,92 @@ def apply_skill_source(
     )
 
 
+def _synced_target(src) -> Dict[str, Any]:
+    """Where a sync went, so its outcome lands only if the row still points
+    there (`SkillSourcesOperations.record_sync`, trinity-enterprise#529)."""
+    return {"url": src.url, "ref": src.ref, "ref_type": src.ref_type}
+
+
+# trinity-enterprise#529: the bundled pin and a followed ref are release tags.
+# Strict on purpose: `v0.6.0-rc1` is not a release, and `0.6.0` names a
+# different tag than `v0.6.0`, so either side failing to match means no move.
+_RELEASE_TAG = re.compile(r"v(\d+)\.(\d+)\.(\d+)")
+
+
+def _release_version(ref: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    match = _RELEASE_TAG.fullmatch((ref or "").strip())
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _follow_bundled_pin_row() -> Optional[Dict[str, str]]:
+    """The synchronous half of `follow_bundled_pin`: decide, then move."""
+    from config import DEFAULT_SKILL_SOURCE_REF, DEFAULT_SKILL_SOURCE_URL
+
+    url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
+    pin = (DEFAULT_SKILL_SOURCE_REF or "").strip()
+    src = db.get_default_skill_source()
+    if not url or src is None or not src.follows_bundled_pin or not src.enabled:
+        return None
+    # Exact equality, not `_same_skills_repo`: the seed stored this literal, any
+    # admin url edit has already ended following, and the normalizer resolves
+    # DNS — at boot, and failing closed on a split-DNS install.
+    if src.url != url:
+        return None
+    current, bundled = _release_version(src.ref), _release_version(pin)
+    if current is None or bundled is None or bundled <= current:
+        return None
+    if db.follow_skill_source_pin(src.id, from_ref=src.ref, to_ref=pin, url=url) is None:
+        return None
+    return {"source_id": src.id, "from_ref": src.ref, "to_ref": pin}
+
+
+async def follow_bundled_pin() -> Optional[Dict[str, str]]:
+    """Move the untouched seeded default source to a newer bundled pin
+    (trinity-enterprise#529). Runs once per backend worker at boot, before the
+    skills auto-sync loop starts. Never raises.
+
+    The seed (ent#237) picks the catalog once; the catalog's version stays the
+    platform's call for an instance that kept the default. So when
+    `DEFAULT_SKILL_SOURCE_REF` is newer than the row's tag and the row still
+    points where the seed put it (`follows_bundled_pin`), the ref moves —
+    forward only, through the same reset an admin ref edit uses, so the next
+    sync fetches the new tag as a moved commit and the ent#236 fleet re-inject
+    fires as for any other.
+
+    Returns `{source_id, from_ref, to_ref}` when THIS call moved the row, else
+    None. The move is a compare-and-set, so with several workers exactly one
+    wins, and only the winner writes the audit row. The audit write is
+    best-effort; the row's `followed_from_ref` / `followed_at` are the durable
+    record.
+    """
+    try:
+        moved = await asyncio.to_thread(_follow_bundled_pin_row)
+    except Exception:  # noqa: BLE001 — boot must not depend on this
+        logger.warning("could not follow the bundled skills pin", exc_info=True)
+        return None
+    if moved is None:
+        return None
+    logger.info(
+        "skills library: default source %s followed the bundled pin %s -> %s",
+        moved["source_id"], moved["from_ref"], moved["to_ref"],
+    )
+    try:
+        from services.platform_audit_service import (
+            platform_audit_service, AuditEventType,
+        )
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="skill_source_follow_bundled_pin",
+            source="system",
+            target_type="skill_source",
+            target_id=moved["source_id"],
+            details={"from_ref": moved["from_ref"], "to_ref": moved["to_ref"]},
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    return moved
+
+
 def _same_skills_repo(stored_url: str, normalized_url: str) -> bool:
     """Do these two strings name the same skills repository? (#2763)
 
@@ -764,7 +850,9 @@ class SkillService:
                     "source_id": src.id, "name": src.name,
                     "success": False, "error": msg,
                 })
-                db.record_skill_source_sync(src.id, success=False, error=msg)
+                db.record_skill_source_sync(
+                    src.id, success=False, error=msg, **_synced_target(src)
+                )
                 continue
 
             try:
@@ -781,7 +869,9 @@ class SkillService:
                     "source_id": src.id, "name": src.name,
                     "success": False, "error": msg,
                 })
-                db.record_skill_source_sync(src.id, success=False, error=msg)
+                db.record_skill_source_sync(
+                    src.id, success=False, error=msg, **_synced_target(src)
+                )
                 continue
 
             clone_url, source_pat = self._clone_target(url, github_pat)
@@ -806,6 +896,7 @@ class SkillService:
                 success=bool(outcome.get("success")),
                 commit_sha=outcome.get("commit_sha"),
                 error=outcome.get("error"),
+                **_synced_target(src),
             )
             entry = {"source_id": src.id, "name": src.name}
             entry.update(outcome)
@@ -1425,6 +1516,11 @@ class SkillService:
                 "last_sync_status": src.last_sync_status,
                 "commit_sha": src.last_commit_sha,
                 "last_error": src.last_error,
+                # trinity-enterprise#529: whether the boot follow still moves
+                # this row, and its latest move (the Settings → Library line).
+                "follows_bundled_pin": src.follows_bundled_pin,
+                "followed_from_ref": src.followed_from_ref,
+                "followed_at": src.followed_at.isoformat() if src.followed_at else None,
                 # Skills this source actually WINS — what the operator can use
                 # from it, which is the number that matters when two sources
                 # overlap. Its total shipped count is on the source detail.

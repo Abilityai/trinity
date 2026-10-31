@@ -523,7 +523,9 @@ def test_an_empty_reply_picks_the_opener_prompt_and_never_an_empty_block(monkeyp
             return _Resp()
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
-    monkeypatch.setattr(service, "_resolve_title_auth", lambda agent: {"x-api-key": "k"})
+    from services import model_gateway
+    monkeypatch.setattr(service, "_resolve_title_auth",
+                        lambda agent: model_gateway.Credential("api_key", "auto", model_gateway.MODEL_ON_API_KEY, "k"))
 
     assert asyncio.run(service._generate_thread_title("scribe", "MSG", "")) == "Q3 invoice discrepancy"
     opener = seen["prompt"]

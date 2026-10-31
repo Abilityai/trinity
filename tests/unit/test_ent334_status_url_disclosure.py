@@ -350,6 +350,10 @@ class TestSourcesRouteUrlIsUserinfoFree:
             last_sync_status="success",
             last_commit_sha="abc",
             last_error=None,
+            # trinity-enterprise#529: the stand-in mirrors db_models.SkillSource.
+            follows_bundled_pin=False,
+            followed_from_ref=None,
+            followed_at=None,
         )
         monkeypatch.setattr(ss.db, "list_skill_sources", lambda: [row], raising=False)
         monkeypatch.setattr(ss.db, "get_setting_value", lambda *a, **k: None, raising=False)
@@ -386,6 +390,10 @@ class TestSourcesRouteUrlIsUserinfoFree:
             last_sync_status=None,
             last_commit_sha=None,
             last_error=None,
+            # trinity-enterprise#529: the stand-in mirrors db_models.SkillSource.
+            follows_bundled_pin=False,
+            followed_from_ref=None,
+            followed_at=None,
         )
         monkeypatch.setattr(ss.db, "list_skill_sources", lambda: [row], raising=False)
         monkeypatch.setattr(ss.db, "get_setting_value", lambda *a, **k: None, raising=False)
