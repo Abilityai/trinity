@@ -447,4 +447,5 @@ def test_apply_op_phase_order():
         "tag", "edge", "folders", "resources", "created_resources",
         "schedule_create", "schedule_update", "created_schedules",
         "skill_assign", "skill_set_assign",  # CP1
+        "grant",  # CP2
     )

@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_grants.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP2: a manifest member's grants: are written only by an admin in a signed-in session (the grant route's own gate, dependencies.assert_interactive_admin, spelled once); every other caller gets grant_requires_interactive_admin + summary.grants.held_back + one warning, never a blocker; an agent key deploying a manifest writes no grant; extras are reported, never revoked; the service's refusals land in failed[]; route and apply share the audit verbs."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",

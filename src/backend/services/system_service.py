@@ -79,13 +79,13 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
     "kind",  # trinity-enterprise#704
-    "skills", "skill_sets",  # trinity-enterprise#1030
+    "skills", "skill_sets", "grants",  # trinity-enterprise#1030
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
-_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets"})
+_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants"})
 
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
@@ -185,7 +185,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
-        for list_key in ("skills", "skill_sets"):  # trinity-enterprise#1030
+        for list_key in ("skills", "skill_sets", "grants"):  # trinity-enterprise#1030
             value = agent_config.get(list_key)
             if value is not None and not (
                     isinstance(value, list) and all(isinstance(v, str) for v in value)):
@@ -200,6 +200,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             kind=agent_config.get("kind"),  # trinity-enterprise#704
             skills=agent_config.get("skills"),  # trinity-enterprise#1030
             skill_sets=agent_config.get("skill_sets"),
+            grants=agent_config.get("grants"),  # trinity-enterprise#1030 CP2
         )
 
     # Parse permissions
@@ -1415,6 +1416,16 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             logger.warning(f"Failed to get skills for {full_name}: {e}")
             unobserved_reads.append(f"skills of {full_name}")
 
+        # trinity-enterprise#1030 CP2: held admin capabilities.
+        try:
+            from services.system_apply import grants as apply_grants
+            grant_names = apply_grants.read_member(full_name)
+            if grant_names:
+                config["grants"] = grant_names
+        except Exception as e:
+            logger.warning(f"Failed to get grants for {full_name}: {e}")
+            unobserved_reads.append(f"grants of {full_name}")
+
         agent_configs[short_name] = config
 
     if templateless:
@@ -2097,6 +2108,14 @@ async def deploy_manifest(
                     status_code=status_code,
                 ))
 
+            # trinity-enterprise#1030 CP2: the preview already says which grants
+            # this caller's credential cannot write.
+            from services.system_apply import grants as apply_grants
+            held_back = apply_grants.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
+            if held_back:
+                all_warnings.append(held_back)
+
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
                 # preview that found blockers reports `invalid`, matching the
@@ -2305,6 +2324,20 @@ async def deploy_manifest(
                 logger.exception(f"Skill assignment failed for system '{manifest.name}'")
                 all_warnings.append(f"Failed to assign skills: {reason}")
 
+        # 10c. Admin grants (trinity-enterprise#1030 CP2): written only for an
+        # admin in a signed-in session — `deploy_system` is agent-callable
+        # through `agents.manage`, so any other caller is told what was held
+        # back. Best-effort, like 7-10b.
+        if any(cfg.grants for cfg in manifest.agents.values()):
+            from services.system_apply import grants as apply_grants
+            try:
+                all_warnings.extend(await apply_grants.deploy(
+                    created_map, manifest.agents, current_user, request))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Grant phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write grants: {reason}")
+
         # 11. Create System View (ORG-001 Phase 4, optional)
         # create_system_view self-guards (returns None on error).
         system_view_id = None
@@ -2469,6 +2502,9 @@ class ApplyMemberState:
     # read only when the member declares `skills:` / `skill_sets:`.
     skills: List[str] = field(default_factory=list)
     skill_sets: List[str] = field(default_factory=list)
+    # trinity-enterprise#1030 CP2: held capabilities, read only when the
+    # member declares `grants:`.
+    grants: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -2494,6 +2530,10 @@ class ApplySnapshot:
     # name (None = assignable), read once for the whole manifest.
     skill_verdicts: Dict = field(default_factory=dict)
     skill_set_verdicts: Dict = field(default_factory=dict)
+    # trinity-enterprise#1030 CP2: does the CALLER pass the grant route's gate
+    # (`dependencies.is_interactive_admin`)? Decides write vs. held-back report
+    # for every `grants:` entry; never a blocker.
+    grant_writer: bool = False
 
 
 def _member_container(name: str):
@@ -2573,7 +2613,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `member_name_unavailable`; free -> create. Never "absent -> create" for a
     taken name, so apply cannot suffix.
     """
-    from dependencies import agent_may_reach, assert_admin
+    from dependencies import agent_may_reach, assert_admin, is_interactive_admin
 
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
@@ -2597,6 +2637,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         caller_username=current_user.username,
         caller_role=current_user.role,
         caller_is_admin=caller_is_admin,
+        grant_writer=is_interactive_admin(current_user),
     )
 
     # 1. Roster (see the docstring).
@@ -2758,6 +2799,9 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             from services.system_apply import skills as apply_skills
             if apply_skills.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030
                 state.skills, state.skill_sets = apply_skills.read_member(name)
+            if manifest.agents[state.short_name].grants is not None:  # trinity-enterprise#1030 CP2
+                from services.system_apply import grants as apply_grants
+                state.grants = apply_grants.read_member(name)
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
             state.blocked = True
@@ -2996,6 +3040,9 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemAgentConfig.kind": ("create-only", "nothing readable stores it"),
     "SystemAgentConfig.skills": ("reconciled", "library skills assigned when missing; extras reported"),
     "SystemAgentConfig.skill_sets": ("reconciled", "skill sets assigned when missing; extras reported"),
+    "SystemAgentConfig.grants": ("reconciled", "capabilities granted when missing, by an admin in a "
+                                 "signed-in session only (else grant_requires_interactive_admin); "
+                                 "extras reported, never revoked"),
     "schedule.name": ("reconciled", "the match key"),
     "schedule.cron": ("reconciled", "updated in place"),
     "schedule.message": ("reconciled", "updated in place"),
@@ -3014,6 +3061,9 @@ _APPLY_OP_STEP = {
     # trinity-enterprise#1030: after every other member write (the gates a
     # skill brings are written with it, before delivery), before the starts.
     "skill_assign": "skills", "skill_set_assign": "skill_sets",
+    # trinity-enterprise#1030 CP2: a capability after the member's skills, so a
+    # created member starts holding what the manifest says it holds.
+    "grant": "grants",
 }
 _APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
 
@@ -3054,6 +3104,8 @@ class ApplyPlan:
     warnings: List[str] = field(default_factory=list)
     default_resources: Optional[Dict[str, str]] = None
     adopted: List["SystemApplyAdoption"] = field(default_factory=list)
+    # trinity-enterprise#1030: `SystemApplyResponse.summary`, per config group.
+    summary: Dict[str, Dict] = field(default_factory=dict)
 
 
 def _apply_change(field_name: str, action: str, code: str, *, current=None,
@@ -3439,6 +3491,17 @@ def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
         make_op=ApplyOp)
 
 
+def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                 snapshot: ApplySnapshot, blockers: List) -> None:
+    """trinity-enterprise#1030 CP2: `grants:`. Written only when the caller
+    passes the grant route's gate (`snapshot.grant_writer`); else reported."""
+    from services.system_apply import grants as apply_grants
+    apply_grants.plan(
+        mp, held=None if state is None else state.grants, grant_writer=snapshot.grant_writer,
+        blockers=blockers, apply_change=_apply_change, apply_blocker=_apply_blocker,
+        make_op=ApplyOp)
+
+
 def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> ApplyPlan:
     """The per-member verdicts, the drift, every blocker, and the write-set.
 
@@ -3474,11 +3537,13 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             mp.creating = True
             _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
             _plan_skills(mp, None, snapshot, blockers)
+            _plan_grants(mp, None, snapshot, blockers)
             mp.verdict = "create"
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
                                   declared_final, normalized_resources, blockers)
             _plan_skills(mp, state, snapshot, blockers)
+            _plan_grants(mp, state, snapshot, blockers)
             mp.verdict = "update" if mp.ops else "unchanged"
         else:
             mp.verdict = "blocked"
@@ -3584,11 +3649,19 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             f"{names}. From then on, restarting the system restarts them and a "
             f"teardown of the system removes them too.")
 
+    # trinity-enterprise#1030 CP2: a grant the caller's credential could not
+    # write is loud — a top-level summary entry and one warning line, beside
+    # the per-member report (theme 3: held-back writes are never only a line).
+    from services.system_apply import grants as apply_grants
+    grants_summary, grants_warning = apply_grants.summarize(members)
+    if grants_warning:
+        warnings.append(grants_warning)
+
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted,
+        adopted=adopted, summary={"grants": grants_summary},
     )
 
 
@@ -3807,7 +3880,7 @@ async def execute_apply_plan(
                      f"skipped_member_not_created: '{op.args['target']}' was not created")
                 continue
             try:
-                await _run_op(op, current_user, out, attempt)
+                await _run_op(op, current_user, out, attempt, request=request)
             except Exception as e:  # noqa: BLE001 — never lose the report after a write
                 fail(op.member, op.short_name, step, _failure_reason(e)[0])
 
@@ -3860,7 +3933,8 @@ def _tag_stored(name: str, tag: str) -> bool:
     return tag in (db.add_agent_tag(name, tag) or [])
 
 
-async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt) -> None:
+async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
+                  request: Optional[Request] = None) -> None:
     name, short = op.member, op.short_name
     if op.kind == "tag":
         if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
@@ -3894,6 +3968,9 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt) -
         from services.system_apply import skills as apply_skills
         await apply_skills.run(op, current_user, out, attempt, apply_change=_apply_change,
                                acting_agent=acting_agent_name(current_user))
+    elif op.kind == "grant":  # trinity-enterprise#1030 CP2
+        from services.system_apply import grants as apply_grants
+        await apply_grants.run(op, current_user, out, attempt, request=request)
 
 
 async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:
@@ -4015,6 +4092,7 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         failed=list(outcome.failed) if outcome else [],
         warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
         adopted=list(plan.adopted),
+        summary=dict(plan.summary),
     )
     if outcome is not None:
         response._tags_written = list(outcome.tags_written)

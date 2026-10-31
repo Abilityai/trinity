@@ -1311,6 +1311,11 @@ class SystemAgentConfig(BaseModel):
     # reported, nothing is ever unassigned.
     skills: Optional[List[str]] = None
     skill_sets: Optional[List[str]] = None
+    # trinity-enterprise#1030 CP2: admin capabilities (`db.capability_grants.
+    # CAPABILITIES`) this member holds. Written only by an admin in a signed-in
+    # session — the grant route's own gate; otherwise reported as held back.
+    # An extra is reported, never revoked.
+    grants: Optional[List[str]] = None
 
 
 class SystemPermissions(BaseModel):
@@ -1585,6 +1590,11 @@ class SystemApplyResponse(BaseModel):
     # into the system by tagging it, kept apart from `members` because adoption
     # is when an agent joins `restart_system` / teardown's reach.
     adopted: List[SystemApplyAdoption] = []
+    # trinity-enterprise#1030: per config group, what the plan writes and
+    # reports, and what the CALLER's credential held back. CP2 fills `grants`:
+    # `{"write": n, "report": n, "held_back": [{"name", "grants": [...]}]}` —
+    # a top-level surface, so a grant that was not written is loud (theme 3).
+    summary: Dict[str, Dict[str, Any]] = {}
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is
     # not a create). Private: never serialized.
