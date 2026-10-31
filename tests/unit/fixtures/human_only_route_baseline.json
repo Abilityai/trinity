@@ -321,12 +321,8 @@
   "routers/whatsapp.py::delete_whatsapp_binding_endpoint": "DELETE /api/agents/{agent_name}/whatsapp",
   "routers/whatsapp.py::get_whatsapp_binding": "GET /api/agents/{agent_name}/whatsapp",
   "routers/whatsapp.py::test_whatsapp_binding": "POST /api/agents/{agent_name}/whatsapp/test",
-  "shared_sessions/router.py::add_participant": "POST /api/rooms/{room_id}/participants",
-  "shared_sessions/router.py::close_room": "POST /api/rooms/{room_id}/close",
   "shared_sessions/router.py::create_room": "POST /api/rooms",
   "shared_sessions/router.py::get_room": "GET /api/rooms/{room_id}",
   "shared_sessions/router.py::list_rooms": "GET /api/rooms",
-  "shared_sessions/router.py::post_message": "POST /api/rooms/{room_id}/messages",
-  "shared_sessions/router.py::remove_participant": "DELETE /api/rooms/{room_id}/participants/{agent_name}",
   "shared_sessions/router.py::rename_room": "PATCH /api/rooms/{room_id}"
 }

@@ -897,6 +897,22 @@ def portal_seat_decisions(
     return seat_decisions.page(agent_name, email, is_platform=principal.is_platform)
 
 
+def _require_person(principal: PortalPrincipal) -> None:
+    """403 `person_required` for a caller that is not a person (trinity-enterprise#719).
+
+    Readiness, the canvas pin and the seat-decision record and actions are an
+    owner's grants, each recorded as a person's act. This door also serves a
+    system-scoped key for the Workspace's uses (#2198), so these routes ask the
+    question the ask endings ask (`asks/router.py`): is the caller a person? The
+    answer depends only on the caller, so it is given before the roster or any
+    of the agent's rows is read, and says nothing about the agent.
+    """
+    if not principal.is_person:
+        from dependencies import HUMAN_ONLY_DETAIL
+
+        raise HTTPException(status_code=403, detail=dict(HUMAN_ONLY_DETAIL))
+
+
 @router.post("/agents/{agent_name}/decisions", response_model=PortalSeatDecisionResult)
 def portal_seat_decision_record(
     agent_name: str,
@@ -906,7 +922,8 @@ def portal_seat_decision_record(
     """The person records a decision for their seat (ent#638). Prose where a
     field belongs is refused with a receipt naming each field (`decision_prose_only`);
     no alternatives → `decision_is_a_note`; a direction decision is kept as `routed`
-    with the canon hint."""
+    with the canon hint. A person only (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -928,7 +945,9 @@ def portal_seat_decision_act(
 ):
     """close / reverse / reconfirm / supersede (correct) an ACTIVE decision of
     the caller's seat — or any seat, for the owner. A non-active target is a
-    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404."""
+    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404.
+    A person only (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -949,7 +968,9 @@ def portal_agent_role_readiness(
 ):
     """The owner flips a companion `calibrating` ⇄ `ready` (#663). Anyone
     else — a shared user, an external client — gets a NAMED 403
-    (`readiness_owner_only`); the agent never reaches this door."""
+    (`readiness_owner_only`); the agent never reaches this door, and a caller
+    that is not a person gets `person_required` (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -1153,7 +1174,9 @@ async def portal_pin_canvas(
 
     Audited: a pin is what decides which canvas a whole roster sees first, so it
     is an administrative act on a shared surface, not a per-viewer preference.
+    A person only (`_require_person`).
     """
+    _require_person(principal)
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):

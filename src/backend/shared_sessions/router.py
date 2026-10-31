@@ -227,6 +227,16 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     Idempotency-Key so a retried post creates one message, not two)."""
     from services import idempotency_service
 
+    # Membership comes BEFORE the idempotency claim (trinity-enterprise#719). A
+    # stored replay and the in-flight 409 are answers this route gives too, so
+    # a non-member gets the same uniform 404 on every one of them as on a first
+    # post (Invariant #8), and never claims a key in the room. The service
+    # checks membership again on the post itself.
+    try:
+        service._require_membership(room_id, current_user)
+    except RoomError as e:
+        _raise(e)
+
     decision = idempotency_service.begin(f"room:{room_id}", idempotency_key)
     # begin() reports an in-flight claim as replay=True too, so this check
     # must come first or it never runs (#3320). Same detail shape as /chat.
