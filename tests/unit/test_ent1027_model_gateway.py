@@ -491,10 +491,13 @@ class TestWiringPins:
         routes = [r for r in agent_memory.router.routes
                   if getattr(r, "path", "").endswith("/retrieval-memory/extract-preview")]
         assert len(routes) == 1 and routes[0].methods == {"POST"}
+        # By NAME, not identity: under the suite's random order another test can
+        # reload `dependencies`, and a `Depends` compares by object identity.
         hints = typing.get_type_hints(agent_memory.extract_preview_endpoint, include_extras=True)
-        assert hints["agent_name"] == OwnedAgentByName
+        gate = hints["agent_name"].__metadata__[0].dependency
+        assert gate.__name__ == OwnedAgentByName.__metadata__[0].dependency.__name__ == "get_owned_agent_by_name"
         params = inspect.signature(agent_memory.extract_preview_endpoint).parameters
-        assert params["current_user"].default.dependency is require_person
+        assert params["current_user"].default.dependency.__name__ == require_person.__name__ == "require_person"
 
 
 # --------------------------------------------------------------------------- #
