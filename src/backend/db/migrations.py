@@ -5752,6 +5752,111 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_memory_facts(cursor, conn):
+    """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
+
+    One row per extracted fact, scoped by ``(agent_name, user_email)`` where
+    ``''`` is the agent scope shared with the owner. The partial unique index on
+    the live ``text_hash`` makes a two-worker duplicate an IntegrityError the
+    writer catches. Schema is also in db/schema.py for fresh installs; mirrored
+    by Alembic revision 0108_agent_memory_facts for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_memory_facts)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_facts (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL,
+                source TEXT NOT NULL,
+                execution_id TEXT,
+                recall_count INTEGER DEFAULT 0,
+                last_recalled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+        "ON agent_memory_facts(agent_name, user_email, deleted_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+        "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL"
+    )
+    conn.commit()
+    print("Created agent_memory_facts table with indexes (trinity-enterprise#1022)")
+
+
+def _migrate_agent_ownership_memory_opt_out(cursor, conn):
+    """trinity-enterprise#1022 — per-agent retrieval-memory opt-out.
+
+    Adds ``memory_opt_out INTEGER DEFAULT 0`` to ``agent_ownership``. The
+    platform switch (``trinity_memory_enabled``, default off) gates globally;
+    this column lets an owner keep one agent out once the platform is on.
+    Mirrored by Alembic revision 0109_agent_ownership_memory_opt_out.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "memory_opt_out",
+        "ALTER TABLE agent_ownership ADD COLUMN memory_opt_out INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_memory_provenance(cursor, conn):
+    """trinity-enterprise#1022 — fact provenance: the journal and the last writer.
+
+    ``agent_memory_fact_events`` is one append-only row per thing that happened
+    to a fact or to a candidate that never became one (add / update / delete /
+    none / screened / prune / recall / forget), keyed to the execution that did
+    it; ``agent_memory_facts.updated_by_execution_id`` is the last run that
+    rewrote or retired the row. Schema is also in db/schema.py for fresh
+    installs; mirrored by Alembic revision 0110_agent_memory_provenance.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_memory_facts",
+        "updated_by_execution_id",
+        "ALTER TABLE agent_memory_facts ADD COLUMN updated_by_execution_id TEXT",
+    )
+    cursor.execute("PRAGMA table_info(agent_memory_fact_events)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                fact_id TEXT,
+                op TEXT NOT NULL,
+                execution_id TEXT,
+                candidate_text TEXT,
+                previous_text TEXT,
+                neighbour_ids TEXT,
+                score REAL,
+                actor TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+        "ON agent_memory_fact_events(agent_name, fact_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+        "ON agent_memory_fact_events(agent_name, execution_id)"
+    )
+    conn.commit()
+    print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+
 # trinity-enterprise#529: which pre-existing rows are still the untouched bundled
 # seed, and so follow the platform's pin from now on. Shared verbatim by Alembic
 # 0107_skill_sources_follow_bundled_pin, so the two tracks cannot disagree.
@@ -5993,4 +6098,7 @@ MIGRATIONS = [
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
     ("execution_chat_session_id", _migrate_execution_chat_session_id),
     ("skill_sources_follow_bundled_pin", _migrate_skill_sources_follow_bundled_pin),
+    ("agent_memory_facts", _migrate_agent_memory_facts),
+    ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
+    ("agent_memory_provenance", _migrate_agent_memory_provenance),
 ]

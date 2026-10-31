@@ -100,6 +100,11 @@
         <ReliabilityPanel :agent-name="agentName" :notify="notify" embedded />
       </div>
     </SettingsSection>
+
+    <!-- trinity-enterprise#1022: keep this one agent out of retrieval memory. -->
+    <SettingsSection title="Memory" description="What this agent carries from one run to the next.">
+      <RetrievalMemoryToggle :agent-name="agentName" :notify="notify" />
+    </SettingsSection>
   </div>
 </template>
 
@@ -112,6 +117,7 @@ import { useEnterpriseStore } from '../../stores/enterprise'
 import { useAgentRestartStore } from '../../stores/agentRestart'
 import SettingsSection from './SettingsSection.vue'
 import SettingRow from './SettingRow.vue'
+import RetrievalMemoryToggle from './RetrievalMemoryToggle.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import GuardrailsPanel from '../GuardrailsPanel.vue'
