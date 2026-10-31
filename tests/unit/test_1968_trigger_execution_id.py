@@ -130,6 +130,7 @@ def _seed_db(db_path: Path) -> None:
             attempt_number INTEGER DEFAULT 1, retry_of_execution_id TEXT,
             source_user_id INTEGER, source_user_email TEXT, source_agent_name TEXT,
             source_mcp_key_id TEXT, source_mcp_key_name TEXT, chain_depth INTEGER,
+            subscription_id TEXT,  -- #4085: snapshotted on every insert
             -- Written by update_execution_status. Omitting them made the
             -- abandon path raise OperationalError, which its fail-safe
             -- swallowed, so the row stayed `running` and the test "found" a bug
@@ -139,6 +140,11 @@ def _seed_db(db_path: Path) -> None:
             tool_calls TEXT, execution_log TEXT, claude_session_id TEXT
         )
         """
+    )
+    conn.execute(
+        # #4085: create_execution snapshots the agent's subscription from here.
+        "CREATE TABLE agent_ownership (agent_name TEXT PRIMARY KEY, "
+        "subscription_id TEXT, deleted_at TEXT)"
     )
     conn.execute(
         "INSERT INTO agent_schedules VALUES ('sch-1','a1','nightly','0 3 * * *',"

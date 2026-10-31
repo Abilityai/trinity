@@ -320,9 +320,15 @@ def test_denied_tick_lands_a_real_skipped_row(tmp_path):
         CREATE TABLE schedule_executions (
             id TEXT PRIMARY KEY, schedule_id TEXT, agent_name TEXT, status TEXT,
             started_at TEXT, completed_at TEXT, duration_ms INTEGER, message TEXT,
-            response TEXT, error TEXT, triggered_by TEXT
+            response TEXT, error TEXT, triggered_by TEXT,
+            subscription_id TEXT  -- #4085: snapshotted on every insert
         )
         """
+    )
+    conn.execute(
+        # #4085: create_execution snapshots the agent's subscription from here.
+        "CREATE TABLE agent_ownership (agent_name TEXT PRIMARY KEY, "
+        "subscription_id TEXT, deleted_at TEXT)"
     )
     conn.execute(
         "INSERT INTO agent_schedules VALUES ('sch-1','a1','nightly','0 3 * * *',"

@@ -826,6 +826,10 @@ ADMIN_WIDENED: Dict[str, Tuple[str, Tuple[str, ...], str]] = {
 # changes what the agent itself may do is person-only however it is fenced.
 # key -> ("METHOD /full/path", reason)
 AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
+    "routers/agent_memory.py::get_retrieval_memory_endpoint": (
+        "GET /api/agents/{agent_name}/retrieval-memory",
+        "a READ of the agent's own retrieval-memory status (trinity-enterprise#1022): on/off, available, counts. "
+        "The opt-out (PUT), the owner view and forget are person-only"),
     "routers/agent_files.py::get_agent_canon_roles": (
         "GET /api/agents/{agent_name}/canon/roles",
         "a READ of the agent's own canon seats (trinity-enterprise#817), the same rule and budget as its objectives"),
@@ -857,6 +861,10 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/seat_decisions.py::list_seat_decisions": (
         "GET /api/agents/{agent_name}/decisions",
         "MCP list_seat_decisions: the seat's standing decisions, read to reuse a criterion (trinity-enterprise#638)"),
+    "routers/agent_memory.py::search_retrieval_memory_agent_endpoint": (
+        "POST /api/agents/{agent_name}/retrieval-memory/search",
+        "MCP search_memory: the agent reads its own retrieval memory past the injected tail, the scope resolved from the "
+        "execution by the whose-memory rule (trinity-enterprise#1028); every hit journaled with the query"),
     "routers/public_memory.py::write_user_memory": (
         "POST /api/agents/{agent_name}/user-memory",
         "MCP write_user_memory: notes about the person the run serves, resolved from the execution (MEM-001); every write recorded and undoable (trinity-enterprise#637)"),

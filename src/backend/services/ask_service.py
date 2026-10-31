@@ -220,6 +220,29 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
     return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
 
 
+def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str, Any]]:
+    """Who a platform-raised approval waits on, and whether THIS person may
+    decide it — `may_end`'s own answer, so a card never offers a control the
+    sink would refuse (trinity-enterprise#980). None for every other ask.
+
+    The operator queue lists an ask to anyone who can use its agent, but a gate
+    approval belongs to the people it was addressed to; without this an admin
+    saw Approve / Decline on someone else's decision and learned only from the
+    refusal that it was not theirs."""
+    if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
+        return None
+    resolved = row.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    people = list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
+    if not people:
+        return None
+    return {"waiting_on": people, "can_decide": may_end(row, actor)}
+
+
 # ---------------------------------------------------------------------------
 # The ways an ask ends
 # ---------------------------------------------------------------------------
