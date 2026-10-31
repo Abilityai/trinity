@@ -53,9 +53,14 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
-  // trinity-enterprise#15: GitHub-repo import intent. MCP exposes only
-  // "copy" | "clone" — "fork" is web-UI-only (its PAT arg would be audit-logged).
+  // trinity-enterprise#15: GitHub-repo import intent ("copy" | "clone" | "fork").
   import_intent?: string;
+  // trinity-enterprise#93 / #1007: fork-to-own. No github_pat over MCP — tool
+  // args are audit-logged; the backend uses the caller's saved token.
+  fork_to_own?: {
+    destination_repo: string;
+    private?: boolean;
+  };
   // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
   // max_executions/ttl_seconds; entitlement-gated at the backend.
   ephemeral?: {

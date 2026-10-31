@@ -497,10 +497,15 @@
 - **FR-6 — Surfaces**: UI Create Agent modal gains a 3-way intent selector on the
   free-form GitHub path (default `clone`; fork reveals the existing destination/PAT/
   visibility fieldset; copy explains the no-upstream contract + own-it-later); MCP
-  `create_agent` gains `import_intent: "copy" | "clone"` only — fork stays UI-only
-  (standing decision: MCP tool args are audit-logged, a PAT arg would persist in
-  plaintext). Fork-scope failures name the alternative intents (never silent
-  auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
+  `create_agent` takes `import_intent: "copy" | "clone" | "fork"` and, since
+  trinity-enterprise#1007, a `fork_to_own: {destination_repo, private?}` block — the
+  same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args are
+  audit-logged, so a PAT arg would persist in plaintext). The fork therefore spends
+  the caller's saved personal token (#3164); under an agent key it is the named 400
+  `FORK_PAT_REQUIRED`, unchanged. REST behaviour and the `agents.manage` create gate
+  are unchanged (`tests/unit/test_ent1007_mcp_fork_body.py` validates the MCP body
+  through `AgentConfig`). Fork-scope failures name the alternative intents (never
+  silent auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
 - **Source of truth**: `services/agent_service/snapshot_import.py` (copy staging),
   `services/agent_service/crud.py` (intent gates + wiring),
   `services/agent_service/deploy.py::_prepopulate_workspace_from_template` (reused),
