@@ -890,8 +890,9 @@ class SyncHealthService:
         """trinity-enterprise#706: report the divergence freeze through the seam.
 
         One pending row per agent (subject `sync_diverged:<agent>`, #3254), so a
-        repeat poll, a restart and a fail-open double leader all land on it; a
-        new episode after the platform ended the last one files a fresh row.
+        repeat poll, a restart and a fail-open double leader all land on it. A
+        new episode files a fresh row whoever ended the last one: `diverged_since`
+        is a material key, so a person's ending snoozes only its own episode.
         The context carries counts and the recommendation, never agent-authored
         error text.
         """

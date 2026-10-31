@@ -8,6 +8,7 @@ one row per crossing, filed directly and never ended. On the seam
 * the row keeps the `type` its readers filter on (D2: `Kind.row_type`);
 * two readings are one row; a falling edge ends it as the platform;
 * a person's ending stands, and a re-reading inside the snooze files nothing;
+  a new divergence episode is material and files (`diverged_since`);
 * a condition that persists is re-read at most every 6 hours (R9), so its
   deadline moves while it holds, and only a condition nobody re-read (a clear
   lost to a fault) ends on its 30-day lifetime;
@@ -365,6 +366,57 @@ async def test_a_persons_ending_stands(kind, service, seed_agent, db, clock, mon
     ended = db.get_operator_queue_item(row["id"])
     assert (ended["status"], ended["disposed_by"]) == ("acknowledged", "person")
     assert len(_rows(db, sc["prefix"])) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_divergence_episode_files_inside_a_persons_snooze(
+        service, seed_agent, db, clock, monkeypatch):
+    """A person's ending snoozes the episode they ended, not the agent. Each
+    reading carries `diverged_since`, a material key of `sync_diverged`: re-reads
+    of the ended episode stay quiet, and a divergence that comes back after a
+    recovery is a new episode that files its own row, inside the 7 days."""
+    seed_agent()
+    await _raise(service, clock, SCENARIOS["sync_diverged"])
+    (first,) = _pending(db, "sync-diverged-")
+    _person_ends(db, first)
+    ended_at = clock.now
+    seam = type(service)._sync_agent.__globals__["platform_alerts"]
+    real, readings = seam.observe, []
+    monkeypatch.setattr(seam, "observe", lambda *a, **k: readings.append(
+        (a[1], real(*a, **k))) or readings[-1][1])
+
+    for _ in range(8):  # two days of re-reads of the SAME episode
+        clock.advance(hours=6, minutes=1)
+        await _poll(service, _AHEAD)
+    assert [out for k, out in readings if k == "sync_diverged"] == ["snoozed"] * 8
+    assert _pending(db, "sync-diverged-") == []
+
+    clock.advance(**_MIN)
+    await _poll(service, _OK)  # the episode ends; the person's ending stands
+    assert db.get_sync_state("alpha")["diverged_since"] is None
+    readings.clear()
+    await _raise(service, clock, SCENARIOS["sync_diverged"])  # a second episode
+    assert clock.now - ended_at < timedelta(days=7)  # still inside the snooze
+    assert [out for k, out in readings if k == "sync_diverged"] == ["created"]
+    (second,) = _pending(db, "sync-diverged-")
+    assert second["id"] != first["id"]
+    assert second["context"]["diverged_since"] == db.get_sync_state("alpha")["diverged_since"]
+    assert second["context"]["diverged_since"] != first["context"]["diverged_since"]
+    assert db.get_operator_queue_item(first["id"])["status"] == "acknowledged"
+
+
+def test_a_pre_move_divergence_row_a_person_ended_snoozes_its_own_episode_only(pa):
+    """The pre-move emitter (ent#706) wrote `diverged_since` into every row's
+    context, so a person-ended legacy row the sweep gave a subject carries the
+    episode marker: the same episode stays snoozed, another one files."""
+    since = "2026-10-30T07:00:00.000000Z"
+    ended = {"priority": "high", "context": {
+        "ahead": 7, "behind": 0, "dirty_files": 0, "diverged_since": since,
+        "divergence_age_s": 90000, "recommendation": "push"}}
+    kind = pa.KINDS["sync_diverged"]
+    assert pa._snoozed_by(kind, ended, "high", {**ended["context"], "divergence_age_s": 99000})
+    assert not pa._snoozed_by(kind, ended, "high",
+                              {**ended["context"], "diverged_since": "2026-11-02T09:00:00.000000Z"})
 
 
 # --------------------------------------------------------------------------

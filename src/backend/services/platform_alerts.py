@@ -149,7 +149,10 @@ _BUILTIN_KINDS = (
     Kind("skills_reconcile_refused", "skills-reconcile-", _N, CLEARS_HOOK),
     Kind("skills_fleet_reinject", "skills-fleet-reinject-", _D, CLEARS_HOOK),
     Kind("sync_failing", "sync-failing-", _N, CLEARS_HOOK, row_type="sync_failing"),
-    Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK, row_type="sync_diverged"),
+    # #3254: the episode start is a material key, so a person's ending snoozes
+    # re-reads of the SAME divergence episode only; a later episode files.
+    Kind("sync_diverged", "sync-diverged-", _N, CLEARS_HOOK, row_type="sync_diverged",
+         material_keys=("diverged_since",)),
     Kind("git_bloat_size", "git-bloat-", _N, CLEARS_HOOK, row_type="git_bloat"),
     Kind("git_bloat_maintenance", "git-bloat-", _N, CLEARS_HOOK, row_type="git_bloat"),
     Kind("db_backup_failure", "db-backup-", _D, CLEARS_HOOK),
