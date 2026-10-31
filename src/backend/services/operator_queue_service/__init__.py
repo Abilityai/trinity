@@ -14,12 +14,14 @@ Polling cycle:
   6. Handle expired entries
 """
 
-# ruff: noqa: F401
 # #3785: this external block stays whole, first, even where `__init__` itself
 # no longer reads a name. A submodule may import at module level only what is
 # already imported here (test_3785's G13), so an ImportError fires before any
 # `_oq`-holding submodule has loaded; and several names here are read through
 # the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
 import asyncio
 import base64
 import hashlib
@@ -125,6 +127,9 @@ OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
 )
+# #3254 R9: a persisting flood episode is re-read at most this often, the #3255
+# base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+OPERATOR_QUEUE_FLOOD_REREAD_SECONDS = 6 * 60 * 60
 
 # =========================================================================
 # #1677: budget for agent-INFLUENCEABLE platform alert emitters.
@@ -382,12 +387,50 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
 OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
 
+# trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
+# admins'). A project steward's proposal names people and tasks of a project
+# that not everyone who can use the agent may open — and the person it is
+# addressed to (the project's creator) need not own the steward: it may only be
+# shared with them. So this is keyed on the addressee (`addressed_to_email` or
+# `resolved_to`), never on who owns the agent — owner-keyed, it showed the row to
+# an owner who could not open the project and hid it from the one person who
+# can decide it. Under `gate-`, so it stays about-a-person and reserved.
+ADDRESSEE_ONLY_ID_PREFIXES = ("gate-addressee-only-",)
+
 
 def is_owner_only(item: dict) -> bool:
     """Is this row readable only by its agent's owner (and admins)? Compared
     like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
     candidate = item.get("request_id") or ""
     return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
+
+
+def is_addressee_only(item: dict) -> bool:
+    """Is this row readable only by the person it is addressed to (and admins)
+    (trinity-enterprise#980)? Compared like `is_owner_only`."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(ADDRESSEE_ONLY_ID_PREFIXES)
+
+
+def is_addressed_to(item: dict, email: Optional[str]) -> bool:
+    """Is `email` this row's addressee — its single `addressed_to_email` or one
+    of its `resolved_to` — compared case-insensitively? The Python twin of the
+    SQL `addressed_to_email` filter (trinity-enterprise#816). An empty `email`
+    is nobody's addressee."""
+    viewer = (email or "").strip().lower()
+    if not viewer:
+        return False
+    if str(item.get("addressed_to_email") or "").strip().lower() == viewer:
+        return True
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    if not isinstance(resolved, list):
+        return False
+    return viewer in {str(p).strip().lower() for p in resolved}
 
 
 def _truncate_with_marker(text: str, max_len: int) -> str:
@@ -1191,6 +1234,14 @@ async def _maybe_emit_alert_budget_episode(
     registry test). Two workers' readings land on the one subject row, which is
     what the old time-bucketed id approximated.
 
+    The episode is the set of pending rows that fill the budget: each reading
+    carries a digest of their ids (``filled_by``, a material key of the kind).
+    After a person ends the episode alert, a reading of the same full budget is
+    snoozed for the snooze window; once a slot frees and a new row fills it,
+    the condition cleared and came back, the digest differs and the reading
+    files. A failed read of the set logs an ERROR and leaves ``filled_by``
+    None, which no digest equals, so the reading files.
+
     The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
     BEFORE the reading, so a persistently failing write backs off for the
     window instead of retrying on every refusal (#1632 shape). The kind is
@@ -1222,10 +1273,21 @@ async def _maybe_emit_alert_budget_episode(
         f"compromised agent — review its recent activity before acting on its "
         f"requests."
     )
+    try:
+        filling = deps.db.list_operator_queue_items(
+            agent_name=agent_name, status="pending", type=item_type, limit=1000)
+        filled_by = hashlib.sha256(
+            "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — the alarm still files, as a new episode
+        logger.error("[#1677 budget] could not read the rows filling %s/%s's budget",
+                     agent_name, item_type, exc_info=True)
+        filled_by = None
     context = {
         "reason": "platform_alert_budget",
         "alert_type": item_type,
         "cap": OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "filled_by": filled_by,
     }
     # Triage aid for the cross-agent budget-fill scenario (a permitted peer
     # spraying at the victim): the platform trigger enum only, shape-guarded.
@@ -2122,7 +2184,18 @@ class OperatorQueueSyncService(poller.PollerCoreMixin):
         Edge-triggered (#3130): an episode alerts once, however many cycles or
         cooldown windows it lasts, and the next alert needs the condition to
         have cleared first (`_sync_agent` ends the episode through
-        `_end_flood_episode`, which ends its alert too). It used to be one
+        `_end_flood_episode`, which ends its alert too). That holds after a
+        person acknowledges the alert too: each reading carries the episode's
+        start (`episode_started_at`, a material key of the kind), so the
+        snooze silences re-reads of the acknowledged episode for the snooze
+        window and a NEW episode files at once. A leader failover or restart
+        loses the in-memory episode, so a persisting flood counts as a new
+        episode there and may file once more. The marker is worker-local too:
+        with Redis down the leader lease fails open
+        (`_try_acquire_leadership`), each worker stamps its own
+        `episode_started_at`, and another worker's re-read can file past a
+        person's ending, at most one extra row per extra worker per re-read
+        window. It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
@@ -2140,15 +2213,19 @@ class OperatorQueueSyncService(poller.PollerCoreMixin):
         reserved prefix. Softened wording to avoid cry-wolf (C9).
 
         Re-read while it lasts (#3254 R9): an episode that persists is observed
-        again at most every 6 hours, so the kind's 14-day lifetime ends only a
-        row nobody re-read (a lost clear), never one whose condition still
-        holds. The refresh time per (agent, reason) lives in a dict this method
-        creates on the instance for itself (`_flood_refreshed_at`).
+        again at most every `OPERATOR_QUEUE_FLOOD_REREAD_SECONDS` (6 hours), so
+        the kind's 14-day lifetime ends only a row nobody re-read (a lost
+        clear), never one whose condition still holds. The refresh time and the
+        episode start per (agent, reason) live in dicts this method creates on
+        the instance for itself (`_flood_refreshed_at`,
+        `_flood_episode_started_at`).
 
-        The cooldown and the episode are stamped BEFORE every reading (a re-read
-        included). Outcomes:
+        The episode and its refresh time are stamped BEFORE every reading; the
+        per-agent cooldown only before an episode's first reading, since it
+        spaces episodes and a re-read is not one. Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
-            episode; a snoozed reading is a person's ending, which stands);
+            episode; a snoozed reading is a person's ending of this episode,
+            which stands for the snooze window);
           * failed on the episode's first reading → the episode is RELEASED so
             the alarm is retried, and the cooldown stamp spaces those retries to
             at most one per window (review I1: holding the episode on a failure
@@ -2170,12 +2247,12 @@ class OperatorQueueSyncService(poller.PollerCoreMixin):
         key = (agent_name, reason)
         now = time.monotonic()
         refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        started = vars(self).setdefault("_flood_episode_started_at", {})
         rereading = key in self._flood_episodes
         if rereading:
-            # R9: the 6-hour re-read of a persisting episode, the #3255
-            # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+            # R9: the re-read of a persisting episode.
             last_read = refreshed.get(key)
-            if last_read is not None and now - last_read < 6 * 60 * 60:
+            if last_read is not None and now - last_read < OPERATOR_QUEUE_FLOOD_REREAD_SECONDS:
                 return  # this episode already alerted and was read recently
         else:
             # `None` = never alerted for this agent. A `0.0` default would be
@@ -2187,9 +2264,10 @@ class OperatorQueueSyncService(poller.PollerCoreMixin):
             if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
                 return  # too soon after the last episode — the next cycle retries
             self._flood_episodes.add(key)
-        # Stamped before every reading, a re-read included, so a failed one —
-        # released below — is retried no sooner than the cooldown (I1).
-        self._flood_alert_cooldown[agent_name] = now
+            started[key] = utc_now_iso()
+            # Stamped before the first reading, so a failed one — released
+            # below — is retried no sooner than the cooldown (I1).
+            self._flood_alert_cooldown[agent_name] = now
         refreshed[key] = now
 
         if reason == "oversize_file":
@@ -2214,13 +2292,14 @@ class OperatorQueueSyncService(poller.PollerCoreMixin):
         outcome = platform_alerts.observe(
             agent_name, "queue_flood", reason,
             title=title, question=question, priority="high",
-            context={"held": held, "reason": reason},
+            context={"held": held, "reason": reason, "episode_started_at": started.get(key)},
         )
         if outcome == platform_alerts.OBSERVED_FAILED:
             if rereading:
                 # keep the episode so its end still clears the alert; retry the
                 # re-read once the cooldown has passed
-                refreshed[key] = now - 6 * 60 * 60 + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS
+                refreshed[key] = (now - OPERATOR_QUEUE_FLOOD_REREAD_SECONDS
+                                  + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
             else:
                 self._flood_episodes.discard(key)  # retry next window (I1)
                 refreshed.pop(key, None)

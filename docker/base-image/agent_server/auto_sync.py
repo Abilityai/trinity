@@ -12,12 +12,17 @@ auto-sync`), so `PUT .../git/auto-sync` takes effect on the next cycle with no
 recreate. `GIT_SYNC_AUTO` — derived from that same DB flag at every recreate —
 is only the fallback when the platform cannot be asked. Interval from
 `GIT_SYNC_INTERVAL_SECONDS` (default 900 = 15 min).
+
+#4000: every tick also runs git maintenance (`_run_git_maintenance_once`)
+whether or not the flag is on — self-pushing agents run with it off and
+otherwise never got their .git reaped, measured or repacked.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import random
 from pathlib import Path
 from typing import Optional
 
@@ -53,12 +58,6 @@ def _platform_coords() -> Optional[tuple]:
     if backend_url and mcp_key and agent_name:
         return backend_url.rstrip("/"), mcp_key, agent_name
     return None
-
-
-def should_start_loop() -> bool:
-    """Start the loop when auto-sync is on OR could be turned on live: an agent
-    that can ask the platform picks up an ON toggle without a recreate."""
-    return should_run_auto_sync() or _platform_coords() is not None
 
 
 async def _resolve_flag(client: httpx.AsyncClient, path: str, field: str,
@@ -135,7 +134,10 @@ async def run_auto_sync_loop(
     home_dir: Optional[Path] = None, interval_seconds: Optional[int] = None
 ) -> None:
     """Background loop. Swallows every exception to keep heartbeating."""
-    from .routers.git import _run_auto_sync_once  # lazy: avoids circular import
+    from .routers.git import (  # lazy: avoids circular import
+        _run_auto_sync_once,
+        _run_git_maintenance_once,
+    )
 
     home = home_dir or _HOME_DIR
     interval = interval_seconds if interval_seconds is not None else get_interval_seconds()
@@ -150,33 +152,43 @@ async def run_auto_sync_loop(
             logger.exception("auto-sync: initial flag read raised unexpectedly")
 
         # Sleep first so containers that just started aren't penalized by a
-        # heartbeat happening before .git is even initialized.
-        await asyncio.sleep(interval)
+        # heartbeat happening before .git is even initialized. #4000: plus a
+        # random share of one interval — a fleet recreate otherwise starts
+        # every agent's repack in the same minute.
+        await asyncio.sleep(interval + random.uniform(0, interval))
 
         while True:
             try:
-                await run_one_cycle(client, home, _run_auto_sync_once)
+                await run_one_cycle(
+                    client, home, _run_auto_sync_once, _run_git_maintenance_once)
             except Exception:  # noqa: BLE001 — loop must never die
                 logger.exception("auto-sync cycle raised unexpectedly")
             await asyncio.sleep(interval)
 
 
-async def run_one_cycle(client: httpx.AsyncClient, home: Path, run_once) -> Optional[dict]:
-    """One tick: skip without a repo, skip when the owner has auto-sync off,
-    else run the sync cycle. Returns the cycle result, or None when skipped."""
+async def run_one_cycle(
+    client: httpx.AsyncClient, home: Path, run_once, maintain
+) -> Optional[dict]:
+    """One tick: skip without a repo; run the sync cycle when the owner has
+    auto-sync on; then run git maintenance either way (#4000). Returns the
+    sync cycle's result, or None when the sync cycle was skipped."""
     if not (home / ".git").exists():
         logger.debug("auto-sync: no .git in %s, skipping cycle", home)
         return None
-    if not await resolve_auto_sync_enabled(client):
-        logger.info("auto-sync: off (auto_sync_enabled=0), skipping cycle")
-        return None
-    # #1595: run the cycle in a worker thread. A blocking cycle (repack can
-    # run for many minutes) starves the event loop — /health unreachable, 5s
-    # heartbeats missed, chat dead. The cycle's subprocesses are
-    # sweep-registered and the repo lock serializes it against operator git
-    # endpoints.
-    result = await asyncio.to_thread(run_once, home)
-    logger.info("auto-sync: %s", result.get("status"))
+    # #1595: both run in a worker thread. A blocking cycle (repack can run for
+    # many minutes) starves the event loop — /health unreachable, 5s
+    # heartbeats missed, chat dead. Their subprocesses are sweep-registered and
+    # the repo lock serializes them against operator git endpoints.
+    result = None
+    if await resolve_auto_sync_enabled(client):
+        result = await asyncio.to_thread(run_once, home)
+        logger.info("auto-sync: %s", result.get("status"))
+    else:
+        logger.info("auto-sync: off (auto_sync_enabled=0), maintenance only")
+    # #4000: maintenance runs whatever the push did — a failing push used to
+    # skip it, as did auto-sync off.
+    health = await asyncio.to_thread(maintain, home)
+    logger.info("git maintenance: %s", health)
     return result
 
 
@@ -261,15 +273,10 @@ async def run_pull_loop(
 
 
 def schedule_auto_sync_if_enabled(app) -> None:
-    """Attach the loop's startup handler when auto-sync is on or can be turned
-    on live (#3010); each cycle then checks the owner's flag."""
-    if not (should_start_loop() or should_run_pull()):
-        logger.info(
-            "auto-sync unavailable (no GIT_SYNC_AUTO / GIT_SYNC_PULL and no "
-            "platform credentials to read the per-agent flags)"
-        )
-        return
-
+    """Attach the loops' startup handler, always (#4000): every push tick runs
+    git maintenance, so an agent with no platform key and no GIT_SYNC_AUTO
+    still needs the loop. Each tick checks `.git` and the owner's flags (#3010),
+    falling back to the env without platform coords."""
     task_ref: list[asyncio.Task] = []
 
     @app.on_event("startup")

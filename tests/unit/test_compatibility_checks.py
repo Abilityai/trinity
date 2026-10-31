@@ -118,7 +118,8 @@ class TestSpecConsistency:
         # below still asserts D-006 stays out of the catalog.
         # ent#479: +1 (D-010, metrics.json superseded) -> 91.
         # ent#730: +1 (X-009, dashboard metric:/dims: bindings) -> 92.
-        assert len(spec.CHECKS) == 92, f"expected 92 checks, found {len(spec.CHECKS)}"
+        # #4002: +1 (F-014, last setup.sh exit code) -> 93.
+        assert len(spec.CHECKS) == 93, f"expected 93 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
         """#2137: persisted `checks_json` rows predate the retirement.
@@ -558,7 +559,8 @@ class TestGitignoreFixes:
 
 class TestAiChecks:
     def test_no_key_skips_all(self, monkeypatch):
-        monkeypatch.setattr(ai_checks, "get_anthropic_api_key", lambda: "")
+        from services import settings_service
+        monkeypatch.setattr(settings_service, "get_anthropic_api_key", lambda: "")
         ids = list(spec.AI_IDS)[:5]
         out = asyncio.run(ai_checks.run_ai(good_snapshot(), ids))
         assert set(out.keys()) == set(ids)
@@ -567,10 +569,11 @@ class TestAiChecks:
             assert out[cid]["skip_reason"] == "no_api_key"
 
     def test_omitted_check_becomes_skipped(self, monkeypatch):
-        monkeypatch.setattr(ai_checks, "get_anthropic_api_key", lambda: "fake-key")
+        from services import settings_service
+        monkeypatch.setattr(settings_service, "get_anthropic_api_key", lambda: "fake-key")
         ids = ["C-002", "C-003", "C-004"]
 
-        async def fake_call(client, api_key, checks, bundle):
+        async def fake_call(credential, checks, bundle):
             # Only answer the FIRST check; omit the rest.
             first = checks[0]
             return {first.id: {"status": "pass", "explanation": "ok", "confidence": 0.9}}
@@ -602,7 +605,7 @@ class TestBuildReport:
         async def fake_collect(name):
             return {"status": "ok", "snapshot": good_snapshot(), "runtime": "claude-code"}
 
-        async def fake_run_ai(snapshot, ai_ids):
+        async def fake_run_ai(snapshot, ai_ids, agent_name=None):
             return {cid: {"status": "pass", "explanation": None, "confidence": 0.8} for cid in ai_ids}
 
         monkeypatch.setattr(svc, "collect", fake_collect)

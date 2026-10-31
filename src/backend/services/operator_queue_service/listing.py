@@ -259,6 +259,7 @@ def list_for_principal(
     agent_names=None,
     cursor: Optional[str] = None,
     owned_agents=None,
+    addressee_email=None,
 ) -> dict:
     """One page of `GET /api/operator-queue` for this caller, with the fields
     that make it honest (trinity-enterprise#815).
@@ -267,6 +268,11 @@ def list_for_principal(
     when the owner-only rule does not apply (an admin). With a set, an
     owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
     a SQL condition like every other visibility filter, so `total` stays exact.
+
+    `addressee_email` (trinity-enterprise#980): this caller's email, or None
+    when the addressee-only rule does not apply (an admin). With a value, an
+    addressee-only row (`ADDRESSEE_ONLY_ID_PREFIXES`) is listed only when it is
+    addressed to them — the same kind of SQL condition.
 
     Every visibility filter is a SQL condition on the one WHERE builder, so the
     page, `total` and the flags are computed over the same rows:
@@ -297,6 +303,9 @@ def list_for_principal(
     if owned_agents is not None:
         where.update(owner_only_request_id_prefixes=_oq.OWNER_ONLY_ID_PREFIXES,
                      owner_agent_names=set(owned_agents))
+    if addressee_email is not None:
+        where.update(addressee_only_request_id_prefixes=_oq.ADDRESSEE_ONLY_ID_PREFIXES,
+                     addressee_email=addressee_email)
     warnings = []
     next_cursor = None
     if cursor is None:

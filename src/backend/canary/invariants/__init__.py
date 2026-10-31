@@ -48,6 +48,14 @@ is broken", hence its own `H-` id family:
 - H-01: collector blindness (SQL roster empty/unreadable while Docker or Redis
   proves the fleet is alive; confirmed after a minimum elapsed interval)
 
+#4000 adds the first two live repo-bound-deployment (`RD-`) checks, both over
+a new `agent_sync_state` collector that gates them via `collectors_ran`:
+
+- RD-04: git health is measured (running git-bound agent past its startup
+  grace has git stats no older than 24 h)
+- RD-05: git maintenance keeps up (loose objects / packs under 3x the agent's
+  own maintenance trigger)
+
 Subsequent phases register additional invariants here without changes to
 the snapshot collector or the run-cycle endpoint.
 """
@@ -72,6 +80,8 @@ from .b01_queue_status_coherence import check as b01_check
 from .b02_no_queued_without_slots_full import check as b02_check
 from .b08_pull_workers_alive import check as b08_check
 from .r01_no_zombie_claude import check as r01_check
+from .rd04_git_measurement_blind import check as rd04_check
+from .rd05_git_maintenance_behind import check as rd05_check
 
 
 # Public registry. Keys are the invariant ids the run-cycle endpoint
@@ -94,6 +104,8 @@ INVARIANTS: Dict[str, Callable[[Snapshot], List[ViolationReport]]] = {
     "B-02": b02_check,
     "B-08": b08_check,
     "R-01": r01_check,
+    "RD-04": rd04_check,
+    "RD-05": rd05_check,
 }
 
 
