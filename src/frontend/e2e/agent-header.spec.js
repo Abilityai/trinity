@@ -54,30 +54,38 @@ const BLAME = () => {
 
 const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
 
-async function stubAgent(page) {
+// The fixture agent. A test that needs another shape (the system agent: no
+// Autonomy / Read-only toggles, so the tags start the settings row) passes
+// overrides to `stubAgent`.
+const AGENT_BODY = {
+  name: AGENT,
+  status: 'running',
+  port: 2299,
+  resources: { cpu: '1', memory: '1g' },
+  container_id: 'e2e-agent-header-container',
+  template: 'local:test-echo',
+  git_configured: true,
+  runtime: 'claude-code',
+  ephemeral: false,
+  display_label: 'A header with everything in it',
+  owner: 'admin',
+  is_owner: true,
+  is_shared: false,
+  is_system: false,
+  can_share: true,
+  can_delete: true,
+  autonomy_enabled: false,
+  read_only_enabled: false,
+  avatar_url: null,
+  shares: [],
+  circuit_breaker: null,
+}
+
+async function stubAgent(page, overrides = {}) {
   await page.route(`**/api/agents/${AGENT}`, (route) => route.fulfill(json({
-    name: AGENT,
-    status: 'running',
-    port: 2299,
+    ...AGENT_BODY,
     created: new Date().toISOString(),
-    resources: { cpu: '1', memory: '1g' },
-    container_id: 'e2e-agent-header-container',
-    template: 'local:test-echo',
-    git_configured: true,
-    runtime: 'claude-code',
-    ephemeral: false,
-    display_label: 'A header with everything in it',
-    owner: 'admin',
-    is_owner: true,
-    is_shared: false,
-    is_system: false,
-    can_share: true,
-    can_delete: true,
-    autonomy_enabled: false,
-    read_only_enabled: false,
-    avatar_url: null,
-    shares: [],
-    circuit_breaker: null,
+    ...overrides,
   })))
   await page.route(`**/api/agents/${AGENT}/git/status`, (route) => route.fulfill(json(GIT_STATUS)))
   await page.route(`**/api/agents/${AGENT}/tags`, (route) => route.fulfill(json({ agent_name: AGENT, tags: LONG_TAGS })))
@@ -152,6 +160,53 @@ test.describe('the agent header (ent#950)', () => {
       expect(fit.nameWidth, 'repo name crushed').toBeGreaterThanOrEqual(64)
       expect(fit.badgeRight, 'a git badge runs past the header').toBeLessThanOrEqual(fit.cardRight + 1)
     })
+  }
+
+  // #3542: below `sm` the avatar hung half off the card's left edge, the page
+  // was inset 64px to make room for it, and on the system agent (no Autonomy /
+  // Read-only toggles) the tags block was squeezed to 0px so "+ Add tag" drew
+  // over CPU/MEM. Not widening the page (above) held through all of it, so this
+  // measures the boxes themselves. Judged against the card's own edges and the
+  // tab card below it, never a pixel floor, apart from the page gutter.
+  for (const kind of ['user', 'system']) {
+    for (const width of [320, 390, 480]) {
+      test(`@smoke at ${width}px the ${kind} agent's header fits inside its card, and the tags never cover the live stats (#3542)`, async ({ page }) => {
+        if (kind === 'system') await stubAgent(page, { is_system: true })
+        await page.setViewportSize({ width, height: 812 })
+        await page.goto(`/agents/${AGENT}`)
+        await expect(page.getByTestId('agent-header-tags')).toBeVisible({ timeout: 20000 })
+        await expect(page.getByTestId('agent-tabs')).toBeVisible()
+        await page.waitForTimeout(400) // tab-strip ResizeObserver settles after paint
+        const m = await page.evaluate(() => {
+          const box = (el) => {
+            const r = el.getBoundingClientRect()
+            return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }
+          }
+          const card = document.querySelector('[data-testid="agent-header-container"]')
+          const row = document.querySelector('[data-testid="agent-header-row-settings"]')
+          const tagsBlock = row.firstElementChild
+          const live = document.querySelector('[data-testid="agent-header-live"]')
+          return {
+            card: box(card),
+            avatar: box(card.firstElementChild),
+            tabs: box(document.querySelector('[data-testid="agent-tabs"]')),
+            tags: box(document.querySelector('[data-testid="agent-header-tags"]')),
+            tagsBlock: { ...box(tagsBlock), scrollWidth: tagsBlock.scrollWidth, clientWidth: tagsBlock.clientWidth },
+            live: [...live.children].map(box),
+          }
+        })
+        const PX = 0.5
+        expect.soft(m.avatar.left, 'the avatar sits across the card\'s left edge').toBeGreaterThanOrEqual(m.card.left - PX)
+        expect.soft(m.avatar.right, 'the avatar runs past the card').toBeLessThanOrEqual(m.card.right + PX)
+        // The page gutter below `sm` is 16px; the old 64px inset put the card at 80.
+        expect.soft(m.card.left, 'the header card is inset from the page gutter').toBeLessThanOrEqual(24)
+        expect.soft(Math.abs(m.card.left - m.tabs.left), 'the header and the tab card start at different x').toBeLessThanOrEqual(PX)
+        expect.soft(Math.abs(m.card.right - m.tabs.right), 'the header and the tab card end at different x').toBeLessThanOrEqual(PX)
+        expect.soft(m.tagsBlock.scrollWidth - m.tagsBlock.clientWidth, `the tags block is ${Math.round(m.tagsBlock.width)}px wide and its content spills out of it`).toBeLessThanOrEqual(1)
+        const hits = m.live.filter((b) => b.width > 0 && m.tags.left < b.right && b.left < m.tags.right && m.tags.top < b.bottom && b.top < m.tags.bottom)
+        expect.soft(hits.length, 'the tags draw over the CPU/MEM cluster').toBe(0)
+      })
+    }
   }
 
   test('@smoke the GitHub line landing moves nothing below the header (#3872)', async ({ page }) => {

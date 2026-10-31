@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest'
-import { formatCompactAge, serverSkewMs } from '@/utils/timestamps'
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
+import { formatCompactAge, formatRelativeTime, serverSkewMs } from '@/utils/timestamps'
+import { useFormatters } from '@/composables/useFormatters'
 
 /**
  * ent#100 — the two time helpers the "Recent failures" tile renders through.
@@ -74,5 +75,36 @@ describe('serverSkewMs', () => {
     expect(serverSkewMs('', client)).toBe(0)
     expect(serverSkewMs('not a date', client)).toBe(0)
     expect(serverSkewMs('Wed, 12 Aug 2026 12:03:00 GMT', NaN)).toBe(0)
+  })
+})
+
+// Release testing (B7, finding 8 / #3568): "1 minutes ago" / "1 hours ago" /
+// "1 days ago". Two copies of the helper carry the same prose — the shared util
+// and the composable AgentHeader reads — so both are held to the same rule.
+describe.each([
+  ['utils/timestamps', formatRelativeTime],
+  ['composables/useFormatters', useFormatters().formatRelativeTime],
+])('formatRelativeTime (%s)', (_name, fmt) => {
+  const NOW = Date.parse('2026-10-11T12:00:00Z')
+  const ago = (ms) => new Date(NOW - ms).toISOString()
+  beforeEach(() => {
+    vi.useFakeTimers()
+    vi.setSystemTime(NOW)
+  })
+  afterEach(() => { vi.useRealTimers() })
+
+  it('uses the singular for exactly one unit', () => {
+    expect(fmt(ago(1 * M))).toBe('1 minute ago')
+    expect(fmt(ago(1 * M + 59 * S))).toBe('1 minute ago')
+    expect(fmt(ago(1 * H))).toBe('1 hour ago')
+    expect(fmt(ago(1 * D))).toBe('1 day ago')
+  })
+
+  it('keeps the plural for every other count', () => {
+    expect(fmt(ago(30 * S))).toBe('just now')
+    expect(fmt(ago(2 * M))).toBe('2 minutes ago')
+    expect(fmt(ago(59 * M))).toBe('59 minutes ago')
+    expect(fmt(ago(2 * H))).toBe('2 hours ago')
+    expect(fmt(ago(6 * D))).toBe('6 days ago')
   })
 })
