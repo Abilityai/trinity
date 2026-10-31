@@ -575,7 +575,7 @@ export interface OperatorAskCreate {
   options?: string[];
   context?: Record<string, unknown> | null;
   proposal?: Record<string, unknown> | null;
-  to?: "primary" | "approver" | "viewer" | "operator";
+  to?: "primary" | "approver" | "viewer" | "operator" | `role:${string}`;   // trinity-enterprise#1007: or a canon role id
   expires_at?: string;
   supersedes_expired?: string;
   replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks
