@@ -19,7 +19,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Tuple, Optional
 
 from fastapi import HTTPException, Request
 
@@ -79,13 +79,17 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
     "kind",  # trinity-enterprise#704
-    "skills", "skill_sets", "grants",  # trinity-enterprise#1030
+    "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
-_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants"})
+_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates"})
+
+# trinity-enterprise#1030 CP3: the fields one `gates:` entry may carry — the
+# gate map's own write request (`SkillGateSetRequest`).
+_GATE_ENTRY_KEYS = ("approver", "deadline_hours")
 
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
@@ -140,6 +144,32 @@ def _load_manifest_yaml(yaml_str: str):
         max_expanded_nodes=MANIFEST_MAX_EXPANDED_NODES,
         error_cls=ManifestError,
     )
+
+
+def _parse_gates(agent_name, value) -> Optional[Dict[str, Dict[str, Any]]]:
+    """trinity-enterprise#1030 CP3: `gates: {<skill>: {approver, deadline_hours}}`.
+    A skill with no fields (`{}` or null) asks for the gate map's defaults.
+    The shape is refused by name; the VALUES are the gate map's to judge
+    (`validate_gate_changes`, at plan time), so one validator answers."""
+    if value is None:
+        return None
+    shape = (f"Agent '{agent_name}' gates must be a map of skill name to "
+             f"{{approver, deadline_hours}}")
+    if not isinstance(value, dict):
+        raise ValueError(shape)
+    out: Dict[str, Dict[str, Any]] = {}
+    for skill, spec in value.items():
+        if spec is None:
+            spec = {}
+        if not isinstance(spec, dict):
+            raise ValueError(shape)
+        extra = sorted(str(k) for k in spec if k not in _GATE_ENTRY_KEYS)
+        if extra:
+            raise ValueError(
+                f"Agent '{agent_name}' gate '{skill}': unknown key(s): {', '.join(extra)}. "
+                f"Recognised gate keys are: {', '.join(_GATE_ENTRY_KEYS)}.")
+        out[str(skill)] = {k: spec[k] for k in _GATE_ENTRY_KEYS if k in spec}
+    return out
 
 
 def parse_manifest(yaml_str: str) -> SystemManifest:
@@ -201,6 +231,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             skills=agent_config.get("skills"),  # trinity-enterprise#1030
             skill_sets=agent_config.get("skill_sets"),
             grants=agent_config.get("grants"),  # trinity-enterprise#1030 CP2
+            gates=_parse_gates(agent_name, agent_config.get("gates")),  # CP3
         )
 
     # Parse permissions
@@ -1426,6 +1457,18 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             logger.warning(f"Failed to get grants for {full_name}: {e}")
             unobserved_reads.append(f"grants of {full_name}")
 
+        # trinity-enterprise#1030 CP3: the explicit approval map. Library
+        # defaults and tombstones are state the library drives, not target
+        # state, so only `set` rows are the manifest's.
+        try:
+            from services.system_apply import gates as apply_gates
+            gate_map = apply_gates.export_member(full_name)
+            if gate_map:
+                config["gates"] = gate_map
+        except Exception as e:
+            logger.warning(f"Failed to get gates for {full_name}: {e}")
+            unobserved_reads.append(f"gates of {full_name}")
+
         agent_configs[short_name] = config
 
     if templateless:
@@ -2115,6 +2158,11 @@ async def deploy_manifest(
                 agent_names, manifest.agents, current_user)
             if held_back:
                 all_warnings.append(held_back)
+            from services.system_apply import gates as apply_gates
+            gates_held_back = apply_gates.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
+            if gates_held_back:
+                all_warnings.append(gates_held_back)
 
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
@@ -2312,6 +2360,20 @@ async def deploy_manifest(
             logger.exception(f"Tag configuration failed for system '{manifest.name}'")
             all_warnings.append(f"Failed to configure tags: {reason}")
 
+        # 10a. The approval map (trinity-enterprise#1030 CP3), BEFORE the
+        # skills: a gate is in place before the skill it governs is delivered
+        # (ent#753). Written only by a caller holding skills.manage (T8);
+        # otherwise listed as held back. Best-effort, like 7-10.
+        if any(cfg.gates for cfg in manifest.agents.values()):
+            from services.system_apply import gates as apply_gates
+            try:
+                all_warnings.extend(await apply_gates.deploy(
+                    created_map, manifest.agents, current_user, request))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Gate phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write gates: {reason}")
+
         # 10b. Skills and skill sets (trinity-enterprise#1030), after the tags
         # and before the starts, so a created member's first start delivers
         # them. Best-effort, like 7-10.
@@ -2505,6 +2567,9 @@ class ApplyMemberState:
     # trinity-enterprise#1030 CP2: held capabilities, read only when the
     # member declares `grants:`.
     grants: List[str] = field(default_factory=list)
+    # trinity-enterprise#1030 CP3: every stored gate row by skill key
+    # (tombstones included), read only when the member declares `gates:`.
+    gates: Dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass
@@ -2802,6 +2867,9 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             if manifest.agents[state.short_name].grants is not None:  # trinity-enterprise#1030 CP2
                 from services.system_apply import grants as apply_grants
                 state.grants = apply_grants.read_member(name)
+            if manifest.agents[state.short_name].gates is not None:  # trinity-enterprise#1030 CP3
+                from services.system_apply import gates as apply_gates
+                state.gates = apply_gates.read_member(name)
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
             state.blocked = True
@@ -3043,6 +3111,8 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemAgentConfig.grants": ("reconciled", "capabilities granted when missing, by an admin in a "
                                  "signed-in session only (else grant_requires_interactive_admin); "
                                  "extras reported, never revoked"),
+    "SystemAgentConfig.gates": ("reconciled", "explicit skill gates set or rewritten through the "
+                                "gate map's own write; undeclared gates reported, never cleared"),
     "schedule.name": ("reconciled", "the match key"),
     "schedule.cron": ("reconciled", "updated in place"),
     "schedule.message": ("reconciled", "updated in place"),
@@ -3058,6 +3128,9 @@ _APPLY_OP_STEP = {
     "tag": "tag", "edge": "permissions", "folders": "folders", "resources": "resources",
     "created_resources": "resources", "schedule_create": "schedules",
     "schedule_update": "schedules", "created_schedules": "schedules",
+    # trinity-enterprise#1030 CP3: the approval map BEFORE the skill phases,
+    # so a skill is gated before it is delivered (ent#753).
+    "gate_set": "gates",
     # trinity-enterprise#1030: after every other member write (the gates a
     # skill brings are written with it, before delivery), before the starts.
     "skill_assign": "skills", "skill_set_assign": "skill_sets",
@@ -3491,6 +3564,15 @@ def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
         make_op=ApplyOp)
 
 
+def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers: List) -> None:
+    """trinity-enterprise#1030 CP3: `gates:`, validated through the gate
+    map's own public validator."""
+    from services.system_apply import gates as apply_gates
+    apply_gates.plan(
+        mp, stored=None if state is None else state.gates, blockers=blockers,
+        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp)
+
+
 def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
                  snapshot: ApplySnapshot, blockers: List) -> None:
     """trinity-enterprise#1030 CP2: `grants:`. Written only when the caller
@@ -3536,12 +3618,14 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         if state.status == "absent" and not state.blocked:
             mp.creating = True
             _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            _plan_gates(mp, None, blockers)
             _plan_skills(mp, None, snapshot, blockers)
             _plan_grants(mp, None, snapshot, blockers)
             mp.verdict = "create"
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
                                   declared_final, normalized_resources, blockers)
+            _plan_gates(mp, state, blockers)
             _plan_skills(mp, state, snapshot, blockers)
             _plan_grants(mp, state, snapshot, blockers)
             mp.verdict = "update" if mp.ops else "unchanged"
@@ -3656,12 +3740,14 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     grants_summary, grants_warning = apply_grants.summarize(members)
     if grants_warning:
         warnings.append(grants_warning)
+    from services.system_apply import gates as apply_gates
+    gates_summary = apply_gates.summarize(members)
 
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted, summary={"grants": grants_summary},
+        adopted=adopted, summary={"grants": grants_summary, "gates": gates_summary},
     )
 
 
@@ -3971,6 +4057,10 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
     elif op.kind == "grant":  # trinity-enterprise#1030 CP2
         from services.system_apply import grants as apply_grants
         await apply_grants.run(op, current_user, out, attempt, request=request)
+    elif op.kind == "gate_set":  # trinity-enterprise#1030 CP3
+        from services.system_apply import gates as apply_gates
+        await apply_gates.run(op, current_user, out, attempt, request=request,
+                              apply_change=_apply_change)
 
 
 async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:

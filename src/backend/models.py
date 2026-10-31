@@ -1316,6 +1316,11 @@ class SystemAgentConfig(BaseModel):
     # session — the grant route's own gate; otherwise reported as held back.
     # An extra is reported, never revoked.
     grants: Optional[List[str]] = None
+    # trinity-enterprise#1030 CP3: the approval map — `{<skill>: {approver,
+    # deadline_hours}}`. Written through the gate map's own `set_gate`, so its
+    # admission is the route's; a stored gate the manifest does not name is
+    # reported, never cleared.
+    gates: Optional[Dict[str, Dict[str, Any]]] = None
 
 
 class SystemPermissions(BaseModel):

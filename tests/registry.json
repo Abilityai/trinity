@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_gates.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read."
+    },
+    {
       "file": "unit/test_ent1030_grants.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",
