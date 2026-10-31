@@ -683,6 +683,13 @@ class TestDeployHoldsAnUngatedSkill:
         assert all("deploy" not in c[2] for c in _delivered(world))
         assert any("Skill 'deploy' not assigned" in w and "gate" in w for w in res.warnings)
 
+    def test_a_refused_gate_holds_its_skill_under_another_spelling(self, world):
+        """The gate key is normalised and the skill name is not."""
+        res = _deploy(world, _gated_manifest({"DePloy": {"approver": "role:cfo"}},
+                                             skills=["deploy"]), world.user(W.ALICE))
+        assert res.status == "deployed"
+        assert not list(db.get_agent_skills(LEAD))
+
     def test_a_gate_that_lands_still_delivers(self, world):
         res = _deploy(world, _gated_manifest({"deploy": {}}, skills=["deploy"]), world.user(W.ALICE))
         assert res.status == "deployed"

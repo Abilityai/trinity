@@ -534,7 +534,7 @@ def test_a_real_system_named_like_the_catalog_still_exports(env, monkeypatch):
                        "template": "local:default", "created_at": "2026-01-01"}],
     )
     monkeypatch.setattr(
-        system_service, "export_manifest", lambda name, agents, naming=None: "name: realsys\n"
+        system_service, "export_manifest", lambda name, agents, naming=None, viewer=None: "name: realsys\n"
     )
     r = env.client.get("/api/systems/realsys/manifest")
     assert r.status_code == 200

@@ -1369,6 +1369,9 @@ def _export_readable(viewer: Optional[User], name: str) -> Dict[str, bool]:
             return True
         except HTTPException:
             return False
+        except Exception as e:  # noqa: BLE001 — one bad read never loses the export
+            logger.warning(f"Failed to check export access to {name}: {e}")
+            return False
 
     owner_tier = passes(get_owned_agent_by_name)
     return {"grants": owner_tier, "seat": owner_tier,

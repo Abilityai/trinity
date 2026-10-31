@@ -104,6 +104,13 @@ class TestWhoReadsWhat:
         assert "grants" not in lead and "gates" not in lead and "seat" not in lead
         assert "not readable by this caller" in text
 
+    def test_a_failed_access_read_withholds_and_keeps_the_export(self, world, monkeypatch):
+        def boom(*_a, **_k):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(db, "can_user_share_agent", boom)
+        text, lead = _export(world.user(W.ALICE))
+        assert "grants" not in lead and f"grants of {LEAD}" in text
+
     def test_the_route_hands_the_caller_to_the_exporter(self, world, monkeypatch):
         """Production wiring: drop `viewer=current_user` and this goes red."""
         import asyncio
