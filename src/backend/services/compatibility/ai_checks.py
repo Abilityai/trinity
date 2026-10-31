@@ -196,9 +196,11 @@ async def run_ai(snapshot: Dict[str, Any], ai_check_ids: List[str],
         # credential mode that excludes this agent — is `no_credential`, with
         # the gateway's reason, so the panel does not send an admin to add a
         # key that would not be used.
-        # A subscription agent's problem is its subscription whether or not the
-        # install has a key — `no_api_key` only when a key is what is missing.
-        reason = "no_api_key" if not (model_gateway.has_platform_key() or credential.subscription_id) else "no_credential"
+        # `no_api_key` only when a key is what is missing AND would be used: a
+        # subscription agent's problem is its subscription, and in `subscription`
+        # mode no key is ever used, whoever the agent is.
+        key_would_help = not credential.subscription_id and model_gateway.mode() != "subscription"
+        reason = "no_api_key" if (key_would_help and not model_gateway.has_platform_key()) else "no_credential"
         for cid in requested:
             out[cid] = {"status": "skipped", "skip_reason": reason,
                         "explanation": credential.reason, "confidence": None}

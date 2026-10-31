@@ -229,10 +229,11 @@ async def extract_preview_endpoint(
     # `facts: []`, which reads as "nothing worth remembering" and gets scored.
     report: dict = {}
     facts, screened = await memory_service._extract(agent_name, transcript, subject, report=report)
-    if not report.get("answered"):
+    if not report.get("answered") or report.get("unparsed"):
+        why = "its answer was not a JSON array of facts" if report.get("unparsed") else (report.get("reason") or "request failed")
         raise HTTPException(status_code=502, detail={
             "code": "extractor_failed", "extractor": report.get("kind"), "status": report.get("status"),
-            "message": f"The extractor did not answer ({report.get('reason') or 'request failed'}); nothing to preview.",
+            "message": f"The extractor did not answer usably ({why}); nothing to preview.",
         })
     answered_on_subscription = report.get("kind") == model_gateway.KIND_SUBSCRIPTION
     return MemoryExtractPreviewOut(

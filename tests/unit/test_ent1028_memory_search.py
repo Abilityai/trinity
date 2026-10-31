@@ -32,7 +32,7 @@ from db.memory_facts import EVENT_OPS
 from db.write_params import ExecutionResult, TaskExecutionFields
 from db_models import UserCreate
 from models import MemorySearchRequest, User
-from services import anthropic_messages as am
+from services import model_gateway as am
 from services import memory_embeddings as me
 from services import memory_service as ms
 

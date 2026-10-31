@@ -312,6 +312,29 @@ class TestRequest:
         assert run(gw.complete("x", "P", agent_name=agent.name, report=report)) is None
         assert report["answered"] is False and report["kind"] == "subscription" and report["status"] == 401
 
+    def test_the_live_429_fallback_honours_use_platform_api_key(self, transport, key, agent, monkeypatch):
+        """The delta review's finding: the in-flight 429 step-aside resolved the
+        PLATFORM's credential, so an agent the operator flagged off the key was
+        billed to it anyway. The fallback is the agent's own key arm."""
+        subscribed(monkeypatch, agent)
+        db.set_use_platform_api_key(agent.name, False)
+        transport.script += [(429, {"error": {"type": "rate_limit_error", "message": "Error"}}), answer("from the key")]
+        report = {}
+        assert run(gw.complete("x", "P", agent_name=agent.name, report=report)) is None
+        assert len(transport.calls) == 1 and report["answered"] is False and report["kind"] == "subscription"
+        db.set_use_platform_api_key(agent.name, True)
+
+    def test_an_answer_that_is_not_json_is_reported_unparsed(self, agent, memory_on, transport, key, monkeypatch):
+        """A 200 whose body is prose, not a JSON array, must not read as "nothing
+        worth remembering" to the preview: the report says the answer was unparsed."""
+        from services import memory_subject
+        subscribed(monkeypatch, agent)
+        transport.script.append(answer("Sure! Here are the facts I found: none really."))
+        report = {}
+        subject = memory_subject.MemorySubject(memory_subject.AGENT, None, "headless_run", "schedule")
+        facts, screened = run(ms._extract(agent.name, "User: hi\nAssistant: hello", subject, report=report))
+        assert facts == [] and screened == [] and report["answered"] is True and report.get("unparsed") is True
+
     def test_failures_are_none_never_a_raise(self, transport, key):
         transport.script += [(500, {"error": "x"}), ConnectionError("down")]
         assert run(gw.complete("x", "P")) is None
@@ -559,6 +582,11 @@ class TestHardening:
         # subscription: `no_api_key` would send the admin to add a key it would not use.
         out = run(ai_checks.run_ai({"files": {}}, ids, agent_name=agent.name))
         assert all(out[cid]["skip_reason"] == "no_credential" for cid in ids)
+        # In `subscription` mode a key would not be used either, subscription or not.
+        monkeypatch.setattr(db, "get_agent_subscription_id", lambda n: None)
+        db.set_setting(gw.SETTING_CREDENTIAL, "subscription")
+        out = run(ai_checks.run_ai({"files": {}}, ids, agent_name=agent.name))
+        assert all(out[cid]["skip_reason"] == "no_credential" for cid in ids)
 
 
 class TestStatusAndPreview:
@@ -607,6 +635,11 @@ class TestStatusAndPreview:
             self._call(agent, req, person(agent))
         assert err.value.status_code == 502 and err.value.detail["code"] == "extractor_failed"
         assert err.value.detail["extractor"] == "subscription" and err.value.detail["status"] == 401
+        transport.script.append(answer("Sure! No facts here."))
+        with pytest.raises(HTTPException) as err:
+            self._call(agent, req, person(agent))
+        assert err.value.status_code == 502 and err.value.detail["code"] == "extractor_failed"
+        assert "JSON" in err.value.detail["message"]
 
     def test_preview_refusals(self, agent, memory_on, transport, key):
         with pytest.raises(HTTPException) as err:

@@ -33,6 +33,7 @@ tokens, latency) for Vector.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -270,7 +271,9 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
     ``report`` (a dict the caller owns) is filled with who actually answered:
     ``answered``, ``kind``, ``model``, ``subscription_id``, and ``status`` /
     ``reason`` on a failure — the plan taken before the call is not the answer."""
-    cred = credential or resolve(agent_name)
+    # `resolve` reads the db and, through the one rate-limit derivation, a cached
+    # Redis snapshot (bounded at its 1 s socket timeout): off the event loop.
+    cred = credential or await asyncio.to_thread(resolve, agent_name)
     if not cred.usable:
         logger.info("[model] %s: nobody to answer for %s: %s", purpose, agent_name or "platform", cred.reason)
         _note(report, cred, answered=False, reason=cred.reason)
@@ -279,7 +282,11 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
     body = cred.body(prompt=prompt, messages=messages, max_tokens=max_tokens, model=model, tools=tools, tool_choice=tool_choice)
     response = await send(cred, body, timeout=timeout)
     if response is not None and response.status_code == 429 and cred.kind == KIND_SUBSCRIPTION and cred.mode == "auto":
-        fallback = resolve(None)
+        # The AGENT's key arm, not the platform's: an agent flagged off the
+        # instance key (`use_platform_api_key = False`) stays off it mid-call too.
+        fallback = await asyncio.to_thread(resolve, None)
+        if agent_name and not await asyncio.to_thread(_agent_may_use_platform_key, agent_name):
+            fallback = Credential(KIND_NONE, cred.mode, None, None, None, "the agent is set not to use the platform key")
         if fallback.kind == KIND_API_KEY:
             logger.info("[model] %s: subscription rate-limited for %s — using the platform key", purpose, agent_name)
             cred = fallback

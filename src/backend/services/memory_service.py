@@ -576,6 +576,8 @@ async def _extract(agent_name: str, transcript: str, subject: memory_subject.Mem
     if parsed is None:
         if raw is not None:
             logger.info("[memory] extractor returned no JSON array")
+            if report is not None:
+                report["unparsed"] = True   # answered, but not in the shape asked for — not "nothing to remember"
         return [], []
     facts: List[str] = []
     screened: List[str] = []
