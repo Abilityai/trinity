@@ -1,7 +1,7 @@
-# mcp: none — owner-tier configuration and the owner view of a person's facts; UI-only (trinity-enterprise#1022)
+# mcp: memory.ts (search_memory) — the agent door; the owner-tier configuration and views are UI-only (trinity-enterprise#1022, #1028)
 """Retrieval memory per agent (trinity-enterprise#1022, MEM-002).
 
-Four routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
+Eight routes under ``/api/agents/{name}/retrieval-memory`` — named so they sit
 clearly apart from ``/user-memory``, the MEM-001 write door the agent itself
 calls:
 
@@ -12,6 +12,10 @@ calls:
 * ``GET  …/events``     — the journal: what happened to a fact, or in one execution.
 * ``POST …/extract-preview`` — the owner runs one exchange through the real extraction on
   whatever would answer for this agent, nothing stored (trinity-enterprise#1027).
+
+* ``GET  …/search``     — the owner's search over one scope (trinity-enterprise#1028).
+* ``POST …/search``     — the agent door: MCP ``search_memory``, the scope read off the
+  execution row by the whose-memory rule, never from the caller.
 
 The platform switch itself is ``trinity_memory_enabled`` through the generic
 settings door; ``GET /api/settings/memory`` (admin) reports the platform status.
@@ -30,17 +34,23 @@ from dependencies import (
     AuthorizedAgentByName,
     CurrentUser,
     OwnedAgentByName,
+    assert_agent_access,
     assert_own_agent,
+    get_current_user,
     reject_agent_principal,
     require_person,
 )
 from db.memory_facts import EVENT_OPS
+from models import TaskExecutionStatus
 from models import (
     MemoryExtractPreviewOut,
     MemoryExtractPreviewRequest,
     MemoryFactEventOut,
     MemoryFactOut,
     MemoryOptOutUpdate,
+    MemorySearchHit,
+    MemorySearchRequest,
+    MemorySearchResponse,
 )
 from services import memory_service, memory_subject, model_gateway
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -231,3 +241,161 @@ async def extract_preview_endpoint(
         subscription=who["subscription"] if answered_on_subscription else None,
         facts=facts, screened=screened, transcript_chars=len(transcript),
     )
+
+# --------------------------------------------------------------------------- #
+# Search (trinity-enterprise#1028)
+# --------------------------------------------------------------------------- #
+
+def _query_or_422(q: str | None) -> str:
+    query = (q or "").strip()
+    if not query:
+        raise HTTPException(status_code=422, detail={"code": "query_empty", "message": "Give a few words to look for: a name, a deadline, a decision, a past outcome."})
+    return query
+
+
+def _memory_on_or_4xx(agent_name: str) -> None:
+    """422 when retrieval memory is off for this agent (the platform switch or
+    the per-agent opt-out), 503 when it is on but the embedder is not there —
+    an honest refusal rather than an empty answer that reads as 'nothing matched'."""
+    if not memory_service.is_enabled(agent_name):
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_off",
+            "message": "Retrieval memory is off for this agent (Settings → General → Retrieval memory, or the agent's own Memory setting).",
+        })
+    platform = memory_service.status()
+    if not platform["available"]:
+        # The loader's own text (a path, a library's error) is for the log and
+        # the Settings card, never for the caller (Product Quality Bar 10).
+        logger.info("[memory] search refused for %s: embedder unavailable (%s)", agent_name, platform.get("reason") or "not loaded")
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Retrieval memory is on but its embedding model is not loaded. Try again shortly; the Settings → General → Retrieval memory card says why.",
+        })
+
+
+def _hit(record: dict) -> MemorySearchHit:
+    return MemorySearchHit(
+        id=record["id"], text=record["text"], line=record.get("line") or memory_service.render_fact_line(record),
+        source=record.get("source") or "", execution_id=record.get("execution_id"),
+        created_at=record.get("created_at"), updated_at=record.get("updated_at"),
+        relevance=float(record.get("relevance") or 0.0), score=float(record.get("score") or 0.0),
+    )
+
+
+@router.get("/{agent_name}/retrieval-memory/search", response_model=list[MemorySearchHit])
+async def search_retrieval_memory_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: User = Depends(require_person),
+    q: str = Query(..., description="What to look for"),
+    k: int = Query(default=10, ge=1, le=memory_service.SEARCH_K_MAX),
+    user_email: str | None = Query(default=None, description="A person's scope; omitted = the agent scope"),
+):
+    """The owner's search over one scope: the same store, ranking and recency
+    weight the prompt gets, past the injected tail. Every hit is journaled as a
+    ``search`` row with the query."""
+    reject_agent_principal(current_user)
+    query = _query_or_422(q)
+    email = None
+    if user_email:
+        email = user_email.strip().lower()
+        if not memory_subject.looks_like_email(email):
+            raise HTTPException(status_code=422, detail={"code": "invalid_email", "message": "user_email is not an email address"})
+    _memory_on_or_4xx(agent_name)
+    try:
+        records = await memory_service.search_records(agent_name, email, query, k=k, actor=current_user.email)
+    except memory_service.MemorySearchError:
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Memory search could not be answered — the embedder or the store did not respond. Try again; if it persists, check Settings → General → Retrieval memory.",
+        })
+    return [_hit(r) for r in records]
+
+
+@router.post("/{agent_name}/retrieval-memory/search", response_model=MemorySearchResponse)
+async def search_retrieval_memory_agent_endpoint(
+    agent_name: str,
+    body: MemorySearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """The agent door (MCP ``search_memory``). The scope is the one the
+    execution serves — the person on a person turn, the agent's own work on a
+    headless run — read off the row by ``memory_subject``; a run that serves no
+    one is refused with the reason. An agent-scoped key may only search its own
+    agent (trinity-enterprise#840), checked first so a key outside its reach
+    gets the same refusal. **Agents only** (operator ruling on PR #4114): a
+    human has the owner door above, which takes the scope explicitly and holds
+    the owner line; letting a human in here would let anyone the agent is
+    merely shared with read any person's scope by naming that person's run —
+    the read the GET door refuses them. Same shape as ``aauth_agent_only``."""
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only search its own agent's memory")
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. Search memory from the owner door "
+                       "(GET /api/agents/{name}/retrieval-memory/search) instead.",
+        })
+    assert_agent_access(current_user, agent_name, detail="Not authorized")
+    query = _query_or_422(body.query)
+    execution = db.get_execution(body.execution_id)
+    if not execution:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if execution.agent_name != agent_name:
+        raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
+    # The door serves the turn the agent is IN. Nothing proves which turn a
+    # request comes from (ent#926: the header is a claim, the ledger is the
+    # fact), so the named run must be live — a finished run of another person
+    # read that person's scope while `GET /executions/{id}` refused it — and no
+    # other live turn on this agent may resolve to a different scope; while two
+    # do, the door fails closed, as the execution reads do.
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_not_live",
+            "message": "That run has finished. Search memory with the execution_id of the turn you are in.",
+        })
+    subject = memory_subject.resolve(execution)
+    if subject.kind == memory_subject.SKIP:
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_no_subject", "reason": subject.reason,
+            "message": ("This run serves no one whose memory can be searched: an anonymous public turn, a group "
+                        f"conversation, or a '{subject.triggered_by}' trigger. Memory is searched on a person's "
+                        "verified turn or on the agent's own headless runs."),
+        })
+    scope = await asyncio.to_thread(memory_service.scope_for, agent_name, subject.user_email)
+    if await asyncio.to_thread(_another_live_scope, agent_name, execution.id, scope):
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_ambiguous",
+            "message": ("Another turn for someone else is running on this agent right now, so whose memory this "
+                        "search is for cannot be told apart. Try again once that turn ends."),
+        })
+    _memory_on_or_4xx(agent_name)
+    try:
+        records = await memory_service.search_records(agent_name, subject.user_email, query, k=body.k,
+                                                      execution_id=body.execution_id)
+    except memory_service.MemorySearchError:
+        raise HTTPException(status_code=503, detail={
+            "code": "memory_unavailable",
+            "message": "Memory search could not be answered — the embedder or the store did not respond. Try again; if it persists, check Settings → General → Retrieval memory.",
+        })
+    return MemorySearchResponse(agent_name=agent_name, scope="agent" if scope == memory_service.AGENT_SCOPE else "person",
+                                hits=[_hit(r) for r in records])
+
+
+def _another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution_id`` resolves
+    to a scope other than ``scope``. Read from the ledger (only ``running`` rows,
+    never a request); a ledger that cannot be read counts as ambiguous."""
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution_id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is None:
+                continue
+            other_subject = memory_subject.resolve(other)
+            other_scope = memory_service.scope_for(agent_name, other_subject.user_email) if other_subject.kind != memory_subject.SKIP else None
+            if other_scope != scope:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[memory] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True
