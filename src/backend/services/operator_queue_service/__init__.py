@@ -14,12 +14,14 @@ Polling cycle:
   6. Handle expired entries
 """
 
-# ruff: noqa: F401
 # #3785: this external block stays whole, first, even where `__init__` itself
 # no longer reads a name. A submodule may import at module level only what is
 # already imported here (test_3785's G13), so an ImportError fires before any
 # `_oq`-holding submodule has loaded; and several names here are read through
 # the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
 import asyncio
 import base64
 import hashlib
