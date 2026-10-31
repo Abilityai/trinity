@@ -243,6 +243,12 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
 - **Tests**: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered, audit-wrapped tool: over the real MCP transport; a session with no API key (which that transport's authentication refuses before any tool runs) in-process through FastMCP's own session; and the other-hostname case in-process too, by choice, so an https DNS origin needs no network (`fetch` stubbed).
 - **Flow**: `docs/memory/feature-flows/system-manifest.md`
 
+#### 7.7.1 `naming:` on the systems tools (trinity-enterprise#1030)
+
+- **Status**: ✅ Implemented (text + one optional parameter, no new tool).
+- **Rules**: `get_system_manifest({system_name, naming?})` forwards `naming` (`prefixed` | `bare`, a zod enum, so any other value is refused before a request) as the export route's `?naming=` override and sends no query when it is omitted (the backend infers). Its `system_name` text says membership is by the system tag with a `'{system_name}-*'` fallback, replacing the stale "All agents matching" line (#2373). `deploy_system` and `apply_system` name `naming: bare` in their manifest text; `apply_system` says an untagged declared agent is adopted under it (`adopted[]`). Every systems tool description stays under the 2,048-character cut (#3234).
+- **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
+
 ---
 
 ## 32. A2A Agent Discoverability (#737)

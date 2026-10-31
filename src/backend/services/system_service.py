@@ -1148,7 +1148,8 @@ async def start_all_agents(agent_names: List[str]) -> Dict[str, str]:
     return results
 
 
-def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
+def _member_short_name(full_name: str, system_name: str,
+                       naming: str = "prefixed") -> Optional[str]:
     """The manifest key for a member, or None when it cannot have one.
 
     #2373 review (C1): a manifest agent key IS the short name, and the short name
@@ -1162,7 +1163,12 @@ def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
     re-deploy — the round trip broken by the export, not the import. Returning
     None lets each caller SKIP and report, which is what AC #3 asks for: drop or
     scope the edge, never blind-slice it.
+
+    trinity-enterprise#1030: under `naming: bare` the key IS the full name, so
+    every member has one.
     """
+    if naming == "bare":
+        return full_name
     prefix = f"{system_name}-"
     if not full_name.startswith(prefix):
         return None
@@ -1170,17 +1176,33 @@ def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
     return short or None
 
 
-def export_manifest(system_name: str, agents: List[Dict]) -> str:
+def export_manifest(system_name: str, agents: List[Dict], *,
+                    naming: Optional[str] = None) -> str:
     """
     Export a system as a YAML manifest.
 
     Args:
         system_name: The system prefix
         agents: List of agent dictionaries from Docker
+        naming: trinity-enterprise#1030 — `prefixed` or `bare` overrides; None
+            infers `bare` when no member carries the `<system>-` prefix and
+            `prefixed` otherwise (today's export, unprefixed members omitted)
 
     Returns:
-        YAML string representing the system configuration
+        YAML string representing the system configuration. When members were
+        omitted, the first line is a `# unobserved:` comment naming them: a
+        text diff sees it, the parser does not.
     """
+    if naming is not None and naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{naming}': naming must be 'prefixed' or 'bare'"
+        )
+    if naming is None:
+        # Unambiguous only when NO member carries the prefix; all-prefixed and
+        # mixed both keep today's export.
+        naming = "bare" if agents and all(
+            _member_short_name(a['name'], system_name) is None for a in agents) else "prefixed"
+
     # #2373: the members, resolved ONCE through the shared predicate. The
     # permission branches below decide what is "inside the system", and they
     # must agree with `get_system`/`restart_system` about that — the caller
@@ -1217,7 +1239,7 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         # ONE rule for "what is this member's manifest key", shared with both
         # permission loops (#2373 review C1) — a guarded slice here and a blind
         # one there is exactly how the two loops drifted apart.
-        short_name = _member_short_name(full_name, system_name)
+        short_name = _member_short_name(full_name, system_name, naming)
         if short_name is None:
             unprefixed.append(full_name)
             continue
@@ -1334,6 +1356,11 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         "description": f"Exported system configuration for {system_name}",
         "agents": agent_configs
     }
+    if naming == "bare":
+        # trinity-enterprise#1030: emitted only for bare, so a prefixed
+        # export's text is today's.
+        manifest_dict = {"name": system_name, "naming": "bare",
+                         **{k: v for k, v in manifest_dict.items() if k != "name"}}
 
     # Get permissions (try to detect preset pattern)
     try:
@@ -1376,13 +1403,13 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                             # edge. A tag-only member has no manifest key, so its
                             # edges cannot be represented — skip rather than emit
                             # a sliced-to-garbage key that breaks the round trip.
-                            short_name = _member_short_name(agent['name'], system_name)
+                            short_name = _member_short_name(agent['name'], system_name, naming)
                             if short_name is None:
                                 continue
                             agent_perms = db.get_agent_permissions(agent['name'])
                             targets = [
                                 t for t in (
-                                    _member_short_name(p["target_agent"], system_name)
+                                    _member_short_name(p["target_agent"], system_name, naming)
                                     for p in agent_perms
                                     if p["target_agent"] in member_names
                                 ) if t is not None
@@ -1398,7 +1425,7 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                     for agent in agents:
                         # #2373 review (C1): see the sibling branch — membership
                         # admits tag-only members, which have no manifest key.
-                        short_name = _member_short_name(agent['name'], system_name)
+                        short_name = _member_short_name(agent['name'], system_name, naming)
                         if short_name is None:
                             continue
                         agent_perms = db.get_agent_permissions(agent['name'])
@@ -1407,7 +1434,7 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         # were its own member.
                         targets = [
                             t for t in (
-                                _member_short_name(p["target_agent"], system_name)
+                                _member_short_name(p["target_agent"], system_name, naming)
                                 for p in agent_perms
                                 if p["target_agent"] in member_names
                             ) if t is not None
@@ -1433,6 +1460,15 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
 
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    if unprefixed:
+        # trinity-enterprise#1030: the log line above reaches an operator; a
+        # Regent diffing this text against its committed file needs the
+        # omission IN the text. A comment, so the parser never sees it.
+        yaml_output = (
+            f"# unobserved: members omitted (no '{prefix}' prefix): "
+            f"{', '.join(sorted(unprefixed))}\n" + yaml_output
+        )
 
     return yaml_output
 

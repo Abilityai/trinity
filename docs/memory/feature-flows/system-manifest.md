@@ -695,6 +695,8 @@ marker, which `agent_git_config` does not have yet.
 **Bug Fix (2025-12-18)**:
 - Line 542: Changed `db.get_setting()` → `db.get_setting_value()` to avoid Python object serialization in YAML
 
+**Naming on export (trinity-enterprise#1030)**: `export_manifest(system_name, agents, *, naming=None)` — `naming` overrides (the route's `?naming=`); None infers `bare` when `_member_short_name` finds no prefixed member, else `prefixed`. `_member_short_name(full, system, naming)` returns the full name under `bare`, so the agents loop and both permission loops key members through the one helper. Omitted members put a leading `# unobserved:` comment line on the YAML.
+
 ### Router Layer (`src/backend/routers/systems.py`)
 
 > **ent#124 (2026-07-24):** the full deploy orchestration (parse → validate →

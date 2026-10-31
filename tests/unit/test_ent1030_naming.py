@@ -296,6 +296,102 @@ class TestBareAdoption:
 
 
 # ===========================================================================
+# CP0c — export round-trips naming
+# ===========================================================================
+
+def _agents(*names):
+    return [{"name": n, "template": "local:plain"} for n in names]
+
+
+def _export(world, names, **kw):
+    import yaml
+    text = system_service.export_manifest(SYSTEM, _agents(*names), **kw)
+    return text, yaml.safe_load(text)
+
+
+class TestExportNaming:
+
+    def test_all_prefixed_infers_prefixed_and_is_todays_text(self, world):
+        for n in ("acme-a", "acme-b"):
+            world.seed_agent(n)
+        text, doc = _export(world, ["acme-a", "acme-b"])
+        assert "naming" not in doc
+        assert list(doc["agents"]) == ["a", "b"]
+        assert not text.startswith("#")
+
+    def test_none_prefixed_infers_bare_and_round_trips(self, world):
+        for n in ("regent", "canon"):
+            world.seed_agent(n)
+        text, doc = _export(world, ["regent", "canon"])
+        assert doc["naming"] == "bare"
+        assert list(doc["agents"]) == ["regent", "canon"]
+        manifest, _ = _parse(text)
+        assert system_service.declared_names(manifest) == {"regent": "regent", "canon": "canon"}
+        # The round trip: applying the export to the live system it came from
+        # changes nothing.
+        snap = world.snapshot(text)
+        assert snap.blockers == []
+
+    def test_mixed_keeps_todays_omission_and_says_so_in_a_comment(self, world, caplog):
+        for n in ("acme-a", "helper", "bot"):
+            world.seed_agent(n)
+        with caplog.at_level("WARNING"):
+            text, doc = _export(world, ["acme-a", "helper", "bot"])
+        assert "naming" not in doc and list(doc["agents"]) == ["a"]
+        first = text.splitlines()[0]
+        assert first == "# unobserved: members omitted (no 'acme-' prefix): bot, helper"
+        assert any("OMITTED" in r.getMessage() for r in caplog.records)
+
+    def test_the_override_names_the_mode(self, world):
+        for n in ("acme-a", "helper"):
+            world.seed_agent(n)
+        _, doc = _export(world, ["acme-a", "helper"], naming="bare")
+        assert doc["naming"] == "bare"
+        assert list(doc["agents"]) == ["acme-a", "helper"]
+        _, doc = _export(world, ["regent"], naming="prefixed")
+        assert "naming" not in doc and doc["agents"] == {}
+
+    def test_an_unknown_override_is_refused(self, world):
+        with pytest.raises(ValueError, match="naming must be 'prefixed' or 'bare'"):
+            system_service.export_manifest(SYSTEM, _agents("regent"), naming="flat")
+
+
+class TestExportRoute:
+    """`GET /api/systems/{system}/manifest?naming=` through the real router."""
+
+    def _client(self, world, monkeypatch, names):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from routers import agents as agents_router
+        from routers import systems
+
+        monkeypatch.setattr(agents_router, "get_accessible_agents",
+                            lambda user: _agents(*names))
+        app = FastAPI()
+        app.include_router(systems.router)
+        app.dependency_overrides[systems.get_current_user] = lambda: world.user(W.ALICE)
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_the_query_overrides_and_absent_infers(self, world, monkeypatch):
+        for n in ("acme-a", "helper"):
+            world.seed_agent(n)
+        client = self._client(world, monkeypatch, ["acme-a", "helper"])
+        r = client.get(f"/api/systems/{SYSTEM}/manifest", params={"naming": "bare"})
+        assert r.status_code == 200 and "naming: bare" in r.text
+        assert "acme-a:" in r.text and "helper:" in r.text
+        r = client.get(f"/api/systems/{SYSTEM}/manifest")
+        assert r.status_code == 200 and r.text.startswith("# unobserved:")
+
+    def test_a_bad_query_is_a_named_400(self, world, monkeypatch):
+        world.seed_agent("acme-a")
+        client = self._client(world, monkeypatch, ["acme-a"])
+        r = client.get(f"/api/systems/{SYSTEM}/manifest", params={"naming": "flat"})
+        assert r.status_code == 400
+        assert "naming must be 'prefixed' or 'bare'" in r.json()["detail"]
+
+
+# ===========================================================================
 # E5 — the executor's phase order is a pinned tuple, not dict-insertion luck
 # ===========================================================================
 

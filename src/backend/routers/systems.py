@@ -4,6 +4,7 @@ System deployment routes for the Trinity backend.
 Provides endpoints for deploying multi-agent systems from YAML manifests.
 """
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -493,6 +494,7 @@ async def restart_system(
 @router.get("/{system_name}/manifest", response_class=PlainTextResponse)
 async def get_system_manifest(
     system_name: str,
+    naming: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -522,8 +524,12 @@ async def get_system_manifest(
                 detail=f"System '{system_name}' not found or no accessible agents"
             )
 
-        # Export manifest
-        yaml_content = export_manifest(system_name, system_agents)
+        # Export manifest. trinity-enterprise#1030: `?naming=prefixed|bare`
+        # overrides; absent, the exporter infers it from the members' names.
+        try:
+            yaml_content = export_manifest(system_name, system_agents, naming=naming)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         return yaml_content
 
