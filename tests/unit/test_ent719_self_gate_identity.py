@@ -343,6 +343,10 @@ REQUESTS = {
     "routers/agent_files.py::get_agent_canon_roles": {},
     "routers/agent_files.py::get_agent_objectives": {},
     "routers/agent_files.py::share_agent_file": {"json": {"filename": "out.txt"}},
+    "routers/agent_memory.py::get_retrieval_memory_endpoint": {},
+    "routers/agent_memory.py::search_retrieval_memory_agent_endpoint": {
+        "json": {"execution_id": "exec-1", "query": "a note"}
+    },
     "routers/agents.py::send_voice_reply_endpoint": {
         "json": {"text": "hello", "execution_id": "exec-1"}
     },
