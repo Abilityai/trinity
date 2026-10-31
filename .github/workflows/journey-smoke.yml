@@ -45,10 +45,11 @@ name: Journey smoke
 # — being unable to determine the changed files must mean "run", never "skip"
 # and never a red X (#1782, where `gh pr diff` 406s on PRs over 300 files).
 #
-# Not done here because it is a ~50-line gate with subtle semantics and
-# `frontend-e2e.yml` says of its own sibling implementation that the two "differ
-# ON PURPOSE. Don't 'unify' them" — so this wants its own deliberate copy, in
-# its own change, not a rushed third one appended to this PR.
+# That deliberate copy is the `changes` job below (#4099): unconditional
+# trigger, cheap decision job, heavy job gated by `if:` and failing open. It
+# gates the PR run to lane C — the only lane whose merge rule waits for this
+# suite on the PR (DEVELOPMENT_WORKFLOW.md → CI Gates); every other PR gets its
+# journey verdict from the Tier 2 run on `dev`.
 # push to dev (#2945): Tier 2. Until then this suite ran on the PR and never on
 # `dev` after the merge, so the branch everyone builds on was tested LESS than
 # the PR that produced it. `dev-ci-status.yml` folds this run's verdict into the
@@ -69,8 +70,86 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Lane gate (#4099). Since trinity#2945 this suite is Tier 2: it runs on every
+  # push burst to `dev` and `dev-ci-status.yml` carries its verdict. On a PR it
+  # is needed only for lane C — auth, credentials, untrusted-input parsers, the
+  # image build, CI, the enterprise seam — the classes where a defect on `dev`
+  # is expensive (DEVELOPMENT_WORKFLOW.md → CI Gates). Every other PR paid the
+  # 5-12 minute stack boot for a verdict `dev` would produce 25 minutes later
+  # anyway, and in a merge burst those runners were the queue.
+  #
+  # The path set is the `SEC` regex from `/validate-pr`'s Quick Triage — one
+  # definition of lane C, not a second one here — plus this workflow, the
+  # journey tier itself and the deploy scripts the stack boots with. The
+  # `journeys` label is the manual opt-in, as `ui` is for frontend-e2e.
+  # `tests/unit/test_4099_journey_smoke_lane_gate.py` pins the shape.
+  #
+  # Shape copied from frontend-e2e.yml's `changes` job on purpose (header note
+  # above): the two still differ from container-security.yml's `git diff`
+  # detector ON PURPOSE — this job must not check the repo out.
+  # ---------------------------------------------------------------------------
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      lane_c: ${{ steps.filter.outputs.lane_c }}
+    steps:
+      - id: filter
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # FAIL OPEN: this job decides whether the tier runs, so being unable
+          # to decide must never mean "don't run" — and never a red X (#1782).
+          fail_open() {
+            echo "::warning::journey-smoke change detection failed open ($1) — running the tier"
+            echo "lane_c=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          err=$(mktemp)
+          if ! expected=$(gh api "repos/$REPO/pulls/$PR_NUMBER" --jq '.changed_files' 2>"$err"); then
+            fail_open "PR lookup failed: $(tr '\n' ' ' < "$err" | cut -c1-300)"
+          fi
+          if ! files=$(gh api "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
+                         --paginate --jq '.[].filename' 2>"$err"); then
+            fail_open "file list failed: $(tr '\n' ' ' < "$err" | cut -c1-300)"
+          fi
+          count=$(printf '%s\n' "$files" | grep -c . || true)
+          if [ "$count" != "$expected" ]; then
+            fail_open "incomplete list: got $count of $expected files"
+          fi
+          echo "changed files: $count"
+          # Lane C (validate-pr `SEC`) + this workflow + the tier + deploy scripts.
+          LANE_C='^src/backend/(dependencies|error_handlers)\.py$|^src/backend/services/(credential_encryption|secret_settings|credential_paths)\.py$|^src/backend/utils/(url_validation|safe_yaml)\.py$|^src/backend/routers/(credentials|auth|internal|public|paid)\.py$|^docker/|^docker-compose.*\.yml$|^\.github/workflows/|^src/backend/enterprise$|^tests/journeys/|^tests/conftest\.py$|^scripts/deploy/'
+          if printf '%s\n' "$files" | grep -qE "$LANE_C"; then
+            echo "lane_c=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "lane_c=false" >> "$GITHUB_OUTPUT"
+            echo "no lane C path touched — the Tier 2 run on dev carries this verdict"
+          fi
+
   journey-smoke:
     name: journey-smoke
+    needs: changes
+    # Run on every push to dev and on dispatch; on a PR only for lane C or the
+    # `journeys` label. `always()` so the skipped `changes` job (push/dispatch)
+    # does not gate this out, and a FAILED `changes` job means RUN (#1782):
+    # the step fails open itself, this clause covers a runner crash. A
+    # `cancelled` clause is deliberately absent — see frontend-e2e.yml.
+    if: >-
+      always() &&
+      ( github.event_name == 'push'
+        || github.event_name == 'workflow_dispatch'
+        || needs.changes.outputs.lane_c == 'true'
+        || needs.changes.result == 'failure'
+        || contains(github.event.pull_request.labels.*.name, 'journeys') )
     runs-on: ubuntu-latest
     timeout-minutes: 30
 

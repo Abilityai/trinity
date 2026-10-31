@@ -8,7 +8,7 @@ The backend restarted. JWT tokens are invalidated whenever the backend restarts 
 
 ## Why did signing out in one tab sign me out of my Workspace tab too?
 
-Because they share one sign-in. The main app and every Workspace tab in the same browser use the same platform session, and open tabs follow it. Signing out in one tab ends the session in the others as well; a background tab drops it quietly rather than jumping to the sign-in page. It works the other way too: sign back in anywhere, and a Workspace tab left open from the old session picks up the new one instead of ending it. A client signed in with an email code is not sent to the operator sign-in page just because the browser also holds an expired operator login. See [Workspace → Signing in and out](../sharing-and-access/workspace.md#signing-in-and-out).
+Because they share one sign-in. The main app and every Workspace tab in the same browser use the same platform session, and open tabs follow it. Signing out in one tab ends the session in the others as well; a background tab drops it quietly rather than jumping to the sign-in page. A Workspace tab then shows its sign-in form; **Have a Trinity account? Sign in** under it takes you to the Trinity sign-in and back to the page you were on. It works the other way too: sign back in anywhere, and a Workspace tab left open from the old session picks up the new one instead of ending it. A client signed in with an email code is not sent to the operator sign-in page just because the browser also holds an expired operator login. See [Workspace → Signing in and out](../sharing-and-access/workspace.md#signing-in-and-out).
 
 ## My new agent shows as unhealthy right after I created it
 

@@ -214,7 +214,8 @@ export function createSkillSourceTools(client: TrinityClient, requireApiKey: boo
       description:
         "Sync ONE skill source from its repository, leaving the others untouched. Returns `outcome`: `ran` (with the " +
         "route's per-source `result`), `refused_busy` (another sync holds the library lock — retryable), or `failed` " +
-        "(with the route's error). Admin only.",
+        "(with the route's error). When the source moved and fleet re-inject is on, the sync starts a background " +
+        "re-inject to every running agent, as sync_skill_library does: `fleet_reinject.started` says so. Admin only.",
       parameters: z.object({ source_id: z.string().min(1).describe("Source id from list_skill_sources") }),
       canAccess,
       execute: async ({ source_id }: { source_id: string }, context?: Ctx) =>

@@ -41,6 +41,7 @@ class TaskExecutionErrorCode(str, Enum):
     SKILL_NOT_FOUND = "skill_not_found"  # Slash-command message didn't resolve to an installed skill (#1410)
     EPHEMERAL_EXHAUSTED = "ephemeral_exhausted"  # Ghost agent budget spent — expired TTL or exec count (trinity-enterprise#69)
     MODEL_UNSUPPORTED = "model_unsupported"  # Claude Code refused the model — CLI too old or unknown id; never a subscription fault (#3012)
+    MAX_TURNS = "max_turns"          # The turn stopped at its turn cap — raise the cap or split the task; a retry repeats it (#3988, MESSAGE_ENVELOPE_SCHEMA §4)
     # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
     # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
     INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded"
@@ -190,10 +191,20 @@ def terminal_from_callback_payload(payload: Any, execution_id: str) -> TerminalE
     # 503 → error_code "auth", which would trip the AUTH dispatch breaker. The
     # error text says what it really was.
     if error_code is not None and error_code.value == TaskExecutionErrorCode.AUTH.value:
-        from services.failure_classifier import is_model_rejection  # noqa: WPS433 — leaf, lazy like above
+        from services.failure_classifier import is_model_rejection, is_prompt_too_long  # noqa: WPS433 — leaf, lazy like above
 
-        if is_model_rejection(getattr(payload, "error", None) or ""):
+        reported = getattr(payload, "error", None) or ""
+        if is_model_rejection(reported):
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        # #3849: the agent labels its prompt-length 503 "auth" too.
+        elif is_prompt_too_long(reported):
+            error_code = TaskExecutionErrorCode.AGENT_ERROR
+
+    # #3988: the callback names the agent's turn-limit 422 by terminal_reason
+    # only (result_callback._STATUS_MAP: 422 → (None, "max_turns")). The agent's
+    # only 422 is that answer, so the label is trusted as it is on pull.
+    if error_code is None and getattr(payload, "terminal_reason", None) == "max_turns":
+        error_code = TaskExecutionErrorCode.MAX_TURNS
 
     return TerminalEnvelope(
         execution_id=execution_id,
