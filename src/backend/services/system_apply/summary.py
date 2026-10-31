@@ -4,7 +4,7 @@ One count per config group — `skills`, `grants`, `gates`, `roles` — and one
 for `members`, each `{write, report, unobserved}`:
 
 * `write` — a change apply makes (or, on a dry run, would make);
-* `report` — a change apply only reports (an extra, a held-back grant, a
+* `report` — a change apply only reports (an extra, a held-back grant or seat, a
   vacant person seat, a declared-only member);
 * `unobserved` — a group the platform could not observe for the member: the
   install has no hook that answers it, so it is neither "in sync" nor a
@@ -43,7 +43,7 @@ def member_unobserved(mp) -> List[str]:
 
 def build(members: Dict, *, extras: Dict[str, Dict]) -> Dict[str, Dict]:
     """The summary over every member's plan. `extras` adds group-specific
-    keys (`grants.held_back`) beside the three counts."""
+    keys (`grants.held_back`, `roles.held_back`) beside the three counts."""
     out = {g: {"write": 0, "report": 0, "unobserved": 0} for g in GROUP_FIELDS}
     out["members"] = {"write": 0, "report": 0, "unobserved": 0}
     for mp in members.values():

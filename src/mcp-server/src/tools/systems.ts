@@ -254,7 +254,7 @@ export function createSystemTools(
             "    skills: [skill-name]  # optional, additive; also skill_sets: [set-name]\n" +
             "    gates: {skill-name: {approver: primary, deadline_hours: 24}}  # optional approval map\n" +
             "    grants: [agents.manage]  # optional; written only for an admin in a signed-in session\n" +
-            "    seat: role-id  # optional canon seat the agent holds; person_seats: [{role, kind}] names no person\n" +
+            "    seat: role-id  # optional canon seat the agent holds; written only for an admin in a signed-in session; person_seats: [{role, kind}] names no person\n" +
             "  catalog-entry:\n" +
             "    template: github:Org/other\n" +
             "    deploy: false  # optional: named in the system, never created\n" +

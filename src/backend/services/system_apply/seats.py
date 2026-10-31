@@ -17,10 +17,13 @@ nothing in this repo writes a seat.
 * `read_member` — the snapshot's read. A provider error or malformed answer is
   a READ failure (it raises, so the snapshot blocks the member retryably);
   "no hook" is not.
-* `plan` — `seat_missing` / `seat_differs` writes when the writer exists,
-  otherwise `seat_unobserved`; `seat_filled` / `seat_vacant` /
+* `plan` — `seat_missing` / `seat_differs` writes when the writer exists and
+  the caller passes the grant gate, `seat_requires_interactive_admin` when the
+  writer exists and the caller does not, otherwise `seat_unobserved`;
+  `seat_filled` / `seat_vacant` /
   `seat_unobserved` reports for person seats, never a write — and
   `seat_unobserved` for a member apply will create, which has nothing to read.
+* `summarize` — `summary.roles.held_back` and its one warning line.
 * `run` — op `seat_set` through `assignment_provider.write_seat`; a refusal is
   recorded in `failed[]` with the module's code.
 * `export_member` — `seat:` when the provider says the agent holds one;
@@ -48,7 +51,10 @@ OP_KIND = "seat_set"
 PERSON_SEAT_KINDS = ("primary", "approver", "collaborator", "viewer")
 PERSON_SEAT_KEYS = ("role", "kind")
 UNOBSERVED_CODE = "seat_unobserved"
+HELD_BACK_CODE = "seat_requires_interactive_admin"
 DEPLOY_HELD_BACK_CODE = "seats_require_interactive_admin"
+_HELD_BACK_NOTE = ("seating an agent requires an admin in a signed-in session, the same "
+                   "gate as a grant; nothing was written. Run apply from such a session")
 _UNOBSERVED_NOTE = ("no assignment module on this install answers this; the seat is "
                     "neither read nor written, which is not the same as in sync")
 _DIFFERS_NOTE = ("another declaration may hold this seat; apply moves it only on a "
@@ -172,25 +178,29 @@ def export_member(name: str) -> Optional[str]:
 
 
 def plan(mp, *, seat: Optional[Dict[str, Any]], people: Optional[Dict[Tuple[str, str], str]],
-         creating: bool, apply_change, make_op) -> None:
+         creating: bool, seat_writer: bool, apply_change, make_op) -> None:
     """Changes and ops for one member. Never a blocker: an unobserved class
-    is a report, and a read failure blocked the member in the snapshot."""
+    is a report, a held-back seat is a report, and a read failure blocked the
+    member in the snapshot. `seat_writer` is whether the CALLER passes the
+    grant gate (`dependencies.is_interactive_admin`)."""
     cfg = mp.config
     name, short = mp.name, mp.short_name
     if cfg.seat is not None:
         if not assignment_provider.seat_writer_installed():
             mp.changes.append(apply_change(SEAT_STEP, "report", UNOBSERVED_CODE,
                                            desired=cfg.seat, note=_UNOBSERVED_NOTE))
-        elif creating:
-            mp.changes.append(apply_change(SEAT_STEP, "write", "seat_missing", desired=cfg.seat))
-            mp.ops.append(make_op(OP_KIND, name, short, {"role_id": cfg.seat}))
-        elif not (seat and seat["case"] == "holds" and seat["role_id"] == cfg.seat):
-            current = None if not seat or seat["case"] == "none" else dict(seat)
-            mp.changes.append(apply_change(SEAT_STEP, "write",
-                                           "seat_differs" if current else "seat_missing",
-                                           current=current, desired=cfg.seat,
-                                           note=_DIFFERS_NOTE if current else None))
-            mp.ops.append(make_op(OP_KIND, name, short, {"role_id": cfg.seat}))
+        elif creating or not (seat and seat["case"] == "holds" and seat["role_id"] == cfg.seat):
+            current = None if creating or not seat or seat["case"] == "none" else dict(seat)
+            if not seat_writer:
+                mp.changes.append(apply_change(SEAT_STEP, "report", HELD_BACK_CODE,
+                                               current=current, desired=cfg.seat,
+                                               note=_HELD_BACK_NOTE))
+            else:
+                mp.changes.append(apply_change(SEAT_STEP, "write",
+                                               "seat_differs" if current else "seat_missing",
+                                               current=current, desired=cfg.seat,
+                                               note=_DIFFERS_NOTE if current else None))
+                mp.ops.append(make_op(OP_KIND, name, short, {"role_id": cfg.seat}))
     if cfg.person_seats:
         installed = assignment_provider.person_seat_reader_installed()
         unobserved_note = _NOT_YET_NOTE if installed and creating else _UNOBSERVED_NOTE
@@ -206,6 +216,23 @@ def plan(mp, *, seat: Optional[Dict[str, Any]], people: Optional[Dict[Tuple[str,
                 note = unobserved_note if code == UNOBSERVED_CODE else _PERSON_NOTE
                 mp.changes.append(apply_change(PERSON_STEP, "report", code,
                                                desired=by_code[code], note=note))
+
+
+def summarize(members: Dict) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """`summary.roles.held_back` over every member's plan, and the one warning
+    line when anything was held back (the grants group's shape). Blocked
+    members are not counted: nothing about them runs."""
+    held_back = [{"name": mp.name, "seat": c.desired}
+                 for mp in members.values() if mp.verdict != "blocked"
+                 for c in mp.changes if c.field == SEAT_STEP and c.code == HELD_BACK_CODE]
+    if not held_back:
+        return held_back, None
+    listing = "; ".join(f"{h['name']}: {h['seat']}" for h in held_back)
+    count = len(held_back)
+    return held_back, (
+        f"{count} seat{'s' if count != 1 else ''} not written ({HELD_BACK_CODE}): seating "
+        f"an agent requires an admin in a signed-in session, the same gate as a grant. "
+        f"Held back: {listing}. Everything else in the manifest still applies.")
 
 
 class _Refused(Exception):

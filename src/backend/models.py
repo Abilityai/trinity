@@ -1612,8 +1612,9 @@ class SystemApplyResponse(BaseModel):
     # trinity-enterprise#1030: per config group — `skills`, `grants`, `gates`,
     # `roles` — and `members`, each `{"write": n, "report": n, "unobserved": n}`
     # (services/system_apply/summary.py). `grants` also carries `held_back:
-    # [{"name", "grants": [...]}]`, so a grant the CALLER's credential could
-    # not write is loud (theme 3). Blocked members are counted nowhere.
+    # [{"name", "grants": [...]}]` and `roles` `held_back: [{"name", "seat"}]`,
+    # so a grant or seat the CALLER's credential could not write is loud
+    # (theme 3). Blocked members are counted nowhere.
     summary: Dict[str, Dict[str, Any]] = {}
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is

@@ -74,6 +74,12 @@ describe("ent#1030 the systems descriptions name naming: bare", () => {
     for (const key of ["skills:", "skill_sets", "gates:", "grants:", "seat:", "person_seats", "deploy: false"]) {
       assert.ok(deployManifest.includes(key), `deploy_system manifest text lacks ${key}`);
     }
+    // A seat is written under the grant gate, in the grants line's own words.
+    const gate = "written only for an admin in a signed-in session";
+    for (const key of ["grants:", "seat:"]) {
+      const line = deployManifest.split("\n").find((l) => l.trimStart().startsWith(key)) ?? "";
+      assert.ok(line.includes(gate), `deploy_system ${key} line lacks the gate clause`);
+    }
     const applyManifest = tools.applySystem.parameters.shape.manifest.description ?? "";
     assert.match(applyManifest, /never a person or an email/);
     assert.match(applyManifest, /declared_only/);

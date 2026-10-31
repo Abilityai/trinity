@@ -2729,7 +2729,7 @@ class ApplySnapshot:
     skill_set_verdicts: Dict = field(default_factory=dict)
     # trinity-enterprise#1030 CP2: does the CALLER pass the grant route's gate
     # (`dependencies.is_interactive_admin`)? Decides write vs. held-back report
-    # for every `grants:` entry; never a blocker.
+    # for every `grants:` and `seat:` entry; never a blocker.
     grant_writer: bool = False
 
 
@@ -3776,14 +3776,17 @@ def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState) -> None:
                                         current=mp.name, note=_DECLARED_ONLY_LIVE_NOTE))
 
 
-def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState]) -> None:
+def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                snapshot: ApplySnapshot) -> None:
     """trinity-enterprise#1030 CP4: `seat:` and `person_seats:`, through the
-    assignment module's optional hooks; unobserved without them."""
+    assignment module's optional hooks; unobserved without them. A seat is
+    written only when the caller passes the grant gate
+    (`snapshot.grant_writer`); else reported as held back."""
     from services.system_apply import seats as apply_seats
     apply_seats.plan(
         mp, seat=None if state is None else state.seat,
         people=None if state is None else state.person_seats, creating=state is None,
-        apply_change=_apply_change, make_op=ApplyOp)
+        seat_writer=snapshot.grant_writer, apply_change=_apply_change, make_op=ApplyOp)
 
 
 def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -3840,7 +3843,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             _plan_gates(mp, None, blockers)
             _plan_skills(mp, None, snapshot, blockers)
             _plan_grants(mp, None, snapshot, blockers)
-            _plan_seats(mp, None)
+            _plan_seats(mp, None, snapshot)
             mp.verdict = "create"
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
@@ -3848,7 +3851,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             _plan_gates(mp, state, blockers)
             _plan_skills(mp, state, snapshot, blockers)
             _plan_grants(mp, state, snapshot, blockers)
-            _plan_seats(mp, state)
+            _plan_seats(mp, state, snapshot)
             mp.verdict = "update" if mp.ops else "unchanged"
         else:
             mp.verdict = "blocked"
@@ -3961,6 +3964,11 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
     grants_summary, grants_warning = apply_grants.summarize(members)
     if grants_warning:
         warnings.append(grants_warning)
+    # The same for a seat: the grant gate, the same loud shape.
+    from services.system_apply import seats as apply_seats
+    seats_held_back, seats_warning = apply_seats.summarize(members)
+    if seats_warning:
+        warnings.append(seats_warning)
     # trinity-enterprise#1030 CP6: one summary per config group, each
     # {write, report, unobserved}; and each member's unobserved groups.
     from services.system_apply import summary as apply_summary
@@ -3968,7 +3976,8 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         if mp.verdict != "blocked":
             mp.unobserved = apply_summary.member_unobserved(mp)
     summary = apply_summary.build(
-        members, extras={"grants": {"held_back": grants_summary["held_back"]}})
+        members, extras={"grants": {"held_back": grants_summary["held_back"]},
+                         "roles": {"held_back": seats_held_back}})
 
     return ApplyPlan(
         system_name=system, agent_names=agent_names, members=members, drift=drift,

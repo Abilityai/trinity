@@ -104,9 +104,9 @@ def _manifest(seat=None, person_seats=None, *, short="lead") -> str:
     return "\n".join(lines) + "\n"
 
 
-def _apply(world, text, *, dry_run):
+def _apply(world, text, *, dry_run, user=None):
     return asyncio.run(system_service.apply_manifest(
-        text, world.user(W.ALICE), None, dry_run=dry_run,
+        text, user or world.user(W.ALICE), None, dry_run=dry_run,
         create_agent_fn=world.create, start_agent_fn=world.docker.start))
 
 
@@ -214,7 +214,8 @@ class TestUnobserved:
         assert m.verdict == "unchanged"
         assert _codes(m) == [("seat", "report", "seat_unobserved"),
                              ("person_seats", "report", "seat_unobserved")]
-        assert res.summary["roles"] == {"write": 0, "report": 0, "unobserved": 2}
+        assert res.summary["roles"] == {"write": 0, "report": 0, "unobserved": 2,
+                                        "held_back": []}
 
     def test_a_reader_without_the_writer_is_never_in_sync(self, world):
         """The provider says the agent holds the declared seat, but without
@@ -254,25 +255,27 @@ class TestWrite:
         world.seed_agent(LEAD)
         res = _apply(world, _manifest("Lead-Role"), dry_run=True)
         assert _codes(_member(res)) == [] and _member(res).verdict == "unchanged"
-        assert res.summary["roles"] == {"write": 0, "report": 0, "unobserved": 0}
+        assert res.summary["roles"] == {"write": 0, "report": 0, "unobserved": 0,
+                                        "held_back": []}
 
     def test_a_missing_seat_is_written_through_the_hook(self, world):
         p = _Full()
         assignment_provider.register_provider(p)
         world.seed_agent(LEAD)
-        dry = _apply(world, _manifest("lead-role"), dry_run=True)
+        admin = world.user(W.ADMIN)
+        dry = _apply(world, _manifest("lead-role"), dry_run=True, user=admin)
         assert _codes(_member(dry)) == [("seat", "write", "seat_missing")]
         assert p.calls == []
-        res = _apply(world, _manifest("lead-role"), dry_run=False)
+        res = _apply(world, _manifest("lead-role"), dry_run=False, user=admin)
         assert res.status == "applied", res.failed
-        assert p.calls == [("set_seat", LEAD, "lead-role", W.ALICE)]
+        assert p.calls == [("set_seat", LEAD, "lead-role", W.ADMIN)]
         assert p.held[LEAD] == "lead-role"
         assert _codes(_member(_apply(world, _manifest("lead-role"), dry_run=True))) == []
 
     def test_another_seat_is_reported_as_differs_with_the_current(self, world):
         assignment_provider.register_provider(_Full({LEAD: "other-role"}))
         world.seed_agent(LEAD)
-        res = _apply(world, _manifest("lead-role"), dry_run=True)
+        res = _apply(world, _manifest("lead-role"), dry_run=True, user=world.user(W.ADMIN))
         (c,) = _member(res).changes
         assert (c.code, c.current, c.desired) == (
             "seat_differs", {"case": "holds", "role_id": "other-role"}, "lead-role")
@@ -281,20 +284,21 @@ class TestWrite:
     def test_a_refusal_lands_in_failed_with_the_modules_code(self, world):
         assignment_provider.register_provider(_Full(refuse="not_assignment_admin"))
         world.seed_agent(LEAD)
-        res = _apply(world, _manifest("lead-role"), dry_run=False)
+        res = _apply(world, _manifest("lead-role"), dry_run=False, user=world.user(W.ADMIN))
         assert [(f.name, f.step, f.reason.split(":")[0]) for f in res.failed] == [
             (LEAD, "seat", "not_assignment_admin")]
 
     def test_a_created_member_is_seated_after_it_is_created(self, world):
         p = _Full()
         assignment_provider.register_provider(p)
-        dry = _apply(world, _manifest("lead-role"), dry_run=True)
+        admin = world.user(W.ADMIN)
+        dry = _apply(world, _manifest("lead-role"), dry_run=True, user=admin)
         assert _member(dry).verdict == "create"
         assert ("seat", "write", "seat_missing") in _codes(_member(dry))
-        res = _apply(world, _manifest("lead-role"), dry_run=False)
+        res = _apply(world, _manifest("lead-role"), dry_run=False, user=admin)
         assert res.status == "applied", res.failed
         assert [c.name for c in world.create_calls] == [LEAD] and p.calls == [
-            ("set_seat", LEAD, "lead-role", W.ALICE)]
+            ("set_seat", LEAD, "lead-role", W.ADMIN)]
 
     def test_person_seats_on_a_member_apply_will_create_are_unobserved_not_vacant(self, world):
         """The member does not exist yet, so nothing was read: the report says
@@ -328,7 +332,90 @@ class TestWrite:
         ]
         assert all(c.action == "report" for c in m.changes)
         assert {c[0] for c in p.calls} == {"person_seat_status"}
-        assert res.summary["roles"] == {"write": 0, "report": 2, "unobserved": 1}
+        assert res.summary["roles"] == {"write": 0, "report": 2, "unobserved": 1,
+                                        "held_back": []}
+
+
+# ===========================================================================
+# Apply mode: a seat is written under the grant gate, like a grant
+# ===========================================================================
+
+class TestApplyGate:
+    """Apply is person-only, but a person is not necessarily an admin: a
+    creator who is not one writes no seat through apply. The plan checks the
+    caller with the grant gate (`dependencies.is_interactive_admin`) and holds
+    the write back the way grants do — a per-member report, a
+    `summary.roles.held_back` entry and one warning line, shown by the dry run
+    before any write, and never a blocker."""
+
+    @pytest.mark.parametrize("who,verdict", [
+        # An agent key never reaches an existing sibling (ent#629), so its case
+        # runs on the member apply CREATES. A held-back seat alone changes
+        # nothing about an existing member.
+        ("agent_key", "create"), ("admin_user_key", "unchanged"),
+        ("non_admin_person", "unchanged")])
+    def test_every_other_caller_is_held_back_and_the_rest_still_applies(self, world, who, verdict):
+        assignment_provider.register_provider(_Full({LEAD: "other-role"}))
+        if verdict != "create":
+            world.seed_agent(LEAD)
+        user = {"agent_key": lambda: _agent_key(world),
+                "admin_user_key": lambda: _user_key(world),
+                "non_admin_person": lambda: world.user(W.ALICE)}[who]()
+        res = _apply(world, _manifest("lead-role"), dry_run=True, user=user)
+        assert res.status == "valid" and not res.blockers
+        lead = _member(res)
+        assert lead.verdict == verdict
+        (held,) = [c for c in lead.changes if c.field == "seat"]
+        assert (held.action, held.code, held.desired) == (
+            "report", "seat_requires_interactive_admin", "lead-role")
+        assert res.summary["roles"]["held_back"] == [{"name": LEAD, "seat": "lead-role"}]
+        assert res.summary["roles"]["write"] == 0
+        seat_warnings = [w for w in res.warnings if "seat_requires_interactive_admin" in w]
+        assert len(seat_warnings) == 1 and f"{LEAD}: lead-role" in seat_warnings[0]
+
+    def test_a_creator_writes_no_seat_on_a_real_run(self, world):
+        p = _Full()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD)
+        alice = world.user(W.ALICE)
+        dry = _apply(world, _manifest("lead-role"), dry_run=True, user=alice)
+        assert _codes(_member(dry)) == [("seat", "report", "seat_requires_interactive_admin")]
+        assert _member(dry).verdict == "unchanged"
+        res = _apply(world, _manifest("lead-role"), dry_run=False, user=alice)
+        assert res.status == "applied", res.failed
+        assert [c for c in p.calls if c[0] == "set_seat"] == [] and p.held == {}
+        assert any("seat_requires_interactive_admin" in w for w in res.warnings)
+
+    def test_a_creator_creating_a_member_writes_no_seat(self, world):
+        p = _Full()
+        assignment_provider.register_provider(p)
+        res = _apply(world, _manifest("lead-role"), dry_run=False, user=world.user(W.ALICE))
+        assert res.status == "applied", res.failed
+        assert [c.name for c in world.create_calls] == [LEAD]
+        assert p.calls == [] and p.held == {}
+
+    def test_the_plan_consults_the_shared_gate_not_its_own_copy(self, world, monkeypatch):
+        import dependencies
+        monkeypatch.setattr(dependencies, "is_interactive_admin", lambda _u: False)
+        assignment_provider.register_provider(_Full())
+        world.seed_agent(LEAD)
+        res = _apply(world, _manifest("lead-role"), dry_run=True, user=world.user(W.ADMIN))
+        assert _codes(_member(res)) == [("seat", "report", "seat_requires_interactive_admin")]
+
+    def test_without_the_writer_it_stays_unobserved_not_held_back(self, world):
+        """Nothing could be written either way: the truer report wins."""
+        assignment_provider.register_provider(_Reader())
+        world.seed_agent(LEAD)
+        res = _apply(world, _manifest("lead-role"), dry_run=True, user=world.user(W.ALICE))
+        assert _codes(_member(res)) == [("seat", "report", "seat_unobserved")]
+        assert res.summary["roles"]["held_back"] == []
+        assert not [w for w in res.warnings if "seat_requires_interactive_admin" in w]
+
+    def test_a_held_seat_needs_no_write_and_holds_nothing_back(self, world):
+        assignment_provider.register_provider(_Full({LEAD: "lead-role"}))
+        world.seed_agent(LEAD)
+        res = _apply(world, _manifest("lead-role"), dry_run=True, user=world.user(W.ALICE))
+        assert _codes(_member(res)) == [] and res.summary["roles"]["held_back"] == []
 
 
 # ===========================================================================
