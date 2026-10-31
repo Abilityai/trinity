@@ -57,8 +57,6 @@ _EXCLUDE_DIRS = ("enterprise/",)
 # inventory the operating-room feature flow points at.
 # ---------------------------------------------------------------------------
 _ALLOWED_CALLERS = {
-    ("client_portal/service.py", "_alert_collided_inbox"):
-        "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
@@ -80,9 +78,6 @@ _ALLOWED_CALLERS = {
         "platform-only: edge-triggered on the durable prior-status transition "
         "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
         "bound by the daily job cadence and no agent input reaches it (#2216)",
-    ("services/lease_reaper_service.py", "_create_park_item"):
-        "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
-        "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
     ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
@@ -97,9 +92,6 @@ _ALLOWED_CALLERS = {
         "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
         "{diverged_since}), and an episode must last > 24 h before it can raise "
         "one, so at most one per agent per day (trinity-enterprise#706)",
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        "platform-only: fires only for schedules the operator enabled validation "
-        "on; cadence operator-bound (#1632 classification)",
 }
 
 
