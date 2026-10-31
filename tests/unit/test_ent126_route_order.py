@@ -161,3 +161,16 @@ def test_deploy_route_unaffected(flat_routes):
     route = _first_match(flat_routes, "POST", "/api/systems/deploy")
     assert route is not None
     assert route.endpoint.__name__ == "deploy_system"
+
+
+def test_apply_route_resolves_to_the_apply_handler(flat_routes):
+    """trinity-enterprise#695: `POST /api/systems/apply` hits `apply_system`.
+
+    A static route beside `POST /{system_name}/restart`; a future
+    `POST /{system_name}` declared above it would capture it as a system
+    named "apply" (Invariant #4)."""
+    route = _first_match(flat_routes, "POST", "/api/systems/apply")
+    assert route is not None, "no route matched POST /api/systems/apply"
+    assert route.endpoint.__name__ == "apply_system", (
+        f"resolved to {route.endpoint.__name__} — the apply route is being shadowed"
+    )

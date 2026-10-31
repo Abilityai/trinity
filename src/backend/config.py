@@ -20,6 +20,10 @@ EMAIL_AUTH_ENABLED = os.getenv("EMAIL_AUTH_ENABLED", "true").lower() == "true"
 # code requests for already-whitelisted emails (separate endpoint).
 PUBLIC_ACCESS_REQUESTS_ENABLED = os.getenv("PUBLIC_ACCESS_REQUESTS_ENABLED", "false").lower() == "true"
 
+# PDF attachments are opt-in across web chat and external channels. Enabling
+# delivers original bytes only; parsing, extraction and OCR remain agent-owned.
+ALLOW_PDF_UPLOADS = os.getenv("ALLOW_PDF_UPLOADS", "false").lower() == "true"
+
 # Operator intake (trinity-enterprise#38). At first-run setup the operator may
 # opt in to "occasionally receive important security & product updates"; when
 # they do, their email + company are submitted once to an Ability.ai-operated
@@ -526,8 +530,10 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # v0.1.0, 2026-08): a default naming a tag that does not exist leaves every
 # fresh install seeded with a source that can never sync — and the failure is
 # quiet (a failed row in Settings), not loud. Bump this in lockstep with the
-# catalog's releases — the seed is fresh-install only, so a bump reaches new
-# installs and nothing else (#2545 moved it to v0.2.0, the release that added
+# catalog's releases. A bump reaches new installs through the seed, and existing
+# installs whose default source still points where the seed put it through the
+# boot follow (trinity-enterprise#529, forward only); a source an admin
+# retargeted stays where they put it (#2545 moved it to v0.2.0, the release that added
 # the project-management category; #3123 to v0.3.0, the release that added
 # `update-dashboard`, which the metrics tiles point users at; #3430 to v0.5.0,
 # the release whose `project-status` and `add-pipeline` match the platform's
@@ -538,8 +544,11 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 #
 # TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
 # wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+# The built-in catalog. Only a default seeded from THIS url follows the bundled
+# pin on upgrade (trinity-enterprise#529): a fork may not carry the next tag.
+BUNDLED_SKILL_SOURCE_URL = "github.com/abilityai/trinity-skills"
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
-    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+    "TRINITY_DEFAULT_SKILL_SOURCE", BUNDLED_SKILL_SOURCE_URL
 )
 DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.5.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"

@@ -4,21 +4,23 @@
 through `platform_alerts.observe` (#3254), and `_end_flood_episode` ends the
 episode and its alert when `_sync_agent` sees the condition clear. The episode
 set and the episode cooldown are instance state initialized in
-`PollerCoreMixin.__init__`; the 6-hour re-read times live in a dict the flood
-method creates on the instance for itself (`_flood_refreshed_at`), so it moved
-here with the method and nothing else touches it.
+`PollerCoreMixin.__init__`; the 6-hour re-read times and the episode starts
+live in dicts the flood method creates on the instance for itself
+(`_flood_refreshed_at`, `_flood_episode_started_at`), so they moved here with
+the method and nothing else touches them.
 
 `OperatorQueueSyncService` is composed from this mixin in the package
 `__init__` (the `db/schedules` shape, Invariant #2); `_sync_agent` reaches both
-methods through `self.`. The cooldown knob is package-owned config (O1), read
-as `_oq.X` at call time. #3438, which retires the file channel, deletes this
-module.
+methods through `self.`. The cooldown and re-read knobs are package-owned
+config (O1), read as `_oq.X` at call time. #3438, which retires the file
+channel, deletes this module.
 """
 
 import logging
 import time
 
 from services import operator_queue_service as _oq
+from utils.helpers import utc_now_iso
 
 logger = logging.getLogger("services.operator_queue_service")
 
@@ -37,7 +39,18 @@ class FloodAlertMixin:
         Edge-triggered (#3130): an episode alerts once, however many cycles or
         cooldown windows it lasts, and the next alert needs the condition to
         have cleared first (`_sync_agent` ends the episode through
-        `_end_flood_episode`, which ends its alert too). It used to be one
+        `_end_flood_episode`, which ends its alert too). That holds after a
+        person acknowledges the alert too: each reading carries the episode's
+        start (`episode_started_at`, a material key of the kind), so the
+        snooze silences re-reads of the acknowledged episode for the snooze
+        window and a NEW episode files at once. A leader failover or restart
+        loses the in-memory episode, so a persisting flood counts as a new
+        episode there and may file once more. The marker is worker-local too:
+        with Redis down the leader lease fails open
+        (`_try_acquire_leadership`), each worker stamps its own
+        `episode_started_at`, and another worker's re-read can file past a
+        person's ending, at most one extra row per extra worker per re-read
+        window. It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
@@ -55,15 +68,19 @@ class FloodAlertMixin:
         reserved prefix. Softened wording to avoid cry-wolf (C9).
 
         Re-read while it lasts (#3254 R9): an episode that persists is observed
-        again at most every 6 hours, so the kind's 14-day lifetime ends only a
-        row nobody re-read (a lost clear), never one whose condition still
-        holds. The refresh time per (agent, reason) lives in a dict this method
-        creates on the instance for itself (`_flood_refreshed_at`).
+        again at most every `OPERATOR_QUEUE_FLOOD_REREAD_SECONDS` (6 hours), so
+        the kind's 14-day lifetime ends only a row nobody re-read (a lost
+        clear), never one whose condition still holds. The refresh time and the
+        episode start per (agent, reason) live in dicts this method creates on
+        the instance for itself (`_flood_refreshed_at`,
+        `_flood_episode_started_at`).
 
-        The cooldown and the episode are stamped BEFORE every reading (a re-read
-        included). Outcomes:
+        The episode and its refresh time are stamped BEFORE every reading; the
+        per-agent cooldown only before an episode's first reading, since it
+        spaces episodes and a re-read is not one. Outcomes:
           * created / updated / snoozed → the episode is consumed (one alert per
-            episode; a snoozed reading is a person's ending, which stands);
+            episode; a snoozed reading is a person's ending of this episode,
+            which stands for the snooze window);
           * failed on the episode's first reading → the episode is RELEASED so
             the alarm is retried, and the cooldown stamp spaces those retries to
             at most one per window (review I1: holding the episode on a failure
@@ -85,12 +102,12 @@ class FloodAlertMixin:
         key = (agent_name, reason)
         now = time.monotonic()
         refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        started = vars(self).setdefault("_flood_episode_started_at", {})
         rereading = key in self._flood_episodes
         if rereading:
-            # R9: the 6-hour re-read of a persisting episode, the #3255
-            # base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+            # R9: the re-read of a persisting episode.
             last_read = refreshed.get(key)
-            if last_read is not None and now - last_read < 6 * 60 * 60:
+            if last_read is not None and now - last_read < _oq.OPERATOR_QUEUE_FLOOD_REREAD_SECONDS:
                 return  # this episode already alerted and was read recently
         else:
             # `None` = never alerted for this agent. A `0.0` default would be
@@ -102,9 +119,10 @@ class FloodAlertMixin:
             if last is not None and now - last < _oq.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
                 return  # too soon after the last episode — the next cycle retries
             self._flood_episodes.add(key)
-        # Stamped before every reading, a re-read included, so a failed one —
-        # released below — is retried no sooner than the cooldown (I1).
-        self._flood_alert_cooldown[agent_name] = now
+            started[key] = utc_now_iso()
+            # Stamped before the first reading, so a failed one — released
+            # below — is retried no sooner than the cooldown (I1).
+            self._flood_alert_cooldown[agent_name] = now
         refreshed[key] = now
 
         if reason == "oversize_file":
@@ -129,13 +147,14 @@ class FloodAlertMixin:
         outcome = platform_alerts.observe(
             agent_name, "queue_flood", reason,
             title=title, question=question, priority="high",
-            context={"held": held, "reason": reason},
+            context={"held": held, "reason": reason, "episode_started_at": started.get(key)},
         )
         if outcome == platform_alerts.OBSERVED_FAILED:
             if rereading:
                 # keep the episode so its end still clears the alert; retry the
                 # re-read once the cooldown has passed
-                refreshed[key] = now - 6 * 60 * 60 + _oq.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS
+                refreshed[key] = (now - _oq.OPERATOR_QUEUE_FLOOD_REREAD_SECONDS
+                                  + _oq.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
             else:
                 self._flood_episodes.discard(key)  # retry next window (I1)
                 refreshed.pop(key, None)

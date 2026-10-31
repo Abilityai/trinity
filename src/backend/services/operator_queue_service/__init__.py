@@ -49,31 +49,42 @@ the boundary that must stay one binding.
 `tests/unit/test_3785_operator_queue_package.py` holds these rules.
 """
 
-# ruff: noqa: F401
 # #3785: this external block stays whole, first, even where `__init__` itself
 # no longer reads a name. A submodule may import at module level only what is
 # already imported here (test_3785's G13), so an ImportError fires before any
 # `_oq`-holding submodule has loaded; and several names here are read through
 # the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
-import asyncio
-import base64
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
+import asyncio  # noqa: F401 — kept for G13 (poller imports it)
+import base64  # noqa: F401 — kept for G13 (listing imports it)
 import hashlib
 import json
 import logging
 import os
 import re
 import time
-import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Optional, Sequence, Tuple
+import uuid  # noqa: F401 — kept for G13 (listing and poller import it)
+from datetime import datetime, timedelta, timezone  # noqa: F401 — kept for G13 (rows imports them)
+from typing import (
+    Optional,
+    Sequence,  # noqa: F401 — kept for G13 (filechannel imports it)
+    Tuple,
+)
 
-from services import rate_limiter
+from services import rate_limiter  # noqa: F401 — O1(d): read as oqs.rate_limiter from outside, _oq.rate_limiter in ingest
 from services.operator_queue_choices import (
     OPTIONS_DROPPED_MARKER,
-    options_cap_violation,
-    title_cap_violation,
+    options_cap_violation,  # noqa: F401 — kept for G13 (ingest imports it)
+    title_cap_violation,  # noqa: F401 — kept for G13 (ingest imports it)
 )
-from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+from utils.helpers import (
+    iso_cutoff,  # noqa: F401 — kept for G13 (listing and ingest import it)
+    parse_iso_timestamp,  # noqa: F401 — kept for G13 (listing, rows and filechannel import it)
+    to_utc_iso,  # noqa: F401 — read as oqs.to_utc_iso from outside; kept for G13 (rows, filechannel)
+    utc_now_iso,
+)
 
 # #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
 # `deps`, and read as `deps.X`, never bound here — a stale
@@ -160,6 +171,9 @@ OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
 )
+# #3254 R9: a persisting flood episode is re-read at most this often, the #3255
+# base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+OPERATOR_QUEUE_FLOOD_REREAD_SECONDS = 6 * 60 * 60
 
 # =========================================================================
 # #1677: budget for agent-INFLUENCEABLE platform alert emitters.
@@ -359,6 +373,16 @@ ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
 # a shared operator must still see and answer a skill gate's approval (`gate-`).
 OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
 
+# trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
+# admins'). A project steward's proposal names people and tasks of a project
+# that not everyone who can use the agent may open — and the person it is
+# addressed to (the project's creator) need not own the steward: it may only be
+# shared with them. So this is keyed on the addressee (`addressed_to_email` or
+# `resolved_to`), never on who owns the agent — owner-keyed, it showed the row to
+# an owner who could not open the project and hid it from the one person who
+# can decide it. Under `gate-`, so it stays about-a-person and reserved.
+ADDRESSEE_ONLY_ID_PREFIXES = ("gate-addressee-only-",)
+
 
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
@@ -501,6 +525,14 @@ async def _maybe_emit_alert_budget_episode(
     registry test). Two workers' readings land on the one subject row, which is
     what the old time-bucketed id approximated.
 
+    The episode is the set of pending rows that fill the budget: each reading
+    carries a digest of their ids (``filled_by``, a material key of the kind).
+    After a person ends the episode alert, a reading of the same full budget is
+    snoozed for the snooze window; once a slot frees and a new row fills it,
+    the condition cleared and came back, the digest differs and the reading
+    files. A failed read of the set logs an ERROR and leaves ``filled_by``
+    None, which no digest equals, so the reading files.
+
     The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
     BEFORE the reading, so a persistently failing write backs off for the
     window instead of retrying on every refusal (#1632 shape). The kind is
@@ -532,10 +564,21 @@ async def _maybe_emit_alert_budget_episode(
         f"compromised agent — review its recent activity before acting on its "
         f"requests."
     )
+    try:
+        filling = deps.db.list_operator_queue_items(
+            agent_name=agent_name, status="pending", type=item_type, limit=1000)
+        filled_by = hashlib.sha256(
+            "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — the alarm still files, as a new episode
+        logger.error("[#1677 budget] could not read the rows filling %s/%s's budget",
+                     agent_name, item_type, exc_info=True)
+        filled_by = None
     context = {
         "reason": "platform_alert_budget",
         "alert_type": item_type,
         "cap": OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "filled_by": filled_by,
     }
     # Triage aid for the cross-agent budget-fill scenario (a permitted peer
     # spraying at the victim): the platform trigger enum only, shape-guarded.
@@ -563,7 +606,7 @@ async def _maybe_emit_alert_budget_episode(
 
 # #3785: the package's own submodules, imported after the names they read
 # from `__init__` (test_3785's G6 and G13).
-from . import listing  # noqa: E402
+from . import listing  # noqa: E402,F401 — loads the submodule here, in G6 order
 
 # #3785: the poller core (instance state, start/stop, the leader lease, the
 # loop and the cycle) lives in `poller.PollerCoreMixin`. Imported after every
@@ -576,8 +619,8 @@ from . import poller  # noqa: E402
 # and write-back halves of the service in `ingest` / `write_back`, composed
 # below. Imported after every package-owned definition, so nothing they read
 # from `_oq` at import time can be missing (none does today).
-from . import filechannel  # noqa: E402
-from . import rows  # noqa: E402
+from . import filechannel  # noqa: E402,F401 — loads the submodule here, in G6 order
+from . import rows  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import ingest  # noqa: E402
 from . import write_back  # noqa: E402
 
@@ -655,6 +698,8 @@ from .rows import (  # noqa: E402,F401
     aging_hours,
     annotate_aging,
     is_about_a_person,
+    is_addressed_to,
+    is_addressee_only,
     is_aged,
     is_owner_only,
     is_person_tag,

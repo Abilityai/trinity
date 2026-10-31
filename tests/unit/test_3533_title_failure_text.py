@@ -25,7 +25,9 @@ def svc(monkeypatch):
         "state": service.TITLE_HEALTH_UNKNOWN, "consecutive_failures": 0,
         "last_ok_at": None, "last_failure_at": None, "last_failure": None,
     })
-    monkeypatch.setattr(service, "_resolve_title_auth", lambda agent: {"x-api-key": "k"})
+    from services import model_gateway
+    monkeypatch.setattr(service, "_resolve_title_auth",
+                        lambda agent: model_gateway.Credential("api_key", "auto", model_gateway.MODEL_ON_API_KEY, "k"))
     return service
 
 

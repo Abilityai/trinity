@@ -13,8 +13,7 @@ import logging
 import shlex
 from typing import Any, Dict, Optional
 
-from database import db
-from services import git_credential_helper
+from services import git_credential_helper, platform_alerts
 from services.docker_service import execute_command_in_container
 
 from . import gitignore
@@ -28,17 +27,6 @@ logger = logging.getLogger(__name__)
 # the caller) — #2969. Without that a wedged exec would pin a pool thread
 # forever, fleet-wide, from a background pass.
 SCRUB_TIMEOUT_S = 60
-
-# One operator alarm per agent per day when the sweep REFUSED to strip: a
-# stable id so a restart loop cannot flood the queue while an operator is
-# already looking at it (the `archive_storage` precedent).
-_SCRUB_ALARM_ID_PREFIX = "ent615-git-token-scrub-"
-
-# Same daily-stable-id discipline for the "could not look" alarm. A SEPARATE
-# family, not a variant of the refusal: the two need different operator action
-# (set a token vs. fix workspace ownership/permissions), and sharing one id would let
-# whichever fired first suppress the other for the rest of the day.
-_SCRUB_UNREADABLE_ALARM_ID_PREFIX = "ent615-git-token-scrub-unreadable-"
 
 # Upserts `GITHUB_PAT` in the workspace `.env` — the FIRST rung of the
 # credential helper's ladder, and therefore the one a rotation must reach.
@@ -105,74 +93,85 @@ async def write_container_github_pat(agent_name: str, github_pat: str) -> bool:
 
 
 def _alarm_git_token_scrub_refused(agent_name: str, report: Dict[str, Any]) -> None:
-    """One operator alarm when the sweep left a token URL in place.
+    """The operator alarm when the sweep left a token URL in place.
 
     Refusing is the CORRECT outcome — the sweep never strips a credential it
     could not replace, because the agent whose only credential lives in its
     `origin` URL (the `POST /{agent}/git/initialize` orphan class) is stranded
     permanently by a strip-first sweep. But a refusal is also invisible, so it
-    is queued rather than logged and forgotten. Fail-soft.
-    """
-    try:
-        from database import db
-        from utils.helpers import utc_now_iso
+    is queued rather than logged and forgotten.
 
-        db.create_operator_queue_item(agent_name, {
-            "id": f"{_SCRUB_ALARM_ID_PREFIX}{agent_name}-{utc_now_iso()[:10]}",
-            "type": "alert",
-            "priority": "medium",
-            "title": "A git remote still carries an embedded credential",
-            "question": (
-                f"{agent_name} has {report.get('refused', 0)} git remote URL(s) "
-                "with an embedded credential that Trinity deliberately did NOT "
-                "remove: no replacement credential could be resolved, and "
-                "removing it would have left the agent unable to fetch or push "
-                "at all. Set a GitHub token for this agent (Git tab → add a "
-                "GitHub token) and the next start will finish the job."
-            ),
-            "context": {k: v for k, v in report.items()},
-            "created_at": utc_now_iso(),
-        })
-    except Exception:  # noqa: BLE001 — alarm plumbing must never break a sweep
-        logger.exception("ent#615: could not file the scrub-refused alarm for %s", agent_name)
+    Reports through the platform alert seam (#3254): one pending row per agent
+    (subject `git_token_scrub_refused:<agent>`), updated in place by every
+    refusing sweep and ended by `_clear_git_token_scrub_alarms`. Never raises.
+    """
+    platform_alerts.observe(
+        agent_name, "git_token_scrub_refused", agent_name,
+        title="A git remote still carries an embedded credential",
+        question=(
+            f"{agent_name} has {report.get('refused', 0)} git remote URL(s) "
+            "with an embedded credential that Trinity deliberately did NOT "
+            "remove: no replacement credential could be resolved, and "
+            "removing it would have left the agent unable to fetch or push "
+            "at all. Set a GitHub token for this agent (Git tab → add a "
+            "GitHub token) and the next start will finish the job."
+        ),
+        priority="medium",
+        context={k: v for k, v in report.items()},
+    )
 
 
 def _alarm_git_token_scrub_unreadable(agent_name: str) -> None:
-    """One operator alarm when the sweep could not read the tree it swept.
+    """The operator alarm when the sweep could not read the tree it swept.
 
     Distinct from a refusal: a refusal means the sweep LOOKED, found a token it
     could not replace, and correctly left it. This means it could not look —
     `find` enumerated nothing and the probe failed — so an all-zero report says
     nothing about whether a token is there. Nothing is destroyed; the
-    remediation simply did not run. Fail-soft.
+    remediation simply did not run.
 
     Reached only when the repository is unreachable, never when there simply is
     no repository (#2930) — the caller splits those. Workspace ownership and
     permissions can prevent either the owner sweep or a seeded root sweep.
-    """
-    try:
-        from database import db
-        from utils.helpers import utc_now_iso
 
-        db.create_operator_queue_item(agent_name, {
-            "id": f"{_SCRUB_UNREADABLE_ALARM_ID_PREFIX}{agent_name}-{utc_now_iso()[:10]}",
-            "type": "alert",
-            "priority": "medium",
-            "title": "Trinity could not check this agent's git remotes",
-            "question": (
-                f"The ent#615 credential sweep could not read {agent_name}'s "
-                "workspace, so it cannot say whether a git remote still carries "
-                "an embedded token — its all-clear is not evidence. Check the "
-                "workspace ownership and permissions, or check the agent's git "
-                "remotes by hand."
-            ),
-            "context": {"reason": "root_readable=0"},
-            "created_at": utc_now_iso(),
-        })
-    except Exception:  # noqa: BLE001 — alarm plumbing must never break a sweep
-        logger.exception(
-            "ent#615: could not file the scrub-unreadable alarm for %s", agent_name
-        )
+    A SEPARATE kind from the refusal (#3254: subject
+    `git_token_scrub_unreadable:<agent>`): the two need different operator
+    action (set a token vs. fix workspace ownership/permissions), and sharing
+    one row would let either reading overwrite the other. Never raises.
+    """
+    platform_alerts.observe(
+        agent_name, "git_token_scrub_unreadable", agent_name,
+        title="Trinity could not check this agent's git remotes",
+        question=(
+            f"The ent#615 credential sweep could not read {agent_name}'s "
+            "workspace, so it cannot say whether a git remote still carries "
+            "an embedded token — its all-clear is not evidence. Check the "
+            "workspace ownership and permissions, or check the agent's git "
+            "remotes by hand."
+        ),
+        priority="medium",
+        context={"reason": "root_readable=0"},
+    )
+
+
+def _clear_git_token_scrub_alarms(agent_name: str, report: Dict[str, Any]) -> None:
+    """End the scrub alarms this sweep proves are over (#3254). Never raises.
+
+    Only on positive evidence that the sweep inspected the workspace: it
+    succeeded AND it could read ROOT's repository. A successful all-zero report
+    from a tree it could not see is not recovery, so it ends neither alarm. Nor
+    is "no repository at ROOT" (#2930): when the toplevel probe fails (its
+    timeout, an exec error), `gitignore._detect_git_dir` falls back to
+    `/home/developer`, and a legacy repo under `workspace/` then reads exactly
+    so while its config still holds the token. A refusal is over only when such
+    an inspection refused nothing.
+    """
+    inspected = bool(report.get("success")) and bool(report.get("root_readable"))
+    if not inspected:
+        return
+    platform_alerts.clear(agent_name, "git_token_scrub_unreadable", agent_name)
+    if not report.get("refused"):
+        platform_alerts.clear(agent_name, "git_token_scrub_refused", agent_name)
 
 
 async def scrub_git_remote_tokens(
@@ -274,6 +273,7 @@ async def scrub_git_remote_tokens(
             )
         else:
             _alarm_git_token_scrub_unreadable(agent_name)
+    _clear_git_token_scrub_alarms(agent_name, report)
     if report["gitmodules_hits"]:
         # A token in the TRACKED `.gitmodules` is already committed and pushed.
         # The sweep cannot fix that; finding one turns "rotate the platform PAT

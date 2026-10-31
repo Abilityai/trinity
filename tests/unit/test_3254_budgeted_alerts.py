@@ -524,6 +524,34 @@ def test_a_person_ending_of_the_episode_stands_through_a_later_refusal(seam):
         (episode["id"], "acknowledged", "person")]
 
 
+def test_a_new_budget_episode_after_a_person_ending_files_again(seam):
+    """C1 for `alert_budget`: the episode is the set of pending rows that fill
+    the budget. A person ends the episode alert; a slot frees and a new row
+    fills it (the condition cleared and came back), so the next refusal is a
+    new episode and files, while the old row stays the person's."""
+    from services import operator_queue_service as oqs
+    from services import platform_alerts as pa
+
+    for i in range(oqs.OPERATOR_ALERT_MAX_PENDING_PER_TYPE):
+        asyncio.run(oqs.create_bounded_alert_outcome(AGENT, _legacy("skill_not_found", command=f"/c{i}")))
+    asyncio.run(oqs.create_bounded_alert_outcome(AGENT, _legacy("skill_not_found", command="/x1")))
+    drain(seam)
+    episode = one(seam, kind="alert_budget")
+    person_ends(seam, episode)
+    person_ends(seam, one(seam, subject=pa.subject_for("skill_not_found", "/c0")))
+    assert asyncio.run(oqs.create_bounded_alert_outcome(
+        AGENT, _legacy("skill_not_found", command="/c-new"))) == oqs.ALERT_CREATED
+    seam.clock.advance(days=1)
+    assert asyncio.run(oqs.create_bounded_alert_outcome(
+        AGENT, _legacy("skill_not_found", command="/x2"))) == oqs.ALERT_REFUSED_AT_BUDGET
+    drain(seam)
+    episodes = [r for r in rows(seam) if (r.get("subject") or "").startswith("alert_budget:")]
+    assert sorted((r["status"], r["disposed_by"]) for r in episodes) == [
+        ("acknowledged", "person"), ("pending", None)]
+    new = next(r for r in episodes if r["status"] == "pending")
+    assert new["context"]["filled_by"] != episode["context"]["filled_by"]
+
+
 def test_the_episode_is_unbudgeted_so_it_cannot_recurse(seam):
     from services import platform_alerts as pa
 
@@ -592,7 +620,7 @@ def _sync_loop(monkeypatch, *, over_cap=True):
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(True, 10, 0, 60))
     svc = oqs.OperatorQueueSyncService()
-    return SimpleNamespace(svc=svc, state=state,
+    return SimpleNamespace(svc=svc, state=state, file=file,
                            cycle=lambda: asyncio.run(svc._sync_agent(AGENT)))
 
 
@@ -758,6 +786,122 @@ def test_a_person_ending_of_the_flood_stands_through_the_reread_and_the_clear(se
     still = seam.db.get_operator_queue_item(row["id"])
     assert (still["status"], still["disposed_by"]) == ("acknowledged", "person")
     assert len(_flood_rows(seam)) == 1
+
+
+def test_a_new_flood_episode_after_a_person_ending_files_again(seam, monkeypatch):
+    """#3130's edge-triggered contract survives an acknowledgement (C1): the
+    person's ending silences re-reads of THAT episode only. The condition
+    clears (the clear finds no pending row), comes back a day later inside the
+    snooze window, and the new episode files a new row."""
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()
+    (first,) = _flood_rows(seam)
+    person_ends(seam, first)
+    loop.state["over_cap"] = False
+    loop.cycle()                                   # the episode ends
+    seam.clock.advance(days=1)
+    loop.state["over_cap"] = True
+    loop.cycle()                                   # a new episode
+    pending = _flood_rows(seam, status="pending")
+    assert [r["subject"] for r in pending] == ["queue_flood:ingestion_cap"]
+    assert pending[0]["id"] != first["id"]
+    assert pending[0]["context"]["episode_started_at"] != first["context"]["episode_started_at"]
+    still = seam.db.get_operator_queue_item(first["id"])
+    assert (still["status"], still["disposed_by"]) == ("acknowledged", "person")
+
+
+def test_a_persisting_flood_a_person_ended_files_again_once_the_snooze_lapses(seam, monkeypatch):
+    """The other half of the episode rule: re-reads of the acknowledged episode
+    stay quiet for the snooze window, and only for it."""
+    from services import platform_alerts as pa
+
+    loop = _sync_loop(monkeypatch)
+    loop.cycle()
+    (first,) = _flood_rows(seam)
+    person_ends(seam, first)
+    window = pa.snooze_window()
+    seam.clock.advance(seconds=window.total_seconds() - 60)
+    loop.cycle()                                   # a re-read inside the window
+    assert _flood_rows(seam, status="pending") == []
+    seam.clock.advance(hours=7)
+    loop.cycle()                                   # a re-read after it
+    (again,) = _flood_rows(seam, status="pending")
+    assert again["context"]["episode_started_at"] == first["context"]["episode_started_at"]
+
+
+def test_a_sane_file_after_an_oversized_one_ends_the_alert_through_the_poll(seam, monkeypatch):
+    """I1: the oversize episode ends at `_sync_agent`'s sane-size read, through
+    the real poll, and its alert is ended as the platform."""
+    import json
+
+    from services import operator_queue_service as oqs
+
+    loop = _sync_loop(monkeypatch, over_cap=False)
+    sane = loop.file["content"]
+    monkeypatch.setattr(oqs, "OPERATOR_QUEUE_MAX_FILE_BYTES", len(sane) + 10)
+    loop.file["content"] = json.dumps({"requests": [], "pad": "x" * (len(sane) + 10)})
+    loop.cycle()
+    (row,) = _flood_rows(seam)
+    assert row["subject"] == "queue_flood:oversize_file"
+    loop.file["content"] = sane
+    loop.cycle()
+    ended = seam.db.get_operator_queue_item(row["id"])
+    assert (ended["status"], ended["disposed_by"], ended["disposition_reason"]) == (
+        "cancelled", "platform", "condition_cleared")
+
+
+def test_a_reread_does_not_delay_the_other_reasons_first_alert(seam):
+    """dolho I1: the per-agent cooldown spaces episodes; a 6-hourly re-read of
+    one reason's episode is not an episode, so it must not hold back the other
+    reason's first alert."""
+    from services import operator_queue_service as oqs
+
+    svc = oqs.OperatorQueueSyncService()
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))
+    seam.clock.advance(hours=6, seconds=1)
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))      # the re-read
+    (row,) = _flood_rows(seam)
+    assert row["context"]["seen_count"] == 2
+    seam.clock.advance(seconds=1)
+    asyncio.run(svc._maybe_emit_flood_alert(AGENT, reason="oversize_file"))
+    assert sorted(r["subject"] for r in _flood_rows(seam)) == [
+        "queue_flood:ingestion_cap", "queue_flood:oversize_file"]
+
+
+def test_the_reread_spacing_is_one_constant_for_the_gate_and_the_retry(seam, monkeypatch):
+    """I3: the re-read gate and a failed re-read's retry arithmetic read one
+    named spacing, so the two cannot drift: with it set to an hour, the re-read
+    lands after an hour, and a failed one is retried after the cooldown."""
+    from services import operator_queue_service as oqs
+
+    monkeypatch.setattr(oqs, "OPERATOR_QUEUE_FLOOD_REREAD_SECONDS", 60 * 60)
+    real = seam.db.create_platform_operator_queue_item
+    attempts = []
+
+    def _flaky(*a, **k):
+        attempts.append(1)
+        if len(attempts) == 2:
+            raise RuntimeError("database is locked")
+        return real(*a, **k)
+
+    monkeypatch.setattr(seam.db, "create_platform_operator_queue_item", _flaky)
+    svc = oqs.OperatorQueueSyncService()
+    emit = lambda: asyncio.run(svc._maybe_emit_flood_alert(AGENT, held=2))  # noqa: E731
+    emit()
+    seam.clock.advance(minutes=59)
+    emit()
+    assert len(attempts) == 1                      # inside the spacing
+    seam.clock.advance(minutes=1, seconds=1)
+    emit()
+    assert len(attempts) == 2                      # the re-read, which fails
+    seam.clock.advance(seconds=5)
+    emit()
+    assert len(attempts) == 2                      # inside the cooldown: no retry yet
+    seam.clock.advance(seconds=oqs.OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+    emit()
+    assert len(attempts) == 3
+    (row,) = _flood_rows(seam)
+    assert row["context"]["seen_count"] == 2
 
 
 def test_the_flood_sends_the_thin_sync_trigger_not_its_title(seam, monkeypatch):
@@ -988,12 +1132,22 @@ def test_the_direction_tag_keeps_an_untracked_path_apart_from_an_unignored_one(s
     assert by_direction[(0, 1)]["priority"] == "medium"
 
 
-def test_a_person_ending_of_a_change_set_stands(seam):
+def test_a_person_ending_of_a_push_stands_and_a_new_push_files_again(seam):
+    """C1 / dolho: every untracking Push is its own must-act event. A person's
+    ending of one Push's row is never rewritten or reopened, and a later Push of
+    the same change set (the agent `git add -f`s the paths and syncs again)
+    files a new row inside the snooze window."""
     _push(removed=("a.env",))
-    person_ends(seam, _gitignore_rows(seam)[0])
+    (first,) = _gitignore_rows(seam)
+    person_ends(seam, first)
     seam.clock.advance(days=2)
     _push(removed=("a.env",))
-    assert [r["status"] for r in _gitignore_rows(seam)] == ["acknowledged"]
+    by_status = {r["status"]: r for r in _gitignore_rows(seam)}
+    assert set(by_status) == {"acknowledged", "pending"}
+    assert by_status["acknowledged"]["id"] == first["id"]
+    assert by_status["acknowledged"]["question"] == first["question"]
+    assert by_status["pending"]["subject"] == first["subject"]
+    assert by_status["pending"]["context"]["push_id"] != first["context"]["push_id"]
 
 
 # ---------------------------------------------------------------------------

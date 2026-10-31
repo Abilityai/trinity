@@ -464,6 +464,12 @@ class Snapshot:
     # `skipped`). Empty when the collection was skipped (older/minimal DDL
     # missing `completed_at`/`duration_ms`, recorded in `sources_unavailable`).
     terminal_rows: List[Dict[str, Any]] = field(default_factory=list)
+    # RD-04 / RD-05 input (#4000): per live git-bound agent, its stored git
+    # health ({git_dir_bytes, pack_count, loose_objects, maintenance_failures,
+    # git_stats_at, last_sync_at}; every value NULL when the poller never wrote
+    # a row). Empty is NOT clean on its own — both checks gate on
+    # `collector_ran(COLLECTOR_GIT_STATS)`.
+    git_stats: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     # Diagnostics — empty on a clean cycle.
     sources_unavailable: List[str] = field(default_factory=list)
     # H-01 input (#1813): which collectors actually EXECUTED this cycle.
@@ -480,6 +486,12 @@ class Snapshot:
     def collector_ran(self, name: str) -> bool:
         return name in self.collectors_ran
 
+    def collector_succeeded(self, name: str) -> bool:
+        """Ran AND did not record a failure under its own label (#4000)."""
+        return self.collector_ran(name) and not any(
+            s.startswith(f"{name}:") for s in self.sources_unavailable
+        )
+
 
 # Collector names recorded in `Snapshot.collectors_ran`. These deliberately
 # match the `sources_unavailable` label prefixes so a consumer can pair
@@ -490,6 +502,10 @@ PULL_POLL_UNAVAILABLE_PREFIX = "pull_poll["
 
 COLLECTOR_DOCKER = "docker"
 COLLECTOR_REDIS = "redis"
+# #4000: RD-04 / RD-05 read it through `collector_succeeded` — they have
+# nothing to say about a read that raised, and an empty map must not read as a
+# clean fleet (#1813).
+COLLECTOR_GIT_STATS = "sqlite.git_stats"
 
 
 # ---------------------------------------------------------------------------
@@ -1116,6 +1132,42 @@ def _collect_enabled_schedules() -> List[Dict[str, Any]]:
         ]
 
 
+def _collect_git_stats() -> Dict[str, Dict[str, Any]]:
+    """Git health per live git-bound agent, for RD-04 / RD-05 (#4000).
+
+    Same set the sync-health poller polls (`SyncStateOperations.list_health_rows`:
+    `sync_enabled = 1`, agent not soft-deleted), LEFT-joined so an agent the
+    poller never wrote still appears — with every stat NULL, which is exactly
+    the blindness RD-04 reports.
+    """
+    from sqlalchemy import select
+    from db.engine import get_engine
+    from db.tables import agent_git_config, agent_ownership, agent_sync_state
+
+    s = agent_sync_state.c
+    stmt = (
+        select(
+            agent_git_config.c.agent_name, s.git_dir_bytes, s.pack_count,
+            s.loose_objects, s.maintenance_failures, s.git_stats_at, s.last_sync_at,
+        )
+        .select_from(
+            agent_git_config.join(
+                agent_ownership,
+                agent_ownership.c.agent_name == agent_git_config.c.agent_name,
+            ).outerjoin(agent_sync_state, s.agent_name == agent_git_config.c.agent_name)
+        )
+        .where(
+            agent_git_config.c.sync_enabled == 1,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+    )
+    with get_engine().connect() as conn:
+        return {
+            row["agent_name"]: {k: v for k, v in row.items() if k != "agent_name"}
+            for row in conn.execute(stmt).mappings()
+        }
+
+
 def _collect_orphan_refs(known_agents: Set[str]) -> List[OrphanRef]:
     """Scan cross-table agent_name refs for any not in known_agents.
 
@@ -1555,6 +1607,15 @@ def collect_snapshot() -> Snapshot:
     except Exception as exc:
         logger.exception("canary snapshot: enabled schedules read failed")
         snap.sources_unavailable.append(f"sqlite.enabled_schedules: {exc}")
+
+    # #4000: stored git health for RD-04 / RD-05.
+    try:
+        snap.git_stats = _collect_git_stats()
+    except Exception as exc:
+        logger.exception("canary snapshot: git stats read failed")
+        snap.sources_unavailable.append(f"{COLLECTOR_GIT_STATS}: {exc}")
+    finally:
+        snap.collectors_ran.add(COLLECTOR_GIT_STATS)
 
     # SQLite: recent terminal rows for E-03 (completed_at populated) + G-03
     # (started_at <= completed_at). Window off the MAX per-agent execution

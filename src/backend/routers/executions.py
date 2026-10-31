@@ -23,7 +23,7 @@ from models import (
     FleetExecutionSummary,
     User,
 )
-from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+from services.agent_service.helpers import accessible_agent_names, narrow_to_agent, viewer_own_rows
 
 router = APIRouter(prefix="/api/executions", tags=["executions"])
 
@@ -36,7 +36,8 @@ _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled
 # `retry` is RETRY-001's second attempt at a failed scheduled run (#2845).
 # `operator_ending` is the wake for an ask that was cancelled or expired
 # (trinity-enterprise#611); `operator_response` is the answer's (ent#329).
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate"}
+# `self_task` is an agent's `POST /task` to itself (#4105).
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate", "self_task"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 # ent#326. `hour`/`day` are gap-filled; `trigger`/`agent` are categorical and
@@ -186,6 +187,12 @@ async def list_fleet_executions(
 ):
     """List executions across all accessible agents with optional filters."""
     agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
+    # trinity-enterprise#875: on every agent the caller does not own, the list
+    # (and the `search` over message text) is the caller's own executions,
+    # narrowed in the WHERE before the LIMIT/OFFSET.
+    own_uid, own_exempt = viewer_own_rows(current_user)
+    own_rows = {} if own_uid is None else {
+        "own_rows_user_id": own_uid, "own_rows_exempt_agents": own_exempt}
     rows = db.get_fleet_executions(
         agent_names,
         status=status if status in _VALID_STATUSES else None,
@@ -194,5 +201,6 @@ async def list_fleet_executions(
         search=search,
         limit=limit,
         offset=offset,
+        **own_rows,
     )
     return [FleetExecutionSummary(**r) for r in rows]
