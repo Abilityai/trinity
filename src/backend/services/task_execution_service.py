@@ -286,8 +286,15 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # was missing all along stays silent whenever the first attempt failed
     # before reaching the agent (capacity, timeout) and only the retry got far
     # enough to show it.
+    #
+    # #4105: `self_task` is the `agent` case with the caller and the target the
+    # same agent. Its reply goes back to that agent (and, if a chat session was
+    # named, into it after the fact), so no person reads it live. `skill_gate`
+    # is the `operator_response` shape: the wake of a requester after someone
+    # else decided its gated request, run with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response", "operator_ending", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry", "self_task",
+     "skill_gate"}
 )
 
 
@@ -1871,6 +1878,20 @@ class TaskExecutionService:
                     db.mark_execution_dispatched(execution_id, async_dispatch=async_dispatch)
                 except Exception as e:
                     logger.warning(f"[TaskExecService] Failed to mark execution dispatched: {e}")
+
+            # trinity-enterprise#1022: a headless run (agent scope) recalls what
+            # the agent and its owner already know about this request. Awaited
+            # here, off the event loop inside the service; None when memory is
+            # off, the run serves a person (their own caller prompt carries
+            # their memory), or anything fails.
+            try:
+                from services import memory_service
+                memory_block = await memory_service.task_memory_block(agent_name, execution_id, message)
+            except Exception as e:  # noqa: BLE001 — fail-open
+                logger.debug(f"[TaskExecService] memory block skipped: {e}")
+                memory_block = None
+            if memory_block:
+                system_prompt = "\n\n".join(p for p in (memory_block, system_prompt) if p)
 
             # ---- 4. Call agent with retry --------------------------------
             effective_system_prompt = self._compose_effective_system_prompt(

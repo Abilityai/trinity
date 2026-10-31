@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -31,6 +42,18 @@
         "gemini-runtime"
       ],
       "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
+      "file": "unit/test_4002_setup_hook_tmpdir.py",
+      "feature": "#4002",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "startup",
+        "compatibility",
+        "unit"
+      ],
+      "description": "setup.sh protected from the orphan sweep, default TMPDIR emptied at boot, F-014 setup outcome check"
     },
     {
       "file": "unit/test_4000_git_maintenance_every_tick.py",
@@ -901,6 +924,17 @@
         "unit"
       ],
       "description": "#3246 merge-train fix: the platform ending seam works from every thread origin — `platform_alerts.clear` / `observe` driven through `asyncio.to_thread` (the loop's default executor, which anyio does not own — the headroom sweep and the skills reconcile) still land the `platform_cleared` audit row and the `operator_queue_cancelled` / sync trigger with no 'could not schedule' warning; `spawn_on_loop` from the default executor and from a plain `threading.Thread` once the host loop is known; `main.py::lifespan` captures the host loop before any boot phase; with no running loop, no anyio portal and no live host loop it still raises loudly (never a silent no-op), and a captured loop that was closed is not a target. No Docker."
+    },
+    {
+      "file": "unit/test_4052_conftest_name_pinned.py",
+      "feature": "#4052",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4052: a bare `from conftest import ...` in a unit file resolves to tests/conftest.py even with tests/unit at sys.path[0], and tests/unit/conftest.py is never executed a second time as top-level `conftest`."
     },
     {
       "file": "unit/test_ent665_send_idempotency_key.py",
@@ -1925,6 +1959,17 @@
         "circuit-breaker"
       ],
       "description": "Tests that the AgentClient circuit breaker only counts TCP unreachability (connect errors/timeouts) toward opening — HTTP errors, read/write/pool failures, and protocol errors are excluded"
+    },
+    {
+      "file": "unit/test_4050_platform_alert_id_collision.py",
+      "feature": "#4050",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4050: at a frozen clock, both kinds of a shared-prefix pair (git_bloat_*, db_backup_*) and a repeated event are separate rows; create_platform_item re-mints a colliding id and never returns created for a row it did not insert."
     },
     {
       "file": "integration/test_circuit_breaker.py",
@@ -2966,6 +3011,17 @@
       "description": "Claude Code's internal [ede_diagnostic] header must never be surfaced as the error cause (#1849): stream_parser filters diagnostic entries from result.errors at BOTH the max_turns and execution_error branches, joins the remaining real errors, keeps the token-stripped diagnostic payload as labelled context, and no longer raises on a malformed errors shape (which previously landed as HTTP 200 success). Acceptance test drives a marker-first errors[] through _finalize_headless_result to routers/sessions.py::_is_resume_not_found."
     },
     {
+      "file": "unit/test_4053_person_kind_never_platform_ended.py",
+      "feature": "#4053",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4053: platform_alerts.clear/reconcile refuse every clears=\"person\" kind at runtime (ends nothing, returns 0, logs ERROR), however the kind is passed; the row stays pending; a hook kind still clears."
+    },
+    {
       "file": "mcp-server/src/tools/ask_trinity_edges.test.ts",
       "feature": "#2027",
       "added": "2026-08-05",
@@ -3986,6 +4042,17 @@
       "description": "GitHub evaluates a workflow string that contains any ${{ }} as ONE expression and refuses the file at parse time above 21,000 characters (#2625: deploy-dev.yml's ssh script embeds three expressions; the #2578 comments took it from 17,837 to 21,923, the first dev push after #2622 came up as a run named after the file with zero jobs, and the notify-failure job that files the #2204 incident never ran — PyYAML and bash -n accept such a file and a dev-push-only workflow is never parsed before merge). Walks EVERY string in EVERY workflow (.yml and .yaml) and composite-action manifest, measured as the parsed scalar in UTF-8 bytes, and fails any expression-bearing one past 20,000 (1,000 in hand), with a vacuity check that the deploy script is found and carries expressions, mutations proving the guard rejects the deploy script padded back past the cap and an expression-bearing string wherever it sits (run, with-input, env), and that a long string WITHOUT an expression is left alone. Structural fix (no expression in the script at all) is #2626."
     },
     {
+      "file": "unit/test_3998_chat_setup_releases_admission.py",
+      "feature": "#3998",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "reliability",
+        "execution"
+      ],
+      "description": "#3998: a /chat turn whose execution setup raises releases its capacity slot and idempotency claim (pull pilot: claim only); a setup that succeeds leaves both to run_chat_turn's finally."
+    },
+    {
       "file": "unit/test_2995_deploy_health_gate.py",
       "feature": "#2995",
       "added": "2026-09-28",
@@ -4958,6 +5025,16 @@
       "description": "Git-sync write access is validated where GitHub enforces it (#2107): probe_push_access runs REAL `git push --dry-run` against a local fake smart-HTTP server — 403 + `Write access to repository not granted.` → denied with GitHub's line verbatim; a valid receive-pack advertisement → ok with nothing POSTed; 5xx / unreachable → transient; the PAT reaches the server as an Authorization header and is never on git's argv; is_push_denied over refusal vs non-refusal texts. Create-path cases (400 before any container, transient non-blocking, source mode not probed) in test_1484_create_agent_characterization.py; the named sync_failing item in test_sync_health_service.py. 20 of 23 red with the fix reverted."
     },
     {
+      "file": "../src/mcp-server/src/fan_out_turn_scope.test.ts",
+      "feature": "#3944",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "fan_out's Idempotency-Key is scoped to the caller's turn (the #3296 rule): same tasks from the same turn keep one key; from a different turn a different key; a scheduler retry derives attempt 1's key (delegationTurnScope); no turn (absent or manual) is byte-identical to the pre-#3944 key and reads no execution row; async mode keeps its own key with the turn appended; an unreadable row scopes to the turn and the call still goes out. Reverting the fix turns 4 of the 6 red."
+    },
+    {
       "file": "unit/test_ent465_suggestions.py",
       "feature": "trinity-enterprise#465",
       "added": "2026-09-24",
@@ -5883,6 +5960,26 @@
         "unit"
       ],
       "description": "trinity-enterprise#753: the agent_skill_gates table on both tracks (the registered SQLite entry run twice; the Alembic revision extends the single head), the PK in tables.py (ON CONFLICT on a tables.py-built database), the write merging unsent fields under the lock, writes only to a live agent, rename/soft-delete/purge through the AGENT_REFS cascade, facade signature parity, and the read seam: list_skill_gates skips tombstones and a failed read raises so read_gates refuses 503 (never {}); a gate written mixed-case holds through the real matcher."
+    },
+    {
+      "file": "unit/test_3300_list_reports_agent_scope.py",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "GET /api/reports takes a narrowing-only agent_names applied in SQL before limit: with an agent key's reach saturated by a spawned child's newer reports, the page without agent_names is the child's, and with agent_names=[self, peer] the permitted peer's older reports are returned; it never widens (an unreachable name yields nothing); an admin is narrowed to exactly the names; it composes with ?agent=; omitted changes nothing; >500 names or a blank name is a named 422; the shared narrow_to_names helper only narrows. Ignoring agent_names in the route turns 7 of 10 red."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/list_reports_scope.test.ts",
+      "feature": "#3300",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "unit"
+      ],
+      "description": "A broad list_reports under an agent key reads its permits strictly first and sends {self} ∪ permitted as agent_names; a page the backend narrowed comes back with exactly {count, reports}; a row the belt drops is reported as withheld + a warning; a failed permissions read is permissions_unavailable with nothing listed; a permit set past 500 is refused before sending; a user key and a scoped listing send no agent_names. Not sending agent_names, or a silent belt, each turns one red."
     },
     {
       "file": "unit/test_ent753_gate_map_service.py",
@@ -7000,15 +7097,60 @@
       "description": "The untouched seeded default skills source follows the platform's bundled pin on upgrade. Driven through skill_service.follow_bundled_pin with the real platform_audit_service building the audit row: an untouched seed behind the pin moves forward through the shared retarget reset (sha/status/error cleared, followed_from_ref/followed_at set, marker kept) with exactly one system audit row; the owner's AC2 ruling 'where it points decides' - a url/ref/ref_type change through PUT or apply (the MCP door) opts out for good, each door built so only the marker can stop the follow (url and ref_type go away and back); rename/priority never opt out; disable pauses and re-enable resumes; forward only on strict vX.Y.Z (downgrade, equal, branch, -rc1, mixed v/no-v, empty never move; v0.10.0 beats v0.9.0); another configured catalog or an empty env never moves; a lost CAS writes no audit row; a UNIQUE(url, ref) clash is a no-op. Seed: cursor and engine seeds mark the built-in URL, a fork seed does not. AC4 over a file:// upstream with ANNOTATED tags (#2550), both the update path and the lost-checkout clone path: the next sync is not refused as moved_tag and counts as a moved commit, and run_cycle re-injects with the new commit. The in-flight race both plan reviewers found: a sync admitted at the old tag that finishes after the follow must not stamp the old commit (record_sync scoped to the synced url/ref/ref_type). Backfill through the real SQLite migration on a pre-529 table: untouched seeds on every historical pin marked, toggles/renames in the audit do not opt out, audited retargets (PUT changed / apply named) and off-history/branch/fork/custom rows stay off, idempotent, and a fresh install records the migration on the second pass. Boot wiring pinned by AST: the follow is awaited before skills_sync_service.start(). Mutation-proved: dropping the marker clear (4 red), the follow reset (5), the sync scoping (1), the boot hook (1), the seed marker (14), the forward check (1) or the backfill audit filter (4). Review round on PR #4091: each of the seven compare-and-set conditions is pinned by a direct refusal test (mutation-proved one at a time); the per-source Sync route starts the fleet re-inject like Sync all, both routes driven after a real follow (automatic re-inject on, off, and an unmoved commit); and update_source re-decides an edit that lands across the follow (a stale save of the old ref is a retarget, a rename keeps the follow). Reviewer finding on PR #4091: a PUT that names url, ref or ref_type ends following even when the value is unchanged (the documented way to hold the current tag), while the moved-tag baseline survives that save and a declarative apply that only re-states the ref keeps following."
     },
     {
-      "file": "unit/test_3993_no_retry_max_turns.py",
-      "feature": "#3993",
+      "file": "unit/test_4105_pull_trigger_census.py",
+      "feature": "#4105",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "unit",
+        "reliability",
+        "pull-migration"
+      ],
+      "description": "`self_task` and `skill_gate` are in _AUTONOMOUS_TRIGGERS and PULL_REACHABLE_TRIGGERS: a pilot owns both, a self_task queued through POST /task takes no Redis slot, a skill_gate wake gets a queue payload; self_task is a valid executions filter. The [#2048] note fires once for a trigger in no pull set and is reached from capacity_manager.acquire (the POST /task route). Census: every triggered_by a producer in src/backend or src/scheduler writes (AST, both IfExp arms, *_TRIGGER constants resolved, track_activity skipped, non-empty floor) is in a pull set or PULL_UNPULLED_TRIGGERS."
+    },
+    {
+      "file": "unit/test_ent1022_retrieval_memory.py",
+      "feature": "trinity-enterprise#1022",
       "added": "2026-10-29",
       "categories": [
-        "unit",
-        "scheduler",
-        "reliability"
+        "backend",
+        "memory",
+        "unit"
       ],
-      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+      "description": "Retrieval memory (MEM-002): the platform switch and per-agent opt-out, the whose-memory table over the execution row, the ONE capture seam in spawn_task_terminal_event, scope isolation both directions with the owner folded into the agent scope, credential redaction before extraction and storage, the ent#419 screen on facts, reconcile ops with out-of-set ids refused, the partial unique index, the daily budget and the lease, recall ranking/threshold/budget/counters off the event loop, fail-open on an unavailable embedder or store, the envelope's third section and the copy-back drop, human-only route gates, dependency-pin parity, offline/egress pins, and both migration tracks."
+    },
+    {
+      "file": "unit/test_ent1022_memory_provenance.py",
+      "feature": "trinity-enterprise#1022",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
+    },
+    {
+      "file": "unit/test_ent1028_memory_search.py",
+      "feature": "trinity-enterprise#1028",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "Retrieval-memory search: `search_records` ranks past the recall tail with no prompt budget and journals every hit as a `search` row carrying the query; the owner GET door (person-only, scope by email, 422 query_empty / invalid_email / memory_off); the agent POST door (MCP search_memory) resolving the scope off the execution by the whose-memory rule — agent scope on a headless run, the served person's scope on a person turn, 422 memory_no_subject with the reason otherwise — refusing an agent key that names another agent, a missing or foreign execution, and capping k through the model."
+    },
+    {
+      "file": "unit/test_ent1027_model_gateway.py",
+      "feature": "trinity-enterprise#1027",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "memory",
+        "unit"
+      ],
+      "description": "The backend's one model door (`services/model_gateway`): the credential follows the agent — its own subscription token, the platform key for an api-key agent or an agent-less job, nobody when a subscription token cannot be read (never a borrowed key); the model follows the credential (Haiku 4.5 on a subscription, Haiku 5.5 on the key, a model override honoured on the key only); `trinity_model_credential` ∈ auto/subscription/platform_key with the 429-on-subscription fallback in auto only; the request/send/complete surface over a scripted transport; the migrated callers (memory extract/reconcile, the MEM-001 summarizer, thread titles, the compatibility AI checks) executed through the door; the honest `extractor` plan on the platform card and the per-agent row; the owner's extract-preview door (facts + screened + who answered, nothing stored; 422 memory_no_subject / transcript_empty / no_extractor; an agent principal refused)."
     }
   ]
 }
