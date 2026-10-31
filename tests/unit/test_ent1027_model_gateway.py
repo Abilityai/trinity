@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import json
 import re
+import typing
 import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -425,6 +426,75 @@ class TestCallers:
         key["key"] = ""
         out = run(ai_checks.run_ai({"files": {}}, ids))
         assert all(out[cid]["skip_reason"] == "no_api_key" for cid in ids)
+
+
+class TestWiringPins:
+    """The hand-offs the merge-train found unpinned: each of these goes red when
+    the line that carries `agent_name` (or the route's gate) is deleted. The
+    proof is the credential the transport sees — a Bearer setup token is the
+    agent's own; an `x-api-key` would mean the hand-off was lost."""
+
+    def test_the_compatibility_report_hands_the_agent_to_run_ai(self, transport, key, agent, monkeypatch):
+        from services import compatibility as compat
+        seen = {}
+
+        async def spy(snapshot, ids, agent_name=None):
+            seen["agent_name"] = agent_name
+            return {cid: {"status": "skipped", "skip_reason": "spy", "explanation": None, "confidence": None} for cid in ids}
+
+        async def collected(_name):
+            return {"status": "ok", "runtime": None, "snapshot": {"files": {}}}
+        monkeypatch.setattr(compat, "collect", collected)
+        monkeypatch.setattr(compat, "run_static", lambda snapshot, ids: {})
+        monkeypatch.setattr(compat.spec, "applies_to_runtime", lambda c, r: True)
+        monkeypatch.setattr(compat, "run_ai", spy)
+        try:
+            run(compat.build_report(agent.name, include_ai=True))
+        except Exception:  # noqa: BLE001 — persistence after the hand-off is not what is pinned here
+            pass
+        assert seen.get("agent_name") == agent.name
+
+    def test_the_summarizer_runs_on_the_agents_subscription(self, transport, key, agent, monkeypatch):
+        from services import platform_prompt_service as pps
+        subscribed(monkeypatch, agent)
+        monkeypatch.setattr(pps.db, "get_or_create_public_user_memory", lambda a, e: {"agent_notes": "", "conversation_summary": ""})
+        monkeypatch.setattr(pps.db, "get_recent_public_chat_messages",
+                            lambda *a, **k: [SimpleNamespace(role="user", content="I prefer PDF invoices")])
+        monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary", lambda a, e, s: None)
+        transport.script.append(answer("- prefers PDF invoices"))
+        run(pps.summarize_user_memory_background(agent.name, "p@example.com", "s1"))
+        call, = transport.calls
+        assert call["headers"].get("authorization", "").startswith("Bearer ") and "x-api-key" not in call["headers"]
+
+    def test_reconcile_runs_on_the_agents_subscription_too(self, agent, memory_on, transport, key, monkeypatch):
+        """Two runs with a near-duplicate fact: the second extraction has a
+        neighbour, so reconcile is asked — on the subscription, with no key."""
+        key["key"] = ""
+        subscribed(monkeypatch, agent)
+        first = db.create_task_execution(agent.name, "Deploy the docs site", "schedule", fields=TaskExecutionFields())
+        db.update_execution_status(first.id, "success", ExecutionResult(response="Deployed; the CDN purge takes about four minutes."))
+        transport.script.append(answer('["The docs site CDN purge takes about four minutes after a deploy"]'))
+        run(ms.retain_execution(first.id))
+        second = db.create_task_execution(agent.name, "Deploy the docs site again", "schedule", fields=TaskExecutionFields())
+        db.update_execution_status(second.id, "success", ExecutionResult(response="Deployed; the CDN purge now takes about five minutes."))
+        transport.script += [answer('["The docs site CDN purge takes about five minutes after a deploy"]'),
+                             answer('[{"candidate": 0, "op": "UPDATE", "id": "' + db.list_memory_facts(agent.name, "", with_embedding=False)[0]["id"] + '"}]')]
+        run(ms.retain_execution(second.id))
+        reconcile_calls = [c for c in transport.calls if "EXISTING" in c["body"]["messages"][0]["content"]]
+        assert len(reconcile_calls) == 1, [c["body"]["messages"][0]["content"][:60] for c in transport.calls]
+        assert reconcile_calls[0]["headers"].get("authorization", "").startswith("Bearer ")
+
+    def test_the_preview_route_is_registered_behind_the_owner_gate(self):
+        import inspect
+        from dependencies import OwnedAgentByName, require_person
+        from routers import agent_memory
+        routes = [r for r in agent_memory.router.routes
+                  if getattr(r, "path", "").endswith("/retrieval-memory/extract-preview")]
+        assert len(routes) == 1 and routes[0].methods == {"POST"}
+        hints = typing.get_type_hints(agent_memory.extract_preview_endpoint, include_extras=True)
+        assert hints["agent_name"] == OwnedAgentByName
+        params = inspect.signature(agent_memory.extract_preview_endpoint).parameters
+        assert params["current_user"].default.dependency is require_person
 
 
 # --------------------------------------------------------------------------- #
