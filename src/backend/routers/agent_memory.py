@@ -254,8 +254,18 @@ async def search_retrieval_memory_agent_endpoint(
     headless run — read off the row by ``memory_subject``; a run that serves no
     one is refused with the reason. An agent-scoped key may only search its own
     agent (trinity-enterprise#840), checked first so a key outside its reach
-    gets the same refusal."""
+    gets the same refusal. **Agents only** (operator ruling on PR #4114): a
+    human has the owner door above, which takes the scope explicitly and holds
+    the owner line; letting a human in here would let anyone the agent is
+    merely shared with read any person's scope by naming that person's run —
+    the read the GET door refuses them. Same shape as ``aauth_agent_only``."""
     assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only search its own agent's memory")
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. Search memory from the owner door "
+                       "(GET /api/agents/{name}/retrieval-memory/search) instead.",
+        })
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     query = _query_or_422(body.query)
     execution = db.get_execution(body.execution_id)

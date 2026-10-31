@@ -150,8 +150,13 @@ takes a person from the caller: the scope is `memory_subject.resolve` over the
 execution row the agent names — the served person's scope on a person turn, the
 agent scope on a headless run, a 422 `memory_no_subject` with the reason for an
 anonymous or group turn — and an agent-scoped key may only search its own agent,
-checked first (ent#840). The owner door (`GET …/retrieval-memory/search`) is
-person-only and takes the scope by email like the facts list. Both refuse
+checked first (ent#840). **It is agents-only** (operator ruling on PR #4114, 403
+`agent_only` for any human, the owner included): a human has the owner door,
+which takes the scope explicitly and holds the owner line, and letting a human
+in here would let anyone the agent is merely shared with read any person's
+scope by naming that person's run — the read the GET door refuses them. The
+owner door (`GET …/retrieval-memory/search`) is person-only and takes the scope
+by email like the facts list. Both refuse
 honestly when memory is off (422 `memory_off`) or the embedder is missing
 (503 `memory_unavailable`) rather than answering `[]`, which would read as
 "nothing matched".
@@ -186,7 +191,7 @@ Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
 | DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
 | GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget/search (422 otherwise) |
 | GET | `/api/agents/{name}/retrieval-memory/search?q=&k=&user_email=` | OwnedAgentByName + `require_person` | the owner's search over one scope (ent#1028): hits with `line`, `relevance`, `score`, provenance; 422 `query_empty` / `invalid_email` / `memory_off`, 503 `memory_unavailable` |
-| POST | `/api/agents/{name}/retrieval-memory/search` | `assert_own_agent` + `assert_agent_access` (the agent door, MCP `search_memory`) | `{execution_id, query, k≤50}` — the scope read off the execution by the whose-memory rule; 422 `memory_no_subject` with the reason when the run serves no one |
+| POST | `/api/agents/{name}/retrieval-memory/search` | `assert_own_agent` → 403 `agent_only` for a human → `assert_agent_access` (the agent door, MCP `search_memory`; the agent's own key only) | `{execution_id, query, k≤50}` — the scope read off the execution by the whose-memory rule; 422 `memory_no_subject` with the reason when the run serves no one |
 | GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) |
 
 The switch is written through the generic `PUT /api/settings/trinity_memory_enabled`.

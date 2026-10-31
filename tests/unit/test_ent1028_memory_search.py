@@ -84,6 +84,11 @@ def person(agent, *, email=None, mcp_scope=None, agent_name=None):
                 agent_name=agent_name, created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
 
 
+def own(agent):
+    """The agent's own injected key — the only principal the agent door serves."""
+    return person(agent, mcp_scope="agent", agent_name=agent.name)
+
+
 def execution(agent_name, *, triggered_by, source_user_email=None, message="hello"):
     ex = db.create_task_execution(agent_name, message, triggered_by,
                                   fields=TaskExecutionFields(source_user_email=source_user_email))
@@ -204,12 +209,27 @@ class TestAgentSearchRoute:
         from routers.agent_memory import search_retrieval_memory_agent_endpoint
         return run(search_retrieval_memory_agent_endpoint(agent_name=agent.name, body=body, current_user=user))
 
+    def test_the_door_is_agents_only(self, agent, memory_on):
+        """Operator ruling on PR #4114: a human — the owner included — is refused
+        by name and sent to the owner door; otherwise anyone the agent is merely
+        shared with could read any person's scope by naming that person's run."""
+        seed(agent, "Prefers invoices as PDF", scope="ann@example.com")
+        exec_id = execution(agent.name, triggered_by="public", source_user_email="ann@example.com")
+        body = MemorySearchRequest(execution_id=exec_id, query="invoices PDF", k=10)
+        for human in (person(agent), person(agent, email="peer@example.com", mcp_scope="user")):
+            with pytest.raises(HTTPException) as err:
+                self._call(agent, body, human)
+            assert err.value.status_code == 403 and err.value.detail["code"] == "agent_only"
+        assert db.list_memory_fact_events(agent.name, execution_id=exec_id, op="search", limit=10) == []
+        out = self._call(agent, body, person(agent, mcp_scope="agent", agent_name=agent.name))
+        assert [h.text for h in out.hits] == ["Prefers invoices as PDF"]
+
     def test_headless_run_searches_the_agent_scope(self, agent, memory_on):
         """The same words match a fact in both scopes; a headless run sees only the agent's."""
         seed(agent, "Invoices as PDF are archived yearly")
         seed(agent, "Prefers invoices as PDF", scope="ann@example.com")
         exec_id = execution(agent.name, triggered_by="schedule")
-        out = self._call(agent, MemorySearchRequest(execution_id=exec_id, query="invoices PDF", k=10), person(agent))
+        out = self._call(agent, MemorySearchRequest(execution_id=exec_id, query="invoices PDF", k=10), own(agent))
         assert out.scope == "agent"
         assert [h.text for h in out.hits] == ["Invoices as PDF are archived yearly"]
         rows = db.list_memory_fact_events(agent.name, execution_id=exec_id, op="search", limit=10)
@@ -220,7 +240,7 @@ class TestAgentSearchRoute:
         seed(agent, "Invoices as PDF are archived yearly")
         seed(agent, "Prefers invoices as PDF", scope="ann@example.com")
         exec_id = execution(agent.name, triggered_by="public", source_user_email="ann@example.com")
-        out = self._call(agent, MemorySearchRequest(execution_id=exec_id, query="invoices PDF", k=10), person(agent))
+        out = self._call(agent, MemorySearchRequest(execution_id=exec_id, query="invoices PDF", k=10), own(agent))
         assert out.scope == "person"
         assert [h.text for h in out.hits] == ["Prefers invoices as PDF"]
 
@@ -232,24 +252,24 @@ class TestAgentSearchRoute:
                        person(agent, mcp_scope="agent", agent_name="someone-else"))
         assert err.value.status_code == 403
         with pytest.raises(HTTPException) as err:
-            self._call(agent, MemorySearchRequest(execution_id="nope", query="deploy"), person(agent))
+            self._call(agent, MemorySearchRequest(execution_id="nope", query="deploy"), own(agent))
         assert err.value.status_code == 404
         other = execution(f"{agent.name}-other", triggered_by="schedule")
         with pytest.raises(HTTPException) as err:
-            self._call(agent, MemorySearchRequest(execution_id=other, query="deploy"), person(agent))
+            self._call(agent, MemorySearchRequest(execution_id=other, query="deploy"), own(agent))
         assert err.value.status_code == 403
         anonymous = execution(agent.name, triggered_by="public", source_user_email="anonymous (10.0.0.1)")
         with pytest.raises(HTTPException) as err:
-            self._call(agent, MemorySearchRequest(execution_id=anonymous, query="deploy"), person(agent))
+            self._call(agent, MemorySearchRequest(execution_id=anonymous, query="deploy"), own(agent))
         assert err.value.status_code == 422 and err.value.detail["code"] == "memory_no_subject"
         assert err.value.detail["reason"] == "no_verified_email"
         with pytest.raises(HTTPException) as err:
-            self._call(agent, MemorySearchRequest(execution_id=anonymous, query="   "), person(agent))
+            self._call(agent, MemorySearchRequest(execution_id=anonymous, query="   "), own(agent))
         assert err.value.status_code == 422 and err.value.detail["code"] == "query_empty"
         db.set_setting(ms.SETTING_ENABLED, "false")
         headless = execution(agent.name, triggered_by="schedule")
         with pytest.raises(HTTPException) as err:
-            self._call(agent, MemorySearchRequest(execution_id=headless, query="deploy"), person(agent))
+            self._call(agent, MemorySearchRequest(execution_id=headless, query="deploy"), own(agent))
         assert err.value.status_code == 422 and err.value.detail["code"] == "memory_off"
 
     def test_k_is_capped_by_the_model(self):
