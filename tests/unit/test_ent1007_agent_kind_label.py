@@ -165,22 +165,60 @@ def test_rebuild_from_nothing_carries_no_kind_label(monkeypatch):
     assert docker_service.get_agent_status_from_container(rebuilt).kind is None
 
 
-def test_ordinary_recreate_copies_the_old_labels_wholesale():
-    """The ordinary recreate starts from the old container's label dict and
-    only overwrites named keys — `trinity.kind` is not one of them."""
-    import ast
-    import inspect
-    import services.agent_service.lifecycle as mod
-    src = inspect.getsource(mod.recreate_container_with_updated_config)
-    tree = ast.parse(src)
-    assigns = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)]
-    copied = [a for a in assigns
-              if any(isinstance(t, ast.Name) and t.id == "labels" for t in a.targets)
-              and "Labels" in ast.unparse(a.value)]
-    assert copied, "recreate must seed `labels` from the old container's Labels"
-    overwritten = {ast.unparse(t.slice) for a in assigns for t in a.targets
-                   if isinstance(t, ast.Subscript) and ast.unparse(t.value) == "labels"}
-    assert "'trinity.kind'" not in overwritten
+def _recreate_labels(monkeypatch, old_labels: dict) -> dict:
+    """Drive the real `recreate_container_with_updated_config` (the #3813
+    harness shape) and return the labels handed to the run tail."""
+    from services.agent_service import lifecycle
+
+    captured: dict = {}
+
+    async def _fake_provision(name, **kw):
+        captured.update(kw)
+        return SimpleNamespace(name=f"agent-{name}")
+
+    async def _noop(*a, **kw):
+        return None
+
+    async def _img(_i):
+        return SimpleNamespace(labels={})
+
+    old = SimpleNamespace(
+        attrs={
+            "Config": {"Env": ["AGENT_NAME=lead"], "Image": "trinity-agent-base:latest",
+                       "Labels": {"trinity.ssh-port": "2222", **old_labels}},
+            "HostConfig": {"RestartPolicy": {}},
+            "Mounts": [],
+        },
+        status="running",
+    )
+    monkeypatch.setattr(lifecycle, "_provision_folders_and_run_agent_container", _fake_provision)
+    monkeypatch.setattr(lifecycle, "validate_base_image", lambda image: None)
+    monkeypatch.setattr(lifecycle, "get_agent_full_capabilities", lambda: False)
+    monkeypatch.setattr(lifecycle, "get_agent_default_resources", lambda: {"cpu": "2", "memory": "4g"})
+    monkeypatch.setattr(lifecycle, "container_stop", _noop)
+    monkeypatch.setattr(lifecycle, "container_remove", _noop)
+    monkeypatch.setattr(lifecycle, "image_get", _img)
+    for name, val in (
+        ("get_agent_subscription_id", None), ("get_resource_limits", None),
+        ("get_guardrails_config", None), ("get_agent_github_pat", None),
+        ("get_git_config", None), ("get_public_mount_path", "/home/developer/public"),
+    ):
+        monkeypatch.setattr(lifecycle.db, name, (lambda v: (lambda *a, **k: v))(val))
+
+    asyncio.run(lifecycle.recreate_container_with_updated_config("lead", old, "owner"))
+    return captured["labels"]
+
+
+@pytest.mark.parametrize("kind", ["agent", "deployment"])
+def test_ordinary_recreate_keeps_the_kind_label(monkeypatch, kind):
+    labels = _recreate_labels(monkeypatch, {"trinity.kind": kind})
+    assert labels["trinity.kind"] == kind
+
+
+def test_ordinary_recreate_does_not_invent_a_kind_for_an_unlabelled_agent(monkeypatch):
+    """An agent created before the label stays unobserved through a recreate:
+    only a delete and create gives it a kind."""
+    assert "trinity.kind" not in _recreate_labels(monkeypatch, {})
 
 
 # ---------------------------------------------------------------------------
