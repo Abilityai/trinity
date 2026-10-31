@@ -52,7 +52,11 @@ AGENT_SCOPE_TRIGGERS = frozenset({
 # the platform judging the agent, not the agent serving anyone.
 NEVER_TRIGGERS = frozenset({"voice", "voip", "paid", "room", "session", "skill_gate", "validation"})
 
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# No dot inside the runs either side of a domain separator: that overlap made the
+# match quadratic on a long dotted domain (CodeQL py/polynomial-redos). The shape and
+# the cap are the portal's (`client_portal.service.normalize_client_email`).
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+(?:\.[^@\s.]+)+$")
+_EMAIL_MAX_LEN = 320
 
 # Reason codes (stable strings the endpoint and the logs key on).
 REASON_SEAT = "seat"
@@ -77,7 +81,7 @@ class MemorySubject:
 
 
 def looks_like_email(value: Optional[str]) -> bool:
-    return bool(value) and bool(_EMAIL_RE.match(value))
+    return bool(value) and len(value) <= _EMAIL_MAX_LEN and bool(_EMAIL_RE.match(value))
 
 
 def resolve(execution: Any) -> MemorySubject:
