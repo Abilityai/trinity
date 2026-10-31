@@ -137,6 +137,42 @@ Call sites (each awaits `recall` first, then passes `retrieved=`):
 - `services/task_execution_service.py` — headless runs: `memory_service.task_memory_block`
   prepends the agent block to the caller prompt when the row's subject is the agent scope.
 
+### Search on demand (trinity-enterprise#1028)
+The injected block is the top of the store for the incoming message; the same
+ranking is also a door the agent and the owner can open by hand.
+`memory_service.search_records(agent_name, user_email, query, k, execution_id)`
+is `recall_records` without the prompt-block budget and past the recall tail
+(`k ≤ SEARCH_K_MAX = 50`), each record also carrying `line` — the rendered
+`(date, kind of run) text` — and every search journaled as `search` rows whose
+`candidate_text` is the query (one per hit, or one with no `fact_id` when nothing
+matched — a fishing search is the one the owner most wants to see; an owner-door
+row also carries the `actor`), so the owner can see what was looked up.
+The agent door (`POST …/retrieval-memory/search`, MCP `search_memory`) never
+takes a person from the caller: the scope is `memory_subject.resolve` over the
+execution row the agent names — the served person's scope on a person turn, the
+agent scope on a headless run, a 422 `memory_no_subject` with the reason for an
+anonymous or group turn — and an agent-scoped key may only search its own agent,
+checked first (ent#840). **The named run must be the turn the agent is in.**
+Nothing proves which turn a request comes from (ent#926: the header is a claim,
+the ledger is the fact), so the row must be `running` — a finished run of another
+person read that person's scope while `GET /executions/{id}` refused it (the
+merge-train finding on PR #4114) — and no other live turn on the agent may
+resolve to a different scope; while two do, 422 `memory_turn_ambiguous`, as the
+execution reads fail closed. A finished run is 422 `memory_turn_not_live`. The
+two read sites are declared in `test_ent875_exec_control_routes.READ_SITES`
+with that rule as their reason. The answer's `scope` is the scope that answered
+(`agent` for the owner's own turn, which `scope_for` folds in). The 503 for a
+missing embedder names the condition, never the loader's text (Bar 10). **It is agents-only** (operator ruling on PR #4114, 403
+`agent_only` for any human, the owner included): a human has the owner door,
+which takes the scope explicitly and holds the owner line, and letting a human
+in here would let anyone the agent is merely shared with read any person's
+scope by naming that person's run — the read the GET door refuses them. The
+owner door (`GET …/retrieval-memory/search`) is person-only and takes the scope
+by email like the facts list. Both refuse
+honestly when memory is off (422 `memory_off`) or the embedder is missing
+(503 `memory_unavailable`) rather than answering `[]`, which would read as
+"nothing matched".
+
 ## Embeddings — `services/memory_embeddings.py`
 `fastembed` (ONNX Runtime, no torch) with
 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384-d, Apache-2.0,
@@ -158,19 +194,27 @@ lazily — with ONNX intra-op threads = 1. Unavailable ⇒ `embed` returns None,
 Forget is a soft delete with `deleted_by`. Both tables cascade with the agent
 (`db/agent_cleanup.py` `AGENT_REFS`).
 
-## API — `routers/agent_memory.py` (`# mcp: none`)
+## API — `routers/agent_memory.py` (`# mcp: memory.ts (search_memory)`)
 | Method | Path | Gate | What |
 |---|---|---|---|
 | GET | `/api/agents/{name}/retrieval-memory` | AuthorizedAgentByName + `assert_own_agent` | status (a use) |
 | PUT | `/api/agents/{name}/retrieval-memory` | OwnedAgentByName + `require_person` | `{opt_out}` — audit-logged |
 | GET | `/api/agents/{name}/retrieval-memory/facts?user_email=&limit=&offset=` | OwnedAgentByName + `require_person` | the owner view (ent#962 readers rule) |
 | DELETE | `/api/agents/{name}/retrieval-memory/facts/{id}` | OwnedAgentByName + `require_person` | forget — audit-logged, journaled with who |
-| GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget (422 otherwise) |
+| GET | `/api/agents/{name}/retrieval-memory/events?fact_id=&execution_id=&op=&limit=&offset=` | OwnedAgentByName + `require_person` | the journal: one fact's lineage, or everything one run did; `op` ∈ add/update/delete/none/screened/prune/recall/forget/search (422 otherwise) |
+| GET | `/api/agents/{name}/retrieval-memory/search?q=&k=&user_email=` | OwnedAgentByName + `require_person` | the owner's search over one scope (ent#1028): hits with `line`, `relevance`, `score`, provenance; 422 `query_empty` / `invalid_email` / `memory_off`, 503 `memory_unavailable` |
+| POST | `/api/agents/{name}/retrieval-memory/search` | `assert_own_agent` → 403 `agent_only` for a human → `assert_agent_access` (the agent door, MCP `search_memory`; the agent's own key only) | `{execution_id, query, k≤50}` — the scope read off the execution by the whose-memory rule; 422 `memory_no_subject` with the reason when the run serves no one |
 | GET | `/api/settings/memory` | admin | platform status (`routers/settings/flags.py`) |
 
 The switch is written through the generic `PUT /api/settings/trinity_memory_enabled`.
 
 ## Frontend
+`agent-settings/RetrievalMemorySearch.vue` (ent#1028) sits under the per-agent
+toggle in Guardrails → Memory: a search box over the agent scope, hits with the
+`(date, source)` line and relevance as a percent, one reserved footprint across
+idle / skeleton / hits / empty / failed, a bounded list with its count, earlier
+hits kept on a failed re-search.
+
 - `components/settings/RetrievalMemoryPanel.vue` (Settings → General): the switch
   and an honest status line ("Currently off…", "On, but unavailable — <reason>",
   "On. N facts stored · last captured …").
@@ -226,6 +270,17 @@ off filenames, "sent" for "drafted", the wrong party's intent), which the gold
 set does not exercise. Open: a real-row training split for that class, the
 10-fact cap, and facts over the 200-character ask (stored intact, the clamp is
 500; the judge counts them as format misses).
+
+**Search (trinity-enterprise#1028).** `tests/unit/test_ent1028_memory_search.py`
+drives `search_records` (past the recall tail, journaled with the query,
+scope-bound, empty when off), the owner door (named 422s) and the agent door
+(agent scope on a headless run, the person's scope on a person turn, the
+refusals in order, `k` capped by the model) over the real SQLite with the
+hash embedder; the route census carries the agent door in `AGENT_CALLABLE_SELF`.
+`src/mcp-server/src/tools/memory.test.ts` proves the `search_memory` tool
+passes `execution_id`/`query`/`k` through and hands the agent a refusal's code
+and message; `src/frontend/tests/unit/retrievalMemorySearch.spec.js` mounts the
+owner search box (idle / skeleton / hits / empty / failed, stale hits kept).
 
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for

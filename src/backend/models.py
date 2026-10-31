@@ -2209,6 +2209,38 @@ class MemoryFactOut(BaseModel):
     updated_at: str
 
 
+class MemorySearchRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/search — the agent door
+    (trinity-enterprise#1028). The scope is resolved from the execution row by
+    the whose-memory rule; the caller never names a person."""
+    execution_id: str = Field(..., min_length=1, max_length=200)
+    query: str = Field(..., min_length=1, max_length=500)
+    k: int = Field(default=10, ge=1, le=50)
+
+
+class MemorySearchHit(BaseModel):
+    """One ranked fact from a search (trinity-enterprise#1028): the text, the
+    rendered ``(date, kind of run) text`` line the prompt would carry,
+    provenance, and both numbers — ``relevance`` (the cosine the gate saw) and
+    ``score`` (relevance × recency, what the order used)."""
+    id: str
+    text: str
+    line: str
+    source: str
+    execution_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    relevance: float
+    score: float
+
+
+class MemorySearchResponse(BaseModel):
+    """What the agent door returns: which scope answered and the hits."""
+    agent_name: str
+    scope: str            # "agent" | "person"
+    hits: list[MemorySearchHit]
+
+
 class MemoryFactEventOut(BaseModel):
     """One row of the retrieval-memory journal (trinity-enterprise#1022).
 

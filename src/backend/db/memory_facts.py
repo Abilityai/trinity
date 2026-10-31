@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 AGENT_SCOPE = ""   # the `user_email` value of the agent scope
 
 # The journal's ops. Kept as a tuple so the owner route can validate a filter.
-EVENT_OPS = ("add", "update", "delete", "none", "screened", "prune", "recall", "forget")
+EVENT_OPS = ("add", "update", "delete", "none", "screened", "prune", "recall", "search", "forget")
 
 
 def _live(agent_name: str, user_email: str):
