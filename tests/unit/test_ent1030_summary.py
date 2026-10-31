@@ -51,6 +51,18 @@ GROUPS = ("skills", "grants", "gates", "roles", "members")
 LIBRARY = {"research", "deploy"}
 
 
+def _patch_skill_service(monkeypatch, attr, value):
+    """Patch `attr` on every live `skill_service` object, not only the one this
+    file bound at import. `system_apply.skills` binds the singleton at import,
+    but `skill_gate_map_service._recommended` imports it at call time from
+    `sys.modules` - and a test file that loads `services.skill_service` a second
+    time (`test_skill_service_user_agent`) leaves the two pointing at different
+    objects, so a patch on one alone depends on which files share the process."""
+    live = importlib.import_module("services.skill_service").skill_service
+    for obj in {id(o): o for o in (skill_service, live)}.values():
+        monkeypatch.setattr(obj, attr, value)
+
+
 @pytest.fixture
 def world(db_backend, monkeypatch, tmp_path):
     w = W.make_world(monkeypatch, tmp_path)
@@ -70,8 +82,8 @@ def world(db_backend, monkeypatch, tmp_path):
     DS = importlib.import_module("services.docker_service")
     monkeypatch.setattr(docker_utils, "agent_container_state_async", state)
     monkeypatch.setattr(DS, "execute_command_in_container", exec_)
-    monkeypatch.setattr(skill_service, "get_skill", lambda n: {"name": n} if n in LIBRARY else None)
-    monkeypatch.setattr(skill_service, "list_skills", lambda: [])
+    _patch_skill_service(monkeypatch, "get_skill", lambda n: {"name": n} if n in LIBRARY else None)
+    _patch_skill_service(monkeypatch, "list_skills", lambda: [])
 
     async def deliver(agent, names):
         return {"status": "pending_start", "skills": {n: {"status": "pending_start"} for n in names}}
@@ -79,7 +91,7 @@ def world(db_backend, monkeypatch, tmp_path):
     async def gates(agent, actor, request=None, **_k):
         return None
 
-    monkeypatch.setattr(skill_service, "deliver_assigned", deliver)
+    _patch_skill_service(monkeypatch, "deliver_assigned", deliver)
     monkeypatch.setattr(skill_assignment_service, "sync_gates", gates)
     W.install_executor_seams(w, monkeypatch)
     assignment_provider.clear_provider()

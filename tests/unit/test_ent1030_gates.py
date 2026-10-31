@@ -57,6 +57,18 @@ NOMAIL = "nomail1030"
 LIBRARY = {"research", "deploy"}
 
 
+def _patch_skill_service(monkeypatch, attr, value):
+    """Patch `attr` on every live `skill_service` object, not only the one this
+    file bound at import. `system_apply.skills` binds the singleton at import,
+    but `skill_gate_map_service._recommended` imports it at call time from
+    `sys.modules` - and a test file that loads `services.skill_service` a second
+    time (`test_skill_service_user_agent`) leaves the two pointing at different
+    objects, so a patch on one alone depends on which files share the process."""
+    live = importlib.import_module("services.skill_service").skill_service
+    for obj in {id(o): o for o in (skill_service, live)}.values():
+        monkeypatch.setattr(obj, attr, value)
+
+
 class _Provider:
     """An assignments provider: one canon role on every roster, `approver`
     answered by `emails` (ent#881's shape)."""
@@ -131,11 +143,11 @@ def world(db_backend, monkeypatch, tmp_path):
     monkeypatch.setattr(db, "drop_unassigned_skill_gates", never_clear_row)
 
     # Skills (CP1), for the gates-before-skills order.
-    monkeypatch.setattr(skill_service, "get_skill",
-                        lambda n: {"name": n} if n in LIBRARY else None)
+    _patch_skill_service(monkeypatch, "get_skill",
+                         lambda n: {"name": n} if n in LIBRARY else None)
     # The library recommends gating `deploy`: a clear on it leaves a tombstone.
-    monkeypatch.setattr(skill_service, "list_skills",
-                        lambda: [{"name": "deploy", "approval": "recommended"}])
+    _patch_skill_service(monkeypatch, "list_skills",
+                         lambda: [{"name": "deploy", "approval": "recommended"}])
 
     async def deliver(agent, names):
         w.calls.append(("deliver", agent, tuple(names)))
@@ -145,7 +157,7 @@ def world(db_backend, monkeypatch, tmp_path):
         w.calls.append(("reconcile", agent))
         return None
 
-    monkeypatch.setattr(skill_service, "deliver_assigned", deliver)
+    _patch_skill_service(monkeypatch, "deliver_assigned", deliver)
     monkeypatch.setattr(skill_assignment_service, "sync_gates", gates)
 
     W.install_executor_seams(w, monkeypatch)
