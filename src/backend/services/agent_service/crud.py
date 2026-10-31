@@ -2526,7 +2526,10 @@ async def _create_agent_container(
         'trinity.template': config.template or '',
         'trinity.agent-runtime': config.runtime or 'claude-code',
         'trinity.full-capabilities': str(full_capabilities).lower(),
-        'trinity.base-image-version': get_platform_version()
+        'trinity.base-image-version': get_platform_version(),
+        # trinity-enterprise#1007: the effective create-time kind (#705), read
+        # back on AgentStatus.kind and /info. Nothing else persists it.
+        'trinity.kind': config.kind or 'agent',
     }
     if config.import_intent:
         # trinity-enterprise#15: ops-visible import provenance (a copy agent

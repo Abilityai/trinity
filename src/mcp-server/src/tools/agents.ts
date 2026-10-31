@@ -148,7 +148,8 @@ export function createAgentTools(
       name: "get_agent",
       description:
         "Get detailed information about a specific agent by name. " +
-        "Returns the agent's status, port assignments, resource limits, and container ID.",
+        "Returns the agent's status, port assignments, resource limits, and container ID, " +
+        "and its create-time kind ('agent' | 'deployment'; null when unknown — e.g. created before kind was recorded).",
       parameters: z.object({
         name: z.string().describe("The name of the agent to retrieve"),
       }),
@@ -169,7 +170,8 @@ export function createAgentTools(
         "Get full template metadata and capabilities for an agent. " +
         "Returns detailed information from the agent's template.yaml including: " +
         "display name, description, version, author, capabilities, available commands, " +
-        "MCP servers, tools, skills, and example use cases. " +
+        "MCP servers, tools, skills, and example use cases, plus the create-time kind " +
+        "('agent' | 'deployment', null when unknown). " +
         "Useful for understanding what an agent can do before interacting with it. " +
         "Access control: agents can only get info about agents they have permission to call.",
       parameters: z.object({

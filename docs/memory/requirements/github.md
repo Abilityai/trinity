@@ -855,6 +855,14 @@
   `POST /api/agents` and MCP `create_agent`. An **explicit `source_mode`
   always wins for the mode**. Every auto-pushing agent, including an explicit working branch and
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **`kind` is readable back (trinity-enterprise#1007):** create stamps the effective
+  kind (`kind or "agent"`) on the container label `trinity.kind` — no column, no
+  migration — and it is returned as `kind` on `GET /api/agents/{name}`, the agent
+  list and `GET /api/agents/{name}/info` (MCP `get_agent` / `get_agent_info` pass it
+  through). A missing or unrecognised label reads as `null` — **unknown**, never a
+  default: agents created before the label, a container rebuilt by
+  `recreate_missing_container` (no source survives it; an ordinary recreate copies
+  the old labels), a container-less recovered agent and the system agent.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
   them **only when the repo is its creator's own and the token can push to

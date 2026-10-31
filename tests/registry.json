@@ -25,6 +25,18 @@
       "description": "trinity-enterprise#1007 item 6: the body MCP create_agent sends for a fork (import_intent fork + fork_to_own {destination_repo}) survives models.AgentConfig with github_pat None and private defaulting True; private:false is carried; the agents.manage create gate still refuses a non-holder agent key before anything is created."
     },
     {
+      "file": "unit/test_ent1007_agent_kind_label.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "agent-create",
+        "docker-labels",
+        "mcp"
+      ],
+      "description": "trinity-enterprise#1007 item 7: create stamps the effective kind on the trinity.kind label; AgentStatus.kind reads it on the full and fast paths; absent, empty or unrecognised reads None (unknown), never a default; a rebuild from nothing carries no label; the ordinary recreate seeds labels from the old container (AST pin); every /info shape carries the label kind, overriding any agent-server value."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",

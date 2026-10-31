@@ -31,6 +31,9 @@ export interface Agent {
   };
   container_id?: string;
   mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
+  // trinity-enterprise#1007: create-time kind from the `trinity.kind` label;
+  // null = unknown (never defaulted).
+  kind?: "agent" | "deployment" | null;
   // trinity-enterprise#15: present on the create response for a copy-import
   import_snapshot?: {
     source_repo: string;
