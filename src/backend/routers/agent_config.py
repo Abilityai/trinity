@@ -1,4 +1,4 @@
-# mcp: none — owner configuration surface (autonomy / timeout / resources / capabilities) — a grant, not a use; deliberately unexposed (Invariant #8)
+# mcp: permissions.ts (get_agent_capability_grants → GET /capability-grants, read-only, ent#991); everything else — the owner configuration surface (autonomy / timeout / resources / capabilities) and the capability-grant PUT — is a grant, not a use; deliberately unexposed (Invariant #8)
 """Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
 import logging
 
