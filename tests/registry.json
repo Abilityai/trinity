@@ -2678,6 +2678,18 @@
       "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
     },
     {
+      "file": "integration/test_4121_user_memory_write_door.py",
+      "feature": "#4121",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "memory",
+        "security",
+        "integration"
+      ],
+      "description": "The write_user_memory door over the network on a sibling stack with a real agent key seeded inside the backend under test (no agent container needed): live turn writes, finished run refused, two live people refuse each other, a human session and a user-scoped key refused agent_only."
+    },
+    {
       "file": "integration/test_1557_autonomy_inbound.py",
       "feature": "#1557",
       "added": "2026-07-10",
@@ -7627,6 +7639,18 @@
         "unit"
       ],
       "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
+    },
+    {
+      "file": "unit/test_4121_user_memory_write_door.py",
+      "feature": "#4121",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "memory",
+        "security",
+        "unit"
+      ],
+      "description": "The write_user_memory door serves the turn the agent is in, through the real route, real get_current_user, a real agent key and real rows: a finished run of another person is refused memory_turn_not_live and their notes stand; another live turn resolving to a different scope is refused memory_turn_ambiguous, fail-closed on an unreadable ledger; any human is refused agent_only; both refusals are logged without the text."
     },
     {
       "file": "unit/test_ent1028_memory_search.py",

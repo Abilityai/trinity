@@ -286,7 +286,9 @@ def _access_sites(monkeypatch):
          lambda u: public_memory.write_user_memory(
              agent_name=_AGENT,
              body=WriteUserMemoryRequest(execution_id="e1", memory_text="m"),
-             current_user=u),
+             # #4121: the agent's own door, so the gate is reached by this
+             # person's agent key; a bare human stops at `agent_only` before it.
+             current_user=_user(u.username, uid=u.id, agent_name=_AGENT, mcp_scope="agent")),
          "Not authorized"),
         ("subscriptions.get_agent_auth_status",
          lambda u: subscriptions.get_agent_auth_status(agent_name=_AGENT, current_user=u),
