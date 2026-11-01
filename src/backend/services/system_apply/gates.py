@@ -162,7 +162,7 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
             raise _Refused(f"{e.code}: {e.message}") from e
         return True
 
-    if not await attempt(name, short, STEP, write):
+    if not await attempt(name, short, STEP, write, key=skill):
         return
     out.gates_unlanded.discard((name, skill))
     # ent#881: the write surface's warning is a report here — a gate whose

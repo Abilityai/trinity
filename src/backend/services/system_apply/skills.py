@@ -205,17 +205,17 @@ async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[s
     name, short = op.member, op.short_name
     result: Dict = {}
 
-    async def hold(step: str, skills: List[str]) -> None:
+    async def hold(step: str, skills: List[str], key) -> None:
         def refuse():
             raise RuntimeError(apply_gates.not_written_reason(skills))
-        await attempt(name, short, step, refuse)
+        await attempt(name, short, step, refuse, key=key)
 
     if op.kind == "skill_assign":
         # ent#753: a skill whose declared gate did not land is not delivered.
         held = apply_gates.unlanded_in(name, op.args["skills"], out.gates_unlanded)
         names = [n for n in op.args["skills"] if n not in held]
         if held:
-            await hold(SKILLS_STEP, held)
+            await hold(SKILLS_STEP, held, held)
         if not names:
             return
 
@@ -223,20 +223,20 @@ async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[s
             result.update(await skill_assignment_service.assign_and_deliver(
                 name, names, actor, acting_agent=acting_agent))
             return True
-        if await attempt(name, short, SKILLS_STEP, write):
+        if await attempt(name, short, SKILLS_STEP, write, key=names):
             out.extra_changes.setdefault(name, []).append(delivery_change(
                 apply_change, SKILLS_STEP, names, result.get("delivery")))
     elif op.kind == "skill_set_assign":
         held = set_held_for_gates(name, op.args["set"], out.gates_unlanded)
         if held:
-            await hold(SKILL_SETS_STEP, held)
+            await hold(SKILL_SETS_STEP, held, op.args["set"])
             return
 
         async def write():
             result.update(await skill_assignment_service.assign_set_and_deliver(
                 name, op.args["set"], actor, acting_agent=acting_agent))
             return True
-        if await attempt(name, short, SKILL_SETS_STEP, write):
+        if await attempt(name, short, SKILL_SETS_STEP, write, key=op.args["set"]):
             # #4130: a set whose skills were all held already still says so.
             added = list(result.get("added") or [])
             out.extra_changes.setdefault(name, []).append(delivery_change(
