@@ -9,7 +9,7 @@ cannot import under its registered interpreter and flags exits 1, which
 Claude Code treats as "let the tool run": this is where that is caught.
 
 Run by the Dockerfile as root, before /logs is created for the agent user.
-It removes the log file and the read-only config it writes.
+It removes the log file, the read-only config and the skill-gate marker it writes.
 """
 import json
 import os

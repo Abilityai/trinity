@@ -452,7 +452,8 @@ These are covered by unit tests:
 | `tests/unit/test_ent752_name_resolution.py` | generous name resolution ⊇ #751's `_FINGERPRINT_SCRIPT`; the `skills:` forms; subagent lookup |
 | `tests/unit/test_ent752_check_endpoint.py` | the route over the real DB: who may ask, every verdict, uniform answers, 503 / 422, the throttled audit, the marker heal, and the hook's own request replayed against it |
 | `tests/unit/test_ent752_self_approval_clearance.py` | the record at `/task`, `/chat` and the backstop on the id the agent receives; the record's lattice; the completion-report filter; the AST guard (`audit_self_approved` only in `record_self_approval`) |
-| `tests/unit/test_ent752_marker_sync.py` | the marker's argv executed; failure handling; the spawn; both lifecycle tails driven |
+| `tests/unit/test_ent752_marker_sync.py` | the marker's argv executed; failure handling; the spawn; both lifecycle tails driven; a start removes a marker left on an agent with no gates, and changes nothing on an unreadable map |
+| `tests/unit/test_ent1002_nested_cli_guardrail.py` | the Bash guardrail's gated rows: the real hook under its registered flags with the marker on and off, refuse and pass tables run on the pinned CLIs, known-limit tables, adversarial commands to 512 KB, the image smoke's marker case |
 | `tests/unit/test_ent752_isolated_chat_session.py` | the isolated `/chat` turn through the router, the payload, the agent server and the real `execute_claude_code` (#2958 fake CLI) |
 | `tests/unit/test_ent752_managed_registration.py`, `test_ent752_cli_pin.py` | the drop-in's exact shape, the matcher through a port of the CLI's own branch, the image wiring, the CLI pin |
 | `tests/unit/test_ent752_health_skill_gate.py` | `/health` `skill_gate_hook` |

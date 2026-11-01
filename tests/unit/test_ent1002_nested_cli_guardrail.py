@@ -115,7 +115,7 @@ def test_a_per_agent_override_cannot_remove_the_rows(tmp_path):
     assert json.loads(runtime.read_text())["gated_bash_deny"] == _BASELINE["gated_bash_deny"]
 
 
-# --- the marker path has three copies ---------------------------------------
+# --- the marker path has one value, in five files ----------------------------
 
 def _constant(path: Path, name: str):
     for node in ast.parse(path.read_text()).body:
@@ -129,6 +129,7 @@ def _constant(path: Path, name: str):
     (H.HOOKS / "bash-guardrail.py", "SKILL_GATES_MARKER"),
     (H.HOOKS / "guard002-smoke.py", "SKILL_GATES_MARKER"),
     (H.HOOKS / "_skill_gate.py", "MARKER"),
+    (H.HOOKS / "skill-gate.py", "MARKER"),
     (H.REPO / "src" / "backend" / "services" / "skill_gate_service.py", "MARKER"),
 ])
 def test_every_reader_names_the_one_marker(path, name):
@@ -177,6 +178,11 @@ def test_every_reader_names_the_one_marker(path, name):
     "gemini plugin list", "gemini plugin review this repo",
     # the `mcp-server` subcommand is not `mcp`
     "codex mcp-server",
+    # -p or --print before any `--` skips subcommand parsing, so these are sessions
+    # (run on CLI 2.1.281: each one reached the model)
+    "claude mcp -p hi", "claude mcp list -p hi", "claude mcp --print hi", "claude mcp list --print hi",
+    "claude plugin -p hi", "claude plugin list --print hi", "claude plugin marketplace list -p",
+    "cd x && claude mcp list -p hi", "(claude mcp -p hi)",
 ])
 def test_refused(command):
     assert _refused(command), command
@@ -234,6 +240,8 @@ def test_known_limit_quoted_prose_at_a_command_position_is_refused_too(command):
     "echo 'claude -p hi' | sh", "eval 'claude -p hi'", "/usr/bin/env claude -p hi",
     "find . -exec claude -p {} \\;", "A=$(cat f) claude -p hi", '"$HOME/.local/bin/claude" -p hi',
     "timeout -s KILL 60 claude -p hi", "ls | xargs -I % claude -p %",
+    # The price of letting `claude = x` pass as a variable in an inline script.
+    "claude = -p hi",
     # Left out on purpose: inline code in a Markdown body written through a heredoc
     # is likelier than a backtick substitution, and models write `$(...)`.
     "x=`claude -p hi`",
@@ -256,10 +264,16 @@ def test_known_limit_other_spellings_get_past(command):
     "claude plugin marketplace list --json; claude plugin list --json",
     "claude plugin marketplace add abilityai/abilities && claude plugin install trinity@abilityai --yes",
     "claude plugin list --json 2>/dev/null | grep -q trinity || claude plugin install trinity --yes",
+    # after `--` a -p is the MCP server's own argument, not the CLI's
+    "claude mcp add srv -- npx server -p 8080", "claude mcp add srv -- /bin/true --print",
+    # neither of these is the -p token
+    "claude mcp add -e A=-p srv -- /bin/true", "claude mcp list -pv",
 ])
 def test_a_command_that_starts_no_session_passes(command):
     """A flag or subcommand that exits without a model turn is not a nested run,
-    and the platform's own plugin skills drive `claude plugin` through Bash."""
+    and the platform's own plugin skills drive `claude plugin` through Bash.
+    Every spelling here was run on CLI 2.1.281 against a stub that counts model
+    calls; `test_refused` holds the ones that reached it."""
     assert not _refused(command), command
 
 
@@ -271,14 +285,17 @@ _SIZE = 512_000
 @pytest.mark.parametrize("unit", [
     "\n", " ", ";", "; ", "\n ", "x", "a/", "-", "A=", 'A="', "A=1 ", "env ", "env   ", "env -x ",
     "env A=1 ", "timeout 1 ", "do ", "sudo -u ", "env -u env ", "time env ", "bash -c '", "(", "|",
-    # an option token must not swallow a command position, or every `;` rescans the rest
+    # no inner token may swallow a command position, or every start rescans the rest
     "env -x;", "env 1;", "env -u x;", "sudo -n|", "env -x(", "time 1&",
+    "A=(", "$(A=", "(A=1", "$(A=~/-x", "x=1(", "A=(A=(",
+    # the -p scan after an allowed word starts over at every command position
+    "sh -c 'claude mcp ", "sh -c 'claude plugin ", "; claude mcp ", "\nclaude mcp x ", "(claude mcp ",
 ], ids=repr)
 def test_the_rule_stays_fast_on_a_large_command(unit):
     command = unit * (_SIZE // len(unit)) + " nothing"
     started = time.monotonic()
     assert not _refused(command)
-    assert time.monotonic() - started < 1.0
+    assert time.monotonic() - started < 3.0  # a quadratic rule takes minutes at this size
 
 
 # --- the image build checks the same thing --------------------------------

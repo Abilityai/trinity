@@ -41,7 +41,7 @@ tool call. So on an agent with gates, `gated_bash_deny` refuses `claude`, `codex
 and `gemini` from the Bash tool (`bash-guardrail.py`, trinity-enterprise#1002).
 That stops the ordinary spelling. A script file, an interpreter or a wrapper it
 does not list can still start the CLI; whether that CLI signs in depends on how
-the agent authenticates (the last item of CLI_FACTS_TO_REAUDIT).
+the agent authenticates (CLI_FACTS_TO_REAUDIT).
 
 Stdlib only; runs under `-I -S`.
 """
@@ -87,6 +87,8 @@ CLI_FACTS_TO_REAUDIT = (
     "A Bash tool child does not inherit CLAUDE_CODE_OAUTH_TOKEN, so a nested claude on an agent "
     "with only that token answers Not logged in; ANTHROPIC_API_KEY reaches the child, and "
     "~/.claude/.credentials.json is read from disk, so either one signs a nested claude in.",
+    "A -p or --print before any `--` skips subcommand parsing, so `claude mcp -p x` is a model "
+    "session; --version and --help still exit first. gated_bash_deny relies on this.",
 )
 
 MARKER = "/opt/trinity/skill-gates-active"
