@@ -3418,6 +3418,9 @@ class ApplyPlan:
     warnings: List[str] = field(default_factory=list)
     default_resources: Optional[Dict[str, str]] = None
     adopted: List["SystemApplyAdoption"] = field(default_factory=list)
+    # #4130: the plan's adoption line, so a refused or real run can drop or
+    # restate it by identity.
+    adoption_warning: Optional[str] = None
     # trinity-enterprise#1030: `SystemApplyResponse.summary`, per config group.
     summary: Dict[str, Dict] = field(default_factory=dict)
 
@@ -4025,18 +4028,9 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         for mp in members.values() if mp.verdict != "blocked"
         for c in mp.changes if c.code == "member_adopted"
     ]
-    if adopted:
-        names = ", ".join(a.name for a in adopted)
-        count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
-        warnings.append(
-            f"{count} will be adopted into '{system}' by adding the tag '{system}': "
-            f"{names}. From then on, restarting the system restarts them and a "
-            f"teardown of the system removes them too."
-            # #4131: a default export infers `prefixed` once a member carries the
-            # prefix and would omit the bare members; name the explicit export.
-            + (f" Export this system with ?naming=bare (get_system_manifest naming=\"bare\"), "
-               f"since an adopted name starts with '{system}-'."
-               if any(a.name.startswith(f"{system}-") for a in adopted) else ""))
+    adoption_warning = _adoption_line(system, adopted, done=False)
+    if adoption_warning:
+        warnings.append(adoption_warning)
 
     # trinity-enterprise#1030 CP2: a grant the caller's credential could not
     # write is loud — a top-level summary entry and one warning line, beside
@@ -4064,8 +4058,27 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted, summary=summary,
+        adopted=adopted, adoption_warning=adoption_warning, summary=summary,
     )
+
+
+def _adoption_line(system: str, adopted: List["SystemApplyAdoption"], *, done: bool) -> Optional[str]:
+    """The adoption sentence: the plan's (`will be`), or a real run's over the
+    members whose system tag landed (`was` / `were`, #4130)."""
+    if not adopted:
+        return None
+    names = ", ".join(a.name for a in adopted)
+    count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
+    verb = ("were" if len(adopted) != 1 else "was") if done else "will be"
+    return (
+        f"{count} {verb} adopted into '{system}' by adding the tag '{system}': "
+        f"{names}. From then on, restarting the system restarts them and a "
+        f"teardown of the system removes them too."
+        # #4131: a default export infers `prefixed` once a member carries the
+        # prefix and would omit the bare members; name the explicit export.
+        + (f" Export this system with ?naming=bare (get_system_manifest naming=\"bare\"), "
+           f"since an adopted name starts with '{system}-'."
+           if any(a.name.startswith(f"{system}-") for a in adopted) else ""))
 
 
 # ----------------------------------------------------------------------------
@@ -4165,6 +4178,10 @@ class ApplyOutcome:
     succeeded: int = 0
     writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
     tags_written: List[str] = field(default_factory=list)
+    # #4130: (name, step) of every write that landed, and (name, tag) of every
+    # tag that landed — the result counts and lists only what happened.
+    landed: set = field(default_factory=set)
+    tags_landed: set = field(default_factory=set)
     member_failed: set = field(default_factory=set)
     # (member, gate key) of every planned gate write that has not landed. Seeded
     # with all of them, so a skipped or lost write holds its skill back too.
@@ -4247,6 +4264,7 @@ async def execute_apply_plan(
             return False
         out.succeeded += 1
         out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
+        out.landed.add((name, step))
         return True
 
     # 1. Create absent members; tag each with the system tag first.
@@ -4264,6 +4282,7 @@ async def execute_apply_plan(
         tagged = await attempt(mp.name, mp.short_name, "tag", lambda n=mp.name: _tag_stored(n, system))
         if tagged:
             out.tags_written.append(mp.name)
+            out.tags_landed.add((mp.name, system))
         else:
             # The next apply would refuse it as name-only evidence; say so.
             out.failed[-1].reason += (
@@ -4313,7 +4332,8 @@ async def execute_apply_plan(
     # mounts another must have.
     if out.succeeded:
         for mp in plan.members.values():
-            if mp.creating:
+            # #4130: a declared-only member is never run nor written; nothing to re-read.
+            if mp.creating or mp.verdict == "declared_only":
                 continue
             try:
                 container = _member_container(mp.name)
@@ -4346,6 +4366,7 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
     name, short = op.member, op.short_name
     if op.kind == "tag":
         if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
+            out.tags_landed.add((name, op.args["tag"]))
             if name not in out.tags_written:
                 out.tags_written.append(name)
     elif op.kind == "edge":
@@ -4491,10 +4512,29 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
                 changes = [c for c in changes if c.code != "pending_template_resolution"]
                 changes.extend(outcome.extra_changes[mp.name])
             restart = outcome.restart_required.get(mp.name, restart)
-            applied = mp.name not in outcome.member_failed
+            # #4130: nothing is planned or attempted for a declared-only member.
+            applied = None if mp.verdict == "declared_only" else mp.name not in outcome.member_failed
         members.append(SystemApplyMember(
             name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
             restart_required=restart, applied=applied, unobserved=list(mp.unobserved)))
+    # #4130: a dry run (valid or invalid) shows the plan; a refused run adopted
+    # and wrote nothing; a real run names only the system tags and the writes
+    # that landed. `report` / `unobserved` stay plan counts.
+    adopted, plan_warnings, summary = list(plan.adopted), list(plan.warnings), dict(plan.summary)
+    if not dry_run and (outcome is not None or status == "refused"):
+        landed = outcome.landed if outcome is not None else set()
+        tags_landed = outcome.tags_landed if outcome is not None else set()
+        adopted = [a for a in plan.adopted if (a.name, plan.system_name) in tags_landed]
+        if plan.adoption_warning is not None:
+            line = _adoption_line(plan.system_name, adopted, done=True)
+            plan_warnings = [line if w is plan.adoption_warning else w for w in plan_warnings]
+            plan_warnings = [w for w in plan_warnings if w is not None]
+        from services.system_apply import summary as apply_summary
+        summary = apply_summary.build(
+            plan.members, landed=landed,
+            extras={g: {k: v for k, v in counts.items()
+                        if k not in ("write", "report", "unobserved")}
+                    for g, counts in plan.summary.items()})
     response = SystemApplyResponse(
         dry_run=dry_run,
         system_name=plan.system_name,
@@ -4505,9 +4545,9 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         prompt=plan.prompt,
         system_view=plan.system_view,
         failed=list(outcome.failed) if outcome else [],
-        warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
-        adopted=list(plan.adopted),
-        summary=dict(plan.summary),
+        warnings=[*warnings, *plan_warnings, *(outcome.warnings if outcome else [])],
+        adopted=adopted,
+        summary=summary,
     )
     if outcome is not None:
         response._tags_written = list(outcome.tags_written)
