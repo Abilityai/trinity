@@ -23,7 +23,10 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from database import db
-from dependencies import AuthorizedAgent, agent_principal_name, assert_agent_owner, assert_own_agent, get_current_user
+from dependencies import (
+    AuthorizedAgent, agent_principal_name, assert_agent_owner, assert_own_agent, get_current_user,
+    assert_person, require_person,
+)
 from models import (
     CANVAS_BLOCKS_MAX_BYTES,
     DEFAULT_CANVAS_ID,
@@ -93,10 +96,14 @@ def _gate_human_removal(current_user: User, name: str) -> None:
     that warning is about deleting an AGENT (where the `is_system` guard
     matters), not about a row belonging to one.
     """
-    # The same "is this an agent key" predicate `assert_own_agent` uses, so a
-    # principal that is not one always meets the owner gate below.
+    # The self-gate first, exactly as the routes call it, so this helper is never
+    # weaker than they are when reached alone: it holds an agent key to its own
+    # canvas and the system key to `trinity-system`'s (trinity-enterprise#719).
+    # An agent key is then done (`agent_principal_name`, the predicate the
+    # self-gate uses); every other principal, the system key included, meets the
+    # owner gate below.
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     if agent_principal_name(current_user) is not None:
-        assert_own_agent(current_user, name, detail=_OWN_CANVAS)
         return
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
@@ -120,12 +127,19 @@ def _gate_human_only(current_user: User, name: str, *, agent_detail: str) -> Non
 
     `agent_detail` is per-caller because the refusal is read by an agent that
     has to decide what to do next, and "may not pin" is unhelpful on a share.
+
+    Only a person passes (trinity-enterprise#719): a signed-in session or the
+    person's own `user` key. It is `assert_person`, the rule `require_person`
+    applies in the decorator of every route that calls this, so the refusal
+    comes before the ownership lookup; this keeps the per-caller detail.
     """
-    if current_user.agent_name:
+    try:
+        assert_person(current_user)
+    except HTTPException:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=agent_detail,
-        )
+        ) from None
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
 
@@ -299,7 +313,8 @@ async def canvas_context(name: AuthorizedAgent, execution_id: str | None = None)
     }
 
 
-@router.get("/{name}/canvas/shares", response_model=List[CanvasShare])
+@router.get("/{name}/canvas/shares", response_model=List[CanvasShare],
+            dependencies=[Depends(require_person)])
 async def list_canvas_shares(
     name: AuthorizedAgent,
     current_user: User = Depends(get_current_user),
@@ -320,7 +335,8 @@ async def list_canvas_shares(
     return [CanvasShare(**r, url=_share_url(r["token"])) for r in rows]
 
 
-@router.post("/{name}/canvas/{canvas_id}/share", response_model=CanvasShare)
+@router.post("/{name}/canvas/{canvas_id}/share", response_model=CanvasShare,
+             dependencies=[Depends(require_person)])
 async def create_canvas_share(
     name: AuthorizedAgent,
     canvas_id: str,
@@ -373,7 +389,7 @@ async def create_canvas_share(
     return CanvasShare(**share, url=_share_url(share["token"]))
 
 
-@router.delete("/{name}/canvas/shares/{share_id}")
+@router.delete("/{name}/canvas/shares/{share_id}", dependencies=[Depends(require_person)])
 async def revoke_canvas_share(
     name: AuthorizedAgent,
     share_id: str,
@@ -488,7 +504,8 @@ async def patch_canvas(
     return canvas_service.decorate([canvas], name)[0]
 
 
-@router.put("/{name}/canvas/{canvas_id}/pin", response_model=CanvasSummary)
+@router.put("/{name}/canvas/{canvas_id}/pin", response_model=CanvasSummary,
+            dependencies=[Depends(require_person)])
 async def pin_canvas(
     name: AuthorizedAgent,
     canvas_id: str,

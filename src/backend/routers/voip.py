@@ -2,7 +2,9 @@
 VoIP telephony router (VOIP-001, #1056 — Phase 1, outbound).
 
 Surfaces:
-- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{agent_name}/voip
+- Binding CRUD (owner-only): GET/PUT/DELETE /api/agents/{agent_name}/voip. The PUT
+  binds Twilio credentials and takes a signed-in session; DELETE and the enable
+  toggle take a person (trinity-enterprise#719). GET returns public fields only.
 - Outbound trigger (any agent-accessor): POST /api/agents/{agent_name}/voip/call
 - Media Streams WebSocket (Twilio, ticket-authed): WS /api/voip/voice/{call_id}
 
@@ -26,7 +28,13 @@ from fastapi import (
 )
 
 from database import db
-from dependencies import AuthorizedAgentByName, OwnedAgentByName, get_current_user
+from dependencies import (
+    AuthorizedAgentByName,
+    OwnedAgentByName,
+    get_current_user,
+    require_interactive,
+    require_person,
+)
 from models import User, VoipBindingResponse, VoipCallRequest, VoipConfigureRequest, VoipEnabledRequest
 from services import idempotency_service
 from services.settings_service import settings_service
@@ -81,7 +89,11 @@ async def get_voip_binding(agent_name: OwnedAgentByName):
     )
 
 
-@auth_router.put("/{agent_name}/voip", response_model=VoipBindingResponse)
+@auth_router.put(
+    "/{agent_name}/voip",
+    response_model=VoipBindingResponse,
+    dependencies=[Depends(require_interactive)],
+)
 async def configure_voip_binding(
     agent_name: OwnedAgentByName,
     config: VoipConfigureRequest,
@@ -124,7 +136,11 @@ async def configure_voip_binding(
     )
 
 
-@auth_router.put("/{agent_name}/voip/enabled", response_model=VoipBindingResponse)
+@auth_router.put(
+    "/{agent_name}/voip/enabled",
+    response_model=VoipBindingResponse,
+    dependencies=[Depends(require_person)],
+)
 async def set_voip_enabled(
     agent_name: OwnedAgentByName,
     config: VoipEnabledRequest,
@@ -151,7 +167,7 @@ async def set_voip_enabled(
     )
 
 
-@auth_router.delete("/{agent_name}/voip")
+@auth_router.delete("/{agent_name}/voip", dependencies=[Depends(require_person)])
 async def delete_voip_binding(agent_name: OwnedAgentByName):
     """Remove the Twilio voice binding for an agent (owner-only)."""
     _require_enabled()
