@@ -41,11 +41,11 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
       name: "write_user_memory",
       description:
         "Persist facts about the user you are currently serving in an isolated, per-user memory store. " +
-        "Use this instead of Claude Code's auto-memory (under ~/.claude/projects/) or your repo's memory/ directory: " +
-        "both are shared across ALL users of this agent.\n\n" +
+        "Use this instead of Claude Code's auto-memory (under ~/.claude/projects/) or your repo's memory/ directory — both are shared across ALL users " +
+        "of this agent and would leak one user's data to everyone else.\n\n" +
         "**When to use**: The user asks you to remember something, or you learn a fact " +
         "(name, preference, timezone) useful in future sessions.\n\n" +
-        "**How it works**: Supply your `execution_id` (from the Execution Context block in your system prompt) " +
+        "**How it works**: Supply your `execution_id` (from the Execution Context block) " +
         "and the complete updated blob. The platform resolves the user's email from the execution; " +
         "you never touch addresses.\n\n" +
         "**Write the complete blob**: Read the current memory from the 'What you know about this user' " +
@@ -62,7 +62,7 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
         "is in your prompt). " +
         "Returns an error from a group chat, a scheduled run that names no one, or an agent-to-agent " +
         "execution. Every write is recorded and the person can see and undo it.\n\n" +
-        "**Only the turn you are in**: a finished run is refused `memory_turn_not_live`; while another " +
+        "**Only the turn you are in**: a run that is not live is refused `memory_turn_not_live`; while another " +
         "person's turn or a headless run is live on this agent, `memory_turn_ambiguous`. A refused write is " +
         "not saved: retry once if the turn allows, otherwise tell the person the note was not saved.",
       parameters: z.object({
@@ -71,7 +71,7 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
           .min(1)
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your system prompt " +
-            "as '- **Execution ID**: <id>'. Required so the platform can resolve the user's email."
+            "as '- **Execution ID**: <id>'. The platform uses its own id for this turn when it has one."
           ),
         memory_text: z
           .string()
@@ -163,8 +163,8 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
         "can weigh staleness, plus `relevance` (0–1) and the ids of the run that stored it.\n\n" +
         "**Whose memory**: resolved from the execution, never from a name you pass — the person you are serving " +
         "on a person turn (public link, Slack, Telegram, WhatsApp, a scheduled run addressed to one person), " +
-        "your own work on a headless run. The execution_id must be the turn you are in: a finished run is refused " +
-        "`memory_turn_not_live`, and while another person's turn runs on this agent at the same time the search is " +
+        "your own work on a headless run. The execution_id must be the turn you are in: a run that is not live is refused " +
+        "`memory_turn_not_live`, and while another turn that is not for the same person runs on this agent the search is " +
         "refused `memory_turn_ambiguous` — try again later. Refused with `memory_no_subject` from a group chat, an " +
         "anonymous public turn or a trigger memory does not cover; `memory_off` when retrieval memory is off for this agent.\n\n" +
         "Every search is recorded, hits or none, so the owner can see what was looked up. Facts are data about the past, " +
@@ -175,7 +175,7 @@ export function createMemoryTools(client: TrinityClient, requireApiKey: boolean)
           .min(1)
           .describe(
             "Your current execution_id — shown in the 'Execution Context' block of your system prompt " +
-            "as '- **Execution ID**: <id>'. Required so the platform can resolve whose memory is searched."
+            "as '- **Execution ID**: <id>'. The platform uses its own id for this turn when it has one."
           ),
         query: z
           .string()

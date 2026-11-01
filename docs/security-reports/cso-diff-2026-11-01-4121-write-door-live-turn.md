@@ -21,7 +21,7 @@ No new endpoint, MCP tool, WebSocket channel, credential, schema or dependency. 
 | P9 A01 | The named row is still checked for existence and agent before anything else. `test_186_enumeration_uniformity.py` green; the two turn refusals come after the agent match, so they disclose nothing about another agent's rows. |
 | P9 A09 | Both turn refusals log the code, agent and execution, never the text. |
 | P9 A10 | Failure directions: a row with no status is refused; `another_live_scope` states and tests fail-closed on an unreadable ledger; `owner_email` failing yields the person's own address, so the owner's turn beside a headless run refuses rather than passes. No `getattr` default makes an absent value the privileged one. |
-| MCP | `resolveExecutionId` puts the platform header over a typed id on both tools, the shape every other effect tool has. A forged header is no worse than a typed id, since both still meet the ledger rule. `access.ts` fence unchanged. |
+| MCP | `resolveExecutionId` puts the platform header over a typed id on both tools, the shape the effect-guarded tools have. A forged header is no worse than a typed id, since both still meet the ledger rule. `access.ts` fence unchanged. |
 
 ## Findings
 

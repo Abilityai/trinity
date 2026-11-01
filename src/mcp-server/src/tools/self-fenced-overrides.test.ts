@@ -29,7 +29,8 @@ const decisions = createDecisionTools(fake, false);
 const voice = createVoiceReplyTools(fake, false);
 
 // Every tool whose route is in AGENT_CALLABLE_SELF (tests/unit/_route_census.py)
-// and still takes `agent_name` — kept by hand; the other self-fenced tools take
+// and still takes `agent_name`, except the memory tools, which have their own
+// block below — kept by hand; the other self-fenced tools take
 // the agent from the key. (`call_a2a_agent`, `get_a2a_task` and `get_agent_spending`
 // REQUIRE the name, so it is not an override; each says an agent key may only pass
 // its own.)

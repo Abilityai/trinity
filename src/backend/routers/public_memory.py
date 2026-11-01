@@ -84,7 +84,7 @@ async def write_user_memory(
         raise HTTPException(status_code=403, detail={
             "code": "agent_only",
             "message": "This door is for the agent's own key. An agent writes a person's notes during "
-                       "that person's turn; the person sees and undoes them in the Workspace.",
+                       "that person's turn.",
         })
     assert_agent_access(current_user, agent_name, detail="Not authorized")
 
@@ -96,15 +96,15 @@ async def write_user_memory(
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
 
     # The door serves the turn the agent is IN. Nothing proves which turn a
-    # request comes from (ent#926: the ledger is the fact), so a finished run,
-    # whoever it served, is refused here; the other half of the rule needs the
-    # person, and runs once they are decided below (#4121).
+    # request comes from (ent#926: the ledger is the fact), so a run that is not
+    # running, whoever it served, is refused here; the other half of the rule
+    # needs the person, and runs once they are decided below (#4121).
     if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
         logger.info(f"[UserMemory] Refused write on {agent_name} (memory_turn_not_live, execution={body.execution_id})")
         raise HTTPException(status_code=422, detail={
             "code": "memory_turn_not_live",
-            "message": "That run has finished. Write memory with the execution_id of the turn you are in. "
-                       "Nothing was saved.",
+            "message": "That run is not running, so nothing was saved. Memory is written during the turn "
+                       "it serves. Tell the person the note was not saved.",
         })
 
     # trinity-enterprise#1022: the ONE "whose memory" rule, shared with the

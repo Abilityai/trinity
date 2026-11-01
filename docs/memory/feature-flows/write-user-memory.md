@@ -14,7 +14,7 @@ Before #888, agents that needed to remember user-specific facts had no safe writ
 The fix is a server-side gated write: the agent never supplies a user email. The backend resolves it from the execution record, preventing an agent from writing memory for an arbitrary user.
 
 ## Entry Points
-- **MCP Tool**: `write_user_memory` in `src/mcp-server/src/tools/memory.ts:30`
+- **MCP Tool**: `write_user_memory` in `src/mcp-server/src/tools/memory.ts:40`
 - **API**: `POST /api/agents/{agent_name}/user-memory`
 
 ## Frontend Layer
@@ -23,8 +23,8 @@ None in this flow: the agent writes through MCP. The person sees what an agent r
 ## MCP Tool Layer
 
 ### Tool Definition
-- `src/mcp-server/src/tools/memory.ts:30` — `writeUserMemory` tool
-- Registered in `src/mcp-server/src/server.ts:217` via `createMemoryTools(client, requireApiKey)`
+- `src/mcp-server/src/tools/memory.ts:40` — `writeUserMemory` tool
+- Registered in `src/mcp-server/src/server.ts:680` via `createMemoryTools(client, requireApiKey)`
 
 ### Parameters
 | Parameter | Required | Description |
@@ -34,28 +34,28 @@ None in this flow: the agent writes through MCP. The person sees what an agent r
 | `agent_name` | no | Leave out; defaults to the `agentName` in the agent-scoped MCP key's auth context, and naming another agent is refused |
 
 ### Agent Name Resolution
-`src/mcp-server/src/tools/memory.ts:85-99` — resolves agent name in priority order:
+`src/mcp-server/src/tools/memory.ts:107-122` — resolves agent name in priority order:
 1. Explicit `agent_name` parameter
 2. `authContext.agentName` (from agent-scoped MCP key, scope `"agent"`)
 3. Error if neither is available
 
 ### Which Turn (#4121)
-The id sent is `resolveExecutionId(authContext, execution_id)`, the rule every effect tool uses: the `X-Trinity-Execution-Id` header (`${TRINITY_EXECUTION_ID:-manual}`, set per spawn) wins over the typed value. The door refuses a finished run, and a resumed session copies ids from its own history, so a typed id alone would lose a live turn's note. An interactive session sends `manual`, which is no execution (404), so a web-terminal `claude` cannot write through whoever's turn happens to be live. The typed value is the fallback for agent images older than the header.
+The id sent is `resolveExecutionId(authContext, execution_id)`, the rule the effect-guarded tools use (`send_message`, `share_file`, `send_voice_reply`): the `X-Trinity-Execution-Id` header (`${TRINITY_EXECUTION_ID:-manual}`, set per spawn) wins over the typed value. The door refuses a run that is not live, and a resumed session copies ids from its own history, so a typed id alone would lose a live turn's note. An interactive Claude Code or Gemini session sends `manual`, which is no execution (404), so this tool cannot write through whoever's turn happens to be live from a web terminal. Codex omits the header outside a turn, so there the typed value goes out; it is also the fallback for agent images older than the header.
 
 ### Client Call
-`src/mcp-server/src/client.ts:1087` — `apiClient.writeUserMemory(resolvedAgent, { execution_id, memory_text })`
-- Makes `POST /api/agents/{agent_name}/user-memory` with the calling user's MCP API key as Bearer token
+`src/mcp-server/src/client.ts:3020` — `apiClient.writeUserMemory(resolvedAgent, { execution_id, memory_text })`
+- Makes `POST /api/agents/{agent_name}/user-memory` with the agent's own MCP key as Bearer token
 
 ## Backend Layer
 
 ### Endpoint
-- `src/backend/routers/public_memory.py:41` — `POST /api/agents/{agent_name}/user-memory`
-- Router prefix `/api/agents`, mounted in `src/backend/main.py:830`
+- `src/backend/routers/public_memory.py:56` — `POST /api/agents/{agent_name}/user-memory`
+- Router prefix `/api/agents`, mounted in `src/backend/main.py:1433`
 
 ### Business Logic
-`src/backend/routers/public_memory.py:42-93`
+`src/backend/routers/public_memory.py:57-207`
 
-1. **Authorization check** — the agent-key self-gate first (`assert_own_agent`, trinity-enterprise#840: an agent-scoped key writes only its own agent's memory, so an agent key naming another agent — inside its reach or not — gets that refusal), then the agent's-own-door check (#4121: no `agent_name` on the principal, so any human, the owner and the system key included, is `403 agent_only`; the run the caller names decides whose notes are replaced, so a human the agent is shared with could otherwise name any person's run), then `assert_agent_access(current_user, agent_name)`. Returns 403 if not.
+1. **Authorization check** — the agent-key self-gate first (`assert_own_agent`, trinity-enterprise#840: an agent-scoped key writes only its own agent's memory, so an agent key naming another agent — inside its reach or not — gets that refusal), then the agent's-own-door check (#4121: no `agent_name` on the principal, so any human, the owner and the system key included, is `403 agent_only`, and a Workspace-only account meets the operator floor's `workspace_only` before this; the run the caller names decides whose notes are replaced, so a human the agent is shared with could otherwise name any person's run), then `assert_agent_access(current_user, agent_name)`. Returns 403 if not.
 2. **Execution lookup** — `db.get_execution(body.execution_id)`: the execution must exist. Returns 404 if not.
 3. **Execution ownership check** — `execution.agent_name != agent_name`: the execution must belong to the agent named in the path. Returns 403 if mismatch.
 4. **The turn is live (#4121)** — the row must be `running`, or `422 memory_turn_not_live`. An agent's own key could otherwise name a finished run of anyone it served (a seat run, a one-to-one channel turn, a signed-in public turn) and replace that person's notes. The same rule as the search door ([retrieval-memory.md](retrieval-memory.md)).
@@ -72,7 +72,7 @@ The id sent is `resolveExecutionId(authContext, execution_id)`, the rule every e
 9. **Write + history (#895, ent#637)** — `db.write_public_user_memory_agent_notes(agent_name, user_email, stored_text, execution_id=…, triggered_by=…, schedule_id=…)`: in one transaction, replaces only the `agent_notes` key of the JSON blob (the summarizer's `conversation_summary` is untouched) and records a `public_user_memory_writes` row (previous + new notes, which run). The row is created on demand. This is the only `agent_notes` writer in `src/backend` (AST-pinned).
 
 ### Database Operations
-- **Table**: `public_user_memory` (schema at `src/backend/db/schema.py:515`) — unchanged by #895
+- **Table**: `public_user_memory` (schema at `src/backend/db/schema.py:1114`) — unchanged by #895
 - **Unique constraint**: `(agent_name, user_email)` — one blob per user per agent
 - **Storage shape (#895)**: `memory_text TEXT` now holds a JSON object with two named keys (no schema migration required):
   ```json
@@ -83,7 +83,7 @@ The id sent is `resolveExecutionId(authContext, execution_id)`, the rule every e
 - **Read — agent_notes only, no create** (`db.get_public_user_memory_agent_notes`): what the screen compares a write against; never creates the row, so a refused write leaves nothing behind — `src/backend/db/public_links.py:get_user_memory_agent_notes`
 - **Write — agent_notes only, recorded** (`db.write_public_user_memory_agent_notes`): replaces only the `agent_notes` key and records the write, in one transaction — `src/backend/db/public_links.py:write_user_memory_agent_notes` (ent#637; the unrecorded `update_user_memory_agent_notes` section writer was removed by ent#419)
 - **Write — conversation_summary only** (`db.update_public_user_memory_conversation_summary`): used by the background summarizer; never invoked from this tool — `src/backend/db/public_links.py:update_user_memory_conversation_summary`
-- **Index**: `idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)` — `src/backend/db/schema.py:1166`
+- **Index**: `idx_public_user_memory_lookup ON public_user_memory(agent_name, user_email)` — `src/backend/db/schema.py:2416`
 
 ### Table Schema
 ```sql
@@ -131,7 +131,7 @@ The MCP tool description names the four refusal codes and the margin to drop, pl
 The agent never provides the user's email — it supplies only `execution_id`. The backend resolves the person from the execution record: the seat a scheduled run is addressed to, ent#549's one-to-one stamp on a channel turn, or `source_user_email` on a public-link / Workspace turn.
 
 ## Side Effects
-- None. No WebSocket broadcast. No audit log entry (informational `logger.info` only, including the two turn refusals: the log line is the operator's only trace of a note that was refused).
+- None. No WebSocket broadcast. No audit log entry (informational `logger.info` only, including the two turn refusals: the log line is how an operator finds a note that was refused).
 
 ## Error Handling
 | Error Case | HTTP Status | Detail |
@@ -140,7 +140,7 @@ The agent never provides the user's email — it supplies only `execution_id`. T
 | Caller cannot access agent | 403 | Not authorized |
 | Execution not found (includes `manual`) | 404 | Execution not found |
 | Execution belongs to different agent | 403 | Execution does not belong to this agent |
-| The run has finished | 422 | `{"code": "memory_turn_not_live", ...}` |
+| The run is not running | 422 | `{"code": "memory_turn_not_live", ...}` |
 | Another live turn resolves to a different scope | 422 | `{"code": "memory_turn_ambiguous", ...}` |
 | Triggered by a schedule that names no one / agent / MCP | 422 | write_user_memory is only available during user-facing sessions (...) |
 | A group (or unverified) channel turn | 422 | `{"code": "memory_not_one_to_one", ...}` |
@@ -149,9 +149,9 @@ The agent never provides the user's email — it supplies only `execution_id`. T
 
 ## Security Considerations
 - **Who writes**: an agent-scoped key writes only its own agent's memory (self-gate), for the person its execution serves — resolved server-side, never named by the caller (a seat run's addressee, a channel turn's one-to-one verified speaker, a public/Workspace turn's verified visitor). A group turn writes no one's memory. A human writes nothing here (`agent_only`).
-- **Which turn**: only a live run, and only while no other live turn on the agent resolves to a different scope (#4121). **The cost, on a shared agent:** a write is refused whenever another person's turn or a headless run is live. That includes two seats briefed at the same time (ent#637's one-schedule-per-seat model, default parallelism 3: stagger the schedules) and a person's turn that has tasked its own agent (a `self_task` or `fan_out` child resolves to the agent scope). A row a crash left `running` refuses too, until the watchdog ends it. The turn may end before a retry works, so the note is lost: the search door can tolerate that as a read, a write cannot, which is why the tool description tells the agent to say the note was not saved. The refusal is logged.
+- **Which turn**: only a live run, and only while no other live turn on the agent resolves to a different scope (#4121). **The cost, on a shared agent:** a write is refused whenever another person's turn is live, or a headless run unless the write is for the owner. That includes two seats briefed at the same time (ent#637's one-schedule-per-seat model, default parallelism 3: stagger the schedules) and a person's turn that has tasked its own agent (a `self_task` or `fan_out` child resolves to the agent scope). A row a crash left `running` refuses too, until the watchdog ends it. The turn may end before a retry works, so the note is lost: the search door can tolerate that as a read, a write cannot, which is why the tool description tells the agent to say the note was not saved. Nothing enforces that the agent does. The refusal is logged.
 - **Scope, not person**: `scope_for` folds the agent's owner into the agent scope a headless run also resolves to, so a headless run beside the owner's live turn is not ambiguous, though notes are stored per address: a headless run can name that turn and write the owner's notes. The filed rule, pinned by `test_scope_is_not_person_the_owner_shares_the_agent_scope`.
-- **What the rule does not prove**: that the caller is in the turn it names. A process holding the agent's key can name the one live run by calling the API directly; the tool edge sends the platform's header, so this takes a deliberate call, not a stale id.
+- **What the rule does not prove**: that the caller is in the turn it names. A process holding the agent's key can name the one live run by calling the API directly; the tool edge sends the platform's header where the runtime sets one, so on those runtimes this takes a deliberate call, not a stale id.
 - **What is written**: the [anti-poisoning gates](#anti-poisoning-gates-trinity-enterprise419) — a named pattern screen at the boundary (a cheap screen, not prompt-injection detection: paraphrase, other languages and homoglyphs pass) and the trust envelope at the read point, which does not depend on spelling.
 - **Logs**: a refusal is logged with the rule, the line, the execution and the trigger — never the notes; the 422 body carries the rule and the line, never the text.
 - **Cost**: every guard pass is linear; the summarizer clamps each chat message before formatting it on the event loop.
@@ -169,14 +169,14 @@ The agent never provides the user's email — it supplies only `execution_id`. T
 | File | Role |
 |------|------|
 | `src/mcp-server/src/tools/memory.ts` | MCP tool definition and execute handler |
-| `src/mcp-server/src/client.ts:1087` | `writeUserMemory()` HTTP client method |
-| `src/mcp-server/src/server.ts:217` | Tool registration |
+| `src/mcp-server/src/client.ts:3020` | `writeUserMemory()` HTTP client method |
+| `src/mcp-server/src/server.ts:680` | Tool registration |
 | `src/backend/routers/public_memory.py` | FastAPI endpoint + all validation logic |
 | `src/backend/services/user_memory_guard.py` | The screen (`prepare_write`, `prepare_summary`, `screen_field`) and the envelope (`envelope`, `margin_lines`) — ent#419 |
 | `src/backend/utils/untrusted_text.py` | `defang_bracket_markers` — shared with the Telegram group-history block |
 | `src/backend/db/public_links.py` | `get_or_create_user_memory`, `get_user_memory_agent_notes`, `write_user_memory_agent_notes` (+ history, undo) |
-| `src/backend/db/schema.py:515` | `public_user_memory` table DDL |
-| `src/backend/main.py:95,830` | Router import and mount |
+| `src/backend/db/schema.py:1114` | `public_user_memory` table DDL |
+| `src/backend/main.py:125,1433` | Router import and mount |
 
 ## Related Flows
 - [public-agent-links.md](public-agent-links.md) — web public chat sessions (read path that injects this memory into the system prompt; same split-storage rules)

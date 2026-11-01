@@ -80,6 +80,15 @@ describe("write_user_memory (ent#419)", () => {
     assert.ok(description.includes("`│ `"), "description does not tell the agent to drop the margin");
   });
 
+  // The sentence that steers an agent off shared memory. #4121's trim to the
+  // 2,048-character cap dropped it with every test green, so a cut now fails here.
+  it("keeps the warning that shared memory leaks one person's data to everyone", () => {
+    const { description } = makeTools(async () => ({})).writeUserMemory;
+    assert.match(description, /auto-memory/);
+    assert.match(description, /shared across ALL users/);
+    assert.match(description, /leak one user's data to everyone else/);
+  });
+
   // #4121: on a shared agent a live neighbour refuses the write, and the turn can
   // end before a retry works, so the agent must say the note was lost.
   it("tells the agent a refused write was not saved, and carries the turn refusal's code", async () => {
@@ -156,6 +165,14 @@ describe("the turn id both memory doors send (#4121)", () => {
     assert.equal(out.success, false);
     assert.match(out.error, /nothing was saved/);
     assert.equal(write.mock.calls.length, 0);
+  });
+
+  it("search_memory does the same with a typed `manual` and no header", async () => {
+    const search = mock.method(TrinityClient.prototype, "searchMemory", async () => ({ hits: [] }) as never);
+    const out = JSON.parse(await keyed().searchMemory.execute({ execution_id: "manual", query: "q" }, session()));
+    assert.equal(out.success, false);
+    assert.match(out.error, /No execution_id/);
+    assert.equal(search.mock.calls.length, 0);
   });
 });
 

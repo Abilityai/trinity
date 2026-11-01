@@ -218,8 +218,8 @@ def another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
     to a scope other than ``scope``. Read from the ledger (only ``running`` rows,
     never a request); a ledger that cannot be read counts as ambiguous.
 
-    The ent#926 rule behind both agent doors that take an execution id, search
-    and the MEM-001 write: nothing proves which turn a request comes from, so
+    The ent#926 rule behind both memory doors, search and the MEM-001 write:
+    nothing proves which turn a request comes from, so
     while two live turns serve different scopes neither door can tell them apart."""
     try:
         for row in db.get_running_turn_attribution(agent_name):

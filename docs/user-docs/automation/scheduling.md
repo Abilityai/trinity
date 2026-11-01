@@ -163,8 +163,9 @@ Workspace. Another agent cannot write through this agent's run.
 
 The platform refuses the write while another turn that serves someone else is
 running on the same agent, because it cannot tell the two turns apart. So if one
-agent briefs several people, give each schedule its own time: two briefs that
-overlap cannot save their notes, and the agent will say so.
+agent briefs several people, give each schedule its own time: a brief cannot save
+its notes while another brief runs, and the agent is told to say the note was not
+saved.
 
 ### Held until a companion is marked ready
 

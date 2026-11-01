@@ -351,7 +351,7 @@ async def search_retrieval_memory_agent_endpoint(
     if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
         raise HTTPException(status_code=422, detail={
             "code": "memory_turn_not_live",
-            "message": "That run has finished. Search memory with the execution_id of the turn you are in.",
+            "message": "That run is not running. Memory is searched during the turn it serves.",
         })
     subject = memory_subject.resolve(execution)
     if subject.kind == memory_subject.SKIP:
@@ -365,8 +365,8 @@ async def search_retrieval_memory_agent_endpoint(
     if await asyncio.to_thread(memory_service.another_live_scope, agent_name, execution.id, scope):
         raise HTTPException(status_code=422, detail={
             "code": "memory_turn_ambiguous",
-            "message": ("Another turn for someone else is running on this agent right now, so whose memory this "
-                        "search is for cannot be told apart. Try again once that turn ends."),
+            "message": ("Another turn that is not for the same person is running on this agent right now, so whose "
+                        "memory this search is for cannot be told apart. Try again once that turn ends."),
         })
     _memory_on_or_4xx(agent_name)
     try:

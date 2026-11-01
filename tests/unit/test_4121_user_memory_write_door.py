@@ -25,12 +25,14 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
 from database import db
+from db.engine import get_engine
+from db.tables import mcp_api_keys
 from db.write_params import ExecutionResult, TaskExecutionFields
 from db_models import McpApiKeyCreate, UserCreate
 from dependencies import create_access_token
-from models import User
 from routers import public_memory
 
 pytestmark = pytest.mark.unit
@@ -123,8 +125,8 @@ class TestTheTurnIsLive:
         refused(write(client, agent, group), 422, "memory_turn_not_live")
 
     def test_a_refusal_leaves_a_log_line_because_the_note_is_gone(self, client, agent, caplog):
-        """The agent is told, the person may not be: the log is the operator's
-        only trace of a lost note. It names the rule and the run, never the text."""
+        """The agent is told, the person may not be: the log is how an operator
+        finds a lost note. It names the rule and the run, never the text."""
         finished = run(agent.name, finished="success")
         with caplog.at_level("INFO", logger="routers.public_memory"):
             write(client, agent, finished, text="Secret detail.")
@@ -261,13 +263,13 @@ class TestItIsTheAgentsDoor:
         assert notes(agent) == ""
 
     def test_the_system_key_is_refused(self, client, agent):
-        """`trinity-system` carries no `agent_name`: the same answer as search."""
+        """`trinity-system` carries no `agent_name`: the same answer as search.
+        Its key is an agent key re-scoped, as `_set_system_scope` does it."""
         ann = run(agent.name)
-        app = client.app
-        app.dependency_overrides[public_memory.get_current_user] = lambda: User(
-            id=1, username="admin", role="admin", mcp_scope="system", agent_name=None,
-            created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
-        refused(write(client, agent, ann, key="ignored"), 403, "agent_only")
+        system = db.create_agent_mcp_api_key(f"{agent.name}-system", agent.owner)
+        with get_engine().begin() as conn:
+            conn.execute(update(mcp_api_keys).where(mcp_api_keys.c.id == system.id).values(scope="system"))
+        refused(write(client, agent, ann, key=system.api_key), 403, "agent_only")
         assert notes(agent) == ""
 
     def test_a_sibling_agents_key_is_still_stopped_by_the_self_gate(self, client, agent):
