@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1042_role_answer_fence.py",
+      "feature": "trinity-enterprise#1042",
+      "added": "2026-11-01",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "trinity-enterprise#1042: an answer to an ask addressed to a canon role (role:<id>) is fenced in ask_service.may_end to the raise-time resolved_to snapshot, so every door inherits it. The real Operations route refuses a shared person outside the seat and an admin without the seat with 403 not_addressee and a remedy naming the role's label, never a person, writing nothing. An admin may still cancel, cancel and bulk-cancel are not narrowed, the approver and primary kinds are unchanged, an empty or unreadable snapshot fails closed, and all three catch sites word the refusal by role."
+    },
+    {
       "file": "unit/test_ent1030_export_access.py",
       "feature": "trinity-enterprise#1030",
       "added": "2026-10-31",
