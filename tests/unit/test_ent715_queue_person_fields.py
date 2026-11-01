@@ -277,9 +277,13 @@ _HEADS_UP_PREFIXES = ("portal-inbox-collision-", "workspace-problem-")
 
 def _file_heads_ups(real_db, agent, tag):
     """Both heads-ups on `agent`, through their REAL emitters, found by their
-    own id or target, never by a scan: `trinity-system` is shared by every
+    own subject or target, never by a scan: `trinity-system` is shared by every
     test in the run. The report's id is bucketed by UTC day, so it is never
-    recomputed. `markers` is everything that would say who or what they are."""
+    recomputed. `markers` is everything that would say who or what they are.
+
+    #3254 re-pin (id shape): the collision is reported through the platform
+    alert seam, so its request id carries a timestamp
+    (`portal-inbox-collision-<dir>-<ts>`) and the row is found by its subject."""
     from types import SimpleNamespace
     from client_portal import service as cps
 
@@ -288,8 +292,8 @@ def _file_heads_ups(real_db, agent, tag):
     cps._alert_collided_inbox(agent, f"legacy_{tag}", list(people))
     assert asyncio.run(cps.raise_problem_report(
         agent, rater, target_kind="message", target_id=target, comment=words)) is True
-    collision = real_db.get_operator_queue_item_for_agent_by_request_id(
-        agent, f"portal-inbox-collision-legacy_{tag}")
+    collision = real_db.find_pending_operator_queue_by_subject(
+        agent, f"portal_inbox_collision:legacy_{tag}")
     (report,) = [i for i in real_db.list_operator_queue_items(
                      agent_name=agent, types=("workspace_problem_report",), limit=500)
                  if (i.get("context") or {}).get("target_id") == target]
@@ -866,7 +870,7 @@ _NON_ROW_ACCESSORS = frozenset({
     "get_operator_queue_stats", "list_operator_queue_agent_names",
     "operator_queue_walk_alert_priorities", "operator_queue_item_exists",
     "prune_operator_queue_terminal_items", "clear_resolved_operator_queue_items",
-    "update_pending_problem_report", "mark_operator_queue_acknowledged",
+    "mark_operator_queue_acknowledged",   # #3254: update_pending_problem_report retired
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
 })
@@ -940,6 +944,9 @@ _ROW_READERS = {
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
+    (_OQS, "_maybe_emit_alert_budget_episode"): (
+        "internal", "the ids of the rows filling an agent's alert budget, digested into the "
+                    "episode marker (#3254); no row leaves"),
     (_OQS, "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),
@@ -975,6 +982,9 @@ _ROW_READERS = {
                     "compared with a pass's start (#3254); a boolean, nothing leaves"),
     ("services/task_execution_service.py", "_alert_skill_not_found"): (
         "internal", "dedupe: is a skill_not_found alert already pending"),
+    ("services/sync_health_service.py", "SyncHealthService._divergence_reported"): (
+        "internal", "the agent's pending `sync_diverged` row: whether its `diverged_since` is this "
+                    "episode (#3254); a boolean, nothing leaves"),
 }
 
 

@@ -200,6 +200,10 @@ The `can_share` gate matches the backend's owner-only `PUT` check, so a non-owne
 
 This is where guardrails actually *bite*. All hooks are root-owned in `/opt/trinity/hooks/` and registered in root-owned `/etc/claude-code/managed-settings.json` (ent#345) — the agent cannot deregister them without `sudo` (the file is also in `path_deny`).
 
+### Routing env pins — `managed-settings.d/60-routing-env.json` (trinity-enterprise#1001)
+
+Claude Code applies settings `env` from `~/.claude/settings.json` and the workspace `.claude/settings.json`, both agent-writable, so either could set `ANTHROPIC_BASE_URL`, a proxy or a TLS trust override and send the CLI's traffic, credential included, to another host. `hooks/write-routing-env.py` writes a root-owned `0444` policy drop-in whose `env` pins each of those names to the container's own value, or `""` when it has none; policy `env` beats user and project settings and the process env, and `""` makes the CLI use its default. The image build runs it under `env -i` (every pin empty); `startup.sh` reruns it through `sudo -E` before the agent server starts, so a proxy set on the container keeps working. Its own file, so a rejected entry voids only itself. The `.env` half of the same rule is in [credential-injection.md](credential-injection.md).
+
 ### Hook registration — `hooks/managed-settings.json`
 
 Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin/env"`, `"args": ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S", "/opt/trinity/hooks/<hook>.py"]`, `"timeout": 30`. No shell runs, so `CLAUDE_CODE_SHELL_PREFIX` does not wrap the hook; `env -i` drops inherited `PYTHON*`/`LD_*` variables and `-I -S` drops the user site. The file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` to `""`, and `CLAUDE_CODE_SHELL_PREFIX` is in `execution_env.PROTECTED_KEYS`, so `.env` cannot set it. The image build runs `/opt/trinity/hooks/guard002-smoke.py`, which executes each hook exactly as this file registers it (`[command] + args`) against known inputs and fails the build otherwise. None of this is a boundary against an agent using its passwordless `sudo`.
@@ -334,6 +338,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Env match check | `src/backend/services/agent_service/helpers.py` | ~408-430 |
 | Baseline | `docker/base-image/hooks/guardrails-baseline.json` | — |
 | Hook registration | `docker/base-image/hooks/managed-settings.json` | — |
+| Routing env pins | `docker/base-image/hooks/write-routing-env.py` → `/etc/claude-code/managed-settings.d/60-routing-env.json` (trinity-enterprise#1001) | `tests/unit/test_ent1001_endpoint_env.py` |
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |

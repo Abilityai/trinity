@@ -58,7 +58,7 @@
         :class="stacked ? 'order-last basis-full' : ''"
         data-testid="inbox-pane-heading"
       >{{ heading }}</h2>
-      <div v-if="item.type === 'thread' || askThread" class="shrink-0 flex items-center gap-2" :class="stacked ? 'ml-auto' : ''" data-testid="inbox-pane-actions">
+      <div v-if="item.type === 'thread' || item.type === 'room' || askThread" class="shrink-0 flex items-center gap-2" :class="stacked ? 'ml-auto' : ''" data-testid="inbox-pane-actions">
         <template v-if="!stacked">
           <!-- §3g C10: leftmost — it arrives late (the canvas feed), and only
                the truncating title may give way when it does. -->
@@ -80,9 +80,20 @@
           >Mark read</BaseButton>
           <BaseButton variant="secondary" size="sm" data-testid="inbox-pane-reply" @click="$emit('reply', target)">Reply in chat</BaseButton>
         </template>
+        <!-- trinity-enterprise#959: a room's header — Mark read while it has new
+             messages (the fallback when the automatic read failed), then Open in
+             chat, which opens the room. No Reply: a room's reply is the room. -->
+        <BaseButton
+          v-if="item.type === 'room' && item.n > 0"
+          variant="ghost"
+          size="sm"
+          class="max-sm:min-h-11"
+          data-testid="inbox-pane-mark-read"
+          @click="markRead"
+        >Mark read</BaseButton>
         <!-- #3714: an ask goes through the card's own `open-thread` path, which
              also opens a chat the sidebar has not loaded (#3140). -->
-        <BaseButton v-if="item.type === 'thread' || askThread" variant="primary" size="sm" class="max-sm:min-h-11" data-testid="inbox-pane-open" @click="askThread ? $emit('open-thread', askThread) : $emit('open-chat', target)">Open in chat</BaseButton>
+        <BaseButton v-if="item.type === 'thread' || item.type === 'room' || askThread" variant="primary" size="sm" class="max-sm:min-h-11" data-testid="inbox-pane-open" @click="askThread ? $emit('open-thread', askThread) : $emit('open-chat', target)">Open in chat</BaseButton>
         <!-- Esc is handled on the WRAPPER: focus stays on the More button
              when it opens the menu, so a handler on the menu never ran and
              Esc reached the Inbox's own Esc — Back (round 3). -->
@@ -174,6 +185,17 @@
         :item="item"
         @rendered="(k) => $emit('rendered', k)"
         @open-chat="(url) => url && $emit('open-chat', url)"
+      />
+
+      <!-- trinity-enterprise#959: a room — its new messages from the
+           membership-scoped room read, then `rendered`, like a chat's. -->
+      <PortalInboxRoomCard
+        v-else-if="item.type === 'room'"
+        ref="roomCard"
+        :item="item"
+        :labels="labels"
+        @rendered="(k) => $emit('rendered', k)"
+        @open-chat="$emit('open-chat', target)"
       />
 
       <template v-else>
@@ -305,6 +327,7 @@ import PortalAskContext from './PortalAskContext.vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import PortalMentionCard from './PortalMentionCard.vue'
+import PortalInboxRoomCard from './PortalInboxRoomCard.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { relativeTime } from './portalUtils'
 import { PANE_HISTORY_LIMIT, paneWindow, paneRuns, openInChatTarget, askOriginThread, paneHeading, replyExcerpt, messageReplyTarget } from './portalInbox'
@@ -322,6 +345,8 @@ const props = defineProps({
   canvasCount: { type: Number, default: 0 },
   // §3g S5: the container's read write for this chat failed.
   readFailed: { type: Boolean, default: false },
+  // trinity-enterprise#959: agent name → label, for a room's senders.
+  labels: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['back', 'open-chat', 'reply', 'open-thread', 'rendered', 'mark-read', 'dismiss-read-error', 'open-canvas'])
 
@@ -417,9 +442,12 @@ async function retryPayload(d) {
 // pane is ALREADY showing (the desktop preview, a re-click) must draw what came
 // since, and say `rendered` again, before the container reads it (round 3).
 const mentionCard = ref(null)
+const roomCard = ref(null)
 function reload() {
   // trinity-enterprise#631: a tag's card reads its own item.
   if (props.item.type === 'mention') { mentionCard.value?.reload?.(); return }
+  // trinity-enterprise#959: so does a room's.
+  if (props.item.type === 'room') { roomCard.value?.reload?.(); return }
   messages.value = []; deliverables.value = []
   loaded.value = false; failed.value = false
   for (const k of Object.keys(payloads)) delete payloads[k]

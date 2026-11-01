@@ -1,38 +1,6 @@
 {
   "test_files": [
     {
-      "file": "unit/test_4085_scheduler_subscription_id.py",
-      "feature": "#4085",
-      "added": "2026-10-29",
-      "categories": [
-        "unit",
-        "scheduler",
-        "subscriptions"
-      ],
-      "description": "#4085: scheduler-created executions (cron, reminder, retry, skipped) snapshot the agent's live subscription assignment into schedule_executions.subscription_id and count toward SUB-004 window_5h/window_7d; no live assignment records NULL."
-    },
-    {
-      "file": "unit/test_4001_no_auto_maintenance.py",
-      "feature": "#4001",
-      "added": "2026-10-27",
-      "categories": [
-        "agent-server",
-        "git",
-        "unit"
-      ],
-      "description": "platform git children never start git auto-maintenance; stale maintenance.lock reaped"
-    },
-    {
-      "file": "unit/test_4064_gemini_process_group.py",
-      "feature": "#4064",
-      "added": "2026-10-28",
-      "categories": [
-        "agent-server",
-        "gemini-runtime"
-      ],
-      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
-    },
-    {
       "file": "unit/test_ent719_org_tags_person_only.py",
       "feature": "abilityai/trinity-enterprise#719",
       "added": "2026-10-27",
@@ -84,6 +52,428 @@
         "unit"
       ],
       "description": "A room's moderator acts (close, add and remove an agent participant) take a person. Through the real rooms router with signed JWTs, a real Workspace session token and MCP keys whose row lookup alone is stubbed; two principals that no credential can present (a vouched loopback and one with no mcp_scope) are handed in by a dependency override of the door, and the Workspace cases stub the portal's block check and roster lookup. The system-scoped key gets 403 not_a_person on all three, both on a room its admin owner created (the account holds the moderator row) and on a room it holds no seat in, and the uniform 404 only on a room that does not exist; an unknown key scope, the vouched loopback and the principal with no mcp_scope get not_a_person too; a member agent gets 403 not_moderator and a non-member agent the uniform 404; connector, ops and portal-delegate keys and a real unvouched loopback JWT are refused at the door; a person admin (session and own user key), the room's creator as a person (session and own user key) and a Workspace moderator still moderate. Fresh install (one admin with no email, its own two agents): the system key, which resolves by username, cannot moderate a room the admin or the key started, and the signed-in admin can. The same roster grant through a post: a mention of an agent outside the room recruits it only for a person (session, own user key, or a Workspace client with the agent on its roster), never for the system key or an agent key that can reach the agent, nor for a woken agent's reply posted under the waking person's principal; the post still lands. With the fix reverted, 19 fail and 28 pass (kept-path guards, and refusals dev already makes). Mutation-proven (admin branch without the person check: 17 red; moderator-row branch without it: 14 red; the not_a_person refusal removed: 17 red; the mention recruit without the person check: 2 red; the recruit without its agent-reply check: 1 red; the person predicate refusing everyone: 10 red; a DELEGATED entry dropped: census rule 1 red); needs no Docker."
+    },
+    {
+      "file": "unit/test_ent719_credential_and_key_routes_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "credentials",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "Human-only gates on the credential, paid-account and key routes, through the real routers over a real temp schema. Per route, every refused principal (the own agent key, an in-reach sibling, the system key, connector, ops, portal_delegate, an unknown scope, no mcp_scope, a vouched loopback, and the user key on an INTERACTIVE route) gets the same 403 on an existing and a missing target, well-formed or schema-invalid, with no ownership lookup and no state change; a real unvouched loopback JWT is refused by the entry fence; a signed-in person succeeds, and the user key succeeds on a PERSON route, inject included (the 2026-10-28 ent#719 ruling: /trinity:onboard Step 5e injects .env with the person's own user key, pinned by its own test). Other shape: with the feature off the person gets today's error and every machine principal 403 first."
+    },
+    {
+      "file": "unit/test_ent719_own_settings_identity_git_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "auth",
+        "unit"
+      ],
+      "description": "Owner-tier routes that change an agent's own settings, identity or git are human-only, through the real routers (agents, agent_brain_orb, agent_rename, git): circuit-breaker, label, mcp-exposed, operator-resume, voice-replies, rename, brain-orb postprocess, the per-agent PAT set and clear, git auto-sync, freeze-schedules-if-failing and initialize are PERSON (Depends(require_person) in the decorator; the PAT set by the 2026-10-28 ent#719 ruling, because /trinity:onboard sets a per-agent token with the person's own user key); the brain-orb voice token and bind-to-own-repo (it can persist the caller's saved GitHub token, which the request does not carry) are INTERACTIVE. Matrix: the agent's own key, a spawning sibling inside manage reach, an edge sibling (voice token), the system key and the owner's user key as real seeded bearers; connector, ops, portal_delegate, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope as stated principals; a real unvouched loopback JWT through the entry fence. Every refusal leaves the stored value unmoved; for every principal the route's rule refuses it is identical for a nonexistent agent and stays 403 for a schema-invalid body on the 11 routes that validate one; the stated principals, and the real keys on a fresh install, are refused with no agent lookup; the owner's session (and user key on PERSON routes) and a shared person on the voice token still succeed; the user key is refused on the voice token and the repository binding (supplied or saved token), sets the PAT as onboarding does, and clears it; send_voice_reply and GET git/auto-sync still admit the own key; fresh install with git never configured (a person gets 404 Git not configured on auto-sync and freeze and initializes; machine keys get 403 before any lookup); the census classifies each route by its rule."
+    },
+    {
+      "file": "unit/test_3435_credential_tool_gates.py",
+      "feature": "#3435",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "credentials",
+        "mcp",
+        "unit"
+      ],
+      "description": "#3435: pins the EXISTING backend gates behind the export_credentials / import_credentials / get_credential_encryption_key MCP tools, by principal (real models.User objects): export admits an owner or admin person (JWT or user key) and import a signed-in owner or admin only (ent#719); both refuse the system key and every agent key with the route rule's exact 403, and give a non-owner the uniform 404; the key route admits an admin human, refuses a non-admin 403 'Admin access required', an agent key 403 human-only, an ops-scope key 403, and answers 503 when CREDENTIAL_ENCRYPTION_KEY is unset. Real router + real owner/admin dependencies; DB ownership, Docker and the encryption service stubbed. No Docker."
+    },
+    {
+      "file": "unit/test_ent719_inline_layer_matches_route_rule.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-28",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "The inline second layer of seven human-only handlers (share, unshare, the Telegram progress-indicator toggle, the Slack proactive-consent toggle, Workspace client log out, block and unblock) is the same allowlist as the route decorator, not the reject_agent_principal denylist. Each handler is called directly, as a direct caller would, with its first side effect replaced by a sentinel: the system, ops, portal_delegate and an unknown-scope key and a principal with no mcp_scope each get the rule's own 403 (the interactive detail on share, HUMAN_ONLY_DETAIL on the six PERSON routes) and never reach the sentinel; the person's user key is refused on share and passes on the PERSON routes; a signed-in session passes every check and reaches the sentinel (the control). Mutation: restore reject_agent_principal -> 36 rows red (the 35 machine-principal rows and the share user-key row)."
+    },
+    {
+      "file": "unit/test_ent719_channel_bindings_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Channel bindings and their exposure are human-only, through the real Telegram, WhatsApp, VoIP and Slack routers: the three credential binds take a signed-in session (the owner's user key refused too), the other 18 routes a person. The agent's own key, a sibling inside its manage reach, the system key, ops, portal_delegate, connector, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope are refused with the gate's detail; a real unvouched loopback JWT is refused by the entry fence; a nonexistent agent gets the same 403; a schema-invalid body or query is refused before validation (and is a 422 for a person); a signed-in owner, an admin and (on person routes) the owner's user key get each handler's own fresh-install answer. Other shape: VoIP with the feature flag off."
+    },
+    {
+      "file": "unit/test_ent719_channel_uses_kept.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "The channel uses an agent keeps: PUT telegram/groups/{id} still sets trigger mode and welcome on the agent's own key (and a spawned sibling's) and on the system key (the route is listed ANY), while the completion-report consent and group-context fields are refused to every machine principal with the stored value unchanged and pass for a person; a sibling outside its reach gets the uniform 404. The Telegram, Slack and VoIP sends and lists still admit the agent's own key and reach their handlers."
+    },
+    {
+      "file": "unit/test_ent719_schedule_webhook_person_or_grant.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "scheduling",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The five schedule-webhook routes (mint, read, sign, unsign, revoke) take require_person_or_capability('schedules.manage') in the decorator, through the real schedules router and the real get_current_user with key rows in the real schema: an ungranted agent key is refused on its own agent with schedule_management_not_permitted and exactly one capability_refused audit row, before any agent or schedule lookup; an in-reach sibling without the grant is refused (the read included); a granted own key and a granted owner-owned sibling pass, another user's agent answers 404 (a call edge to it included); the owner's session and user key pass; the system key gets person_required; real connector, ops, portal_delegate and ephemeral agent keys are refused by their own entry fences first, each asserted by that fence's exact detail with no capability_refused row (a ghost on its own schedule too), and the route gate refuses stated connector, ops and portal_delegate principals, an unknown scope, a user scope carrying an agent, a vouched loopback (person_required) and a principal with no mcp_scope (403); a real unvouched loopback JWT is refused by the entry fence. Every refusal leaves the stored webhook state unmoved. The schedule itself keeps its own-agent exemption (create/update/enable/disable/delete without a grant). Other shape: a schedule with no webhook reads has_token false. The census classifies all five person_or_grant. Mutation: restoring capability_fence(own_agent_exempt=True) turns the refusal, system-key and census tests red."
+    },
+    {
+      "file": "unit/test_ent719_reach_and_exposure_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "sharing",
+        "auth",
+        "api",
+        "security",
+        "unit"
+      ],
+      "description": "Who may reach an agent and who outside the platform sees it is a person's decision, through each route's real router over a real schema: sharing and access-request approval take a signed-in session (require_interactive); revoking a share, access policy, public prompt, permission edges, folders and file sharing, and logging out, blocking and unblocking a Workspace client take a person (require_person; block and unblock keep assert_admin), as do the five public-link routes (the agent's own key creating a link: 403, no row written) and the canvas share create/list/revoke and pin routes. Every machine principal (own key, an agent in reach, system, connector, ops, portal_delegate, unknown scope, no mcp_scope, vouched loopback) gets the rule's 403 before any db call, for a missing agent and a schema-invalid body too; a real unvouched loopback JWT is refused at the entry fence; a person (and the user key on PERSON routes) still succeeds; share_file still mints once a person turns file sharing on, and the own key still writes and clears its own canvas; fresh install refuses the same way and lists []."
+    },
+    {
+      "file": "unit/test_3180_ops_write_scope.py",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The ops_write scope through the real resolver and routers on the real schema, keys minted through POST /api/mcp/keys; only Docker and Redis faked. Pass paths for circuit-breaker reset, agent stop (audit row carries mcp_key_id and mcp_scope=ops_write), execution terminate (queued cancel) and agent start through the real start_agent_internal including the #1854 self-heal of a revoked baked key (fresh key bound to the target, superseded active key pruned, nothing returned to the caller, caller's reach unchanged). Target policy: start/stop refuse the system agent, an is_system agent and a ghost, refuse when the ghost lookup raises or cannot be proven, and stay scope-specific; reset/terminate keep every agent. Demoted owner (creator, operator) 403 and suspended owner 401 on all four; password change with revoke_api_keys revokes it; PERSON_KEY_SCOPES == the mintable set. Mint matrix composed (admin JWT ok; non-admin JWT, user, ops, ops_write, agent keys 403, no row) and each redundant rung isolated. The ops key refused on the four writes; A2A 403 with no dispatch and no anonymous fallback; enumeration-safe refusal; verify verdict foreign_ops_write_key; a crafted Host with the desync asserted. Mutations: fence call, path check, owner check, each mark, target policy (call, fail-open, is_system), creatable scope, revoke set, each mint rung, verdict, url.path each turn named tests red."
+    },
+    {
+      "file": "unit/test_3180_ops_write_route_census.py",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "ops_write mark census (frozen marked set, unaliased, reasoned, below the route decorator, no other reference, authenticates through get_current_user) and path-list agreement (each entry resolves to exactly one live marked route), the test_2323 fence/gate pair mirrored for reset, and a sweep of every live OSS route of the real main.app in a hermetic subprocess (_ops_write_sweep.py) with real keys, classified by credential dependency: 623 unlisted routes refuse, A2A 403, get_optional_user treats the key as unrecognised, routes reading no Trinity credential listed by name; path list holed -> the mark refuses every unmarked handler; every handler marked -> the path list refuses; demoted owner refused and suspended owner 401 on every route; the ops key reaches no write; never-grantable families refused, and with the fence call removed each shows its own gate or (key revoke/delete, credentials inject/export/import, subscription assign) that the fence is its only layer. Mutations: fence call, path check, mark check, owner check, reset opt-in, each mark, an overbroad path entry each turn named tests red. OSS routes only."
+    },
+    {
+      "file": "../src/frontend/tests/unit/mcpKeysOpsWriteScope.mount.spec.js",
+      "feature": "#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "frontend",
+        "auth",
+        "unit"
+      ],
+      "description": "McpKeysTab mounted: an ops_write key is badged 'Ops (writes)' distinct from 'Ops (read-only)'; an admin is offered the 'Ops (operational writes)' radio beside the read-only one and creating sends scope 'ops_write' exactly; a non-admin is offered no bounded scope."
+    },
+    {
+      "file": "unit/test_3180_operational_write_audit.py",
+      "feature": "abilityai/trinity#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "Circuit-breaker reset (CONFIGURATION circuit_breaker_reset) and execution terminate (EXECUTION execution_terminate) each write one audit_log row on success, through the real resolver and the real routes: a session and a user-scoped key carry the right actor and key id; terminate covers queued cancel, parked cancel and container-proxy terminate; refused and failed calls, and an already_finished terminate, write none; with DISPATCH_BREAKER_ENABLED off and the per-agent breaker disabled the reset still writes its row."
+    },
+    {
+      "file": "unit/test_ent986_gemini_usage_statistics.py",
+      "feature": "trinity-enterprise#986",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "git"
+      ],
+      "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
+    },
+    {
+      "file": "unit/test_4051_per_worker_unit_db.py",
+      "feature": "#4051",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4051: each unit-test process, every xdist worker included, defaults TRINITY_DB_PATH / TRINITY_RETAINED_RESULTS_DIR / TRINITY_CHAT_SESSION_FILE to its own pid, not the xdist controller's (bites under CI's -n auto)."
+    },
+    {
+      "file": "unit/test_ent1042_role_answer_fence.py",
+      "feature": "trinity-enterprise#1042",
+      "added": "2026-11-01",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "trinity-enterprise#1042: an answer to an ask addressed to a canon role (role:<id>) is fenced in ask_service.may_end to the raise-time resolved_to snapshot, so every door inherits it. The real Operations route refuses a shared person outside the seat and an admin without the seat with 403 not_addressee and a remedy naming the role's label, never a person, writing nothing. An admin may still cancel, cancel and bulk-cancel are not narrowed, the approver and primary kinds are unchanged, an empty or unreadable snapshot fails closed, and all three catch sites word the refusal by role."
+    },
+    {
+      "file": "unit/test_ent1030_export_access.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030: a manifest export says no more than the direct read routes: grants and seat for owner or admin, gates through the gate read's allowlist, withheld groups named uniformly whether or not anything is held, no principal reads none, and the route hands the caller to the exporter. resources export the effective value (stored override first), an unreadable override is named instead of falling back to the label, and re-applying an export keeps a pending limit."
+    },
+    {
+      "file": "unit/test_ent1030_summary.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP6: SystemApplyResponse.summary has skills/grants/gates/roles/members each with write/report/unobserved (grants keeps held_back); one manifest exercising every group under an interactive admin, a non-admin creator and an admin's own MCP key (S8), dry run and real run counting alike and the second dry run writing nothing; member.unobserved lists roles without the provider hooks; a read error (person seats, skills) is the retryable blocker, never unobserved, and a blocked member is counted in no group; two bare manifests on one agent add and never remove (S6); the deploy preview's configured counts appear only for a member that declares a group."
+    },
+    {
+      "file": "../src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1030 CP6: ManifestPreview mounted in jsdom — the one 'after create, also configured' line sums every agent's configured counts with plurals, says person seats are reported and never filled, and renders nothing when no agent declares a configuration group."
+    },
+    {
+      "file": "unit/test_ent1030_declared_only.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; one warning per declared-only member names every key it ignores; a live one is never started, stopped or written (Docker recorders + every row naming it); deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
+    },
+    {
+      "file": "unit/test_ent1030_seats.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved; unobserved with a not-yet-exists note on a member apply will create); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips, and without a seat reader names each seat in its # unobserved: line; deploy seats through the hook only for an admin in a signed-in session (agent key, an admin's user key and a non-admin are held back with seats_require_interactive_admin, nothing written) and passes the username as attribution."
+    },
+    {
+      "file": "unit/test_ent1030_gates.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read. A gate that did not land holds its skill, or a set carrying it, on deploy and apply, including a write that raised; the deploy dry run names the refusal."
+    },
+    {
+      "file": "unit/test_ent1030_grants.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP2: a manifest member's grants: are written only by an admin in a signed-in session (the grant route's own gate, dependencies.assert_interactive_admin, spelled once); every other caller gets grant_requires_interactive_admin + summary.grants.held_back + one warning, never a blocker; an agent key deploying a manifest writes no grant; extras are reported, never revoked; the service's refusals land in failed[]; route and apply share the audit verbs."
+    },
+    {
+      "file": "unit/test_ent1030_naming.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1030_skills.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1007_ask_to_canon_role.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing"
+      ],
+      "description": "trinity-enterprise#1007 item 1: ask_operator `to: role:<id>` — the sink resolves a canon role on the raising agent's own roster with ent#881 reachability, stores the id lower-cased (a mixed-case retry replays without differs), and refuses every arm by name (role_unavailable / role_unassigned / role_cannot_open_agent; a malformed id is invalid_to naming the form) with the role's label and never a person; the gate's _can_open delegates to role_addressing.can_open_agent and its patch surface still governs _approvers."
+    },
+    {
+      "file": "unit/test_ent1007_mcp_fork_body.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "mcp",
+        "agent-create",
+        "fork-to-own"
+      ],
+      "description": "trinity-enterprise#1007 item 6: the body MCP create_agent sends for a fork (import_intent fork + fork_to_own {destination_repo}) survives models.AgentConfig with github_pat None and private defaulting True; private:false is carried; the agents.manage create gate still refuses a non-holder agent key before anything is created."
+    },
+    {
+      "file": "unit/test_ent1007_agent_kind_label.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "agent-create",
+        "docker-labels",
+        "mcp"
+      ],
+      "description": "trinity-enterprise#1007 item 7: create stamps the effective kind on the trinity.kind label; AgentStatus.kind reads it on the full and fast paths; absent, empty or unrecognised reads None (unknown), never a default; a rebuild from nothing carries no label; the ordinary recreate seeds labels from the old container (AST pin); every /info shape carries the label kind, overriding any agent-server value."
+    },
+    {
+      "file": "unit/test_ent1001_endpoint_env.py",
+      "feature": "trinity-enterprise#1001",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1001: .env cannot set proxy/TLS-trust names (every runtime), the runtime's own endpoint names (that runtime only) or AGENT_RUNTIME; container-baseline values still apply; Claude settings env pinned by a root-owned managed-settings.d drop-in written from the container env; Codex -c endpoint pins and $CODEX_HOME/.env stripping; Gemini spawns carry every pin against the CLI's own fill-only .env loader; CLI-version guards."
+    },
+    {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
+      "file": "unit/test_4085_scheduler_subscription_id.py",
+      "feature": "#4085",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "subscriptions"
+      ],
+      "description": "#4085: scheduler-created executions (cron, reminder, retry, skipped) snapshot the agent's live subscription assignment into schedule_executions.subscription_id and count toward SUB-004 window_5h/window_7d; no live assignment records NULL."
+    },
+    {
+      "file": "unit/test_4001_no_auto_maintenance.py",
+      "feature": "#4001",
+      "added": "2026-10-27",
+      "categories": [
+        "agent-server",
+        "git",
+        "unit"
+      ],
+      "description": "platform git children never start git auto-maintenance; stale maintenance.lock reaped"
+    },
+    {
+      "file": "unit/test_4064_gemini_process_group.py",
+      "feature": "#4064",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
+    },
+    {
+      "file": "unit/test_ent719_self_gate_identity.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "A self-gated route acts only as the agent its key names, through the real routers on a fresh tmp DB (SQLite; Postgres too when TEST_POSTGRES_URL is set). emit-event: an in-reach (edge) sibling key gets 403 and nothing is recorded; a nonexistent and an out-of-reach agent get the same 404; the agent's own key emits as itself (201); the owner, on a session or a user key, emits for the agent; the system key emits as trinity-system; after the self-gate an allowlist admits only an agent key, the system key and a person, so an unknown scope, ops, portal_delegate, a connector bound to the agent, a principal with no mcp_scope and a loopback principal (vouched or not) each get 403 and nothing is recorded; a real signed loopback JWT (vouched or not) is refused by the entry fence. The system key is trinity-system on every assert_own_agent route, derived from the census by gate kind: naming another agent it gets that route's own refusal, byte for byte what an in-reach agent key gets; naming trinity-system it passes; a person and the agent's own key still pass (observed at the gate's call site: the real helper decides, a wrapper records it and stops at a fixed 418). The canvas removal helper, reached alone, holds the system key to trinity-system's canvases. The three get_self_acting_agent routes are pinned unchanged. Fresh install (trinity-system plus one agent, no subscribers): the agent emits as itself; trinity-system's own report and canvas writes run whole and pass; its write to the other agent's canvas is refused. Mutations: drop the emit gate line -> the sibling test and census rule 8 red; drop the emitter allowlist call -> its eight refused-principal rows red; revert the helper's system branch -> the 22 system-key rows, the fresh-install refusal, the canvas-helper test and two ent840 rows red. No Docker."
+    },
+    {
+      "file": "unit/test_ent719_room_uses_delegated.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "The three room uses the route census lists DELEGATED, each with the named behavioural test its entry cites, through the real rooms router with real credentials: an agent key lists only its own memberships; a non-member agent key gets the missing-room 404 on read and on rename, and a member agent cannot rename; a person passes every route; the event loopback is refused on all of them. Room creation stays in the baseline (its budget fields are ruled on their own); its reach rule is pinned: every agent named must be inside the creator's reach, an unknown and an unreachable agent get one 403 with the same shape for an agent key and for a person, and nothing is created. Other shape: an agent in no room lists [] and reads the uniform 404."
+    },
+    {
+      "file": "unit/test_ent719_listed_agent_uses.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "The 11 channel, VoIP, agent-delete and event-subscription routes the route census lists AGENT_CALLABLE_ANY (no runtime change), each sibling answer through the real routers with real credentials and no dependency override (an agent's own MCP key, a user-scoped key, a session JWT, a signed loopback JWT). Use reach (Telegram groups, Slack channels and binding, VoIP call): the own key, an edge target and a spawned agent pass; a sibling with no edge, an agent spawned under a key the caller no longer holds and another user's agent are refused and nothing is sent. Manage reach (Telegram and Slack sends, VoIP binding read, the three subscription writes): an edge target is refused too. Agent delete: the own key never deletes itself (capability fence without agents.manage, spawn scope with it), a spawned durable agent needs agents.manage, a spawned ghost is discarded without it, edge-only, unrelated, retired-key-spawned and unspawned-ghost targets are refused even with the grant, another user's agent is a 404, a person deletes. A cross-agent subscription needs the subscriber's own edge to the source: for an agent the caller spawned, the caller's edge does not count and a person's grant to that agent does. A person (session or user key) passes every route; the event loopback is refused by the entry fence on all 11. Other shape: an agent with nothing bound gets [], {bound: false}, configured: false and named not-bound 404s."
     },
     {
       "file": "unit/test_4002_setup_hook_tmpdir.py",
@@ -923,6 +1313,17 @@
       "description": "#3246 C4: the seam's static guards — two-way prefix parity between the kind registry and _RESERVED_ID_PREFIXES (the four newly reserved families are platform-minted); the EMITTERS_NOT_YET_ON_SEAM ratchet (every direct or #1677-budgeted platform emitter listed with its follow-up, no stale entries, prefixes registered); the clear-site check (every hook kind on the seam has a platform_alerts.clear/reconcile call naming it, or a named NO_CLEAR_SITE reason); the caller guard (only the seam calls the #3246 accessors). AST, no DB."
     },
     {
+      "file": "unit/test_3254_budgeted_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal; the flood alarm as one queue_flood:<reason> row re-read every 6 hours through the real _sync_agent poll for 30 simulated days (R9), ended as the platform where the episode ends and never read when no episode runs (D8), retried after a failed write (#3130 I1), a person's ending standing through the re-read and the clear; the effect guard's refusal as one effect_unguarded:<effect>:<reason> row ended by its lifetime; the missing skill as one row per command, re-read by each run with the notification sent only for a new row, a pending pre-seam row still standing for its command; the gitignore sweep's must-act alert keyed by the canonical direction-tagged change-set digest (a repeat collapses, a different set or direction is another row, never expires, a person's ending stands); the Workspace problem report as one must-act row per person, target and day, keep_text at the sink and both click/comment interleavings keeping the words, the owner-only prefix kept, the delegate and the emitter landing on one subject; a person's acknowledgement through ask_service.answer landed mid-reading (between observe's read and the locked create, and between the locked find and the CAS) yields snoozed and no new row for the problem report, an inbox collision and the flood's re-read, the snooze being decided under the create's lock; the other shape, the clock 30 days ahead (the gitignore and problem-report rows still pending, a full skill_not_found budget frees itself and a new command files). Fresh DB per test (db_backend), both clocks frozen."
+    },
+    {
       "file": "unit/test_3246_platform_alert_sweep.py",
       "feature": "#3246",
       "added": "2026-10-05",
@@ -933,6 +1334,18 @@
         "unit"
       ],
       "description": "#3246 C2: the upgrade sweep, driven as the registered SQLite migration (`platform_alert_subjects`) against the real schema.py operator_queue DDL with the two new columns and indexes stripped (a pre-upgrade install holding duplicates). Ordered columns → sweep → index: `subject` / `last_seen_at` added PRAGMA-guarded; the newest pending row per derived subject survives stamped (subject, last_seen_at, context.seen_count=1, expires_at only where NULL — opt-out kinds keep NULL) and the rest end as ONE batch (cancelled / platform / superseded / NULL email / one batch_id); known kinds without a derivable subject get a lifetime stamp only (never merged on a guess); person-ended rows inside the 7-day snooze window get subject only; agent-raised, gate- and external-prefix rows untouched; a second run changes nothing; the partial unique index exists only after the run, bites on a second pending row, and matches schema.py's DDL; both tracks registered after the #3130 flood sweep, tables.py declares columns and both indexes. No Docker."
+    },
+    {
+      "file": "unit/test_3254_second_sweep.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#3254: the #3246 upgrade sweep run a second time, data only, on both tracks (SQLite `platform_alert_subjects_resweep`, Alembic `0111_platform_alert_resweep`), against the real post-#3246 operator_queue DDL (subject columns and partial unique index present). Registered on both tracks after the first sweep, no DDL in either half; per derivable moved kind (18 families) exactly one pending row per subject survives: the existing holder (seam row or first-sweep stamp) keeps the slot whatever its age, otherwise the newest subject-less row survives stamped; the rest end as ONE batch (cancelled / platform / superseded); must-act survivors keep expires_at NULL; person-ended legacy rows inside the snooze window get subject only; gitignore and problem-report legacy rows, agent-raised and gate rows untouched; git-bloat legacy rows a lifetime stamp only; idempotent (a second run changes and plans nothing); fresh install (no rows: one SELECT, no writes; the real three-pass lifecycle records it); the Alembic revision's own upgrade() on SQLite via an operations context and on PostgreSQL (`requires_postgres`, runs only with TEST_POSTGRES_URL). No Docker."
     },
     {
       "file": "unit/test_3246_platform_alerts_db.py",
@@ -1701,6 +2114,17 @@
       "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
     },
     {
+      "file": "unit/test_3254_unended_kinds.py",
+      "feature": "Issue #3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 slice 6: the poison-park, inbox-collision and validation-failure alerts report through platform_alerts.observe (no clear site). Against the unit island's real SQLite with a frozen clock: two readings are one pending row with the subject <kind>:<key>, seen_count bumped, last_seen_at moved, expires_at moved for validation and NULL for the must-act kinds; the poison park follows the seam outcome (failed or refused never parks and the next pass retries, snoozed parks); an acknowledgement through ask_service.answer lands acknowledged and snoozes; a person's ending of a collision is final (no re-file at +8 days, a new claimant or a raised priority re-alerts); a legacy collision ended inside the sweep's window and a stamped legacy pending collision ended before its first refresh both stay snoozed although legacy rows carry no claimants_digest; the collision is observed at most once per 6 hours per claimant set and a failed reading is retried; each new subject equals the sweep's legacy derivation (R1); 30 days ahead the poison and collision rows are still pending with expires_at NULL while the validation row has expired."
+    },
+    {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",
@@ -2282,6 +2706,18 @@
       "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
     },
     {
+      "file": "unit/test_3254_sync_health_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "git-sync",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 S2: the git sync health alerts on the platform-alert seam, driven through the real SyncHealthService poll cycle against db_harness with a pinned clock. D2: Kind.row_type keeps sync_failing / sync_diverged / git_bloat as the row type; a kind without one keeps alert or its budgeted type; an explicit row_type that differs from budgeted_type is refused. Per kind (sync_failing, sync_diverged, git_bloat_size, git_bloat_maintenance): the row carries its subject, a re-read bumps seen_count and moves last_seen_at / expires_at, the falling edge ends it cancelled / platform / condition_cleared; a restarted poller's reading lands on the same row; a person's acknowledgement through ask_service.answer stands, a re-read inside the snooze files nothing, the recovery clear never overwrites it; diverged_since is a sync_diverged material key, so after a person's ending two days of re-reads of that episode stay snoozed and a new episode inside the 7 days files its own row, and a pre-move person-ended row (its context carries diverged_since) snoozes its own episode only. R9: a poll inside 6 h touches nothing; a push-denied failure polled for 31 simulated days keeps one pending row with a moving deadline; a row whose recovery clear was lost expires 30 days after its last reading. AC 5: size and maintenance are two subjects and end separately. The divergence row survives a sync-failing precedence, is re-read under it (31 simulated days keep one row; a failed re-read is retried on the next poll; a restarted poller looks the row up and re-reads it; a worker's miss is looked up again after 6 h, so a row another worker raised is not stranded), a precedence never raises one, even across a restart, and it ends only with its diverged_since episode. R10: an unreachable agent, git switched off, a never cycle, an unknown tuple or a missing / malformed / negative measurement never ends an alert. /cso: an agent-written error past the 64 KiB context belt cannot keep the sync_failing alert out. R1: pre-move sync-failing / sync-diverged ids derive the seam subject; git-bloat ids are exempt and get a lifetime stamp only."
+    },
+    {
       "file": "unit/test_1600_proactive_history.py",
       "feature": "#1600",
       "added": "2026-07-16",
@@ -2316,7 +2752,7 @@
         "security",
         "reliability"
       ],
-      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632): reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Also pins #3385: an agent-authored `type` is truncated with the marker at OPERATOR_QUEUE_TYPE_MAX (64) while every platform-emitted and ask_operator type passes unchanged, the #2915 fingerprint bounds both sides so a clamped row is not a rewrite of its own oversize entry, and the DB belt rejects a type over 1 KiB. Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
+      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632) and since #3254 reporting through platform_alerts.observe: reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Also pins #3385: an agent-authored `type` is truncated with the marker at OPERATOR_QUEUE_TYPE_MAX (64) while every platform-emitted and ask_operator type passes unchanged, the #2915 fingerprint bounds both sides so a clamped row is not a rewrite of its own oversize entry, and the DB belt rejects a type over 1 KiB. Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
     },
     {
       "file": "unit/test_1615_ssh_password_removed.py",
@@ -3581,6 +4017,18 @@
         "reliability"
       ],
       "description": "Daily database-backup service (#2216, services/db_backup_service.py). Run orchestration: day-keyed idempotence (second run same day no-ops), the DB_BACKUP_ENABLED off path touching nothing, and durable system_settings status on every terminal (ent#236 — in-process state is invisible to the other worker). The Redis lease is pinned as duplicate-I/O SUPPRESSION, never a correctness boundary: taken/released, a held lease skips, Redis down fails OPEN to the day-key guard alone, release is own-token compare-and-delete (a foreign token is never deleted), and the TTL is derived from PG_DUMP_TIMEOUT_SECONDS so retuning the dump timeout visibly re-opens the math (learnings 2026-07-31). Prune runs on EVERY attempt — success, failure, and the no-space skip — which is the Catch-22 regression guard: prune-only-on-success means a full disk skips the backup, bypasses the prune, and an operator lowering the window frees nothing. Free-space preflight skips loudly with an alarm; an unavailable size estimate proceeds rather than failing closed. The alarm has two triggers because 'does not fail silently' must hold over time: the edge fires exactly once per failure episode and re-arms only after a success intervenes, and the staleness re-alarm never fires while fresh, fires past the 3-day threshold, then respects the 7-day re-fire window, covers an install that never succeeded at all, and agrees with the status block's own `stale` flag. Knobs: malformed and out-of-range env values fall back with a WARNING while an unset one is silent (#1871 shape), and the retention reader's INVERTED coercion (garbage → 14, never → 0 keep-forever) is parametrized. PG arm with the subprocess mocked: the conninfo URI normalizes the SQLAlchemy driver suffix away and strips the password while PRESERVING query params (?sslmode=require survives — re-parsing into -h/-p/-U would permanently break managed PG), the password reaches pg_dump via PGPASSWORD env ONLY and never argv, a no-password URL leaves PGPASSWORD unset, an unparseable URL never echoes the URL (no password in the log or the durable status), non-zero exit raises with size-capped stderr, a missing binary names the image rebuild (#1814 class), and the timeout path KILLS AND REAPS the child (wait_for cancels the await, never the process) before unlinking the partial tmp and reaching status + alarm."
+    },
+    {
+      "file": "unit/test_3254_backup_archive_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit",
+        "reliability"
+      ],
+      "description": "#3254: the database-backup and log-archive alarms report through the platform alert seam (#3246), on the unit island's real SQLite with the clock frozen at a pinned date in every module the path reads it from. db_backup_failure (the edge alarm) and db_backup_stale (the weekly re-alarm) are two subjects on the _db-backup host keyed by the backup directory (AC 5); log_archive_unwritable is keyed by the archive path on _log-archive. Per kind: two readings are one pending row with the subject, seen_count 2 and a moved last_seen_at and expires_at; the success site ends it as the platform (condition_cleared): an ok ends both backup kinds, a success the boot pre-migration hook wrote to the settings ends the stale row at the next staleness check, a successful write probe ends the archive row; a further failure, a no-space skip, a status reset with no success on record and a skipped probe (archival off, non-local backend) end nothing; a person's ending through ask_service.answer lands acknowledged, is never overwritten by the clear, and snoozes the next reading; key parity: the key equals the upgrade sweep's reading of a pre-move row, and the seam's row reads back as the same kind. Two workers (the Redis lease failed open), serialised by the outcome lock: a failure the sibling records while this worker clears keeps its alarm; a success the sibling records while this worker raises the failure alarm ends it; a success recorded while this worker raises the stale alarm ends that row; an outcome lock that cannot be taken fails open with a WARNING. The clock 30 days ahead: a persisting staleness re-alarmed weekly by the real _staleness_check keeps exactly one pending row through day 30 while the one-off failure reading expires on day 14, and a person's ending of the stale row silences one weekly re-alarm, not more. No Docker."
     },
     {
       "file": "unit/test_2216_boot_pre_migration_backup.py",
@@ -6395,19 +6843,6 @@
       "description": "trinity-enterprise#837 D4 (mounted): People this agent serves shows each platform role on rows and pickers, writes the assignment and then shares the agent (never with the owner, yourself or an account with no email; a 409 is silent; a failed assignment shares nothing; a failed share lands in the row's Not shared warning), pins the agent across an in-flight switch, and warns on an old unshared row with Share with them. Mutation-proven."
     },
     {
-      "file": "unit/test_3435_credential_tool_gates.py",
-      "feature": "#3435",
-      "added": "2026-10-09",
-      "categories": [
-        "backend",
-        "auth",
-        "credentials",
-        "mcp",
-        "unit"
-      ],
-      "description": "#3435: pins the EXISTING backend gates behind the export_credentials / import_credentials / get_credential_encryption_key MCP tools, by principal (real models.User objects): import/export admit an owner or admin human (JWT, user or system key), refuse every agent key with the exact human-only 403 the MCP mapper keys on, and give a non-owner the uniform 404; the key route admits an admin human, refuses a non-admin 403 'Admin access required', an agent key 403 human-only, an ops-scope key 403, and answers 503 when CREDENTIAL_ENCRYPTION_KEY is unset. Real router + real owner/admin dependencies; DB ownership, Docker and the encryption service stubbed. No Docker."
-    },
-    {
       "file": "unit/test_3434_removed_routes.py",
       "feature": "#3434",
       "added": "2026-10-09",
@@ -6857,7 +7292,7 @@
         "security",
         "guard"
       ],
-      "description": "The agent-key self-gate is one helper the route census recognises. dependencies.assert_own_agent's truth table (an agent key on its own agent passes; a sibling gets 403 with the route's own detail; JWT, user, system, connector and event-loopback principals pass, like the hand copies it replaced; refusal= builds the exception; a non-string agent_name is not an agent key). Then ONE sibling refusal per AGENT_CALLABLE_SELF route, driven off the census: each handler (or the get_self_acting_agent dependency its signature names) is called directly with a sibling agent's key on the path agent and the caller's own name in every other argument, so a gate comparing the wrong parameter fails; the routes this change converted keep their pre-existing messages; both self-gate mechanisms are exercised (per family, not a total). No Docker, no network."
+      "description": "The agent-key self-gate is one helper the route census recognises. dependencies.assert_own_agent's truth table (an agent key on its own agent passes; a sibling gets 403 with the route's own detail; the system key passes as trinity-system and gets the route's own refusal naming any other agent (trinity-enterprise#719); JWT, user, connector and event-loopback principals pass; refusal= builds the exception; a non-string agent_name is not an agent key, and a double whose mcp_scope is absent or a mock is not the system key). Then ONE sibling refusal per AGENT_CALLABLE_SELF route, driven off the census: each handler (or the get_self_acting_agent dependency its signature names) is called directly with a sibling agent's key on the path agent and the caller's own name in every other argument, so a gate comparing the wrong parameter fails; the routes this change converted keep their pre-existing messages; both self-gate mechanisms are exercised (per family, not a total). No Docker, no network."
     },
     {
       "file": "../src/mcp-server/src/tools/self-fenced-overrides.test.ts",

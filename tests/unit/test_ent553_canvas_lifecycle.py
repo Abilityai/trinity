@@ -430,6 +430,22 @@ def test_an_agent_key_may_not_pin_its_own_canvas():
     canvas_router._gate_human_removal(_user(agent_name="agent-a"), "agent-a")
 
 
+def test_the_system_key_may_not_pin_a_canvas_either(monkeypatch):
+    """trinity-enterprise#719: the pin gate admits only a person. The system
+    key is refused by that rule, before the owner check behind it."""
+    from fastapi import HTTPException
+    from routers import canvas as canvas_router
+
+    owner_checks = []
+    monkeypatch.setattr(canvas_router, "assert_agent_owner",
+                        lambda user, name, **kw: owner_checks.append(name))
+    with pytest.raises(HTTPException) as excinfo:
+        canvas_router._gate_pin(User(id=1, username="alice", role="admin", mcp_scope="system"),
+                                "agent-a")
+    assert excinfo.value.status_code == 403
+    assert owner_checks == []
+
+
 def test_the_pin_route_uses_the_humans_only_gate():
     import inspect
     from routers import canvas as canvas_router
