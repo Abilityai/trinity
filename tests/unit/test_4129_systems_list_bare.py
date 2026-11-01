@@ -12,7 +12,8 @@ A plain tag (`prod`, a manifest's `default_tags`) is not a system.
 Every case runs the REAL route over the REAL `db` facade on a full schema
 (`db_backend`). The only seam is the Docker-backed roster
 (`routers.agents.get_accessible_agents`), fed rows in the real
-`AgentStatus.dict()` shape; test 6 additionally makes the tag read raise.
+`AgentStatus.dict()` shape; test 6 additionally makes the tag read raise,
+test 9 the system-view and audit reads.
 """
 from __future__ import annotations
 
@@ -204,3 +205,16 @@ class TestSystemsListByTag:
             ("tie", "2026-10-02T09:00:00.000000Z"),
             ("old", "2026-10-01T09:00:00.000000Z"),
         ]
+
+    @pytest.mark.parametrize("read", ["list_all_system_views", "get_audit_entries"])
+    def test_9_unreadable_evidence_is_a_named_503_never_a_guess(self, world, monkeypatch, read):
+        world.seed_agent("writer")  # carries the system tag, but no `<tag>-*` carrier and no view
+
+        def boom(*_a, **_k):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(db, read, boom)
+        r = _client(world, monkeypatch, [_row("writer")]).get("/api/systems")
+        assert r.status_code == 503, r.text
+        detail = r.json()["detail"].lower()
+        assert "system views" in detail and "audit" in detail
