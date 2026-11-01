@@ -127,11 +127,30 @@ class AskConflict(Exception):
 
 class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
-    person it was addressed to (an admin may cancel it, never approve it)."""
+    person it was addressed to (an admin may cancel it, never approve it).
+    trinity-enterprise#1042: so may an ask addressed to a canon role id —
+    `role` is that `role:<id>`, None for any other ask."""
 
-    def __init__(self, item_id: str):
+    def __init__(self, item_id: str, *, role: Optional[str] = None):
         super().__init__("not_addressee")
         self.item_id = item_id
+        self.role = role
+
+    def role_message(self, *, cancelling: bool = False) -> Optional[str]:
+        """The refusal for a role-addressed ask: the role's label and what to do
+        next, never a person and never advice to widen a permission (the text
+        reaches a model through the MCP tool). None when no role id applies —
+        the door keeps its own wording."""
+        if self.role is None:
+            return None
+        from services import role_addressing
+        label = role_addressing.role_label(self.role)
+        if cancelling:
+            return (f"This ask was addressed to the {label} role; only a person seated "
+                    "in it or an admin can cancel it.")
+        return (f"This ask was addressed to the {label} role; only a person seated in it "
+                "can decide it. Ask someone seated in that role to answer it from their "
+                "Inbox, or have it cancelled so the agent can ask again.")
 
 
 @dataclass(frozen=True)
@@ -194,28 +213,61 @@ def register_ending_observer(fn: Callable[[EndingEvent], None]) -> Callable[[End
     return fn
 
 
-def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
-    """Who may end an ask — the one rule every ending door shares
-    (trinity-enterprise#751; the operator routes, the Workspace answer and a
-    bulk sweep all reach it through this sink).
+def _role_id_of(row: Mapping[str, Any]) -> Optional[str]:
+    """The canonical `role:<id>` the ask was addressed to, else None."""
+    from services import role_addressing
+    role_id = role_addressing.parse_role_id(row.get("to_role"))
+    return None if role_id is None else f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
 
-    Only a GATED-SKILL APPROVAL is narrowed: its decision runs a business action,
-    so it belongs to the people the ask was addressed to (`resolved_to`). An
-    admin may CANCEL one — the escalation — but never approve it. Every other
-    ask keeps the rule it had: any person with access to the agent, checked by
-    the caller. Person-only endings stay the routes' check
-    (`dependencies.reject_non_person_principal`), since an agent key carries its
-    owner's email."""
-    if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
+
+def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
+    """Whether ending `row` this way belongs to the people it resolved to
+    (`resolved_to`) — the one predicate `may_end` and `addressed_view` share,
+    so a card never offers a control the sink would refuse.
+
+    - A gated-skill approval (trinity-enterprise#751): its answer AND its cancel.
+    - An ask addressed to a canon role id (trinity-enterprise#1042): its answer
+      only — a cancel keeps the rule every ask has.
+    The four kinds are not fenced here."""
+    if row.get("raised_by") == "gate" and row.get("type") == "approval":
         return True
-    email = (getattr(actor, "email", None) or "").strip().casefold()
+    if cancelling:
+        return False
+    return _role_id_of(row) is not None
+
+
+def _resolved_people(row: Mapping[str, Any]) -> List[str]:
+    """`resolved_to` as a list of people; anything unreadable is nobody."""
     resolved = row.get("resolved_to") or []
     if isinstance(resolved, str):
         try:
             resolved = json.loads(resolved)
         except ValueError:
             resolved = []
-    if email and email in {str(p).strip().casefold() for p in resolved}:
+    if not isinstance(resolved, list):
+        return []
+    return list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
+
+
+def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
+    """Who may end an ask — the one rule every ending door shares
+    (trinity-enterprise#751; the operator routes, the Workspace answer and a
+    bulk sweep all reach it through this sink).
+
+    A seat-fenced ending (`_seat_fenced`) belongs to the people the ask was
+    addressed to (`resolved_to`, written at raise time): a gated-skill approval,
+    whose decision runs a business action, and the answer to an ask addressed to
+    a canon role id (trinity-enterprise#1042 — the role addresses the ask, the
+    seat authorises the answer). An empty or unreadable snapshot is nobody. An
+    admin may CANCEL a gate approval — the escalation — but never decide a
+    fenced ask. Every other ending keeps the rule it had: any person with access
+    to the agent, checked by the caller. Person-only endings stay the routes'
+    check (`dependencies.reject_non_person_principal`), since an agent key
+    carries its owner's email."""
+    if not _seat_fenced(row, cancelling=cancelling):
+        return True
+    email = (getattr(actor, "email", None) or "").strip().casefold()
+    if email and email in {p.casefold() for p in _resolved_people(row)}:
         return True
     return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
 
@@ -231,13 +283,7 @@ def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str,
     refusal that it was not theirs."""
     if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
         return None
-    resolved = row.get("resolved_to") or []
-    if isinstance(resolved, str):
-        try:
-            resolved = json.loads(resolved)
-        except ValueError:
-            resolved = []
-    people = list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
+    people = _resolved_people(row)
     if not people:
         return None
     return {"waiting_on": people, "can_decide": may_end(row, actor)}
@@ -270,7 +316,7 @@ def answer(
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
-        raise AskNotAddressee(item["id"])
+        raise AskNotAddressee(item["id"], role=_role_id_of(item))
     from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
@@ -307,7 +353,7 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     `AskNotAddressee` (a gate approval the actor may not end, #751)."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
-        raise AskNotAddressee(item_id)
+        raise AskNotAddressee(item_id, role=_role_id_of(current))
     updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
     if not updated:
         raise AskNotFound(item_id)
