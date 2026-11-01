@@ -177,46 +177,90 @@ async def apply_system(
 @router.get("")
 async def list_systems(current_user: User = Depends(get_current_user)):
     """
-    List all systems (agents grouped by prefix).
+    List deployed systems (#4129): one entry per system tag carried by an
+    agent the caller can access, with the agents that carry it.
 
-    Groups agents by system prefix (before first '-').
-    Returns system summaries with agent counts and details.
+    The tag is what deploy and apply write to record membership; a name is
+    never split at a hyphen, so a `naming: bare` system lists under its own
+    name and `content-writer` does not invent a `content` system. A stored
+    system tag looks like any other tag, so a tag is listed only with evidence
+    that it is a system: the auto-created system view for it, a `system_apply`
+    audit row naming it, or a carrier named `<tag>-*`. A plain tag (`prod`,
+    a manifest's `default_tags`) is not listed.
     """
     try:
         # Import here to avoid circular dependency
         from routers.agents import get_accessible_agents
+        from services.system_service import SYSTEM_VIEW_AUTO_DESCRIPTION
+        from utils.helpers import parse_iso_timestamp, to_utc_iso
 
-        # Get all agents user can access
         agents = get_accessible_agents(current_user)
+        try:
+            names = [a['name'] for a in agents]
+            tags_by_agent = (db.get_tags_for_agents(names) or {}) if names else {}
+        except Exception:
+            logger.exception("list_systems: agent tag read failed")
+            raise HTTPException(status_code=503,
+                                detail="Systems could not be listed: agent tags could not be read. Retry.")
 
-        # Group by system prefix
-        systems_dict: dict = {}
+        # Members are the roster agents that CARRY the tag (members ⊆ roster).
+        groups: dict = {}
         for agent in agents:
-            # Extract system prefix (everything except last component after final '-')
-            # Example: "my-system-abc-worker1" -> "my-system-abc"
-            if '-' in agent['name']:
-                parts = agent['name'].split('-')
-                prefix = '-'.join(parts[:-1])  # All parts except the last (short name)
-                if prefix not in systems_dict:
-                    systems_dict[prefix] = {
-                        "name": prefix,
-                        "agents": [],
-                        "agent_count": 0,
-                        "created_at": agent.get('created_at')
-                    }
-                systems_dict[prefix]["agents"].append({
-                    "name": agent['name'],
-                    "status": agent.get('status', 'unknown'),
-                    "template": agent.get('template')
-                })
-                systems_dict[prefix]["agent_count"] += 1
+            for tag in tags_by_agent.get(agent['name']) or []:
+                groups.setdefault(tag, []).append(agent)
 
-        # Sort by created_at (newest first)
-        systems = list(systems_dict.values())
-        systems.sort(key=lambda s: s.get('created_at') or '', reverse=True)
+        try:
+            proven = {t for t, members in groups.items()
+                      if any(a['name'].startswith(f"{t}-") for a in members)}
+            pending = [t for t in groups if t not in proven]
+            if pending:
+                for view in db.list_all_system_views() or []:
+                    view_tags = {str(x).lower().strip() for x in (view.filter_tags or [])}
+                    for t in pending:
+                        if t in view_tags and view.description == SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=t):
+                            proven.add(t)
+            for t in [t for t in pending if t not in proven]:
+                offset = 0
+                while True:
+                    rows = db.get_audit_entries(event_type=AuditEventType.CONFIGURATION.value,
+                                                target_type="system", target_id=t,
+                                                limit=100, offset=offset)
+                    if any(r.get('event_action') == "system_apply" for r in rows):
+                        proven.add(t)
+                        break
+                    if len(rows) < 100:
+                        break
+                    offset += 100
+        except Exception:
+            logger.exception("list_systems: system evidence read failed")
+            raise HTTPException(status_code=503,
+                                detail="Systems could not be listed: system views or the audit log could not be read. Retry.")
+
+        systems = []
+        for name in sorted(proven):
+            members = groups[name]
+            created = []
+            for a in members:
+                c = a.get('created')
+                if isinstance(c, str):
+                    c = parse_iso_timestamp(c)
+                if c:
+                    created.append(to_utc_iso(c))
+            systems.append({
+                "name": name,
+                "agents": [{"name": a['name'], "status": a.get('status', 'unknown'),
+                            "template": a.get('template')} for a in members],
+                "agent_count": len(members),
+                "created_at": min(created) if created else None,
+            })
+
+        # Newest first (earliest member's `created`), name order on a tie.
+        systems.sort(key=lambda s: s['created_at'] or '', reverse=True)
 
         return {"systems": systems}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to list systems: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list systems: {str(e)}")
