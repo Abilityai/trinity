@@ -19,7 +19,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 from fastapi import HTTPException, Request
 
@@ -2780,6 +2780,10 @@ class ApplyMemberState:
     # trinity-enterprise#1030 CP3: every stored gate row by skill key
     # (tombstones included), read only when the member declares `gates:`.
     gates: Dict[str, dict] = field(default_factory=dict)
+    # trinity-enterprise#1043: every skill the member holds (casefolded; set-
+    # derived included), read with the gates, so the plan knows which declared
+    # gate sits on a skill that keeps running if its write fails.
+    skill_names: Set[str] = field(default_factory=set)
     # trinity-enterprise#1030 CP4: the seat the member holds (None = not
     # observed on this install) and each declared person seat's status.
     seat: Optional[Dict[str, object]] = None
@@ -3129,6 +3133,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             if manifest.agents[state.short_name].gates is not None:  # trinity-enterprise#1030 CP3
                 from services.system_apply import gates as apply_gates
                 state.gates = apply_gates.read_member(name)
+                state.skill_names = apply_gates.read_held_skills(name)  # trinity-enterprise#1043
             from services.system_apply import seats as apply_seats
             if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
                 state.seat, state.person_seats = apply_seats.read_member(
@@ -3855,7 +3860,8 @@ def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers
     from services.system_apply import gates as apply_gates
     apply_gates.plan(
         mp, stored=None if state is None else state.gates, blockers=blockers,
-        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp)
+        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp,
+        skill_names=None if state is None else state.skill_names)
 
 
 _DECLARED_ONLY_LIVE_NOTE = (
