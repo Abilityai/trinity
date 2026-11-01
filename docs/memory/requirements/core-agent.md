@@ -4129,6 +4129,12 @@ to localStorage in the clear.
     (`db/operator_queue.py::list_items`) while both clients show the **longest-waiting
     first**, so a page truncated at the read cap drops the oldest — a public bug listed in the
     PR's handoffs, not fixed here (no endpoint change).
+- **Asks the platform addresses to a person reach them by address (trinity-enterprise#981)**:
+  a gate-raised ask in the reserved `gate-addressee-only-reach-` family is in its addressee's
+  Action (list, count, answer, context) even when its agent is on no roster of theirs; nobody
+  else sees it, and the rest of the addressee-only family keeps its roster fence. Such an ask
+  opens no chat, and carries a `project` field (`{id, task_id, event}`) read only from
+  platform-written context keys an agent cannot set.
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).

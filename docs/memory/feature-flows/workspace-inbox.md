@@ -543,6 +543,43 @@ narrowed to the agent (`actionItems`, the same builder) and whose click lands
 here on `?tab=action&from=<agent>&item=ask:<id>`. Flow:
 [workspace-rail.md](workspace-rail.md) → *The Asks tab*.
 
+## Asks the platform addresses to a person (trinity-enterprise#981)
+
+Action's asks are fenced on the raising agent's roster, which is right for an
+agent's own asks. A row the **platform** raises about a person is raised under a
+platform agent that person is not shared with, so the roster would hide it from
+the one person it is for. For one narrow reserved family the address is the
+fence instead: the platform chose the addressee; the roster was never its fence.
+
+- **Reach by address.** A row reaches its addressee by address alone when ALL
+  hold: its `request_id` starts with a prefix in `ADDRESSEE_REACH_ID_PREFIXES`
+  (`gate-addressee-only-reach-`, a sub-family of the #980 addressee-only family,
+  under the reserved `gate-` prefix so no agent can mint one), the row's own
+  `raised_by = 'gate'`, and the viewer is its single addressee or one of its
+  `resolved_to` (case-insensitive). The condition is SQL, OR'd beside the
+  roster's agent set in `db/operator_queue.py::_list_conditions` for the page
+  **and** its count, so a viewer on no roster still gets the row and an honest
+  total. `client_portal/asks/service._owned_ask` applies the same predicate
+  (`is_addressee_reach`), so answer and context open it off-roster and anyone
+  else gets the uniform 404. The wider addressee-only family keeps its roster
+  fence.
+- **One person off a shared row.** `ask_service.drop_addressee(ask_id, email,
+  reason=…)` removes one person from a row's `resolved_to` (and clears the
+  single addressee when it named them), compare-and-set; the row stays for the
+  others. The audit row carries ids and the reason, never the address.
+- **No chat, platform-written context.** A gate raise may pass
+  `attach_chat=False` (no Workspace attachment, no Main minted, no `chat_id`)
+  and `platform_context`, merged into `context` after the agent-content strip
+  and only for keys in `_PLATFORM_CONTEXT_KEYS`; both are refused (ValueError)
+  on an agent's raise.
+- **The `project` field.** `WorkspaceAsk.project` is `{id, task_id, event}`,
+  projected from the platform keys `workspace_project_id`,
+  `workspace_project_task` and `workspace_project_event` only; null without a
+  project id. Those keys are stripped from agent-authored content at both
+  ingestion boundaries (native and file), so an agent cannot forge one.
+
+Tests: `tests/unit/test_ent981_addressee_reach.py`.
+
 ## Related Flows
 
 - Upstream: [workspace-deliverables.md](workspace-deliverables.md) (addressed reports and the
