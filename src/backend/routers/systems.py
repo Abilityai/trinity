@@ -320,6 +320,7 @@ async def get_system(
             )
 
         # Get detailed info for each agent
+        accessible = {a['name'] for a in agents}
         detailed_agents = []
         for agent in system_agents:
             agent_detail = {
@@ -329,20 +330,32 @@ async def get_system(
                 "created_at": agent.get('created_at')
             }
 
-            # Try to get additional details (permissions, folders, schedules)
+            # Additional details, each in its OWN `try` (#4128): one shared
+            # `try` let the first raise hide the other two keys, and
+            # `db.get_agent_permissions` / `db.get_agent_folder_config` do not
+            # exist on the facade, so all three were absent for every member.
+            # Same reads as apply's snapshot: `get_permitted_agents` and
+            # `get_shared_folder_config` (a pydantic row, read by attribute).
             try:
-                # Get permissions
-                perms = db.get_agent_permissions(agent['name'])
-                agent_detail["permissions"] = [p["target_agent"] for p in perms]
+                # Targets narrowed to the caller's accessible roster, exactly
+                # what `GET /api/agents/{name}/permissions` shows the same caller.
+                agent_detail["permissions"] = sorted(
+                    t for t in db.get_permitted_agents(agent['name']) if t in accessible
+                )
+            except Exception as e:
+                logger.warning(f"Failed to get permissions for agent {agent['name']}: {e}")
 
-                # Get folders config
-                folder_config = db.get_agent_folder_config(agent['name'])
-                if folder_config:
+            try:
+                folder_config = db.get_shared_folder_config(agent['name'])
+                if folder_config is not None:
                     agent_detail["folders"] = {
-                        "expose": folder_config["expose_enabled"],
-                        "consume": folder_config["consume_enabled"]
+                        "expose": bool(folder_config.expose_enabled),
+                        "consume": bool(folder_config.consume_enabled)
                     }
+            except Exception as e:
+                logger.warning(f"Failed to get folders for agent {agent['name']}: {e}")
 
+            try:
                 # #2373: `db.get_agent_schedules` DOES NOT EXIST — the facade
                 # exposes `list_agent_schedules`, and `database.py` deliberately
                 # has no `__getattr__` fallback. The AttributeError was swallowed
@@ -375,7 +388,7 @@ async def get_system(
                 ]
 
             except Exception as e:
-                logger.warning(f"Failed to get details for agent {agent['name']}: {e}")
+                logger.warning(f"Failed to get schedules for agent {agent['name']}: {e}")
 
             detailed_agents.append(agent_detail)
 

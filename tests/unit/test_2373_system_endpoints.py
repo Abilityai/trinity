@@ -290,7 +290,7 @@ def test_export_round_trips_kind_so_a_deployment_stays_pull_only(monkeypatch):
     monkeypatch.setattr(svc.db, "get_permitted_agents", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "list_agent_schedules", lambda n: [], raising=False)
     monkeypatch.setattr(svc.db, "get_agent_tags", lambda n: [], raising=False)
-    monkeypatch.setattr(svc.db, "get_agent_folder_config", lambda n: None, raising=False)
+    monkeypatch.setattr(svc.db, "get_shared_folder_config", lambda n: None)
 
     agents = [
         {"name": "acme-web", "template": "github:acme/web"},

@@ -654,9 +654,11 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
         raise AskError(422, e.code, str(e))
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
-    except ask_service.AskNotAddressee:
-        # trinity-enterprise#751: a gated-skill approval addressed to someone else.
-        raise AskError(403, "not_addressee", "This approval was addressed to someone else.")
+    except ask_service.AskNotAddressee as e:
+        # trinity-enterprise#751: a gated-skill approval addressed to someone else;
+        # #1042: an ask to a canon role the person is not seated in.
+        raise AskError(403, "not_addressee",
+                       e.role_message() or "This approval was addressed to someone else.")
     except ask_service.AskConflict as conflict:
         # A lost race writes nothing and dispatches nothing — the sink only
         # reaches its observers on a compare-and-set it WON. Still pending means

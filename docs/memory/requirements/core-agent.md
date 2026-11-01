@@ -263,7 +263,8 @@
   - `upstream` remote auto-added in the agent workspace (credential-less, public templates) so `git pull upstream main` adopts template improvements; `GIT_UPSTREAM_REPO` env var baked at creation.
   - Fork-to-own agents are pinned to source mode (origin main = the brain) with the 15-min auto-sync heartbeat enabled (pushing to your own main is the point).
   - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
-- **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
+- **MCP (since #4126)**: `create_agent` accepts the `fork_to_own` block minus `github_pat` (tool args land in transcripts — a PAT arg would persist there in plaintext); the caller's saved personal token is spent, and an agent key is refused `FORK_PAT_REQUIRED`.
+- **Out of scope (v1)**: PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
 
 ### 4.5 Library Page (trinity-enterprise#263)
 - **Status**: ✅ Implemented (2026-07-31)

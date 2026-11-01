@@ -159,9 +159,14 @@ one. Losing the re-claim race to a concurrent retry yields 409
 - **UI**: `CreateAgentModal.vue` — 3-way intent radio on the free-form GitHub
   path (default clone; fork reveals the existing destination/PAT/visibility
   fieldset; copy names the own-it-later path) + `ImportValidationStep.vue`.
-- **MCP**: `create_agent` gains `import_intent: "copy" | "clone"` only — fork
-  stays UI-only (tool args are audit-logged; a PAT arg would persist in
-  plaintext). Fork-scope failures (`FORK_PAT_INVALID`,
+- **MCP**: `create_agent` takes `import_intent: "copy" | "clone" | "fork"`;
+  fork adds a `fork_to_own: {destination_repo, private?}` block and never a
+  token argument (tool args land in the caller's transcript, so a PAT arg
+  would persist there in plaintext; the `mcp_operation` audit row records the
+  tool, outcome, target agent and request id, never the arguments
+  themselves). The backend spends the caller's saved personal token; an agent
+  key, or a caller with no saved token, is refused `FORK_PAT_REQUIRED`
+  (#4126). Fork-scope failures (`FORK_PAT_INVALID`,
   `FORK_REPO_CREATE_FAILED`) name the copy/clone alternatives — never silent
   auto-degrade.
 - **Backend**: `services/agent_service/snapshot_import.py` (new),
