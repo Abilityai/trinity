@@ -23,12 +23,11 @@ from dependencies import (
     get_current_user,
     require_admin,
     reject_agent_principal,
-    reject_non_interactive_principal,
+    assert_interactive_admin,
     get_authorized_agent_by_name,
     get_skill_managed_agent_by_name,
     can_manage_agent_skills,
     acting_agent_name,
-    is_person_principal,
 )
 from database import db
 from db_models import AgentSkill, SkillInfo, AgentSkillsUpdate
@@ -57,7 +56,7 @@ from services.skill_service import (
     AmbiguousSkillSource, apply_skill_source,
 )
 from services.skill_packaging import validate_skill_name
-from services import capability_grant_service, peer_skill_policy
+from services import capability_grant_service, peer_skill_policy, skill_assignment_service
 from services.capability_grant_service import CapabilityGrantRefused
 from db.capability_grants import CAPABILITY_SKILLS_MANAGE
 
@@ -135,106 +134,6 @@ async def _remove_unassigned_skills(
         "skills_failed": result.get("skills_failed", 0),
         "results": result.get("results", {}),
     }
-
-
-async def _deliver_assigned_skills(
-    agent_name: str, added_names: List[str]
-) -> Optional[Dict[str, Any]]:
-    """Deliver just-assigned skill packages to the agent (#2703) — the write-side
-    twin of `_remove_unassigned_skills`, with the same contract: the row has
-    committed and is authoritative, delivery is best-effort, and a stopped
-    agent / busy lock / transport failure is a NAMED outcome in the body, never
-    a failed request. See `skill_service.deliver_assigned` for the vocabulary.
-
-    Returns the delivery report for the response body, or None when nothing was
-    assigned.
-    """
-    names = [n for n in added_names if validate_skill_name(n)]
-    if not names:
-        return None
-    try:
-        return await skill_service.deliver_assigned(agent_name, names)
-    except Exception as e:  # noqa: BLE001 — never fail a committed assign
-        logger.warning(f"skill delivery failed for {agent_name}: {e}")
-        return {
-            "status": "not_delivered",
-            "reason": "injection_error",
-            "skills": {n: {"status": "not_delivered"} for n in sorted(names)},
-        }
-
-
-def _conflict_names(agent_name: str) -> List[str]:
-    """Assigned names whose library package was NOT written because the agent
-    has its own skill of that name (#2914 `conflict`). Read BEFORE an
-    unassign: the own skill is what runs, so its gate is the own skill's and
-    stays (trinity-enterprise#753, decision 1)."""
-    try:
-        return [r.skill_name for r in db.get_agent_skills(agent_name)
-                if getattr(r, "delivery_status", None) == "conflict"]
-    except Exception:  # noqa: BLE001 — a missed snapshot keeps nothing extra; never block the write
-        return []
-
-
-async def _sync_gates(
-    agent_name: str,
-    current_user: User,
-    request: Optional[Request] = None,
-    *,
-    removed: Optional[List[str]] = None,
-    conflict: Optional[List[str]] = None,
-    removal: Optional[Dict[str, Any]] = None,
-    prune: Optional[Dict[str, Any]] = None,
-    add: bool = True,
-) -> Optional[Dict[str, Any]]:
-    """Bring the agent's skill gates in line with an assignment write
-    (trinity-enterprise#753). Every route here that writes `agent_skills` calls
-    it — `tests/unit/test_ent753_assignment_hooks.py` holds that.
-
-    * `add` — library defaults for every assigned recommended skill. Called
-      BEFORE `_deliver_assigned_skills`, so a package never lands ungated.
-    * A gate on a `removed` name goes only once its package has left the agent
-      (`removal`, the route's own report; `prune`, the inject route's). A
-      deferred or failed removal keeps it — the files may still be there.
-    * An explicit gate goes only when a PERSON unassigned the skill. An agent's
-      unassign — a skills.manage holder, itself or a sibling — keeps it and says
-      so, so unassign-then-reassign cannot launder a gate away (plan-gate
-      ruling 2026-10-07).
-
-    Returns `{gates_removed, gates_kept, gate_defaults}` (only what happened),
-    or None. Never raises: the assignment has committed.
-    """
-    from services import skill_gate_map_service as gate_map
-
-    ctx = gate_map.gate_context(
-        current_user, trigger="assignment",
-        ip=request.client.host if request is not None and request.client else None,
-        endpoint=request.scope.get("path") if request is not None else None,
-        request_id=getattr(request.state, "request_id", None) if request is not None else None,
-    )
-    report: Dict[str, Any] = {}
-    names = [n for n in (removed or []) if n]
-    gone = gate_map.packages_gone(removal)
-    try:
-        dropped: List[str] = []
-        if names and is_person_principal(current_user) and not getattr(
-                current_user, "vouched_source_agent", None):
-            dropped = await gate_map.drop_explicit_gates_on_unassign(
-                agent_name, [n for n in names if n.lower() in gone], ctx=ctx, keep=conflict or [])
-            if dropped:
-                report["gates_removed"] = dropped
-        if names:
-            kept = [n for n in await asyncio.to_thread(gate_map.explicit_gate_names, agent_name, names)
-                    if n not in dropped]
-            if kept:
-                report["gates_kept"] = kept
-    except Exception as e:  # noqa: BLE001 — an explicit gate left in place is the safe direction
-        logger.warning("[ent#753] gate removal after unassign failed for %s: %s", agent_name, e)
-    defaults = await gate_map.reconcile_library_gates(
-        agent_name, ctx=ctx, add=add,
-        drop_defaults=gate_map.drop_after_prune(prune) if prune is not None else gone)
-    if defaults:
-        report["gate_defaults"] = defaults
-    return report or None
 
 
 def _merge_gate_reports(*reports: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -598,7 +497,7 @@ async def update_agent_skills(
         previous = set(db.get_agent_skill_names(agent_name))
     except Exception:  # noqa: BLE001 — never block the assignment itself
         previous = set()
-    conflict = _conflict_names(agent_name)
+    conflict = skill_assignment_service.conflict_names(agent_name)
 
     if set_names is not None:
         try:
@@ -647,14 +546,14 @@ async def update_agent_skills(
     # `deferred` (the start-path reconcile finishes it), which is the honest
     # order for a replace that mostly ADDS.
     added = sorted(current - previous)
-    gates_added = await _sync_gates(agent_name, current_user, request)   # ent#753: gated before delivered
-    delivery = await _deliver_assigned_skills(agent_name, added)
+    gates_added = await skill_assignment_service.sync_gates(agent_name, current_user, request)   # ent#753: gated before delivered
+    delivery = await skill_assignment_service.deliver_assigned_skills(agent_name, added)
     removal = await _remove_unassigned_skills(
         agent_name, sorted(previous - current), current_user, request
     )
     if added or (previous - current):
         await broadcast_skills_changed(agent_name)
-    gates = _merge_gate_reports(gates_added, await _sync_gates(
+    gates = _merge_gate_reports(gates_added, await skill_assignment_service.sync_gates(
         agent_name, current_user, request, removed=sorted(previous - current),
         conflict=conflict, removal=removal, add=False))
 
@@ -692,7 +591,7 @@ async def inject_skills(
     # ent#753: library defaults follow the rows the set reconcile just wrote,
     # before anything is injected. A Sync is not a person's unassign, so
     # explicit gates of dropped members stay.
-    gates = await _sync_gates(agent_name, current_user)
+    gates = await skill_assignment_service.sync_gates(agent_name, current_user)
     try:
         result = await skill_service.inject_skills(agent_name, force=True)
     except SkillInjectionBusy as e:
@@ -704,7 +603,7 @@ async def inject_skills(
     # #2703: a Sync changes the listing too — open surfaces refetch.
     await broadcast_skills_changed(agent_name)
     # ent#753: the prune removed what is no longer assigned — their defaults go.
-    result["gates"] = _merge_gate_reports(gates, await _sync_gates(
+    result["gates"] = _merge_gate_reports(gates, await skill_assignment_service.sync_gates(
         agent_name, current_user, prune=result.get("reconcile"), add=False))
     return result
 
@@ -726,22 +625,19 @@ async def assign_skill(
             detail=f"Skill '{skill_name}' not found in library"
         )
 
-    result = db.assign_skill(
-        agent_name, skill_name, current_user.username,
-        assigned_by_agent=acting_agent_name(current_user),  # ent#596, R29
-    )
-    if result is None:
-        # ent#530: a row that exists only because a set names it becomes an
-        # individual assignment — unassigning the set no longer removes it.
-        db.set_skill_individual(agent_name, skill_name, True)
     # #2703: deliver on BOTH branches. "Already assigned" used to return early,
     # which made a re-click after a `not_delivered` a no-op — and the Library
     # page's assign control has no Sync button beside it, so that re-click is
     # the only retry it has. Delivery is the start-path injection (unchanged
     # skills cost one metas read), so an idempotent re-assign is cheap.
-    gates = await _sync_gates(agent_name, current_user)   # ent#753: gated before delivered
-    delivery = await _deliver_assigned_skills(agent_name, [skill_name])
-    await broadcast_skills_changed(agent_name)
+    # ent#1030: the row → gates → delivery → broadcast sequence is shared with
+    # a system manifest's `skills:` field.
+    out = await skill_assignment_service.assign_and_deliver(
+        agent_name, [skill_name], current_user,
+        acting_agent=acting_agent_name(current_user),  # ent#596, R29
+    )
+    result = out["rows"].get(skill_name)
+    delivery, gates = out["delivery"], out["gates"]
     if result is None:
         return {
             "success": True,
@@ -813,8 +709,8 @@ async def unassign_skill(
         # deferred — the listing surfaces re-read the container either way and
         # the assignment lists read the row.
         await broadcast_skills_changed(agent_name)
-    gates = await _sync_gates(agent_name, current_user, request,
-                              removed=[skill_name] if removed else [], conflict=conflict,
+    gates = await skill_assignment_service.sync_gates(agent_name, current_user, request,
+                                                       removed=[skill_name] if removed else [], conflict=conflict,
                               removal=removal)
 
     return {
@@ -868,7 +764,7 @@ async def assign_skill_set(
 
     if not validate_skill_name(set_name):
         raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
-    conflict = _conflict_names(agent_name)
+    conflict = skill_assignment_service.conflict_names(agent_name)
     try:
         result = await asyncio.to_thread(
             skill_set_service.assign,
@@ -877,9 +773,10 @@ async def assign_skill_set(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     # ent#753: gated before delivered. This route removes no package, so a gate
     # on a member the re-plan dropped stays until the start path prunes it.
-    gates = await _sync_gates(agent_name, current_user,
-                              removed=result.get("removed") or [], conflict=conflict)
-    delivery = await _deliver_assigned_skills(agent_name, result["added"]) if result["added"] else None
+    gates = await skill_assignment_service.sync_gates(agent_name, current_user,
+                                                       removed=result.get("removed") or [], conflict=conflict)
+    delivery = (await skill_assignment_service.deliver_assigned_skills(agent_name, result["added"])
+                if result["added"] else None)
     await broadcast_skills_changed(agent_name)
     # The assign response probes prerequisites: one exec, on a write the fence already gated.
     status = next((s for s in await skill_set_service.agent_set_status(agent_name, probe=True)
@@ -909,15 +806,15 @@ async def unassign_skill_set(
 
     if not validate_skill_name(set_name):
         raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
-    conflict = _conflict_names(agent_name)
+    conflict = skill_assignment_service.conflict_names(agent_name)
     result = await asyncio.to_thread(skill_set_service.unassign, agent_name, set_name, current_user.username)
     removal = None
     if result["removed"]:
         removal = await _remove_unassigned_skills(agent_name, result["removed"], current_user, request)
     if result["existed"]:
         await broadcast_skills_changed(agent_name)
-    gates = await _sync_gates(agent_name, current_user, request,
-                              removed=result["removed"], conflict=conflict, removal=removal)
+    gates = await skill_assignment_service.sync_gates(agent_name, current_user, request,
+                                                       removed=result["removed"], conflict=conflict, removal=removal)
     return {
         "success": True,
         "set_name": set_name,
@@ -989,7 +886,7 @@ async def set_skill_manager(
     audited — who gave which agent the power to write skills into its siblings,
     and when, is exactly the record a later incident review reaches for.
     """
-    reject_non_interactive_principal(admin_user)
+    assert_interactive_admin(admin_user)  # the one spelling of the grant gate (ent#1030)
     try:
         result = capability_grant_service.set_grant(
             agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user.username
@@ -997,21 +894,11 @@ async def set_skill_manager(
     except CapabilityGrantRefused as e:
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     if result["changed"]:
-        try:  # best-effort: the grant has already committed
-            await platform_audit_service.log(
-                event_type=AuditEventType.AUTHORIZATION,
-                event_action="skill_manager_grant" if body.granted else "skill_manager_revoke",
-                source="api",
-                actor_user=admin_user,
-                actor_ip=request.client.host if request.client else None,
-                endpoint=request.scope["path"],
-                request_id=getattr(request.state, "request_id", None),
-                target_type="agent",
-                target_id=agent_name,
-                details={"capability": CAPABILITY_SKILLS_MANAGE, "granted": body.granted},
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning("skill-manager audit failed for %s", agent_name)
+        # `skill_manager_grant` / `skill_manager_revoke`, from the shared verb
+        # table every grant door uses.
+        await capability_grant_service.audit_grant_change(
+            agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user, request=request,
+            log=platform_audit_service.log)
     return SkillManagerGrantResult(**result)
 
 

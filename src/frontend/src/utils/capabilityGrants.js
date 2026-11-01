@@ -18,8 +18,8 @@ export const SELF_CHANGE_CAPABILITIES = [
   {
     id: 'schedules.manage',
     label: 'Change other agents’ schedules',
-    can: "Create, change, pause or delete another agent's schedules and their webhooks.",
-    without: 'Without it, it can still manage its own schedules, but never another agent’s.',
+    can: "Create, change, pause or delete another agent's schedules, and manage any schedule's webhook, its own included.",
+    without: 'Without it, it can still manage its own schedules but not their webhooks, and never another agent’s.',
   },
   {
     id: 'instructions.manage',

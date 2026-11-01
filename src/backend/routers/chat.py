@@ -3,7 +3,7 @@ Agent chat and activity routes for the Trinity backend.
 
 Includes execution queue integration to prevent parallel execution on the same agent.
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import asyncio
 import httpx
@@ -22,6 +22,7 @@ from dependencies import (
     assert_owns_or_admin,
     is_fleet_admin,
     resolve_source_agent,
+    ops_write_route,
     row_is_viewers,
     viewer_row_scope,
 )
@@ -48,6 +49,7 @@ from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
 from db.write_params import ExecutionResult
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +147,21 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
         status_code=503,
         detail={"error": "circuit_open", "retry_after_seconds": retry_after},
         headers={"X-Circuit-Open": "true", "Retry-After": str(retry_after)},
+    )
+
+
+def _raise_if_stored_error(snapshot) -> None:
+    """#3993: a replay of a key whose run ended in a terminal error (a turn
+    limit, #3988) answers that error again, with its code, and never runs the
+    task a second time."""
+    stored = chat_execution_service.stored_error(snapshot)
+    if stored is None:
+        return
+    raise HTTPException(
+        status_code=stored["status_code"],
+        detail=stored.get("detail"),
+        headers=chat_execution_service._error_code_headers(
+            stored.get("error_code"), {"X-Idempotent-Replay": "true"}),
     )
 
 
@@ -267,6 +284,7 @@ async def chat_with_agent(
                     "execution_id": admission.execution_id,
                 },
             )
+        _raise_if_stored_error(admission.snapshot)
         return JSONResponse(
             content=admission.snapshot
             or {"execution": {"task_execution_id": admission.execution_id}},
@@ -510,6 +528,7 @@ async def execute_parallel_task(
                     "execution_id": result.execution_id,
                 },
             )
+        _raise_if_stored_error(result.snapshot)
         return JSONResponse(
             content=result.snapshot
             or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
@@ -1017,11 +1036,15 @@ async def close_chat_session(
 # ============================================================================
 
 @router.post("/{name}/executions/{execution_id}/terminate")
+@ops_write_route("#3180: cancels one execution on an agent the key owner reaches")
 async def terminate_agent_execution(
     execution_id: str,
     task_execution_id: Optional[str] = None,
     name: str = Depends(get_authorized_agent),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    # Audit context only (#3180): FastAPI injects a `Request`-annotated
+    # parameter regardless of its default, while direct callers need not pass one.
+    request: Request = None,
 ):
     """
     Terminate a running execution on an agent.
@@ -1058,12 +1081,34 @@ async def terminate_agent_execution(
     # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
     # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
+    # #3180: a terminate had no audit row. The service calls this once, and
+    # only when THIS request ended work (a queued, parked or container cancel
+    # that won its CANCELLED CAS); a repeat, `already_finished` and every error
+    # arm write nothing. `log` derives the key fields from the
+    # principal (#2389), so a key's terminate names the key.
+    async def _audit_terminate(outcome: str) -> None:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="execution_terminate",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request and request.client else None,
+            target_type="agent",
+            target_id=name,
+            details={
+                "execution_id": execution_id,
+                "task_execution_id": task_execution_id,
+                "status": outcome,
+            },
+        )
+
     try:
         return await chat_execution_service.terminate_execution(
             name=name,
             execution_id=execution_id,
             task_execution_id=task_execution_id,
             current_user=current_user,
+            on_ended=_audit_terminate,
         )
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)

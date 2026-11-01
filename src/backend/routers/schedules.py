@@ -29,6 +29,8 @@ from models import (
 from dependencies import (
     agent_may_reach,
     capability_fence,
+    person_or_capability_admits,
+    require_person_or_capability,
     agent_viewer_tier,
     VIEWER_SHARE,
     row_is_viewers,
@@ -137,13 +139,16 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
 
 
 def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
-    """Who may mint, rotate, revoke or read a schedule's webhook (ent#875).
+    """The share-tier half of who may mint, rotate, revoke or read a schedule's
+    webhook (ent#875).
 
     A webhook URL is a bearer credential that triggers the schedule with the
     agent's own authority, so it is held by the schedule's creator or the agent
     owner (an admin included) — not by everyone the agent is merely shared with.
-    The owner, admin and key tiers are unchanged (a key still meets the
-    `schedules.manage` capability fence on the route); a share holder needs to
+    This check passes the owner, admin and key tiers; the principal half is the
+    routes' decorator, `require_person_or_capability("schedules.manage")`
+    (trinity-enterprise#719: a person, or an agent key holding the grant on an
+    agent its owner owns; the system key is refused). A share holder needs to
     be the creator (`agent_schedules.owner_id`). A schedule with no recorded
     creator is the owner's alone."""
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
@@ -166,12 +171,16 @@ def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) ->
 
 
 def _schedule_response(schedule, agent_name: str, current_user: User) -> ScheduleResponse:
-    """The response, with `can_manage_webhook` computed by the same predicate the
-    webhook routes enforce, so the Schedules panel hides exactly the controls the
-    server would refuse (ent#875) — the client has no numeric user id to compare."""
+    """The response, with `can_manage_webhook` computed by both checks the
+    webhook routes enforce — the decorator's principal rule and the share-tier
+    rule — so it is true exactly when this caller's webhook call would pass
+    (ent#875, trinity-enterprise#719). The client has no numeric user id to compare."""
     return ScheduleResponse(
         **schedule.model_dump(),
-        can_manage_webhook=_can_manage_webhook(schedule, agent_name, current_user),
+        can_manage_webhook=(
+            person_or_capability_admits(current_user, "schedules.manage", agent_name)
+            and _can_manage_webhook(schedule, agent_name, current_user)
+        ),
     )
 
 
@@ -714,6 +723,13 @@ async def trigger_schedule(
 
 
 # Webhook Management Endpoints (WEBHOOK-001, #291)
+#
+# Every webhook route, the read included, takes a person or an agent holding
+# `schedules.manage` (trinity-enterprise#719). The schedule writes above keep
+# the own-agent exemption, whose reason is that autonomy bounds the agent's own
+# schedules; a webhook run is not gated by autonomy, so the exemption stops at
+# the schedule. The read returns the URL with its token, so it takes the same
+# gate as the writes.
 
 
 def _build_webhook_url(request: Request, token: str) -> Optional[str]:
@@ -727,7 +743,7 @@ def _build_webhook_url(request: Request, token: str) -> Optional[str]:
     return f"{base}/api/webhooks/{token}" if base else None
 
 
-@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.post("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def generate_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -781,7 +797,7 @@ async def generate_webhook(
     )
 
 
-@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse)
+@router.get("/{name}/schedules/{schedule_id}/webhook", response_model=WebhookStatusResponse, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def get_webhook_status(
     name: AuthorizedAgent,
     schedule_id: str,
@@ -820,7 +836,7 @@ async def get_webhook_status(
 @router.post(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def generate_webhook_secret(
     name: AuthorizedAgent,
@@ -876,7 +892,7 @@ async def generate_webhook_secret(
 @router.delete(
     "/{name}/schedules/{schedule_id}/webhook/secret",
     response_model=WebhookStatusResponse,
-    dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))],
+    dependencies=[Depends(require_person_or_capability("schedules.manage"))],
 )
 async def disable_webhook_secret(
     name: AuthorizedAgent,
@@ -907,7 +923,7 @@ async def disable_webhook_secret(
     )
 
 
-@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
+@router.delete("/{name}/schedules/{schedule_id}/webhook", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_person_or_capability("schedules.manage"))])
 async def revoke_webhook(
     name: AuthorizedAgent,
     schedule_id: str,
