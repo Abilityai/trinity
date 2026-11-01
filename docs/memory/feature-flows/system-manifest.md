@@ -686,11 +686,26 @@ saves to its default branch, while the heartbeat refuses to push there).
 Rejecting that toggle for non-fork source-mode agents needs a persisted fork
 marker, which `agent_git_config` does not have yet.
 
-**Permission Detection Logic**:
-- Check first agent's permissions
-- If matches full-mesh pattern (can call all other agents), verify all agents
-- If full-mesh verified, use `preset: full-mesh`
-- Otherwise, export explicit permission matrix
+**Permission Detection Logic** (#4128): one pass over every member, through
+`db.get_permitted_agents` (the read apply's snapshot makes). Each member with a
+manifest key gets its edge targets filtered to members first — an edge leaving
+the system cannot be represented — and mapped to short names. Then:
+- `preset: full-mesh` when at least two keyed members exist and every keyed
+  member reaches every other keyed member. Tag-only members (no manifest key,
+  named in the `# unobserved: members omitted` header) are outside that universe.
+- Otherwise `explicit`, listing only members with at least one in-system edge.
+- No in-system edge at all: no `permissions` block (apply reads an absent block
+  as "no desired edges").
+The block no longer depends on roster order: it used to probe `agents[0]` only,
+so a system whose first member had no outgoing edge exported none. Any failed
+edge read drops the whole block and names `permissions` in the
+`# unobserved: could not be read` header.
+
+**Folders on export** (#4128): `db.get_shared_folder_config(member)`, a pydantic
+row read by attribute; `folders:` is emitted only when `expose` or `consume` is
+on. A failed read names `folders of <member>` in the `# unobserved:` header, so an
+absent key never reads as "both off". (Until #4128 the read called a facade
+method that does not exist, so no export carried `folders`.)
 
 **Bug Fix (2025-12-18)**:
 - Line 542: Changed `db.get_setting()` → `db.get_setting_value()` to avoid Python object serialization in YAML
@@ -976,9 +991,10 @@ async def get_system(
 - Lines 264-268: Filter agents by `{system_name}-` prefix
 - Lines 270-274: Return 404 if no agents found
 - Lines 277-307: Enrich each agent with permissions, folders, schedules from database
-- Lines 289-290: Get permissions via `db.get_agent_permissions()`
-- Lines 293-298: Get folders via `db.get_agent_folder_config()`
-- Lines 301-302: Get schedules via `db.get_agent_schedules()`
+- Each of the three keys below is read in its own `try` (#4128): a failed read logs a warning and omits only that key, never the other two
+- Permissions via `db.get_permitted_agents()`, narrowed to the caller's accessible agents and sorted — the same targets `GET /api/agents/{name}/permissions` shows that caller
+- Folders via `db.get_shared_folder_config()`, a model read by attribute (`expose_enabled` / `consume_enabled` → `{expose, consume}`); omitted when the agent has no row
+- Schedules via `db.list_agent_schedules()`, each projected through `ScheduleResponse` so webhook credentials never reach the response
 
 #### POST /api/systems/{system_name}/restart (Lines 322-384)
 ```python

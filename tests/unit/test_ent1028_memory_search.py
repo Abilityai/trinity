@@ -59,6 +59,9 @@ def memory_on(monkeypatch):
     monkeypatch.setattr(me, "embed", hash_embed)
     monkeypatch.setattr(me, "availability", lambda: (True, None))
     monkeypatch.setattr(me, "is_loaded", lambda: True)
+    # `status()` checks the loader's error before `is_loaded`, and `_error` is a
+    # module global another test's background warm may have set.
+    monkeypatch.setattr(me, "last_error", lambda: None)
     monkeypatch.setattr(ms, "_redis", lambda: None)
     monkeypatch.setattr(am, "has_platform_key", lambda: True)
     ms._scope_cache.clear()

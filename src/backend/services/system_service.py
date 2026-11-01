@@ -1513,16 +1513,20 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         except Exception as e:
             logger.warning(f"Failed to get git config for {full_name}: {e}")
 
-        # Get folders config from database
+        # Get folders config from database. #4128: `get_agent_folder_config`
+        # never existed, and the row is a pydantic model, not a dict — the read
+        # apply's snapshot makes, by attribute. A failed read is named: an
+        # absent `folders` would otherwise read as "both off".
         try:
-            folder_config = db.get_agent_folder_config(full_name)
-            if folder_config and (folder_config['expose_enabled'] or folder_config['consume_enabled']):
+            folder_config = db.get_shared_folder_config(full_name)
+            if folder_config is not None and (folder_config.expose_enabled or folder_config.consume_enabled):
                 config["folders"] = {
-                    "expose": bool(folder_config['expose_enabled']),
-                    "consume": bool(folder_config['consume_enabled'])
+                    "expose": bool(folder_config.expose_enabled),
+                    "consume": bool(folder_config.consume_enabled)
                 }
         except Exception as e:
             logger.warning(f"Failed to get folder config for {full_name}: {e}")
+            unobserved_reads.append(f"folders of {full_name}")
 
         # Get schedules from database
         try:
@@ -1649,87 +1653,33 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # snapshot uses; `get_agent_permissions` never existed, so until
     # trinity-enterprise#1030 every export dropped this block behind a
     # WARNING.
+    #
+    # #4128: ONE pass over every member. The block used to probe `agents[0]`
+    # and only looked further if that member had edges, so a system whose
+    # first member had none exported no edges at all. Edges are filtered to
+    # members before anything is compared (#2373: an edge leaving the system
+    # cannot be represented), and the mesh is stated over the members that
+    # have a manifest key — a tag-only member has none and the header names it.
     try:
-        # Check first agent's permissions to infer pattern
-        if agents:
-            first_agent = agents[0]['name']
-            perms = db.get_permitted_agents(first_agent)
+        edges: Dict[str, List[str]] = {}
+        for agent in agents:
+            short_name = _member_short_name(agent['name'], system_name, naming)
+            if short_name is None:
+                continue
+            targets = {
+                _member_short_name(target, system_name, naming)
+                for target in db.get_permitted_agents(agent['name'])
+                if target in member_names
+            }
+            edges[short_name] = sorted(t for t in targets if t is not None and t != short_name)
 
-            if perms:
-                # Try to detect full-mesh pattern
-                all_agents_names = [a['name'] for a in agents]
-                permitted_targets = list(perms)
-
-                # Full-mesh: agent can call all other agents
-                expected_targets = [n for n in all_agents_names if n != first_agent]
-                if set(permitted_targets) == set(expected_targets):
-                    # Verify other agents also have full-mesh
-                    is_full_mesh = True
-                    for agent in agents:
-                        agent_perms = db.get_permitted_agents(agent['name'])
-                        expected = [n for n in all_agents_names if n != agent['name']]
-                        actual = list(agent_perms)
-                        if set(actual) != set(expected):
-                            is_full_mesh = False
-                            break
-
-                    if is_full_mesh:
-                        manifest_dict["permissions"] = {"preset": "full-mesh"}
-                    else:
-                        # Export explicit permissions
-                        # #2373: the sibling branch below filters on membership
-                        # and this one did not — a permission edge pointing
-                        # OUTSIDE the system was blind-sliced into a garbage
-                        # short name, which then failed validate_manifest's
-                        # "unknown agent in permissions" check on re-deploy. The
-                        # round trip was broken by the export, not the import.
-                        explicit_perms = {}
-                        for agent in agents:
-                            # #2373 review (C1): prefix-safe on BOTH sides of the
-                            # edge. A tag-only member has no manifest key, so its
-                            # edges cannot be represented — skip rather than emit
-                            # a sliced-to-garbage key that breaks the round trip.
-                            short_name = _member_short_name(agent['name'], system_name, naming)
-                            if short_name is None:
-                                continue
-                            agent_perms = db.get_permitted_agents(agent['name'])
-                            targets = [
-                                t for t in (
-                                    _member_short_name(target, system_name, naming)
-                                    for target in agent_perms
-                                    if target in member_names
-                                ) if t is not None
-                            ]
-                            if targets:
-                                explicit_perms[short_name] = targets
-
-                        if explicit_perms:
-                            manifest_dict["permissions"] = {"explicit": explicit_perms}
-                else:
-                    # Export explicit permissions
-                    explicit_perms = {}
-                    for agent in agents:
-                        # #2373 review (C1): see the sibling branch — membership
-                        # admits tag-only members, which have no manifest key.
-                        short_name = _member_short_name(agent['name'], system_name, naming)
-                        if short_name is None:
-                            continue
-                        agent_perms = db.get_permitted_agents(agent['name'])
-                        # #2373: membership, not the prefix — `acme` must not
-                        # export an edge to an `acme-extra` agent as though it
-                        # were its own member.
-                        targets = [
-                            t for t in (
-                                _member_short_name(target, system_name, naming)
-                                for target in agent_perms
-                                if target in member_names
-                            ) if t is not None
-                        ]
-                        if targets:
-                            explicit_perms[short_name] = targets
-
-                    if explicit_perms:
-                        manifest_dict["permissions"] = {"explicit": explicit_perms}
+        keyed = set(edges)
+        # Fewer than two keyed members is never a mesh: with no edge to state,
+        # `full-mesh` would read as a claim about the topology.
+        if len(keyed) >= 2 and all(set(v) == keyed - {k} for k, v in edges.items()):
+            manifest_dict["permissions"] = {"preset": "full-mesh"}
+        elif any(edges.values()):
+            manifest_dict["permissions"] = {"explicit": {k: v for k, v in edges.items() if v}}
 
     except Exception as e:
         logger.warning(f"Failed to export permissions for system {system_name}: {e}")
