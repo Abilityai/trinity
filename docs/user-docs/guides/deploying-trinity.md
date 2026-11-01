@@ -19,6 +19,8 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 All eight paths share one installer (`scripts/deploy/start.sh`), one `.env` contract, and one set of day-two procedures ([Upgrading](deploying/upgrading.md), [Backup and Restore](deploying/backup-and-restore.md), [Monitoring](deploying/monitoring.md)). Fresh server installs from prebuilt images run on a bundled PostgreSQL database; SQLite reached end-of-support on September 1, 2026 (see [Single Server → Database backend](deploying/single-server.md#database-backend)).
 
+For a server, pick the size before you create it: start at 4 vCPU / 8 GB RAM / 80 GB disk and see [Sizing Your Server](deploying/capacity-planning.md) for larger fleets.
+
 ## Option A: Local, from Source
 
 > **Tip:** the install runs one-shot with `./scripts/deploy/start.sh --unattended` (generates and prints the admin password), or is driven end to end by an AI coding agent via the runbook at [`docs/AGENT_INSTALL_GUIDE.md`](../../AGENT_INSTALL_GUIDE.md). `./quickstart.sh` is an alias for `start.sh` (`--defaults` means `--unattended`).

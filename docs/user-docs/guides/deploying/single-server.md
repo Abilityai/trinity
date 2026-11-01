@@ -9,7 +9,7 @@ Both use the production compose shape: no hot-reload, health checks and `unless-
 
 ## Prerequisites
 
-- Linux server (Ubuntu 22.04 LTS or later recommended), **4 GB RAM minimum, 8 GB recommended**. 4 GB runs the platform and two or three agents; budget 8 GB for a working fleet
+- Linux server (Ubuntu 22.04 LTS or later recommended), **8 GB RAM recommended** (4 GB runs the platform with one or two agents) — size it from how many agents run at once; see [Sizing Your Server](capacity-planning.md)
 - Docker Engine 24+ and the Docker Compose plugin (`docker compose` — no hyphen)
 - A domain or subdomain pointing to your server's IP (e.g., `trinity.your-domain.com`), or a plan for private access — see [TLS on a bare VM](#tls-on-a-bare-vm)
 - `openssl` on the server for secret generation
@@ -326,15 +326,17 @@ The Trinity 1-Click is a Droplet image with Docker, Caddy, ufw and a pinned Trin
 
 Find it on the [DigitalOcean Marketplace](https://marketplace.digitalocean.com/apps/trinity), or search **Trinity** under **Marketplace** when you create a Droplet in the control panel. Pick a region and a size from the table below, then create the Droplet. Trinity is free; DigitalOcean bills you for the Droplet.
 
-Prefer a terminal to the control panel? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, claiming the admin, sign-in, managing the Droplet) apply to both, with three differences: an installer Droplet takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
+Prefer to choose the admin password before the Droplet exists? `trinity-do-create.sh` gives the same result from your own terminal — see [Deploy on DigitalOcean](digitalocean.md). The sections below (first boot, sign-in, managing the Droplet) apply to both, with four differences: an installer Droplet has its admin account from first boot, takes about six minutes rather than ninety seconds (it installs and pulls everything on first boot), records `do-script` instead of `do-marketplace` as its provenance, and has no login banner.
 
 ### Sizing
 
 | Use case | RAM | vCPU | Boot disk |
 |---|---|---|---|
-| Minimum — platform plus 1–2 agents | 4 GB | 2 | 50 GB |
-| **Recommended** — a working fleet | **8 GB** | **4** | **80 GB** |
-| Larger fleets | 16 GB+ | 8+ | 160 GB+ |
+| Evaluation — platform plus 1–2 agents | 4 GB | 2 | 50 GB |
+| **Start here** — up to about 8 agents, about 2 runs at a time | **8 GB** | **4** | **80 GB** |
+| Busy fleet — several agents running at once | 16 GB | 4–8 | 150 GB |
+
+For heavier workloads and larger fleets, and how to estimate your own, see [Sizing Your Server](capacity-planning.md).
 
 The baked images occupy a significant share of the disk before any agent exists; agent workspaces grow from there. Disk can be increased on a running Droplet, never decreased.
 
@@ -345,9 +347,9 @@ On a 2-vCPU size, an agent configured for more CPUs than the host has runs at th
 First boot runs once per Droplet, about ninety seconds, with no input from you:
 
 1. **Admin account** — **none is created.** Unless you supplied a password through user-data (below), `ADMIN_PASSWORD` stays blank and `ADMIN_PASSWORD_SOURCE=browser` records that this is deliberate; the first person to open the instance creates the admin in the browser. Nothing is generated, so nothing is printed.
-2. **`.env`** — written at `/opt/trinity/.env` with `FRONTEND_PORT=8081` and `FRONTEND_BIND_ADDRESS=127.0.0.1` (the web UI moves off `:80`, published on loopback only, so Caddy can own 80/443), `TRINITY_IMAGE_TAG=<the baked release>`, `TRINITY_INSTALL_SOURCE=do-marketplace` (the install-provenance marker) and `FRONTEND_URL=https://<droplet-ip>`. `start.sh` generates the remaining secrets as on any install.
+2. **`.env`** — written at `/opt/trinity/.env` with `FRONTEND_PORT=8081` (the web UI moves off `:80` so Caddy can own 80/443), `TRINITY_IMAGE_TAG=<the baked release>`, `TRINITY_INSTALL_SOURCE=do-marketplace` (the install-provenance marker) and `FRONTEND_URL=https://<droplet-ip>`. `start.sh` generates the remaining secrets as on any install.
 3. **Firewall** — ufw allows 22, 80 and 443 only. Docker publishes container ports past ufw, so a separate `DOCKER-USER` rule set (re-applied by a systemd unit on every boot) drops **everything** arriving at a container from off-box, whatever the port — there is no port list to keep in step with the compose file. It also blocks containers from reaching the cloud metadata service, so an agent cannot read the Droplet's user-data. Everything you use is served by Caddy on 80/443.
-4. **Caddy** — a Caddyfile for `https://<droplet-ip>` with a Let's Encrypt short-lived IP certificate (about six days, renewed automatically), reverse-proxying to the web UI; `http://` redirects to `https://`. Once the stack answers, Caddy talks to the web container's PROXY-protocol listener on `127.0.0.1:18082` (`CADDY_PROXY_PORT`), which carries each visitor's own address through Docker's port publishing, so per-client sign-in limits and audit addresses see real clients. Until that listener answers (first boot, before the stack is up) it uses the ordinary listener on `127.0.0.1:8081`, and `start.sh` switches over by itself after the stack is healthy. A second catch-all site issues a certificate on demand for the domain you later save as the Public URL (and refuses every other name). First boot verifies the IP certificate was actually issued and records the result — the login banner prints `http://` if it was not.
+4. **Caddy** — a Caddyfile for `https://<droplet-ip>` with a Let's Encrypt short-lived IP certificate (about six days, renewed automatically), reverse-proxying to the web UI on `127.0.0.1:8081`; `http://` redirects to `https://`. A second catch-all site issues a certificate on demand for the domain you later save as the Public URL (and refuses every other name). First boot verifies the IP certificate was actually issued and records the result — the login banner prints `http://` if it was not.
 5. **Trinity** — `./scripts/deploy/start.sh --hosted --unattended` from `/opt/trinity`.
 
 ### Claim the admin account
@@ -366,7 +368,7 @@ write_files:
     content: "your-password-here"
 ```
 
-It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The admin is provisioned at boot, and the form never appears; sign in as `admin` with that password. The password stays in the droplet's user-data for the droplet's life: cloud-init keeps it on disk and the metadata service serves it ([#3942](https://github.com/abilityai/trinity/issues/3942)). Change it after you sign in.
+It must be `#cloud-config` with `write_files`, not a shell script — a shell script runs after first boot has already started Trinity. The file is shredded once the password has been read, the admin is provisioned at boot, and the form never appears; sign in as `admin` with that password. (The [installer script](#digitalocean-installer-script) does the same from your terminal.)
 
 The login banner (Droplet → Console) prints the URL to open, whether HTTPS came up, and which of the two paths this Droplet took — never a password.
 
@@ -408,23 +410,24 @@ sudo git fetch --tags && sudo git checkout v0.9.1
 sudo ./scripts/deploy/start.sh --hosted
 ```
 
-On a Droplet (or any host `start.sh --provision` prepared), that re-run also reconfigures Caddy for the new release once the backend is healthy and the web UI answers — there is no separate `--caddy-only` step. It checks that the new web image's PROXY-protocol listener really answers before switching to it; if the running image is older, Caddy keeps the ordinary listener and the run prints a warning that visitors' addresses are not yet passed through. The first switch restarts Caddy once, so open live views (execution logs, chat streams) reconnect. While the upgrade runs it holds the same lock as the IP-refresh timer, so the two never rewrite the configuration at the same time.
-
 **Backups.** Nightly and pre-migration database backups land in `/opt/trinity/trinity-data/backups/` (the data directory is `./trinity-data` relative to the checkout). They are on the same disk as the database, so they protect against corruption and mistakes, not against losing the Droplet — take Droplet snapshots as well. See [Backup and Restore](backup-and-restore.md).
 
 **Support.** GitHub Issues on `abilityai/trinity`, label `do-marketplace`. DigitalOcean does not build or support Trinity.
 
 ## DigitalOcean installer script
 
-`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal. Like the 1-Click, the Droplet boots with no admin account: you create it in the browser at the address the installer prints, with the same [claim window](#claim-the-admin-account). It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
+`scripts/deploy/trinity-do-create.sh` gives you the 1-Click result from your own terminal, with the admin password chosen before the Droplet exists — so there is no claim window. It needs [`doctl`](https://docs.digitalocean.com/reference/doctl/how-to/install/) installed and signed in (`doctl auth init` with a write-scoped API token). The step-by-step walkthrough — from installing `doctl` to adding a domain, with the installer's error messages and how to remove the Droplet — is [Deploy on DigitalOcean](digitalocean.md).
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/abilityai/trinity/<release-tag>/scripts/deploy/trinity-do-create.sh)
 ```
 
-It asks for a **region** and a **Droplet name** (defaults offered), then a confirmation that names the monthly cost, and writes nothing to your computer. It asks for no password.
+It asks three questions and writes nothing to your computer:
 
-It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The user-data carries no password, because DigitalOcean keeps user-data on the Droplet and serves it from the metadata service for the Droplet's whole life. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers, with a prompt to open it now and create the admin. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
+1. **Admin password** (twice; 12+ characters, guessable prefixes refused). Your username will be `admin`.
+2. **Region** and **Droplet name** (defaults offered), then a confirmation that names the monthly cost.
+
+It then creates an Ubuntu 24.04 Droplet (4 vCPU / 8 GB — Trinity's recommended size), attaches every SSH key already on your account, and hands the Droplet a first-boot script that clones the pinned release to `/opt/trinity`, runs `start.sh --provision --cloud digitalocean --hosted --unattended` (Docker, Caddy with the IP certificate, the firewall, then the install itself). The password travels only in the Droplet's own user-data; the firewall blocks containers from reading it back. The script polls `https://<ip>/` with certificate verification for up to fifteen minutes and prints the address when it answers. If it times out, open the Droplet's Console and read `/var/log/trinity-install.log`.
 
 The installer does not ask for a Claude credential. When you first sign in, the setup that opens includes **Connect Claude**, the one required step: paste a subscription token from `claude setup-token` or an Anthropic API key. It is checked with Anthropic before it is saved and handed to the seeded agents.
 
@@ -559,10 +562,6 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 | `TRINITY_INSTALL_SOURCE` | dev · prod · hosted | Install-provenance marker (`do-marketplace`, `vultr-marketplace`, `aws-marketplace`, `do-script`, `aws-script`, `script`); written by `start.sh --provision`, read once at first boot and recorded permanently. Leave empty on an ordinary install. |
 | `BACKEND_URL` | dev · prod · hosted | Backend base URL used to build OAuth callback URLs (default `http://localhost:8000`). |
 | `FRONTEND_PORT` | dev · prod · hosted | Host port for the web UI (default 80). |
-| `FRONTEND_BIND_ADDRESS` | prod · hosted (port mapping) | Interface the web UI's port is published on. Empty (default) = every interface, as before; `start.sh --provision` and a re-run on a provisioned host set `127.0.0.1`, so only the host's Caddy reaches it. |
-| `CADDY_PROXY_PORT` | prod · hosted (port mapping) | Loopback port (default `18082`) of the web container's PROXY-protocol listener, used by a reverse proxy on the same host to pass each visitor's address. Published on `127.0.0.1` only; change it if something else holds the port. |
-| `TRINITY_PROXY_PREFIX` | prod · hosted | First three octets of the ingress network's `/24` (default `172.30.0`). Change it only if that range is taken; `start.sh --hosted` refuses a value that overlaps an existing Docker network and names it. |
-| `TRUSTED_PROXIES` | prod · hosted | Your own reverse proxies or load balancers, by address or CIDR, comma-separated (default empty). Requests they forward are attributed to the client they name. Invalid, wildcard, loopback or Trinity-network entries stop the backend at startup with the entry named — see [Public Access → Visitor addresses](public-access.md#visitor-addresses-behind-the-tunnel-and-other-proxies). |
 | `FRONTEND_URL` | dev · prod · hosted | Public UI URL for email links and OAuth callbacks. |
 | `PUBLIC_CHAT_URL` | dev · prod · hosted | External base URL for public chat links, the A2A agent card and paid-agent URLs (the **Public URL** setting overrides it). |
 | `TRINITY_IMAGE_TAG` | hosted | Which published image set to pull (default `latest`). Ignored by source builds. |
