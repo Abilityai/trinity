@@ -30,10 +30,11 @@ from dependencies import (
     CurrentUser,
     OwnedAgentByName,
     assert_admin,
+    assert_person,
     get_current_user,
     oauth2_scheme,
-    reject_agent_principal,
     require_admin,
+    require_person,
     resolve_platform_user_unfloored,
 )
 from models import (
@@ -479,7 +480,8 @@ def list_agent_clients(agent_name: OwnedAgentByName, current_user: CurrentUser):
     )
 
 
-@router.post("/agents/{agent_name}/clients/{email}/logout", response_model=PortalLogoutResult)
+@router.post("/agents/{agent_name}/clients/{email}/logout", response_model=PortalLogoutResult,
+             dependencies=[Depends(require_person)])
 async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
                               request: Request, current_user: CurrentUser):
     """End every live portal session for this client (ent#281).
@@ -488,11 +490,12 @@ async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
     client's whole roster, so there is no per-agent session to end. Non-
     destructive: the client may sign in again immediately unless also blocked.
 
-    Human-only: ending a person's access is an operator decision, and an
-    agent-scoped key resolves to its owner, so without this a prompt-injected
-    agent could sign clients out of the agent it runs as.
+    Human-only: ending a person's access is an operator decision, so the route
+    takes a person (`require_person`, trinity-enterprise#719) before the
+    ownership lookup. The inline check below is the same allowlist, for direct
+    callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     try:
         result = service.logout_client(email)
     except ClientPortalError as e:
@@ -502,7 +505,8 @@ async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
     return PortalLogoutResult(**result)
 
 
-@router.post("/agents/{agent_name}/clients/{email}/block", response_model=PortalBlockResult)
+@router.post("/agents/{agent_name}/clients/{email}/block", response_model=PortalBlockResult,
+             dependencies=[Depends(require_person)])
 async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: PortalBlockRequest,
                              request: Request, current_user: CurrentUser):
     """Bar this client from signing in again, anywhere, and end their sessions.
@@ -511,13 +515,11 @@ async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: Por
     at an agent they own, but the effect is platform-wide, so ownership alone is
     not enough authority.
 
-    `assert_admin` is NOT sufficient on its own: it rejects *connector*
-    principals, but an agent-scoped key resolves to its owner **carrying the
-    owner's role**, so on a default admin-owned install it would pass. That is
-    the trinity-ops-agent#232 shape the retention-acknowledge endpoint hit.
-    `reject_agent_principal` is what makes this human-only.
+    The route takes a person (`require_person`, trinity-enterprise#719) before
+    the ownership lookup, and `assert_admin` then requires that person to be an
+    admin. The inline `assert_person` is the same allowlist, for direct callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Blocking a client requires admin access")
     try:
         result = service.block_client(
@@ -533,7 +535,8 @@ async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: Por
     return PortalBlockResult(**result)
 
 
-@router.delete("/agents/{agent_name}/clients/{email}/block", response_model=PortalUnblockResult)
+@router.delete("/agents/{agent_name}/clients/{email}/block", response_model=PortalUnblockResult,
+               dependencies=[Depends(require_person)])
 async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
                                request: Request, current_user: CurrentUser):
     """Lift the block. Admin + human-only, mirroring block exactly.
@@ -545,7 +548,7 @@ async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
     again and gets a fresh one), and no data was ever removed — block is not
     delete.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Unblocking a client requires admin access")
     try:
         result = service.unblock_client(email)
