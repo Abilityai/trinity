@@ -141,7 +141,13 @@ permissions:
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
   persons only. See "Phase 4: Apply" below
-- **Management**: `GET /api/systems` - List all deployed systems
+- **Management**: `GET /api/systems` - List deployed systems by their system tag (#4129): one
+  entry per tag on the caller's accessible agents that has evidence of being a system (its
+  auto-created system view, a `system_apply` audit row, or a carrier named `<tag>-*`), with
+  the roster agents carrying it; names are never split, a plain tag is not listed, and
+  unreadable tags are a 503. Known gap: a bare-named system created by `POST /deploy` with
+  no `system_view` and never applied leaves no such evidence, so it is not listed until
+  deploy records that its tag is a system (follow-up)
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
 - **Export**: `GET /api/systems/{name}/manifest` - Export system as YAML
@@ -184,7 +190,9 @@ permissions:
 - **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
 - **Not built**: a browser for *already-deployed* systems (see Frontend Layer below) —
   which is also why the teardown panel takes a **typed** system name or one handed over
-  from a deploy result, and never a name from `GET /api/systems`
+  from a deploy result, never a name read off `GET /api/systems` without confirming it (that
+  list names systems by their tag since #4129, but not one deployed bare with no view and
+  never applied)
 
 ## Frontend Layer
 

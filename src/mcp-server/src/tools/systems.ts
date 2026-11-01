@@ -312,16 +312,17 @@ export function createSystemTools(
     },
 
     // ========================================================================
-    // list_systems - List all deployed systems (agents grouped by prefix)
+    // list_systems - List deployed systems by their system tag (#4129)
     // ========================================================================
     listSystems: {
       name: "list_systems",
       description:
-        "List all deployed systems with their agents. " +
-        "Groups agents by system prefix (before first '-'). " +
-        "For example, agents 'content-production-orchestrator' and 'content-production-writer' " +
-        "are grouped under system 'content-production'. " +
-        "Returns system summaries with agent counts and details.",
+        "List the systems deployed or applied from a manifest, by their system tag, with " +
+        "the agents you can access that carry it. A tag is listed only when it is known " +
+        "to be a system (its auto-created system view, an apply of that manifest, or a " +
+        "member named '<system>-*'); a plain tag such as 'prod' is not. Names are never " +
+        "split at a hyphen, so a system whose members are named bare (e.g. 'writer') " +
+        "lists under its own name. Returns system summaries with agent counts and details.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
@@ -469,9 +470,9 @@ export function createSystemTools(
           .describe(
             "System to remove (e.g., 'content-production'). Members are the "
             + "agents tagged with the system, else those matching "
-            + "'{system_name}-*'. Do NOT take this name from list_systems, "
-            + "which groups by the last hyphen and can report a name that is "
-            + "not a real system."
+            + "'{system_name}-*'. list_systems lists systems deployed or applied "
+            + "from a manifest, by their tag; take a system name from a deploy "
+            + "or apply result, or confirm it with the detail route."
           ),
         dry_run: z
           .boolean()
