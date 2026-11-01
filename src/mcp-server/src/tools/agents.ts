@@ -278,7 +278,7 @@ export function createAgentTools(
         "The agent will be started automatically after creation. " +
         "Fork-to-own (import_intent 'fork' + a fork_to_own block) copies a 'github:owner/repo' template into a new repo " +
         "you own and creates the agent from that copy, using your saved personal GitHub token (Settings); there is no PAT " +
-        "argument here because tool arguments are audit-logged. With an agent key the backend refuses it with " +
+        "argument here because tool arguments land in transcripts. With an agent key the backend refuses it with " +
         "`FORK_PAT_REQUIRED` — an agent cannot spend its owner's token. A template that declares fork_to_own required " +
         "is refused with `FORK_TO_OWN_REQUIRED` unless the block is present.",
       parameters: z.object({

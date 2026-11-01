@@ -499,8 +499,9 @@
   visibility fieldset; copy explains the no-upstream contract + own-it-later); MCP
   `create_agent` takes `import_intent: "copy" | "clone" | "fork"` and, since
   trinity-enterprise#1007, a `fork_to_own: {destination_repo, private?}` block — the
-  same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args are
-  audit-logged, so a PAT arg would persist in plaintext). The fork therefore spends
+  same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args land
+  in transcripts, so a PAT arg would persist there in plaintext; the audit row records
+  the tool, outcome and target agent, never the arguments themselves). The fork therefore spends
   the caller's saved personal token (#3164); under an agent key it is the named 400
   `FORK_PAT_REQUIRED`, unchanged. REST behaviour and the `agents.manage` create gate
   are unchanged (`tests/unit/test_ent1007_mcp_fork_body.py` validates the MCP body
