@@ -5250,39 +5250,54 @@ def _legacy_migration_is_safe(agent_name: str, email: str) -> bool:
     return True
 
 
-def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
-    """Raise ONE operator-queue item per collided legacy inbox (ent#308).
+# ent#308, #3254: the collision is recomputed on every inbox read and keeps
+# reading true while the two shares exist, so this process reports it at most
+# once per 6 hours per (agent, folder, claimant set). A new claimant is a new
+# key and is reported at once.
+_COLLISION_REOBSERVE_SECONDS = 6 * 60 * 60
+_collision_observed_at: dict[tuple[str, str, str], float] = {}
 
-    Best-effort and idempotent: the id is derived from the legacy directory and
-    `create_item` is an INSERT ... ON CONFLICT DO NOTHING (keyed per agent), so a
-    repeat access does not re-alert. Never raises — an alert failure must not
-    break a client's inbox read.
+
+def _alert_collided_inbox(agent_name: str, legacy_dir: str, claimants: list[str]) -> None:
+    """Report a collided legacy inbox to the operator queue (ent#308). Never raises.
+
+    Through the platform alert seam (#3246, #3254): one pending row per legacy
+    folder (subject `portal_inbox_collision:<dir>`). A must-act kind: it never
+    expires and only a person ends it. A person's ending is final. The
+    collision keeps reading true after someone split the folder, because the
+    platform cannot tell, so a repeat access never re-alerts the same
+    claimants. A NEW claimant changes `claimants_digest`, the kind's material
+    key (sha256 of the sorted set; no address in the context), and re-alerts.
 
     The id's prefix is reserved (`_RESERVED_ID_PREFIXES`, #715): the text lists
     client addresses, so the item is a platform alarm the agent's own file and
     resume turn never receive, the queue's reads never return it to a machine
-    key, and an agent cannot pre-create the id to swallow the alert through that
-    same ON CONFLICT. The ERROR log in the caller still fires on every access.
+    key, and an agent cannot pre-create one. The ERROR log in the caller still
+    fires on every access.
     """
-    try:
-        from database import db as core_db
-        core_db.create_operator_queue_item(agent_name, {
-            "id": f"portal-inbox-collision-{legacy_dir}",
-            "type": "alert",
-            "priority": "high",
-            "title": "Two portal clients shared one inbox folder",
-            "question": (
-                f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
-                f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
-                + ", ".join(claimants)
-                + ". Their files are mixed together and nothing records which file belongs to whom, "
-                "so Trinity will not split it automatically. New uploads are already isolated in "
-                "per-client folders. Please review the old folder and move or delete its contents."
-            ),
-            "created_at": utc_now_iso(),
-        })
-    except Exception as exc:  # noqa: BLE001 — alerting must never break a read
-        logger.warning("[#308] could not raise collided-inbox alert for %s: %s", agent_name, exc)
+    digest = hashlib.sha256("\0".join(sorted(claimants)).encode("utf-8")).hexdigest()
+    memo_key = (agent_name, legacy_dir, digest)
+    now = time.monotonic()
+    seen = _collision_observed_at.get(memo_key)
+    if seen is not None and now - seen < _COLLISION_REOBSERVE_SECONDS:
+        return
+    from services import platform_alerts
+    outcome = platform_alerts.observe(
+        agent_name, "portal_inbox_collision", legacy_dir,
+        priority="high",
+        title="Two portal clients shared one inbox folder",
+        question=(
+            f"The folder `{_PORTAL_INBOX_ROOT}/{legacy_dir}/` on {agent_name} was written to by "
+            f"{len(claimants)} different client addresses before ent#308 made inbox names unique: "
+            + ", ".join(claimants)
+            + ". Their files are mixed together and nothing records which file belongs to whom, "
+            "so Trinity will not split it automatically. New uploads are already isolated in "
+            "per-client folders. Please review the old folder and move or delete its contents."
+        ),
+        context={"claimants_digest": digest},
+    )
+    if outcome != platform_alerts.OBSERVED_FAILED:
+        _collision_observed_at[memo_key] = now
 
 
 def _inbox_list_cmd(inbox: str, legacy: str | None = None) -> str:
@@ -5884,29 +5899,55 @@ def _chat_state_room_left(email: str) -> bool:
         return True
 
 
-def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
+def get_chat_state(email: str, unread: dict[str, int] | None = None,
+                   room_reader: tuple[str, str] | None = None,
+                   room_unread: dict[str, int] | None = None,
+                   sees_all_rooms: bool = False) -> dict:
     """Star + unread state for every chat the caller has state for.
 
-    Unread is computed for threads only; a room carries its own seq cursor and
-    is reported as starred-or-not with `unread = 0`. `unread` lets a caller pass
-    counts it already read in the same statement as something else
-    (ent#610 `chat_previews`), so the two cannot come from different instants.
+    `unread` lets a caller pass counts it already read in the same statement as
+    something else (ent#610 `chat_previews`), so the two cannot come from
+    different instants; `room_unread` is the same for rooms.
+
+    trinity-enterprise#959: a room's unread is counted only when the caller
+    names the room participant it reads as (`room_reader`, from
+    `room_reader_of(principal)`), and only for rooms that participant is in
+    (`db.unread_room_arrivals` joins through the membership row).
+
+    Fix round 1 (security review #1): the stored room ROWS are filtered the same
+    way. A cursor/star row is keyed by EMAIL, which a Workspace identity and a
+    platform account can share, so without the filter a credential was handed
+    the ids of rooms only the OTHER identity is in. A room row is returned only
+    for a room the reader is actively in — one batched read, `db.active_room_ids`
+    — and with no reader, for none. `sees_all_rooms` (`room_sees_all`: a
+    platform admin, who lists every room through `GET /api/rooms` anyway) keeps
+    the admin's OWN starred rows for rooms they are not in; those still count 0.
     """
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
+    if room_unread is None:
+        room_unread = ({rid: a["n"] for rid, a in db.unread_room_arrivals(email, *room_reader).items()}
+                       if room_reader else {})
+    my_rooms: set[str] | None = None if sees_all_rooms else (
+        db.active_room_ids(*room_reader) if room_reader else set())
     chats = []
     seen_threads: set[str] = set()
+    seen_rooms: set[str] = set()
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
+        if kind == "room" and my_rooms is not None and cid not in my_rooms:
+            continue
         if kind == "thread":
             seen_threads.add(cid)
+        elif kind == "room":
+            seen_rooms.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
-            "unread": unread.get(cid, 0) if kind == "thread" else 0,
+            "unread": unread.get(cid, 0) if kind == "thread" else room_unread.get(cid, 0),
         })
     # A CURSORLESS thread has unread and no state row, so the loop above never
     # reaches it — and that is the whole ent#557 case: an agent replies into a
@@ -5922,8 +5963,15 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # that is not already theirs. `starred` is False by construction — a chat
     # with no row has never been starred.
     cursorless = [
-        (cid, n) for cid, n in unread.items()
+        ("thread", cid, n) for cid, n in unread.items()
         if cid and cid not in seen_threads and n > 0
+    ]
+    # ent#959: a room the viewer is in and has never opened enters the same way,
+    # under the same cap rule. Bounded by the membership join that produced
+    # `room_unread`, so this cannot append a room the viewer is not in.
+    cursorless += [
+        ("room", cid, n) for cid, n in room_unread.items()
+        if cid and cid not in seen_rooms and n > 0
     ]
     # ...but ONLY while the viewer can still clear it, and that is not a
     # nicety. `mark_chat_read` silently no-ops when the row would be a NEW one
@@ -5942,9 +5990,43 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None) -> dict:
     # list is empty and the cap cannot be the reason.
     if cursorless and not _chat_state_room_left(email):
         cursorless = []
-    for cid, n in cursorless:
-        chats.append({"kind": "thread", "id": cid, "starred": False, "unread": n})
+    for kind, cid, n in cursorless:
+        chats.append({"kind": kind, "id": cid, "starred": False, "unread": n})
     return {"chats": chats}
+
+
+def room_reader_of(principal) -> tuple[str, str] | None:
+    """The room participant this Workspace credential reads as (ent#959).
+
+    Rooms seat a person in one of two identity spaces (ent#362), and the rooms
+    API picks between them by credential (`shared_sessions.service._caller`): a
+    platform session is `user` + its USERNAME, a Workspace session is
+    `workspace_user` + its verified email. The chat-state routes see the
+    `PortalPrincipal`, whose email alone cannot say which — so the decision is
+    made here, from the same two facts, and fails CLOSED: a platform principal
+    with no username reads no room rather than an email-keyed guess that could
+    be another person's Workspace identity.
+    """
+    from shared_sessions.service import WORKSPACE_KIND
+
+    if getattr(principal, "is_platform", False):
+        username = (getattr(principal, "username", None) or "").strip()
+        return ("user", username) if username else None
+    email = (getattr(principal, "email", None) or "").strip().lower()
+    return (WORKSPACE_KIND, email) if email else None
+
+
+def room_sees_all(principal) -> bool:
+    """Does this Workspace credential list EVERY room (ent#959 fix round 1)?
+
+    Only a platform admin: the rooms API lists every room to an admin platform
+    account (`shared_sessions.service.list_rooms`), so the admin's own starred
+    rows for rooms they are not in disclose nothing they cannot already list.
+    `is_admin` is the portal's stricter reading (`_is_admin_principal`: role AND
+    an admin-gate scope) and is always False for a Workspace session token.
+    """
+    return bool(getattr(principal, "is_platform", False)
+                and getattr(principal, "is_admin", False))
 
 
 def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> None:
@@ -5968,10 +6050,22 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 
-def mark_chat_read(email: str, chat_kind: str, chat_id: str) -> None:
+def mark_chat_read(email: str, chat_kind: str, chat_id: str,
+                   room_reader: tuple[str, str] | None = None) -> None:
     """Advance the caller's read cursor on one chat. Same non-validation and
-    same cap as `set_chat_star`."""
+    same cap as `set_chat_star` — for a thread.
+
+    A ROOM's cursor moves only for a reader actively in that room
+    (trinity-enterprise#959 fix round 1, security review #3): the cursor row is
+    keyed by email, so an unchecked write let a non-member create one and let a
+    platform account clear the same email's Workspace-identity room. An unknown
+    room, a room the reader is not in or left, and a call with no reader all
+    return exactly as a successful write does, writing nothing — the write
+    stays no existence oracle (invariant #8).
+    """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
+    if kind == "room" and not (room_reader and db.is_active_room_participant(cid, *room_reader)):
+        return
     if _would_create_row_past_cap(email, kind, cid):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because
@@ -6294,23 +6388,31 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
     redaction (`comment_withheld`) is untouched. The operator sees the comment;
     the agent still does not.
 
-    **Routed through the #1677 budget, never a direct create.** The volume is
-    driven by a client clicking, so by the classification rule this is an
-    agent-influenceable emitter: a direct `create_operator_queue_item` would fail
-    the CI emitter guard, and reusing the generic `alert` type would have let five
-    unrelated alerts on that agent silence every problem report (the budget counts
-    pending rows OF THAT TYPE, including ones other emitters wrote).
+    **Reported through the platform-alert seam (#3254), budgeted there (#1677).**
+    The volume is driven by a client clicking, so by the classification rule this
+    is an agent-influenceable emitter, and it carries its own type,
+    `workspace_problem_report`: reusing the generic `alert` type would have let
+    five unrelated alerts on that agent silence every problem report (the budget
+    counts pending rows OF THAT TYPE, including ones other emitters wrote).
 
-    Never raises, and returns whether an item was raised. The client's rating is
-    already recorded by the time this runs: their action must never fail because
-    the operator's copy could not be written.
+    One row per person per target per UTC day: the subject is the digest
+    `_problem_report_id` computes. A person must act on it, so it never expires
+    and the platform never ends it. The click and the comment arrive as two
+    requests that meet on that row inside the seam's lock: a reading with words
+    writes them, and a bare one only counts (`keep_text`), so a re-rate can never
+    erase a comment, whichever lands first (trinity#3521). An item a person
+    already ended is not rewritten or reopened: a later reading that day is
+    snoozed. The `workspace-problem-` id prefix keeps it owner-only
+    (trinity-enterprise#866).
+
+    Never raises, and returns whether the operator's item was written (created,
+    or updated in place). The client's rating is already recorded by the time
+    this runs: their action must never fail because the operator's copy could not
+    be written.
     """
     try:
-        from database import db as core_db
-        from services.operator_queue_service import (
-            _truncate_with_marker,
-            create_bounded_alert,
-        )
+        from services import platform_alerts
+        from services.operator_queue_service import _truncate_with_marker
 
         evaluator = workspace_evaluator(email, is_platform=is_platform)
         text = (comment or "").strip()
@@ -6334,33 +6436,17 @@ async def raise_problem_report(agent_name: str, email: str, *, target_kind: str,
             "target_id": target_id,
             "has_comment": bool(text),
         }
-        request_id = _problem_report_id(evaluator, target_kind, target_id)
-
-        def _attach_comment() -> bool:
-            # trinity#3521: the comment usually arrives as a SECOND request, after
-            # the click already raised the item. Only words ever write text, so a
-            # bare re-rate can never erase a comment. No new row, so no budget.
-            return bool(text) and core_db.update_pending_problem_report(
-                agent_name, request_id, question=question, context=context)
-
-        if _attach_comment():
-            return True
-        item = {
-            "id": request_id,
-            "agent_name": agent_name,
-            "type": "workspace_problem_report",
-            "status": "pending",
-            "priority": "medium",
-            "title": "A Workspace client rated a response as not useful",
-            "question": question,
-            "context": context,
-            "created_at": utc_now_iso(),
-        }
-        created = await create_bounded_alert(agent_name, item)
-        # Both requests run as background tasks. If the bare click's create
-        # landed between the miss above and this create, ours was the ON
-        # CONFLICT no-op, so attach once more. Idempotent.
-        return _attach_comment() or created
+        kind = platform_alerts.KINDS["workspace_problem_report"]
+        key = _problem_report_id(evaluator, target_kind, target_id)[len(kind.prefix):]
+        outcome = platform_alerts.observe(
+            agent_name, kind.name, key,
+            title="A Workspace client rated a response as not useful",
+            question=question,
+            priority="medium",
+            context=context,
+            keep_text=not text,
+        )
+        return outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED)
     except Exception as e:  # noqa: BLE001 — the rating is already recorded
         logger.warning("[ent#499] problem report failed for %s/%s: %s",
                        agent_name, target_kind, e)

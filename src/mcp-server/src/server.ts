@@ -47,6 +47,7 @@ import { createAAuthTools } from "./tools/aauth.js";
 import { createCredentialVaultTools } from "./tools/credential_vault.js";
 import { createProjectTools } from "./tools/projects.js";
 import { createAssignmentTools } from "./tools/assignments.js";
+import { createPermissionTools } from "./tools/permissions.js";
 import { configureAudit, logSessionRevival, withAudit } from "./audit.js";
 import { revivalRequests } from "./session-front.js";
 import { installLogRedaction } from "./log-redaction.js";
@@ -690,6 +691,7 @@ export async function createServer(config: ServerConfig = {}) {
     createCredentialVaultTools(client, requireApiKey), // Credential vault runtime — list/fetch (license-blind proxy, ent#279)
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
+    createPermissionTools(client, requireApiKey),     // Permission edges + self-change grants, read-only (ent#991)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {

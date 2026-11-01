@@ -94,7 +94,12 @@
         </ul>
         <form v-if="canManage && addableAgents.length" class="mt-2 flex items-start gap-2" @submit.prevent="addAgent">
           <BaseSelect id="project-add-agent" v-model="newAgent" class="flex-1" aria-label="Add an agent">
-            <option value="" disabled>Add an agent you can use…</option>
+            <!-- Selected explicitly, not via the select's value: the refreshed
+                 project drops the added agent's option while the model still
+                 names it, which leaves NO option selected, and a select with
+                 none selected reads value "" — so Vue sees the reset to "" as
+                 a no-op and the box stays blank. -->
+            <option value="" disabled :selected="!newAgent">Add an agent you can use…</option>
             <option v-for="name in addableAgents" :key="name" :value="name">{{ name }}</option>
           </BaseSelect>
           <BaseButton type="submit" variant="secondary" :loading="busy === 'agent'" :disabled="!newAgent">Add</BaseButton>

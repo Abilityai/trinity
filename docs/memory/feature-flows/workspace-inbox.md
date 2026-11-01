@@ -112,8 +112,8 @@ Sign-in / reload on bare /workspace
                       the window widens it (a ?item= at row 72 shows 72). Not virtualisation.
                       All's footer (§3g D-4b, allFooterNotes): "Answered, expired and cancelled
                       asks drop off after 7 days."; "Showing your first 200 asks: the ones waiting longest come first." when the
-                      asks read hit its cap (T16; server total is #3059); "Rooms aren't in the
-                      Inbox yet…" only to a viewer with rooms. Empty All: "No chats or asks yet"
+                      asks read hit its cap (T16; server total is #3059). (The "Rooms aren't in
+                      the Inbox yet" note is gone since trinity-enterprise#959.) Empty All: "No chats or asks yet"
                       + a New chat link (/workspace?new=1)
                       ask rows (§3g A10, portalAskUrgency.js): kind by SHAPE in gray
                       (shield-check / question-mark-circle / bell, kind sr-only); no
@@ -320,6 +320,9 @@ table, no migration. The report publish may mint the addressee's Main
 | Sessions or previews read fails after a good load | list kept, stale banner |
 | Roster unreadable during `?previews=true` | 5xx (fail loud), never a 200 with previews dropped |
 | Deliverables read fails in the pane | `LoadFailed` in the pane, never "no deliverables" |
+| A room's read fails in the pane (trinity-enterprise#959) | `inbox-pane-room-failed` (`LoadFailed`, retry); no `rendered`, so the room is not read and keeps its count |
+| A room the pane cannot read to its end (trinity-enterprise#959) | past ten pages, or a read that runs dry before the room's `message_count`: `inbox-pane-room-partial` ("too long to show here … open it"), no `rendered`, the room stays unread; the header's Mark read still clears it on purpose |
+| The open room fails to load, or has not loaded all of itself yet (trinity-enterprise#959) | `PortalRoom` emits no `read` until its transcript reaches the room's `message_count`; opening a room from the sidebar writes no read of its own |
 | Mark all read partly fails | `InlineError` naming the failed count; those rows keep "N new" |
 | A single read write fails (any of `Portal.vue::markRead`'s 7 callers) | the optimistic zero is rolled back — only while the entry is still the one that call wrote (`portalUtils.optimisticRead` / `rollbackRead`, compared via `toRaw`) — and the call resolves `false`; it never rejects (§3g S4) |
 | First unread message outside the 50-message window | "N earlier arrivals — Open in chat" |
@@ -342,6 +345,10 @@ table, no migration. The report publish may mint the addressee's Main
 - **URL params.** `?tab=` is allowlisted; `?item=` resolves only against the viewer's loaded
   items; `?anchor=` compares `dataset` values in JS, never builds a selector.
 - Asks keep the uniform 404 of `answer_ask` (Invariant #8); no new per-item endpoint.
+- **Rooms** (trinity-enterprise#959): membership is the grant on every surface — the count, the
+  preview, the stored row and the cursor write all go through the reader's own active participant
+  row in their credential's identity space, and a participant who left is not a member. See
+  *Rooms* → **Access** below for the rule and the tests that pin it.
 
 ## Known properties
 
@@ -349,7 +356,7 @@ table, no migration. The report publish may mint the addressee's Main
 - An owner is never the addressee of an ask or a report (`include_owned=False`), so their
   Action is empty and its empty state links to Operations (A9).
 - Archived chats stay in Unread.
-- Rooms are not in Unread until PR C.
+- Rooms are in Unread and All for their members (trinity-enterprise#959, *Rooms* below).
 
 ## Files
 
@@ -374,6 +381,9 @@ table, no migration. The report publish may mint the addressee's Main
 | Frontend | `src/frontend/src/components/portal/PortalAskContext.vue`, `portalAskUrgency.js` | the ask's context below the card; `askContextMeta` |
 | Frontend | `src/frontend/src/components/portal/PortalConversation.vue`, `PortalDeliverables.vue`, `composables/useConversationAnchor.js`, `composables/useStickToBottom.js` | anchors (`data-message-id`, `data-report-id`, `loaded`, `detach()`) |
 | Frontend | `src/frontend/src/stores/clientPortal.js` | `fetchChatState({previews})`, `markChatReadStrict`, `fetchSessionDeliverablesStrict`, `asksAbsent` |
+| Backend | `src/backend/client_portal/db.py`, `service.py`, `chat_previews.py`, `router.py`, `portal_auth.py` | ent#959: `unread_room_arrivals`, `get_chat_state(room_reader=…)`, `room_reader_of`, room previews, `PortalPrincipal.username` |
+| Backend | `src/backend/shared_sessions/service.py` | ent#959: `list_rooms` marks each room `member` |
+| Frontend | `src/frontend/src/components/portal/PortalInboxRoomCard.vue`, `PortalRoom.vue` | ent#959: a room in the pane; the open room's `read` |
 
 ## Testing
 
@@ -398,6 +408,8 @@ an ask that ends while selected; a deep-linked `?item=`; previews read failing m
 | `tests/unit/test_ent610_inbox.py` | D3 deliverable arm, D4 report stamp, completion `source` marker, previews (property n == count, latest iff n > 0, no `cost`, off-roster, excerpt redaction, outcome only from the marker), the router flag |
 | `tests/unit/test_ent557_unread_never_opened_chat.py`, `test_ent359_portal_chat_state.py`, `test_ent365_report_audience.py`, `test_ent457_portal_completion_report.py` | updated fixtures / retargets for the arm and the stamp |
 | `src/frontend/tests/unit/portalInbox.spec.js` | pure rules + the seeded count-parity property |
+| `tests/unit/test_ent959_room_unread.py` | ent#959: agent messages after the room cursor count, own/system lines never; the baseline for a never-opened room; a non-member (cursor row, other identity space, departed, no reader) gets NO entry and no preview; an admin keeps their own starred non-member row at 0; the read write moves a room cursor only for an active member (unknown and unauthorized answer alike); a removed agent can no longer fetch, list or post into the room; the platform door carries its username to the room reader; `member` on the rooms list |
+| `src/frontend/tests/unit/portalInboxRooms.spec.js`, `portalInboxRooms.mount.spec.js`, `portalInboxRoomsShell.mount.spec.js` | ent#959: member rooms in Unread / All, non-member rooms never drawn or fetched, the pane reads the room after render, `roomTranscriptComplete`, a room past the page bound or short of its count stays partial and unread, the room view reads a multi-page room only once all of it is loaded and never on a failed open, opening a room from the sidebar writes no read, Mark all read by kind, the footer note gone, the count-parity property with rooms, the open room's `read` through the shell |
 | `src/frontend/tests/unit/portalInboxStore.spec.js` | `fetchChatState({previews})`, `markChatReadStrict` |
 | `src/frontend/tests/unit/portalInbox.mount.spec.js` | honest states, mark-read once, answer via store, Mark all read (Unread/All only, confirm for k>1 with Cancel focused, k=1 direct, success toast + new visit, partial failure), phone Back + focus; §3g S1 rows keep their place (A1 click-then-read, A7 answer on All, A12 poll ghosts + "All caught up"), a deleted open chat goes Back on phone; §3g S5 read after render (payloads awaited, a failed payload stays unread + Mark read, preview not in the URL, deep link reads, a false write shows the error) |
 | `src/frontend/tests/unit/portalInboxShell.mount.spec.js` | the stage chain (roster error, empty roster, no `PortalConversation`), selection never writes `activeAgentName`; ent#738: `reply` → the target, the `messageId` guard, cleared on leaving (and back), cleared on a New chat from a URL that does not name the chat, the Inbox path keeps its target |
@@ -455,6 +467,70 @@ PortalInbox.vue
   triage order (T2); the unknown-priority and expiry splits between the two
   surfaces, and the server-newest vs client-oldest direction within a priority,
   are T5 (iii being a public bug for handoff).
+
+## Rooms (trinity-enterprise#959)
+
+A room — a chat with more than one agent — is a chat row in Unread and All.
+
+```
+GET /api/rooms            shared_sessions/service.list_rooms → each row carries `member`
+                          (the caller has an active participant row; an admin lists every room)
+GET /client-portal/chat-state[?previews=true]
+  router.portal_chat_state → service.room_reader_of(principal)
+                               platform session → ("user", username)   (PortalPrincipal.username)
+                               Workspace session → ("workspace_user", email)
+                               neither → None: no room is counted (fail closed)
+    → service.get_chat_state(email, room_reader=…)       room entries' `unread`, plus
+                                                         cursorless member rooms (ent#557 baseline)
+    → chat_previews: room entries also get `latest` + `first_unread_message_id`
+      db.unread_room_arrivals(email, kind, identity)     ONE statement: agent messages after the
+                                                         `chat_kind='room'` cursor (or the baseline),
+                                                         JOINed through the viewer's own active
+                                                         participant row — membership is the grant
+portalInbox.js
+  isMemberRoom(t)          t.is_room && t.member === true — anything else is never a row
+  roomItem(t, previews)    key room:<id>, type 'room', agent_names, n, latest (previews['room:<id>'])
+  unreadItems / allItems   member rooms beside chats, ordered by latest arrival; isChatItem counts
+                           a room as a chat in the head line and in Mark all read
+  resolveItem('room:<id>') member rooms only — a deep link to another room resolves to nothing
+  openInChatTarget(room)   /workspace/r/<id>
+  roomPaneMessages / paneRuns   the room transcript in the pane's shape; a run is one SENDER
+PortalInboxRoomCard.vue    store.fetchRoom(id, since) (GET /api/rooms/{id}, uniform 404 for a non-member),
+                           paged until what is held reaches the response's `message_count`
+                           (roomTranscriptComplete), at most 10 pages
+                           → complete: the new messages → `rendered` → the container's markRead('room', id)
+                           → short of it: "too long to show here", no `rendered`, stays unread
+PortalRoom.vue             owes a `read` on a full load and when an agent message arrives, and
+                           emits it once its transcript reaches `message_count` (the 3 s poll
+                           brings the rest of a long room, a closed one included); Portal.vue → markRead('room', id), so
+                           the open room never badges. openRoom (the sidebar) writes no read itself.
+POST /client-portal/chat-state/room/{id}/read
+                           service.mark_chat_read(…, room_reader=room_reader_of(principal)):
+                           writes only for an active participant; otherwise the same 204, no write
+```
+
+- **What is new**: an agent's message after the cursor. The viewer's own messages and the
+  room's system lines never count (a room seats one person — its creator).
+- **Access**: a non-member gets NO entry for a room — no count, no zero, no id, no preview —
+  even holding a cursor row for its id: stored room rows pass through one batched
+  active-membership read (`db.active_room_ids`), and a cursorless room is emitted only through
+  the membership join. The read write (`mark_chat_read`) moves a room cursor only for an
+  active participant; an unknown or unauthorized id gets the same 204 and nothing is written.
+  A platform account and a Workspace session with the same email are two identity spaces
+  (ent#362) and never read or clear each other's rooms. A participant who left is not a member
+  (the rooms API 404s their fetch and drops the room from their list). The one exception: a
+  platform admin, who lists every room anyway, keeps their own starred rows for rooms they are
+  not in, at 0. Pinned by `tests/unit/test_ent959_room_unread.py` and
+  `portalInboxRooms.mount.spec.js`.
+- **Reading only what is on screen**: a room is read only once the transcript held reaches the
+  room's `message_count` (`roomTranscriptComplete`), in the pane and in the room view alike.
+- **Known gaps (follow-ups)**: a message landing between the last fetch and the read write is
+  cleared unseen (the write stamps server time, as a chat's does); and the cursor row has no
+  identity-space column, so one email in the SAME room under both identities shares one cursor.
+- **Counts**: the room's count rides `sidebarThreads`, so Σ "N new" == came holds
+  (`portalInboxRooms.spec.js` property; `portalInboxRoomsShell.mount.spec.js` through the shell).
+- **Known limit**: between an agent message landing and the open room's next 3 s poll, a
+  20 s chat-state refresh can count it; the room's `read` clears it on that poll.
 
 ## A door from the agent page, and a calmer mark (trinity-enterprise#836)
 

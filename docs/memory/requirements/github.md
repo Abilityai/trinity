@@ -497,10 +497,16 @@
 - **FR-6 — Surfaces**: UI Create Agent modal gains a 3-way intent selector on the
   free-form GitHub path (default `clone`; fork reveals the existing destination/PAT/
   visibility fieldset; copy explains the no-upstream contract + own-it-later); MCP
-  `create_agent` gains `import_intent: "copy" | "clone"` only — fork stays UI-only
-  (standing decision: MCP tool args are audit-logged, a PAT arg would persist in
-  plaintext). Fork-scope failures name the alternative intents (never silent
-  auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
+  `create_agent` takes `import_intent: "copy" | "clone" | "fork"` and, since
+  trinity-enterprise#1007, a `fork_to_own: {destination_repo, private?}` block — the
+  same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args land
+  in transcripts, so a PAT arg would persist there in plaintext; the audit row records
+  the tool, outcome and target agent, never the arguments themselves). The fork therefore spends
+  the caller's saved personal token (#3164); under an agent key it is the named 400
+  `FORK_PAT_REQUIRED`, unchanged. REST behaviour and the `agents.manage` create gate
+  are unchanged (`tests/unit/test_ent1007_mcp_fork_body.py` validates the MCP body
+  through `AgentConfig`). Fork-scope failures name the alternative intents (never
+  silent auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.
 - **Source of truth**: `services/agent_service/snapshot_import.py` (copy staging),
   `services/agent_service/crud.py` (intent gates + wiring),
   `services/agent_service/deploy.py::_prepopulate_workspace_from_template` (reused),
@@ -675,11 +681,11 @@
     `after − before` across two execs against a live container, so a file the agent's
     own session creates in that window lands there too, whereas a removal is a
     confirmed destructive act. That entry is **budgeted**
-    (#1677 `create_bounded_alert`), not a direct create like its `git_bloat`/`sync_failing`
+    (#1677, through `platform_alerts.observe` as kind `gitignore_untracked`), unlike its unbudgeted `git_bloat`/`sync_failing`
     siblings: their cadence is the 60-second platform poller's, while this one fires from
     `sync_to_github`, which the `git_sync` MCP tool lets an agent-scoped key drive on itself
-    — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time
-    against a timestamped, non-idempotent id. Its `gitignore-untracked-` prefix is reserved
+    — a repeated `git add -f <ignored>` + sync loop yields a fresh `removed` set each time,
+    and each set is its own subject (a digest of the direction-tagged change set; it never expires). A repeat of the same set collapses onto a pending row; each reading carries its own `push_id` (a material key), so after a person ends the row the next untracking Push, the same set included, files a new row at once. Its `gitignore-untracked-` prefix is reserved
     so an agent cannot pre-create the id and suppress its own alert through the sink's
     `on_conflict_do_nothing`. The commit-message half is
     explicitly **best-effort**: `git rm --cached` only *stages*, and if the in-container
@@ -850,6 +856,14 @@
   `POST /api/agents` and MCP `create_agent`. An **explicit `source_mode`
   always wins for the mode**. Every auto-pushing agent, including an explicit working branch and
   fork-to-own, also gets freeze-on-failure; a `deployment` never does.
+- **`kind` is readable back (trinity-enterprise#1007):** create stamps the effective
+  kind (`kind or "agent"`) on the container label `trinity.kind` — no column, no
+  migration — and it is returned as `kind` on `GET /api/agents/{name}`, the agent
+  list and `GET /api/agents/{name}/info` (MCP `get_agent` / `get_agent_info` pass it
+  through). A missing or unrecognised label reads as `null` — **unknown**, never a
+  default: agents created before the label, a container rebuilt by
+  `recreate_missing_container` (no source survives it; an ordinary recreate copies
+  the old labels), a container-less recovered agent and the system agent.
 - **An agent** gets a working branch (`trinity/<agent>/<id>`) it alone writes,
   `auto_sync_enabled=1` and `freeze_schedules_if_sync_failing=1`. It only gets
   them **only when the repo is its creator's own and the token can push to
@@ -970,7 +984,7 @@
   - `green` — otherwise.
   - The reason is operator-readable (`diverged 31 behind / 0 ahead for 26h`, `last sync failed (seen on 3 polls)`, `dirty: 791 files uncommitted for 30h`, `auto-sync on, no heartbeat for 9d`), and a stale observation (last poll older than 15 minutes) is named in it. A recommendation names the fix (`credential is read-only`, `push via git_sync strategy=pull_first`, `deployment: turn auto-sync off`, `enable auto-sync`, `pull via git_pull`).
 - **The freeze**: `should_freeze = freeze_schedules_if_sync_failing AND (sync_failing OR (work agent AND diverged > 24 h AND the observation is fresh))`. `sync_failing` is unchanged from #1808 and applies to any binding. The freshness guard fails open: the poller writes nothing for an unreachable agent, so a stale `diverged_since` must never keep an agent frozen after it may already have pushed. Enforced by the scheduler's own DB gate (the vendored copy of the shared policy module), which stays fail-open and writes the reason into the skipped execution's `skip_reason`; `GET /api/agents/sync-health` still surfaces the verdict (`freeze`) for operators. Un-freezing is automatic: the gate reads live state, so the next cron tick after divergence clears fires.
-- **One operator-queue item per episode**: when a divergence freeze is in force, the poller (inside its leader lease) raises one `sync_diverged` item with the deterministic id `sync-diverged-{agent}-{diverged_since}`; the `(agent_name, request_id)` conflict target collapses repeat polls, restarts and a fail-open double leader onto one row. The prefix is platform-reserved so an agent cannot pre-create the id and silence its own alarm. The item carries counts, the episode start and the recommendation — never raw error text. It is not auto-resolved; a new episode gets a new id. No item for red-but-not-frozen.
+- **One operator-queue item per episode**: when a divergence freeze is in force, the poller (inside its leader lease) observes one `sync_diverged` condition through `platform_alerts.observe` (subject `sync_diverged:<agent>`, type `sync_diverged`, #3254); one pending row per subject collapses repeat polls, restarts and a fail-open double leader onto one row, re-read at most every 6 h while the episode lasts. The prefix is platform-reserved so an agent cannot pre-create the id and silence its own alarm. The item carries counts, the episode start and the recommendation — never raw error text. The platform ends it when the episode ends (`diverged_since` clears); a later episode files a new row even when a person ended the last one: `diverged_since` is the kind's material key, so a person's ending snoozes re-reads of its own episode only (#3254). No item is filed for red-but-not-frozen; an item already open stays until its episode ends, even when `sync_failing` takes over the freeze.
 - **Surfaces (this slice)**: `GET /api/agents/sync-health` and `GET /api/agents/{name}/git/sync-state` (and therefore MCP `get_git_sync_state`, a pass-through) carry `state`, `reason`, `recommendation`, `binding`, `freeze`, the ages and the new columns; pre-existing keys are unchanged. The dashboard dot renders the backend's state and shows the reason on hover. The fleet surfaces follow below.
 - **Fleet surfaces (trinity-enterprise#707)** — read path only; the poller and the rule are unchanged, and every surface reads the same shared query (`db.list_sync_health_rows`) and the same verdict:
   - **Fleet health** (`GET /api/monitoring/status`, MCP `get_fleet_health`): each agent carries a `sync` block — `binding` (agent / deployment), `auto_sync_enabled`, `ahead`, `behind` (origin on the agent's own branch), `dirty_files`, `last_successful_push_at`, `divergence_age_s`, `state`, `reason`, `recommendation`, `frozen` — or `sync: null` when the agent has no git binding. The response gains `sync_summary` = `{git_bound, diverged, frozen, auto_sync_off, dirty, red, yellow}`. A red agent gains one `issues[]` entry, `sync: <reason> — <recommendation>`, so every existing consumer of that list sees it. Sync is an **annotation** (the heartbeat precedent): it never changes an agent's `status`, the fleet sort, or the healthy/degraded/unhealthy counts. A fault in the sync read degrades to `sync: null` / `sync_summary: null`, never to the "aggregation failed" payload.
