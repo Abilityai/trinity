@@ -21,6 +21,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step
 - [Local Development](guides/deploying/local-development.md) — Docker Desktop, dev compose, hot reload, base image build
 - [Single Server](guides/deploying/single-server.md) — VPS or bare metal: prebuilt images or source, `.env` reference, database backend, Vultr
+- [Sizing Your Server](guides/deploying/capacity-planning.md) — How much RAM, CPU and disk a fleet needs, how to recommend a size, and when to grow
 - [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl and an optional domain; you connect Claude on first sign-in
 - [Deploy on AWS](guides/deploying/aws.md) — Script install or CloudFormation stack, the instance-ID claim, IP refresh
 - [Public Access](guides/deploying/public-access.md) — Cloudflare Tunnel, the public webhook surface, DNS
