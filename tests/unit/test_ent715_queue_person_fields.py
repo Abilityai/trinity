@@ -975,6 +975,9 @@ _ROW_READERS = {
                     "compared with a pass's start (#3254); a boolean, nothing leaves"),
     ("services/task_execution_service.py", "_alert_skill_not_found"): (
         "internal", "dedupe: is a skill_not_found alert already pending"),
+    ("services/sync_health_service.py", "SyncHealthService._divergence_reported"): (
+        "internal", "the agent's pending `sync_diverged` row: whether its `diverged_since` is this "
+                    "episode (#3254); a boolean, nothing leaves"),
 }
 
 

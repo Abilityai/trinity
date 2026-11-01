@@ -1779,6 +1779,9 @@ async def recreate_missing_container(agent_name: str):
             agent_name,
         )
 
+    # trinity-enterprise#1007: no `trinity.kind` here — the create-time kind
+    # lived only on the vanished container, so the rebuilt agent reads as
+    # unknown (AgentStatus.kind None) rather than a fabricated default.
     labels = {
         "trinity.platform": "agent",
         "trinity.agent-name": agent_name,

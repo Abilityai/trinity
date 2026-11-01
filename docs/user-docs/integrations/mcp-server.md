@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 169 tools across 38 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 164 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 175 tools across 39 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 170 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -76,7 +76,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `subscriptions.ts` | 6 | Subscription management |
 | `monitoring.ts` | 4 | `get_fleet_health`, `get_fleet_sync_audit`, `get_agent_health`, `trigger_health_check` — fleet health, git sync health, and the fleet sync audit (see [Monitoring](../operations/monitoring.md)) |
 | `metrics.ts` | 4 | `record_metrics`, `get_metrics`, `get_objectives`, `refresh_metric_definitions` — the calling agent's declared business metrics and objectives (see [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics)) |
-| `nevermined.ts` | 4 | Payment configuration |
+| `nevermined.ts` | 6 | Payment configuration, payment history, agent spending and delegation revocation |
 | `notifications.ts` | 1 | `send_notification` — agent-to-platform notifications (`alert`, `info`, `status`, `completion`, `question`) |
 | `events.ts` | 4 | Agent event pub/sub |
 | `docs.ts` | 2 | `get_agent_requirements`, `ask_trinity` — agent documentation and grounded Q&A about Trinity |
@@ -84,7 +84,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `messages.ts` | 1 | `send_message` — proactive message to a person, addressed by role |
 | `voice.ts` | 1 | `send_voice_reply` — speak one reply of the current channel turn as a voice note (see [Voice Replies](../advanced/voice-replies.md)) |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
-| `memory.ts` | 1 | `write_user_memory` — per-user memory blob, isolated server-side |
+| `memory.ts` | 2 | `write_user_memory` — per-user memory blob, isolated server-side; `search_memory` — search the agent's retrieval memory on demand |
 | `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
@@ -99,8 +99,9 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `aauth.ts` | 2 | `request_person_token`, `call_aauth_resource` — prototype AAuth legs (person-token binding, allow-listed resource calls); always registered, agent-scoped key only, answer `aauth_disabled: true` while the AAuth or prototype switch is off. See [A2A Protocol](a2a-protocol.md#prototypes-acting-for-the-owner-and-calling-aauth-resources) |
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
-| `projects.ts` | 13 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
+| `projects.ts` | 14 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
 | `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
+| `permissions.ts` | 2 | `get_agent_permissions`, `get_agent_capability_grants` — read an agent's permission edges (the agents it may call) and its self-change permissions; read-only, granting stays in the UI. An agent key reads edges for itself, an agent it has an edge to, or one it spawned, and grants only for itself or an agent it spawned |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 
@@ -203,6 +204,7 @@ When the caller is an agent serving a Slack, Telegram or Workspace conversation,
 | `send_group_message` | Proactive message to a channel group (Slack channel, Telegram chat). Discovered via `list_channel_groups`. Takes an optional `idempotency_key`. |
 | `ask_trinity` | Grounded Q&A about Trinity itself, answered from the documentation. Pass the `session_id` it returns to ask follow-ups; the tool tells you when a session reset dropped your context. Also available standalone as the `trinity-docs-mcp` npx package, with no Trinity instance or API key required. |
 | `record_metrics` | Record observations of the agent's declared business metrics as data. A batch is all-or-nothing, with a reason code per bad point; declare a metric in `template.yaml` first and call `refresh_metric_definitions`. Read back with `get_metrics`, and targets vs actuals with `get_objectives`. See [Dynamic Dashboards](../advanced/dynamic-dashboards.md#declared-metrics). |
+| `get_agent_permissions` | Read the agents an agent may call. Strict: when Docker can't be read you get an error, not an empty list. Only edges you can see are listed (`observed_within`), so a missing edge is not proof it was removed. `get_agent_capability_grants` reads the agent's five self-change permissions. An agent key reads only its own grants or those of agents it spawned, and any other target is refused. A refusal is an error, never "no grants". |
 | `report` | Publish a structured report (table, KPI set, markdown, timeline); `to` addresses it to a role's person. Read them back with `list_reports` / `get_report`. See [Agent Reports](../operations/agent-reports.md). |
 
 ## For Agents

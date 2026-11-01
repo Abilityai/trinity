@@ -491,6 +491,10 @@ class AskRejected(Exception):
 
 ASK_TYPES = ("approval", "question", "alert")
 ASK_ROLES = ("primary", "approver", "viewer", "operator")
+# trinity-enterprise#1007: beside the four kinds, an agent's `to` may name a
+# canon role by id. This is the form the `invalid_to` refusal teaches; the id
+# itself is validated by `role_addressing.parse_role_id` (ROLE_ID_RE).
+ASK_ROLE_ID_FORM = "role:<id>"
 # Who raised a native ask, and the channel its row records. The column also holds
 # `file`, which only the file poller writes (`create_item_with_outcome`), never
 # this sink.
@@ -522,8 +526,9 @@ def raise_ask(
     `addressees` + `to_role_override` (trinity-enterprise#848) are the gate's
     pre-resolved audience: the very people `skill_gate_service.enforce` decided
     self-approval with, and the approver value the ask is recorded `to_role`
-    as — a kind, or a canon role `role:<id>` the sink's own `to` vocabulary
-    (`ASK_ROLES`, an agent's input) deliberately does not accept. Given, role
+    as — a kind, or a canon role `role:<id>` (an agent's own `to` may name one
+    too since trinity-enterprise#1007, resolved by `_address` on its own
+    roster; the gate's value is pre-resolved and skips that step). Given, role
     resolution (`_address`) is skipped, so the gate's audience and the ask's
     cannot diverge (no second resolve between the two). Gate raises only, like
     `addressee`; an agent's raise passing either is a programming error.
@@ -830,6 +835,8 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     platform-reserved prefix; a gate raise must use its own, `gate-`, so no
     agent can pre-create it and `is_platform_minted` keeps the row's endings
     from waking the agent."""
+    from services import role_addressing
+
     if not isinstance(ask, Mapping):
         raise AskRejected(422, "invalid_ask", "The ask must be an object.")
     rid = ask.get("request_id")
@@ -911,8 +918,15 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
         if proposal_bytes > oqs.OPERATOR_QUEUE_PROPOSAL_MAX_BYTES:
             raise _too_large("proposal", oqs.OPERATOR_QUEUE_PROPOSAL_MAX_BYTES, "bytes")
     to = ask.get("to") or ("operator" if kind == "alert" else "primary")
-    if to not in ASK_ROLES:
-        raise AskRejected(422, "invalid_to", "Unknown role.", allowed=list(ASK_ROLES))
+    role_id = role_addressing.parse_role_id(to)
+    if role_id is not None:
+        # trinity-enterprise#1007: a canon role, stored canonical (lower-cased)
+        # so a retry spelt `role:Head` replays against `role:head` with no
+        # false `differs`. Resolved — and refused by name — in `_address`.
+        to = f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
+    elif to not in ASK_ROLES:
+        raise AskRejected(422, "invalid_to", "Unknown role.",
+                          allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
     expires_at = ask.get("expires_at")
     _deadline(expires_at, floor=False)
     supersedes = ask.get("supersedes_expired")
@@ -1217,11 +1231,24 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     is delivered to each of them on read (trinity-enterprise#816, the
     2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
     membership), so `resolved` is true because a person's Inbox shows it. `role` is already validated
-    against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
-    so the one refusal left to map is an unfilled role.
+    by `_validated_ask` (the only caller passes its output): one of `ASK_ROLES`,
+    whose one refusal left to map is an unfilled role — or a canonical canon
+    role `role:<id>` (trinity-enterprise#1007), which
+    `role_addressing.resolve_role_id_for_ask` resolves on this agent's OWN
+    roster with ent#881 reachability applied; each of its arms
+    (`role_unavailable`, `role_unassigned`, `role_cannot_open_agent`) maps 1:1
+    to a 422 so the agent gets the remedy for the arm it hit, with the role's
+    label and never a person in the text.
     """
     from services import role_addressing
 
+    role_id = role_addressing.parse_role_id(role)
+    if role_id is not None:
+        try:
+            r = role_addressing.resolve_role_id_for_ask(agent_name, role_id)
+        except role_addressing.RoleRefused as e:
+            raise AskRejected(422, e.code, e.message, role=e.role)
+        return r.people, r.single, r.resolved
     try:
         r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
     except role_addressing.RoleRefused:
