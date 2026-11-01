@@ -273,20 +273,19 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
 
 
 def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str, Any]]:
-    """Who a platform-raised approval waits on, and whether THIS person may
-    decide it — `may_end`'s own answer, so a card never offers a control the
-    sink would refuse (trinity-enterprise#980). None for every other ask.
+    """Who a seat-fenced ask waits on, and whether THIS person may decide it —
+    `may_end`'s own answer, so a card never offers a control the sink would
+    refuse (trinity-enterprise#980, widened to role-id asks by #1042). None for
+    every other ask.
 
-    The operator queue lists an ask to anyone who can use its agent, but a gate
-    approval belongs to the people it was addressed to; without this an admin
+    The operator queue lists an ask to anyone who can use its agent, but a
+    fenced ask belongs to the people it was addressed to; without this an admin
     saw Approve / Decline on someone else's decision and learned only from the
-    refusal that it was not theirs."""
-    if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
+    refusal that it was not theirs. An empty snapshot waits on nobody and nobody
+    may decide it — the sink's answer, never None."""
+    if not _seat_fenced(row):
         return None
-    people = _resolved_people(row)
-    if not people:
-        return None
-    return {"waiting_on": people, "can_decide": may_end(row, actor)}
+    return {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
 
 
 # ---------------------------------------------------------------------------

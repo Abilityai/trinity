@@ -429,3 +429,50 @@ class TestRefusalWording:
         assert (exc.value.status_code, exc.value.code, exc.value.detail) == (
             403, "not_addressee", REMEDY)
         assert real_db.get_operator_queue_item(row["id"])["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# The card goes read-only before the click (`addressed`, the ent#980 path)
+# ---------------------------------------------------------------------------
+
+class TestProjection:
+    def _addressed(self, routes, uid):
+        res = routes.client.get(f"/api/operator-queue/{uid}")
+        assert res.status_code == 200, res.text
+        return res.json()["addressed"]
+
+    def test_a_person_outside_the_seat_reads_whose_it_is(self, routes, agent, people):
+        uid = _seated_row(agent, people)["id"]
+        routes.as_(people["carol"], role="admin")
+        view = self._addressed(routes, uid)
+        assert view["can_decide"] is False
+        assert sorted(view["waiting_on"]) == sorted([people["alice"], people["bob"]])
+
+    def test_a_seated_person_may_decide(self, routes, agent, people):
+        uid = _seated_row(agent, people, kind="question")["id"]
+        routes.as_(people["bob"].upper())
+        assert self._addressed(routes, uid)["can_decide"] is True
+
+    def test_the_list_carries_the_same_view(self, routes, agent, people):
+        uid = _seated_row(agent, people)["id"]
+        routes.as_(people["carol"])
+        res = routes.client.get("/api/operator-queue", params={"agent_name": agent})
+        assert res.status_code == 200, res.text
+        item = {i["id"]: i for i in res.json()["items"]}[uid]
+        assert item["addressed"]["can_decide"] is False
+
+    @pytest.mark.parametrize("kind_to", ["approver", "primary"])
+    def test_kind_addressed_asks_carry_none(self, routes, agent, people, kind_to):
+        _provide(kinds={kind_to: [people["alice"]]})
+        uid = _raise(agent, to=kind_to)["id"]
+        routes.as_(people["carol"])
+        assert self._addressed(routes, uid) is None
+
+    @pytest.mark.parametrize("snapshot", [None, "[]", "not json"])
+    def test_an_empty_snapshot_reads_as_nobodys_never_as_open(self, agent, people, snapshot):
+        """The sink refuses everyone, so the card must not offer the control."""
+        from services.ask_service import addressed_view, may_end
+        row = {**_seated_row(agent, people), "resolved_to": snapshot}
+        actor = _actor(people["alice"], role="admin")
+        assert addressed_view(row, actor) == {"waiting_on": [], "can_decide": False}
+        assert may_end(row, actor) is False
