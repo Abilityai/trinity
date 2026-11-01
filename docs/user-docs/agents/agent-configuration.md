@@ -56,6 +56,8 @@ The owner and admins see the card; anyone else does not. Only an instance admin,
 
 **After upgrading.** No agent holds the schedule, instruction or agent permissions after the upgrade that introduces them. An orchestrating agent that creates agents, writes another agent's schedules or instructions, or reconfigures agents is refused until an admin grants the permission.
 
+Read the five permissions over MCP with `get_agent_capability_grants` (an agent key reads itself or an agent it spawned; a person key reads as the agent's owner or an admin). Granting stays on this card.
+
 The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
 
 ### Parallel Capacity

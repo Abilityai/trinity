@@ -263,7 +263,8 @@
   - `upstream` remote auto-added in the agent workspace (credential-less, public templates) so `git pull upstream main` adopts template improvements; `GIT_UPSTREAM_REPO` env var baked at creation.
   - Fork-to-own agents are pinned to source mode (origin main = the brain) with the 15-min auto-sync heartbeat enabled (pushing to your own main is the point).
   - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
-- **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
+- **MCP (since #4126)**: `create_agent` accepts the `fork_to_own` block minus `github_pat` (tool args land in transcripts — a PAT arg would persist there in plaintext); the caller's saved personal token is spent, and an agent key is refused `FORK_PAT_REQUIRED`.
+- **Out of scope (v1)**: PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
 
 ### 4.5 Library Page (trinity-enterprise#263)
 - **Status**: ✅ Implemented (2026-07-31)
@@ -510,8 +511,11 @@
   use, so a single cap would be spent by activity the user cannot undo, making
   the 409's "unstar some first" advice false. Unstarring a chat that carries no
   read cursor deletes its row.
-- **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
-  reconciling the two cursor models is follow-up work; stars work for both kinds.
+- **Rooms (trinity-enterprise#959)**: a room's unread is counted on the same per-viewer
+  timestamp cursor (`chat_kind = 'room'`, written when the person opens the room) and the
+  ent#557 baseline — agent messages only, and only for a room the viewer is an active
+  participant of in the identity space their credential acts in (§5.40 *Rooms*). Stars work
+  for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
@@ -2724,26 +2728,26 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
-  `operator_queue_service.create_bounded_alert` with its own registered type
+  `platform_alerts.observe` (which applies the #1677 budget) with its own registered type
   `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target per UTC day, by construction.** The id is
-  derived from the evaluator, the target and the day, so a re-rate hits
-  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **One item per person per target per UTC day, by construction.** The subject's
+  key is a digest of the evaluator, the target and the day, so a re-rate updates
+  that day's pending item in place through `platform_alerts.observe` (#3254).
 - **A comment sent after the rating reaches the item** (trinity#3521). The
   Workspace records the thumbs-down on the click and sends the comment as a
   second request, so the click has usually raised the item already. A request
   that carries words rewrites the item's `question` and `context.has_comment`
-  through `db.update_pending_problem_report` — pending items of this type only,
+  through `platform_alerts.observe` (`keep_text=False`; a bare click passes `keep_text=True`) — pending items only,
   so an item a person already ended is never rewritten or reopened. Only words
   ever write text: a bare re-rate cannot erase a comment. The update adds no row,
-  so it spends no budget. Both requests run in the background, so the service
-  attaches once more after its own create (the click's create can land in
-  between). **Stated residual**: a comment sent after the operator ended that
+  so it spends no budget. Both requests run in the background, and which one
+  writes is decided inside the per-agent create lock, so either order keeps the
+  words. **Stated residual**: a comment sent after the operator ended that
   day's item does not reach it; the next day's item carries the next report.
-- **Emitted off the response path.** `create_bounded_alert` is async and the
+- **Emitted off the response path.** `raise_problem_report` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
   alert is raised: the client's action must never fail because the operator's
@@ -3907,7 +3911,7 @@ to localStorage in the clear.
 
 ### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
 - **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
-  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+  Action after abilityai/trinity#3028; rooms in Unread and All: trinity-enterprise#959)
 - **Requirement ID**: WORKSPACE_INBOX
 - **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
 - **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
@@ -3925,8 +3929,8 @@ to localStorage in the clear.
   | Tab | Membership | Source |
   |---|---|---|
   | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
-  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
-  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included; **rooms I am in count as chats** (one row per room, trinity-enterprise#959) | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed), **the rooms I am a member of** (trinity-enterprise#959), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule and the 200-ask read cap when hit (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
   #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
   read row. An arrival is an assistant message in my chat **or** a report addressed to me that
@@ -3970,6 +3974,35 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Rooms (trinity-enterprise#959, the rest of AC 2)**: a room — a chat with more than one
+  agent — is a chat row in Unread and All, named by its agents ("Ada, Bo") and its title.
+  - *What is new*: an **agent's** message in the room after my read cursor (`POST
+    /chat-state/room/{id}/read`), or after my account baseline for a room I have never opened
+    — the chat rule (`role = 'assistant'`) in a room's terms. My own messages and the room's
+    system lines never count.
+  - *Who sees it*: membership is the grant. The count, the preview excerpt and the row exist
+    only for a room where the viewer has an active participant row in the identity space
+    their credential acts in — `workspace_user` + email for a Workspace session, `user` +
+    username for a platform session (ent#362) — so a non-member never gets a room's row, id,
+    name or count, even holding a cursor row for its id: stored room rows are filtered through
+    the reader's active memberships. The read write moves a room cursor only for an active
+    participant (an unknown or unauthorized id gets the same 204 and nothing is written). A
+    participant who left is not a member: the rooms API no longer lists or serves the room to
+    them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
+    a room only when `member` is true, and a deep link to another room resolves to nothing. A
+    platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
+  - *Reading it*: opening a room row shows its new messages in the pane (the room's own
+    membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
+    opens the room. The room on screen reads itself on open and whenever an agent message
+    lands in it, so the sidebar never badges the room being read. Either way a room is read
+    only once the transcript on screen reaches the room's whole message count; a room too long
+    for the pane stays unread and says so, and a failed open reads nothing. Mark all read reads
+    a room as a room.
+  - *Counts*: the room's count rides the same `sidebarThreads` projection, so the sidebar,
+    the agent rows (a room credits every agent in it), the tab title and the Inbox still read
+    one number (Σ "N new" == came).
+  - No new table, store or migration: the room cursor is a `enterprise_portal_chat_state`
+    row of the existing `room` kind.
 - **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
   raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
   messages and answerable in place; once ended — at once when answered there, the confirmation
@@ -4105,7 +4138,7 @@ to localStorage in the clear.
   - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
   - Counts for the viewer's own chats with agents no longer on their roster are in the
     chat-state payload (since ent#359/#557) but nothing renders them.
-  - Rooms are not in Unread until PR C (no human room read cursor exists).
+  - Rooms are in Unread and All for their members since trinity-enterprise#959 (*Rooms* above).
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

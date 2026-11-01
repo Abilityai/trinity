@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
+# mcp: files.ts (share_file → /shared-files) + permissions.ts (get_agent_permissions → /permissions?strict=true, ent#991; the permission writes are deliberately unexposed — granting an edge is human-only) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -21,7 +21,7 @@ from services import (
     peer_skill_policy,
     rate_limiter,
 )
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
 from services.agent_service import (
     agent_reach_logic,
@@ -131,6 +131,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "stopped",
             "message": "Agent is stopped. Start the agent to see full template info."
         }
@@ -146,6 +147,8 @@ async def get_agent_info_endpoint(
                 # `type` read from template.yaml — strip it here so the retired
                 # field never reaches the UI/MCP without forcing image rebuilds.
                 data.pop("type", None)
+                # trinity-enterprise#1007: the label is the record, not the template.
+                data["kind"] = kind_from_labels(container.labels)
                 return data
             else:
                 labels = container.labels
@@ -157,6 +160,7 @@ async def get_agent_info_endpoint(
                         "cpu": labels.get("trinity.cpu", ""),
                         "memory": labels.get("trinity.memory", "")
                     },
+                    "kind": kind_from_labels(labels),
                     "status": "running",
                     "message": "Template info endpoint not available in this agent version"
                 }
@@ -172,6 +176,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "running",
             "message": f"Could not fetch template info: {str(e)}"
         }

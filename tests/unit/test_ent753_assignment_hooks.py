@@ -59,7 +59,9 @@ DB_WRITERS = frozenset({
     "assign_skill_set", "unassign_skill_set", "replace_skill_sets", "reconcile_skill_sets",
 })
 SET_SERVICE_WRITERS = frozenset({"assign", "unassign", "replace", "reconcile_agent"})
-HOOKS = frozenset({"reconcile_library_gates", "_sync_gates"})
+# `sync_gates` moved from routers/skills.py into services/skill_assignment_service.py
+# (trinity-enterprise#1030); the router reaches it as an attribute of that module.
+HOOKS = frozenset({"reconcile_library_gates", "sync_gates"})
 
 # Modules that ARE the writers (or delegate to them) — they cannot hook themselves.
 EXEMPT_FILES = frozenset({"database.py", "services/skill_set_service.py"})
@@ -69,12 +71,14 @@ EXEMPT_DIRS = ("db/", "enterprise/", "tests/", "migrations/")
 EXPECTED_SITES = frozenset({
     "routers/skills.py::update_agent_skills",
     "routers/skills.py::inject_skills",
-    "routers/skills.py::assign_skill",
     "routers/skills.py::unassign_skill",
     "routers/skills.py::assign_skill_set",
     "routers/skills.py::unassign_skill_set",
     "services/agent_service/lifecycle.py::inject_assigned_skills",
     "services/skills_sync_service.py::SkillsLibrarySyncService._reinject_agent",
+    # ent#1030: the single-skill assign route delegates its write here.
+    "services/skill_assignment_service.py::assign_and_deliver",
+    "services/skill_assignment_service.py::assign_set_and_deliver",
 })
 
 
@@ -175,10 +179,10 @@ def test_every_assignment_writer_reaches_the_gate_reconcile():
     assert {s for s, _, _ in sites} == EXPECTED_SITES
 
 
-def test_the_router_helper_itself_reaches_the_reconcile():
-    tree = ast.parse((_BACKEND / "routers" / "skills.py").read_text())
+def test_the_shared_helper_itself_reaches_the_reconcile():
+    tree = ast.parse((_BACKEND / "services" / "skill_assignment_service.py").read_text())
     helper = next(n for n in ast.walk(tree)
-                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "_sync_gates")
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "sync_gates")
     assert any(isinstance(n, ast.Attribute) and n.attr == "reconcile_library_gates"
                for n in ast.walk(helper))
 

@@ -24,8 +24,11 @@
     › Danger zone; the Workspace and the voice call → the Workspace (ent#950).
   -->
   <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg mb-4 relative" data-testid="agent-header-container">
-    <!-- Overlapping Avatar (AVATAR-001) - centered on left edge of card (50% in, 50% out) -->
-    <div class="absolute left-0 top-3 z-10 group -translate-x-1/2">
+    <!-- Overlapping Avatar (AVATAR-001) - centered on left edge of card (50% in, 50% out)
+         from `sm` up. Below `sm` it sits inside the card above the name: hung off
+         the edge it covered the card's border, and the 64px it needed on each
+         side left a phone's header a third narrower (#3542). -->
+    <div class="relative ml-4 mt-4 w-fit group sm:absolute sm:left-0 sm:top-3 sm:z-10 sm:ml-0 sm:mt-0 sm:-translate-x-1/2">
       <div class="rounded-full border-[3px] border-action-primary-400 dark:border-action-primary-500 shadow-lg overflow-hidden">
         <div class="relative w-28 h-28">
           <Transition name="avatar-crossfade">
@@ -91,7 +94,7 @@
     </div>
 
     <!-- ROW 1: Identity + Primary Action -->
-    <div class="p-4 pb-3 pl-16">
+    <div class="p-4 pb-3 sm:pl-16">
       <!-- #2197 — `flex-wrap` + `gap-y-3`. Identity and the action buttons are
            both rigid (a name, the context chart, a Running toggle), so on a
            single non-wrapping row their combined min-content simply widened the
@@ -285,12 +288,15 @@
          dominated the measurement: toggles + Tags on the left and the live
          CPU/MEM/uptime cluster on the right add up to ~790px of min-content,
          so the page body scrolled horizontally from 1023px down. -->
-    <div class="pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-y-2" data-testid="agent-header-row-settings">
-      <!-- Left side: Mode toggles + Tags. `flex-1 min-w-0`: the tags block
-           takes whatever the live cluster leaves and its chips truncate, so
-           the row fits on one line wherever toggles + live cluster fit — and
-           the wrap point no longer moves when the tags arrive. -->
-      <div class="flex flex-wrap items-center gap-y-2 min-w-0 flex-1">
+    <div class="pl-4 sm:pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-y-2" data-testid="agent-header-row-settings">
+      <!-- Left side: Mode toggles + Tags. From `sm` up, `grow shrink sm:basis-0
+           min-w-0` (flex-1): the tags block takes whatever the live cluster
+           leaves and its chips truncate, so the row fits on one line wherever
+           toggles + live cluster fit — and the wrap point no longer moves when
+           the tags arrive. Below `sm` the live cluster fills the line by
+           itself, so a zero basis left this block 0px wide and "+ Add tag"
+           drew over CPU/MEM; `basis-full` gives it its own line (#3542). -->
+      <div class="flex flex-wrap items-center gap-y-2 min-w-0 grow shrink basis-full sm:basis-0">
         <!-- Autonomy Toggle (not for system agents) -->
         <div v-if="canEditIdentity" class="flex items-center">
           <AutonomyToggle
