@@ -205,7 +205,7 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
             raise _Refused(f"{e.code}: {e.message}") from e
         return True
 
-    if not await attempt(name, short, STEP, write):
+    if not await attempt(name, short, STEP, write, key=skill):
         if op.args.get("held"):
             _held_skill_not_gated(op, out, apply_change)
         return

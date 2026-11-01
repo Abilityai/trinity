@@ -1580,6 +1580,10 @@ class SystemApplyFailure(BaseModel):
     short_name: str
     step: str
     reason: str  # Sanitized, truncated (`system_service._failure_reason`)
+    # What the write was for when a step writes more than one thing on a
+    # member — the skill(s), set, gate's skill, capability, seat, edge target
+    # or tag (#4130); None for a member-wide write.
+    key: Optional[str] = None
 
 
 class SystemApplyAdoption(BaseModel):
@@ -1626,7 +1630,8 @@ class SystemApplyResponse(BaseModel):
     # so a grant or seat the CALLER's credential could not write is loud
     # (theme 3). Blocked members are counted nowhere. #4130: `write` is the
     # plan on a dry run ("would make") and only the LANDED writes on a real
-    # run (none on a refused run); `report` / `unobserved` are plan counts.
+    # run, each by its own key (two sets on one member, one held: 1), none on
+    # a refused run; `report` / `unobserved` are plan counts.
     summary: Dict[str, Dict[str, Any]] = {}
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is

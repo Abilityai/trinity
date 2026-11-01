@@ -300,6 +300,15 @@ class TestPersonSeatsHeader:
         assert line.endswith(f": {B}, {LEAD}")
         assert all("person_seats" not in a for a in doc["agents"].values())
 
+        # A non-owner viewer cannot read the agent seat, but the person-seats
+        # line is about the seam, not the caller: it names the members too.
+        from database import db
+        for n in (LEAD, B):
+            db.share_agent(n, W.ALICE, world.user(W.BOB).email)
+        shared, _ = _export([LEAD, B], viewer=world.user(W.BOB))
+        assert f"seat of {B}" in shared
+        assert line in shared.splitlines()
+
 
 class TestGroupRoundTrips:
     def test_folders_tags_resources_schedules_mesh_template_round_trip(self, world, monkeypatch):

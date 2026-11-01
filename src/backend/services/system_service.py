@@ -1648,9 +1648,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             except Exception as e:
                 logger.warning(f"Failed to get the seat of {full_name}: {e}")
                 unobserved_reads.append(f"seat of {full_name}")
-            # #4132: the seam answers per seat and never lists who fills what,
-            # so the person seats a member needs can never be read back.
-            person_seats_unread.append(full_name)
+        # #4132: the seam answers per seat and never lists who fills what, so
+        # the person seats a member needs can never be read back — for any
+        # caller, so the line names every member, not only seat-readable ones.
+        person_seats_unread.append(full_name)
 
         agent_configs[short_name] = config
 
@@ -4231,8 +4232,10 @@ class ApplyOutcome:
     succeeded: int = 0
     writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
     tags_written: List[str] = field(default_factory=list)
-    # #4130: (name, step) of every write that landed, and (name, tag) of every
-    # tag that landed — the result counts and lists only what happened.
+    # #4130: (name, step, key) of every write that landed — `key` is what the
+    # write wrote (the skill, set, gate's skill, capability, seat, edge target,
+    # tag), None for a member-wide write — and (name, tag) of every tag that
+    # landed: the result counts and lists only what happened.
     landed: set = field(default_factory=set)
     tags_landed: set = field(default_factory=set)
     member_failed: set = field(default_factory=set)
@@ -4291,33 +4294,39 @@ async def execute_apply_plan(
     system = plan.system_name
     by_name = {mp.name: mp for mp in plan.members.values()}
 
-    def fail(name: str, short: str, step: str, reason: str) -> None:
-        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step, reason=reason))
+    def fail(name: str, short: str, step: str, reason: str, key=None) -> None:
+        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step,
+                                             reason=reason, key=_write_key(key)))
         if name in by_name:
             out.member_failed.add(name)
 
-    def lost(name: str, short: str, step: str) -> bool:
+    def lost(name: str, short: str, step: str, key=None) -> bool:
         if lease.ok:
             return False
-        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply")
+        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply",
+             key)
         return True
 
-    async def attempt(name: str, short: str, step: str, write) -> bool:
-        if lost(name, short, step):
+    async def attempt(name: str, short: str, step: str, write, key=None) -> bool:
+        """One write. `key` is what it writes (a string, or a list when one
+        write lands several, e.g. a skill assignment), so the result counts and
+        names each write by its own key, never per member and step (#4130)."""
+        if lost(name, short, step, key):
             return False
         try:
             result = write()
             if asyncio.iscoroutine(result):
                 result = await result
         except Exception as e:  # noqa: BLE001 — recorded per write, the run continues (P-C)
-            fail(name, short, step, _failure_reason(e)[0])
+            fail(name, short, step, _failure_reason(e)[0], key)
             return False
         if result is False or result is None:
-            fail(name, short, step, "the write was refused or stored nothing")
+            fail(name, short, step, "the write was refused or stored nothing", key)
             return False
         out.succeeded += 1
         out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
-        out.landed.add((name, step))
+        for k in (key if isinstance(key, (list, tuple)) else [key]):
+            out.landed.add((name, step, k))
         return True
 
     # 1. Create absent members; tag each with the system tag first.
@@ -4332,7 +4341,8 @@ async def execute_apply_plan(
         if not created:
             continue
         out.created.append(mp.name)
-        tagged = await attempt(mp.name, mp.short_name, "tag", lambda n=mp.name: _tag_stored(n, system))
+        tagged = await attempt(mp.name, mp.short_name, "tag",
+                               lambda n=mp.name: _tag_stored(n, system), key=system)
         if tagged:
             out.tags_written.append(mp.name)
             out.tags_landed.add((mp.name, system))
@@ -4400,6 +4410,14 @@ async def execute_apply_plan(
     return out
 
 
+def _write_key(key) -> Optional[str]:
+    """`SystemApplyFailure.key`: what the failed write was for, joined when
+    one write carries several."""
+    if isinstance(key, (list, tuple)):
+        return ", ".join(str(k) for k in key) or None
+    return None if key is None else str(key)
+
+
 async def _created(awaitable) -> bool:
     await awaitable
     return True
@@ -4418,7 +4436,8 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
                   request: Optional[Request] = None) -> None:
     name, short = op.member, op.short_name
     if op.kind == "tag":
-        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
+        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"]),
+                         key=op.args["tag"]):
             out.tags_landed.add((name, op.args["tag"]))
             if name not in out.tags_written:
                 out.tags_written.append(name)
@@ -4426,7 +4445,7 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
         target = op.args["target"]
         await attempt(name, short, "permissions", lambda: (
             db.add_agent_permission(name, target, current_user.username) is not None
-            or bool(db.is_agent_permitted(name, target))))
+            or bool(db.is_agent_permitted(name, target))), key=target)
     elif op.kind == "folders":
         await attempt(name, short, "folders", lambda: db.upsert_shared_folder_config(
             agent_name=name, expose_enabled=op.args["expose_enabled"],
