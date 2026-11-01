@@ -141,7 +141,14 @@ permissions:
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
   persons only. See "Phase 4: Apply" below
-- **Management**: `GET /api/systems` - List all deployed systems
+- **Management**: `GET /api/systems` - List deployed systems by their system tag (#4129): one
+  entry per tag on the caller's accessible agents that has evidence of being a system (its
+  auto-created system view, a `system_apply` audit row, or a carrier named `<tag>-*`), with
+  the roster agents carrying it; names are never split, a plain tag is not listed, and
+  unreadable tags are a 503. Known gap: a bare-named system created by `POST /deploy` with
+  no `system_view` and never applied leaves no such evidence, so it is not listed until
+  deploy records that its tag is a system (follow-up); likewise a bare system whose only
+  evidence is a `system_apply` audit row leaves the list once audit retention prunes that row
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
 - **Export**: `GET /api/systems/{name}/manifest` - Export system as YAML
@@ -184,7 +191,9 @@ permissions:
 - **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
 - **Not built**: a browser for *already-deployed* systems (see Frontend Layer below) —
   which is also why the teardown panel takes a **typed** system name or one handed over
-  from a deploy result, and never a name from `GET /api/systems`
+  from a deploy result, never a name read off `GET /api/systems` without confirming it (that
+  list names systems by their tag since #4129, but not one deployed bare with no view and
+  never applied)
 
 ## Frontend Layer
 
@@ -894,27 +903,23 @@ async def apply_system(body: SystemApplyRequest, request: Request,
   reaches permission grants, other agents' schedules and the platform prompt).
 - A refused run writes no audit row (nothing changed).
 
-#### GET /api/systems (Lines 199-244)
+#### GET /api/systems (#4129)
 ```python
 @router.get("")
 async def list_systems(current_user: User = Depends(get_current_user)):
     """
-    List all systems (agents grouped by prefix).
-
-    Groups agents by system prefix (before last '-').
-    Example: "my-system-abc-worker1" -> system "my-system-abc"
-
-    Returns system summaries with agent counts and details.
+    List deployed systems (#4129): one entry per system tag carried by an
+    agent the caller can access, with the agents that carry it.
     """
 ```
 
-**Response**:
+**Response** (shape unchanged; `created_at` is now populated):
 ```json
 {
   "systems": [
     {
       "name": "content-production",
-      "agent_count": 3,
+      "agent_count": 2,
       "agents": [
         {
           "name": "content-production-orchestrator",
@@ -933,13 +938,30 @@ async def list_systems(current_user: User = Depends(get_current_user)):
 }
 ```
 
-**Implementation**:
-- Line 212: Get all agents via `get_accessible_agents(current_user)`
-- Lines 214-234: Group by prefix (all parts except last after splitting on '-')
-- Lines 237-238: Sort by created_at (newest first)
+**Implementation** (the evidence rule; a name is never split at a hyphen):
+- **Roster**: `get_accessible_agents(current_user)` — every name that can appear comes from it.
+- **Tag read over the roster**: `db.get_tags_for_agents(names)` for the roster names only. A
+  failure is a named **503** ("agent tags could not be read. Retry."), never an empty list.
+- **Candidates**: every tag a roster agent carries; the tag's **members are the roster agents
+  carrying it** (members ⊆ roster), so the global reads below can promote a tag the caller
+  already sees but never add a name.
+- **Evidence** — a candidate is listed only if one of these holds, cheapest first:
+  1. a carrier is named `<tag>-*` (the `naming: prefixed` shape);
+  2. `db.list_all_system_views()` holds the view deploy/apply auto-create for it (its
+     `filter_tags` contain the tag and its description is
+     `SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=tag)`);
+  3. `db.get_audit_entries(event_type=CONFIGURATION, target_type="system", target_id=tag)`,
+     paged by 100, holds a `system_apply` row.
 
-**Bug Fix (2025-12-18)**:
-- Line 221: Changed from `parts[0]` to `'-'.join(parts[:-1])` to handle hyphenated system names
+  A plain tag (`prod`, a manifest's `default_tags`) has none of the three and is not listed.
+  A failure of the view or audit read is a second named **503** ("system views or the audit
+  log could not be read. Retry."). Both 503s pass through the outer `except HTTPException`;
+  anything else is the generic 500.
+- **`created_at`**: the earliest member `created`, normalised to UTC ISO-Z
+  (`parse_iso_timestamp` → `to_utc_iso`); `null` when no member has one.
+- **Order**: newest `created_at` first, name order on a tie.
+- **Cost**: tags without a carrier or view cost one audit query each per call (trinity#4143,
+  a durable deploy/apply record, is the follow-up that removes it).
 
 #### GET /api/systems/{system_name} (Lines 247-319)
 ```python
@@ -1888,28 +1910,9 @@ the recovery story: remove them by hand once the original is reconciled.
 
 ### System Grouping
 
-**List Systems Endpoint**:
-- Splits agent name on `-`
-- Takes all parts except last as system prefix
-- Groups agents by prefix
-
-**Examples**:
-```
-Agent: content-production-orchestrator
-Split: ["content", "production", "orchestrator"]
-Prefix: "content-production" (all except last)
-System: content-production
-
-Agent: my-research-team-analyst
-Split: ["my", "research", "team", "analyst"]
-Prefix: "my-research-team"
-System: my-research-team
-
-Agent: test-list-abc123-worker1
-Split: ["test", "list", "abc123", "worker1"]
-Prefix: "test-list-abc123"
-System: test-list-abc123
-```
+**List Systems Endpoint** (#4129): grouped by system **tag**, never by splitting the agent
+name — see "GET /api/systems" under Router Layer for the evidence rule. A `naming: bare`
+system lists under its own name, and `content-writer` alone does not make a `content` system.
 
 ## Error Handling
 
