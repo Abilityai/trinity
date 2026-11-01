@@ -73,6 +73,11 @@ _UNLISTED_MANIFEST_KEYS = frozenset({"naming"})
 
 # trinity-enterprise#1030: the values `naming:` may take. `prefixed` is today.
 MANIFEST_NAMING_MODES = ("prefixed", "bare")
+# #4131: a manifest key accepts what the platform's own name producers write —
+# the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
+# chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
+# exported suffixed member must parse again, in both naming modes.
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -340,9 +345,11 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
 
     # Validate agent names
     for agent_name in manifest.agents.keys():
-        if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', agent_name):
+        if not MANIFEST_KEY_RE.match(agent_name):
             raise ValueError(
-                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric and hyphens"
+                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric, "
+                "hyphens, underscores or dots, starting with a letter or digit and "
+                "not ending with a hyphen"
             )
 
     # Validate template references
@@ -979,7 +986,8 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     return system_membership(system_name, agent_names).members
 
 
-def system_membership(system_name: str, agent_names: List[str]) -> SystemMembership:
+def system_membership(system_name: str, agent_names: List[str],
+                      naming: Optional[str] = None) -> SystemMembership:
     """Which agents belong to `system_name` (#2373).
 
     THE ONE membership predicate. `get_system`, `restart_system` and
@@ -1008,7 +1016,20 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     of the other are ambiguous whenever no tag distinguishes them — deployed
     before tagging, or during a tag-read outage. Tagging is what removes the
     ambiguity, and every system deployed since ent#124 has it.
+
+    `naming` (#4131): under `bare` a prefix is no evidence of anything, so the
+    prefix step is dropped and membership is the tag. Only apply knows the
+    naming (it holds the manifest). With `None` (restart, get, export: nothing
+    stores the naming) bare is INFERRED the way export infers it — tags
+    readable and every tagged member unprefixed — and the prefix step is then
+    dropped too; a prefixed system keeps the union above. The tag read still
+    runs under `bare`, so an outage reports `tags_readable=False` (apply
+    refuses) instead of adopting over a guess.
     """
+    if naming is not None and naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{naming}': naming must be 'prefixed' or 'bare'"
+        )
     if not system_name or not agent_names:
         return SystemMembership(members=[])
     tags_readable = True
@@ -1031,8 +1052,13 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     tagged = [n for n in agent_names if system_name in (tags_by_agent.get(n) or [])]
 
     prefix = f"{system_name}-"
+    if naming is None and tags_readable and tagged and not any(
+            n.startswith(prefix) for n in tagged):
+        naming = "bare"  # #4131 (D): export's own inference
     narrowed = []
     for name in agent_names:
+        if naming == "bare":
+            break  # #4131: no prefix step for a bare system
         if not name.startswith(prefix) or name in tagged:
             continue
         # A longer sibling system's member (`acme-extra-worker` under `acme`) is
@@ -2924,7 +2950,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     # 2. Membership through THE one predicate, and the evidence gate (AC5).
     declared = declared_names(manifest)
     if roster_ok:
-        snapshot.membership = system_membership(system, snapshot.roster)
+        snapshot.membership = system_membership(system, snapshot.roster, naming=manifest.naming)
         if not snapshot.membership.tags_readable:
             blockers.append(_apply_blocker(
                 "membership_tags_unreadable", None,
@@ -3082,8 +3108,13 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     if roster_ok and snapshot.membership.tags_readable:
         unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
         declared_set = set(declared.values())
+        # #4131: a `deploy: false` member is never written, so the gate (which
+        # protects writes) does not apply, and "add the tag" would make it
+        # restart-reachable. Excluded in both naming modes.
+        declared_only = {s.name for s in snapshot.members.values() if s.declared_only}
         for member in snapshot.membership.members:
-            if snapshot.membership.evidence.get(member) != "prefix" or member in unavailable:
+            if (snapshot.membership.evidence.get(member) != "prefix" or member in unavailable
+                    or member in declared_only):
                 continue
             is_declared = member in declared_set
             blockers.append(_apply_blocker(
@@ -3914,7 +3945,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             if evidence not in ("tag", "both"):
                 continue
             note = None
-            if any(re.fullmatch(re.escape(d) + r"_\d+", member) for d in declared_final):
+            if any(re.fullmatch(re.escape(d) + r"_\d+(?:_\d+)*", member) for d in declared_final):
                 note = ("suffixed copy from an earlier create-mode deploy; apply never "
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
