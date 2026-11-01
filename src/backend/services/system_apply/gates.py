@@ -21,7 +21,12 @@ this module clears, drops or tombstones a row.
 * `run` — the executor's writes, each through `skill_gate_map_service.set_gate`
   with `trigger="apply"`, so gate admission (ent#753, ent#848, ent#881), the
   marker ordering contract (#752) and the audit row are the route's own.
-  Runs BEFORE the skill phases (ent#753: gated before delivered).
+  Runs BEFORE the skill phases (ent#753: gated before delivered). A write
+  that fails on a skill the member ALREADY holds (trinity-enterprise#1043)
+  holds nothing back — there is no skill op to hold — so the run says what
+  that leaves: the skill stays assigned and runs with no approval gate
+  (`skill_runs_ungated`, plus one top-level warning line) or under the gate
+  stored before (`previous_gate_stands`). Reported, never unassigned.
 * `deploy` / `deploy_hold_back_warning` — create mode's phase, before skills.
   `deploy_system` is agent-callable through `agents.manage`, so an agent key
   writes gates only if it holds `skills.manage` — the gate routes' own
@@ -53,6 +58,17 @@ _REACH_NOTES = {
 #: #4130: `set_gate` stored the row but could not write the running agent's marker.
 MARKER_NOTE = ("the gate is stored; the running agent's marker could not be written, so the "
                "hook fails open until the next check heals it")
+#: trinity-enterprise#1043: the gate write failed on a skill the member already
+#: holds. "Held" is decided at plan time from the snapshot's read under the
+#: lock; "runs ungated" means no live gate row, the one thing admission reads.
+UNGATED_CODE = "skill_runs_ungated"
+PREVIOUS_GATE_CODE = "previous_gate_stands"
+UNGATED_NOTE = ("apply never unassigns: the skill keeps running with no approval gate until "
+                "one exists. Fix the gate and re-apply, set it by hand in the agent's Skills "
+                "tab (or set_skill_gate), or unassign the skill by hand")
+PREVIOUS_GATE_NOTE = ("apply never unassigns: the gate stored before still applies until the "
+                      "rewrite lands. Fix the gate and re-apply, or set it by hand in the "
+                      "agent's Skills tab (or set_skill_gate)")
 
 
 def declared(cfg) -> Dict[str, Dict[str, Any]]:
@@ -65,6 +81,13 @@ def read_member(name: str) -> Dict[str, dict]:
     included, so the plan can tell a cleared row from an absent one. Raises
     on a failed read."""
     return {r["skill_name"]: dict(r) for r in db.list_agent_skill_gates(name)}
+
+
+def read_held_skills(name: str) -> Set[str]:
+    """Every skill the member holds, casefolded — individually assigned and
+    set-derived alike, the gate map's own population (trinity-enterprise#1043).
+    Raises on a failed read; the snapshot turns that into a blocker (P-B)."""
+    return {str(s).casefold() for s in db.get_agent_skill_names(name)}
 
 
 def export_member(name: str) -> Dict[str, Dict[str, Any]]:
@@ -97,14 +120,19 @@ class _Refused(Exception):
 
 
 def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
-         apply_change, apply_blocker, make_op) -> None:
+         apply_change, apply_blocker, make_op,
+         skill_names: Optional[Set[str]] = None) -> None:
     """Changes, ops and blockers for one member. `stored` is None for a member
-    apply will create (it carries nothing yet)."""
+    apply will create (it carries nothing yet). `skill_names` is what the
+    member holds (trinity-enterprise#1043): a `gate_set` op on a held skill
+    carries `held=True` and the gate in force (`live`), so a failed write can
+    say what it leaves running."""
     cfg = mp.config
     if cfg.gates is None:
         return
     name, short = mp.name, mp.short_name
     rows = stored or {}
+    held_skills = skill_names if stored is not None and skill_names else set()
     declared_keys = set()
     for skill, spec in declared(cfg).items():
         # #4132: a declared gate equal to the stored explicit row (approver
@@ -144,7 +172,10 @@ def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
         mp.changes.append(apply_change(
             STEP, "write", "gate_differs" if live else "gate_missing",
             current=current, desired=desired, note=note))
-        mp.ops.append(make_op(OP_KIND, name, short, {"skill": key, "changes": fields}))
+        mp.ops.append(make_op(OP_KIND, name, short, {
+            "skill": key, "changes": fields,
+            "held": key.casefold() in held_skills,
+            "live": _public(live) if live else None}))
     undeclared = [_public(r) for k, r in sorted(rows.items())
                   if k not in declared_keys and r["origin"] != ORIGIN_CLEARED]
     if stored is not None and undeclared:
@@ -175,6 +206,8 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
         return True
 
     if not await attempt(name, short, STEP, write):
+        if op.args.get("held"):
+            _held_skill_not_gated(op, out, apply_change)
         return
     out.gates_unlanded.discard((name, skill))
     # ent#881: the write surface's warning is a report here — a gate whose
@@ -187,6 +220,33 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
         elif warning == "marker_not_written":
             out.extra_changes.setdefault(name, []).append(apply_change(
                 STEP, "report", "gate_marker_not_written", desired=[skill], note=MARKER_NOTE))
+
+
+def _held_skill_not_gated(op, out, apply_change) -> None:
+    """trinity-enterprise#1043: `attempt` recorded the failed write as
+    `out.failed[-1]`; the member already holds the skill, so nothing holds it
+    back. Say what is running: the consequence is appended to that failure's
+    reason (the create-not-tagged precedent, `<code>:` prefix kept), the member
+    gets a report change, and an ungated skill gets one top-level warning line
+    after the held-back grant and seat lines. A write that raised AFTER its
+    row landed reads as not written — the safe direction; re-apply shows the
+    truth. Nothing here unassigns."""
+    name, skill, live = op.member, op.args["skill"], op.args.get("live")
+    failure = out.failed[-1]
+    reason = failure.reason
+    if live is None:
+        failure.reason += f"; '{skill}' stays assigned and runs with NO approval gate"
+        out.extra_changes.setdefault(name, []).append(apply_change(
+            STEP, "report", UNGATED_CODE, current=None, desired=[skill], note=UNGATED_NOTE))
+        out.warnings.append(
+            f"'{name}': '{skill}' is assigned and runs with no approval gate; the manifest's "
+            f"gate was not written ({reason}).")
+    else:
+        failure.reason += (f"; '{skill}' stays assigned and still runs under its previous "
+                           f"gate (approver {live['approver']})")
+        out.extra_changes.setdefault(name, []).append(apply_change(
+            STEP, "report", PREVIOUS_GATE_CODE, current=live, desired=[skill],
+            note=PREVIOUS_GATE_NOTE))
 
 
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, Dict[str, Dict]]:
