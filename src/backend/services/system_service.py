@@ -1648,9 +1648,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             except Exception as e:
                 logger.warning(f"Failed to get the seat of {full_name}: {e}")
                 unobserved_reads.append(f"seat of {full_name}")
-            # #4132: the seam answers per seat and never lists who fills what,
-            # so the person seats a member needs can never be read back.
-            person_seats_unread.append(full_name)
+        # #4132: the seam answers per seat and never lists who fills what, so
+        # the person seats a member needs can never be read back — for any
+        # caller, so the line names every member, not only seat-readable ones.
+        person_seats_unread.append(full_name)
 
         agent_configs[short_name] = config
 
