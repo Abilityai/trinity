@@ -174,6 +174,16 @@ backend scopes a read to everything the owner can see — wider than the calling
 permits. The tool narrows a broad listing to `{self} ∪ permitted` (the #1104 rule that
 `list_operator_queue` established) and re-checks the owning agent on `get_report`.
 
+**Narrowed before the cut (#3300).** Filtering after the backend's `limit` could not make a
+page complete: rows the agent may see could sit below a window of rows it may not (since
+#3810 the backend narrows an agent key to its reach, but that reach includes the agents it
+spawned, which the tool's permit set does not). So a broad read now fetches the permits first
+— strictly: a failed read is `permissions_unavailable`, never "no peers" — and sends them as
+repeated `agent_names` on `GET /api/reports`, which narrows in SQL before `limit` and only ever
+narrows. A set past 500 names or 8 KB of request target is refused up front
+(`permit_set_too_large`). The post-filter stays as a belt; if it drops anything the result
+carries `withheld: N` and a warning that the page may be short.
+
 **A denial looks like a miss, not a refusal.** `GET /api/reports/{id}` deliberately answers
 404 rather than 403 so an id cannot be probed for existence. The MCP re-check returns the same
 `Report not found` shape — returning "exists but forbidden" for agent keys would undo that

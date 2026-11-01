@@ -532,6 +532,15 @@ async def update_setting(
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
+    # trinity-enterprise#1027: the model-credential knob takes three words;
+    # anything else used to be stored and silently read as `auto`.
+    from services import model_gateway
+    if key == model_gateway.SETTING_CREDENTIAL and body.value not in model_gateway.MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} must be one of {', '.join(model_gateway.MODES)}; got {body.value!r}.",
+        )
+
     # #2691: `public_chat_url` is the one generic-PUT key whose write has
     # immediate side effects on live integrations — every Telegram webhook is
     # re-registered and every WhatsApp binding rewritten a few lines below. It

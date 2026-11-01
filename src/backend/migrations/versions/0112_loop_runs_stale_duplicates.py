@@ -8,15 +8,15 @@ duplicate run rows the pre-#4023 race inserted, rows numbered below their
 loop's ``runs_completed``, and every ``running`` row of an ended loop close
 ``abandoned``. Data only — no DDL.
 
-Revision ID: 0108_loop_runs_stale_duplicates
-Revises: 0107_skill_sources_follow_bundled_pin
+Revision ID: 0112_loop_runs_stale_duplicates
+Revises: 0111_platform_alert_resweep
 """
 from alembic import op
 from sqlalchemy import text
 
 
-revision = "0108_loop_runs_stale_duplicates"
-down_revision = "0107_skill_sources_follow_bundled_pin"
+revision = "0112_loop_runs_stale_duplicates"
+down_revision = "0111_platform_alert_resweep"
 branch_labels = None
 depends_on = None
 

@@ -187,7 +187,8 @@
           ref="paneEl"
           :key="selectedItem.key"
           :item="selectedItem"
-          :agent-label="labels[selectedItem.agent_name] || selectedItem.agent_name || ''"
+          :agent-label="selectedItem.type === 'room' ? roomAgentsLabel(selectedItem, labels) : (labels[selectedItem.agent_name] || selectedItem.agent_name || '')"
+          :labels="labels"
           :show-back="stacked"
           :stacked="stacked"
           :canvas-count="canvasCount"
@@ -233,7 +234,7 @@ import {
   stableRows, emptyVisit, isGhost, resolveItem, parseItemKey, listHeadLabel,
   markAllLabel, markAllConfirm, allFooterNotes, pageWindow, PAGE_SIZE, inboxLayout, listHeadExact,
   INBOX_TAB_SHELL, agentFacets, filterByAgent, activeAgentFilter, normalizeFrom, FROM_ALL,
-  inboxSortFor, normalizeInboxSort, loadInboxSort, saveInboxSort,
+  inboxSortFor, normalizeInboxSort, loadInboxSort, saveInboxSort, isChatItem, isMemberRoom, roomAgentsLabel,
 } from './portalInbox'
 import { safeStorage } from '@/utils/safeStorage'
 import { resolveLayoutIdentity } from '@/composables/useColumnResize'
@@ -401,7 +402,7 @@ const baseItems = computed(() => {
   return allItems(props.threads, store.asks, props.previews, Date.now(), store.mentions)
 })
 const footerNotes = computed(() => (tab.value === 'all'
-  ? allFooterNotes({ hasRooms: props.threads.some((t) => t && t.is_room), askCount: store.asks.length })
+  ? allFooterNotes({ askCount: store.asks.length })
   : []))
 
 // §3g S5 (T2): the URL holds only what the reader OPENED. The desktop
@@ -479,7 +480,9 @@ function newVisit() { visit = { tab: null, ...emptyVisit() }; visitEpoch.value++
 // sort change re-sorts the rows on the click, then they hold still again.
 const visitKey = computed(() => `${tab.value}|${activeFrom.value || ''}|${sort.value || ''}`)
 const live = {
-  thread: (id) => props.threads.find((t) => (t.id || t.session_id) === id) || null,
+  thread: (id) => props.threads.find((t) => t && !t.is_room && (t.id || t.session_id) === id) || null,
+  // trinity-enterprise#959: a room the viewer is still in — else its row drops.
+  room: (id) => props.threads.find((t) => isMemberRoom(t) && t.id === id) || null,
   ask: (id) => store.asks.find((a) => a.id === id) || null,
   mention: (id) => store.mentions.find((m) => m.id === id) || null,
 }
@@ -623,11 +626,11 @@ function replaceQuery(patch) {
 // before the content — a failed load leaves the chat unread.
 const initial = parseItemKey(routeItem.value)
 // trinity-enterprise#631: a tag opened by a deep link is read the same way.
-const readIntent = ref(initial && (initial.type === 'thread' || initial.type === 'mention') ? routeItem.value : null)
+const readIntent = ref(initial && (isChatItem(initial) || initial.type === 'mention') ? routeItem.value : null)
 const renderedKey = ref(null)
 const readFailedKey = ref(null)
 async function readNow(it) {
-  if (!it || (it.type !== 'thread' && it.type !== 'mention')) return
+  if (!it || (!isChatItem(it) && it.type !== 'mention')) return
   readIntent.value = null
   readFailedKey.value = null
   // trinity-enterprise#631: a tag is read once its card is on screen — which
@@ -638,14 +641,15 @@ async function readNow(it) {
     if (ok === false) readFailedKey.value = it.key
     return
   }
-  const ok = props.markRead ? await props.markRead('thread', it.id) : true
+  // trinity-enterprise#959: a room is read as a room (its own cursor kind).
+  const ok = props.markRead ? await props.markRead(it.type, it.id) : true
   if (ok === false) readFailedKey.value = it.key
 }
 watch([readIntent, renderedKey], ([want, done]) => {
   if (want && want === done) {
     readNow(selectedItem.value?.key === want
       ? selectedItem.value
-      : resolveItem(want, { threads: props.threads, mentions: store.mentions }))
+      : resolveItem(want, { threads: props.threads, mentions: store.mentions, previews: props.previews }))
   }
 })
 
@@ -665,7 +669,7 @@ async function open(it) {
     readIntent.value = it.key
     if (paneEl.value && selectedItem.value?.key === it.key) paneEl.value.reload?.()
   }
-  if (it.type === 'thread') {
+  if (isChatItem(it)) {
     // The read waits for a render OF THIS OPEN (round 3): a verdict left over
     // from an earlier render of the same chat — the preview, a re-click, a
     // reopen after an ask — would read arrivals the pane never drew. A pane
@@ -793,7 +797,8 @@ async function markAllRead() {
     // Through the shell's `markRead` (S4): each write rolls its own zero back
     // on failure and resolves false — never a silent success.
     const read = props.markRead || (async () => true)
-    const results = await Promise.allSettled(rows.map((r) => read('thread', r.id)))
+    // trinity-enterprise#959: a room row is read as a room.
+    const results = await Promise.allSettled(rows.map((r) => read(r.type, r.id)))
     const failed = results.filter((r) => r.status === 'rejected' || r.value === false).length
     if (failed) {
       markAllError.value = `${failed} of ${rows.length} ${rows.length === 1 ? 'chat' : 'chats'} couldn't be marked read. They keep their count — try again.`
