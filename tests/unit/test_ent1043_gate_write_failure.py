@@ -240,6 +240,7 @@ def _assert_result_says_ungated(res, code, skill="research"):
     assert member.applied is False
     failures = _gate_failures(res)
     assert len(failures) == 1, res.failed
+    assert failures[0].key == skill, failures[0]  # the row names this gate's write (#4130)
     reason = failures[0].reason
     assert reason.startswith(code), reason
     assert f"'{skill}' stays assigned and runs with NO approval gate" in reason, reason

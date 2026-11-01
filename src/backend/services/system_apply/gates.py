@@ -233,6 +233,7 @@ def _held_skill_not_gated(op, out, apply_change) -> None:
     truth. Nothing here unassigns."""
     name, skill, live = op.member, op.args["skill"], op.args.get("live")
     failure = out.failed[-1]
+    assert (failure.name, failure.step, failure.key) == (name, STEP, skill), failure
     reason = failure.reason
     if live is None:
         failure.reason += f"; '{skill}' stays assigned and runs with NO approval gate"
