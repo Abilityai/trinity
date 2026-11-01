@@ -2506,7 +2506,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -2516,7 +2516,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None
@@ -4445,8 +4445,10 @@ class ScheduleResponse(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
-    # the same predicate the webhook routes enforce — the client has no numeric
-    # user id to compare an owner id against, and the creator's id is not exposed.
+    # both checks the webhook routes enforce — the principal rule (a person, or an
+    # agent key holding `schedules.manage`, trinity-enterprise#719) and the share
+    # tier — the client has no numeric user id to compare an owner id against,
+    # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
 
@@ -4864,7 +4866,7 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
-    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    # ent#265: human-only arm — the router calls assert_person when set.
     allow_proactive: Optional[bool] = None
     # ent#600: human-only arm too — recording a group's conversation is a
     # privacy decision the owner makes, not one an agent grants itself.
@@ -4910,8 +4912,8 @@ class ChangePasswordRequest(BaseModel):
     service with the rule first-run setup uses, so the reasons come back named."""
     current_password: str = Field(..., max_length=1024)
     new_password: str = Field(..., max_length=1024)
-    # Also revoke the MCP API keys this person minted (user / ops / portal
-    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    # Also revoke the MCP API keys this person minted (user / ops / ops_write /
+    # portal delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
     revoke_api_keys: bool = False
 
 

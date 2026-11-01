@@ -55,10 +55,10 @@
   - `credentials`: oauth_complete (`slack.py` OAuth callback)
 - **Event Categories** (actions tracked):
   - `AGENT_LIFECYCLE`: create, start, stop, delete, rename (recreate — no endpoint)
-  - `EXECUTION`: chat_started, task_triggered, schedule_triggered
+  - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written only when this call ended the turn — a queued, parked or container cancel that won its CANCELLED CAS)
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set
-  - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle
+  - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle, circuit_breaker_reset (#3180: written once both reset calls return, whatever the breaker feature flags say; the resets are fail-open, so with Redis unreachable the row records the request, not a confirmed reset)
   - `CREDENTIALS`: inject, export, import, oauth_complete (CRED-002 replaced spec's create/delete/reload), subscription_assign, subscription_clear, subscription_auto_adopt, subscription_auto_adopt_sweep (#2572 — the manual and automatic halves of subscription assignment; #2421 still owns register / delete / auto-switch-settings)
   - `MCP_OPERATION`: tool_call, key_create, key_revoke, key_delete
   - `GIT_OPERATION`: sync, pull, init (commit — folded into sync)
@@ -414,7 +414,9 @@
     admitted and `role == "admin"` is still enforced afterwards. An earlier
     revision of this section claimed the tier "stops every ops integration dying
     when that admin is offboarded" — **it does not, and could not**: demoting the
-    owner 403s the key at every ops read, and `get_current_user` rejects a
+    owner 403s the key at every ops read (the resolver checks the owner's role
+    ahead of the route fence, 403 `ops_owner_not_admin`; until #3180 the reads
+    with no admin gate of their own still answered), and `get_current_user` rejects a
     principal whose owner carries `suspended_at` (#995) one layer above this gate,
     so suspension — the usual offboarding action — kills it before any of this
     runs. Dropping the role check for an opted-in scope was considered and
@@ -473,11 +475,93 @@
   from `a2a:{agent}:{username}` to `a2a:{agent}:{key_id}`, so a `messageId`
   replayed across the deploy re-executes instead of replaying (bounded by the 24h
   TTL).
+- **`ops_write` scope — the bounded WRITE tier (#3180)**:
+  - **Shape**: a separate scope, not a per-key capability set (that would make
+    fence membership a stored value and need a column on both migration tracks)
+    and not a widening of `ops` (a non-goal). It does **not** include the `ops`
+    reads: observability consumers keep a read-only key, and a writer holds both
+    keys, so offboarding re-mints two.
+  - **Four routes**, measured from the ops toolkit's executed deploy records and
+    limited to uses, never grants: `POST /api/agents/{name}/circuit-breaker/reset`,
+    `POST /api/agents/{name}/start`, `POST /api/agents/{name}/stop`,
+    `POST /api/agents/{name}/executions/{id}/terminate`. Everything else is
+    refused, including fleet restart and stop, emergency stop, retention
+    acknowledge, schedule edit/toggle/trigger, system-agent restart, every ops
+    read, and every identity, credential, subscription, grant and configuration
+    write.
+  - **Admission at the single auth entry point, three predicates**: the
+    (method, routed path) full-matches `_OPS_WRITE_ALLOWED_ROUTES`; the routed
+    handler carries `@ops_write_route("<why it is a use>")` (read from
+    `scope["route"].endpoint`); and the key's owner row still has
+    `role == "admin"`. The path list and the mark are two independently
+    maintained declarations with one enforcement point: an overbroad path entry
+    is refused by every unmarked handler, a stray mark by the path list. Route
+    enforcement of its own exists only on reset (`require_admin_allowing
+    ("ops_write")`, an `ADMIN_WIDENED` census row; `role == "admin"` still runs)
+    and on start/stop (the target policy).
+  - **Target policy (start, stop)**: refused for the system agent (by name or
+    the `is_system` flag) and for an ephemeral agent, and refused when that
+    lookup fails or cannot be proven. Stopping and then starting the system
+    agent replaces its container, which is the human-only #1816 restart by
+    another spelling; a start with config drift recreates a ghost, which is
+    volume-less. Reset and terminate keep every agent the owner reaches.
+  - **A start never mints a key, so it cannot undo a person's containment**:
+    a person contains an agent by stopping it and revoking (or deleting) the
+    platform key baked into its container. A start that would mint the agent a
+    key is refused for this scope with 409 `ops_write_would_mint_key` (body
+    `{code, reason, message}`, the message saying a person has to start the
+    agent), before any side effect: nothing is minted, pruned, recreated,
+    started or cleared. The two minting starts are `reason: key_drift`, the
+    #1854 self-heal (the container's key is revoked, deleted, missing, or not
+    this agent's own `agent` key; refused whether the agent is stopped or
+    running), and `reason: container_missing`, the #1559 rebuild of a missing
+    container. The verdict does not try to tell a person's action from benign
+    drift: a revoke leaves an inactive row, but a person's delete leaves no row,
+    the same state the platform's own prune leaves, so the two cannot be told
+    apart, and treating "no row" as benign would leave delete as a containment
+    a machine could undo. Benign drift (a failed creation-time mint, a stale
+    database) is therefore refused too. That is safe because it costs only
+    availability, never reach: on a healthy agent the key predicate matches, so
+    the start runs as for anyone, and a drifted agent needs one person's start,
+    which heals it as before, after which the key's starts work again. A
+    person's start is unchanged.
+  - **Dies with its owner, on every route the resolver protects**: demotion
+    below `admin` refuses the key at the fence (`ops_write_owner_not_admin`),
+    suspension refuses it one line earlier (401), and a password change with
+    "revoke keys" revokes it (`PERSON_KEY_SCOPES` equals the mintable set,
+    pinned). It applies to the next request, not to an operation already
+    running. Demotion suspends the key rather than revoking it: the row stays
+    active, and promoting the owner back to admin makes the key work again; to
+    end it, revoke it. `/api/mcp/validate` keeps reporting the key valid until
+    the key is revoked (introspection; it grants nothing).
+  - **Mint**: `POST /api/mcp/keys` with `scope: "ops_write"`, from an
+    interactive admin session only (the `ops` ladder: `require_interactive`,
+    then `reject_non_interactive_principal`, `reject_agent_principal`,
+    `assert_admin`); `agent_name` is NULL on the row. Settings → MCP Keys offers
+    it to admins as **Ops (operational writes)** and badges it **Ops (writes)**.
+  - **Excluded by allowlists, unchanged**: no MCP tools (`OPERATOR_SCOPES`), no
+    `/ws/events` (`WS_EVENT_STREAM_SCOPES`), no `/ws` ticket (PERSON), no
+    heartbeat, result callback or pull seam (the agent's own key only).
+    `/api/mcp/validate` reports the key as valid: it is introspection and grants
+    nothing.
+  - **Attribution**: every audit row written as the caller carries the key's
+    `mcp_key_id` and `mcp_scope=ops_write`, derived from the principal (#2389);
+    start and stop already write one. Since this scope's start never runs the
+    #1854 self-heal, it causes no `agent_key_self_heal` row (that row is written
+    as `system` when a person's start heals).
+  - **Survives enforced two-factor** for the same reason `ops` does: key
+    validation never passes through the second-factor flow.
+  - Guards: `tests/unit/test_3180_ops_write_scope.py` (pass paths, containment,
+    target policy, owner binding, mint matrix) and `tests/unit/test_3180_ops_write_route_census.py`
+    (the mark census, and a sweep of every live OSS route with a real key).
 - **Explicitly NOT delivered**: key expiry (`mcp_api_keys` still has no
-  `expires_at`); narrowing the existing `user` scope (would break the fleet); a
-  **write-capable** ops tier — the human-driven ops toolkit's 24 writes stay on
-  password auth or a `user`-scoped key. The read fence does not retire the admin
-  password.
+  `expires_at`); narrowing the existing `user` scope (would break the fleet). The
+  write tier covers the four routes above only (#3180); the rest of the
+  human-driven ops toolkit's writes stay on password auth or a `user`-scoped
+  key, and neither fence retires the admin password. Terminate's admission for
+  `ops_write`, and the refusal of key revoke/delete, credential
+  inject/export/import and subscription assignment to it, rely on the route
+  fence alone (those routes have no gate of their own that reads the scope).
 - **Two costs inherited, not introduced** (flagged in review; stated so they are
   not discovered): key validation writes `last_used_at`/`usage_count` on **every**
   request, so a 10s poll takes a write lock every 10s; and
@@ -621,7 +705,7 @@
   - **Deadline floor:** `expires_at` must carry a timezone and be at least 15 minutes out — the bound on the expiry wake's agent-driven self-trigger.
   - **Re-asks:** `supersedes_expired` names one of the agent's OWN expired asks (one uniform 422 otherwise); repeating an expired ask's `proposal` without that link is **422 `reask_requires_link`**, and the refusal names the expired ask (`expired_request_id`). The receipt and `get_my_ask` both name the predecessor by its `request_id` (the row stores its uuid). The guard and the link compare with the SAME raiser's expired asks: an agent's expired ask neither blocks nor is linked by a gate raise, nor the reverse. A row older than the `raised_by` column is the agent's own; a platform alarm is nobody's. The Operations cards show the link both ways.
   - **The proposal is shown where the decision is made:** every card that offers the decision renders `proposal` read-only and expanded — the Operating Room card, the `/m` ops card and the Workspace ask — and the Resolved tab keeps it, so the record says what was decided (the `WorkspaceAsk` projection names it; `context` stays off) — as text, never markup. The prompt tells agents to put the exact action there so the person can verify what they are approving; before this, nothing rendered it.
-  - **Addressed by role (`to`):** a registered assignment provider answers first, and an empty answer means nobody fills the role: for `primary` the ask then goes to the operators (the ent#606 fallback; the owner stands in only when no provider answers at all). With no provider, `primary` (the default for approval and question) is the agent's owner, `operator` (the default for alert) names no person, and `approver` / `viewer` are **422 `role_unassigned`** until someone fills them. An owner without an email turns a `primary` ask into an operator ask and the receipt says so (`resolved: false`); several people are recorded but none becomes the single Workspace addressee. **A canon role by id (trinity-enterprise#1007, asks only):** `to: role:<id>` (`ROLE_ID_RE`; stored lower-cased so a retry spelt differently replays without `differs`) resolves through `role_addressing.resolve_role_id_for_ask` on the raising agent's OWN roster — the assignments provider names who is seated, each person is checked for ent#881 reachability (`role_addressing.can_open_agent`, the gate's rule moved there; `skill_gate_service._can_open` delegates), every reachable person is recorded in `resolved_to` (a single Workspace addressee only when exactly one), and every arm is refused **422** by name with the role's label, never a person: `role_unavailable` (no assignments provider answers — address `primary` or `operator`), `role_unassigned` (nobody seated), `role_cannot_open_agent` (nobody seated can open the agent). No owner or operator fallback. A malformed id is `invalid_to`, whose `allowed` names the `role:<id>` form beside the four kinds. Reports and messages keep the four kinds (`invalid_to` for a role id).
+  - **Addressed by role (`to`):** a registered assignment provider answers first, and an empty answer means nobody fills the role: for `primary` the ask then goes to the operators (the ent#606 fallback; the owner stands in only when no provider answers at all). With no provider, `primary` (the default for approval and question) is the agent's owner, `operator` (the default for alert) names no person, and `approver` / `viewer` are **422 `role_unassigned`** until someone fills them. An owner without an email turns a `primary` ask into an operator ask and the receipt says so (`resolved: false`); several people are recorded but none becomes the single Workspace addressee. **A canon role by id (trinity-enterprise#1007, asks only):** `to: role:<id>` (`ROLE_ID_RE`; stored lower-cased so a retry spelt differently replays without `differs`) resolves through `role_addressing.resolve_role_id_for_ask` on the raising agent's OWN roster — the assignments provider names who is seated, each person is checked for ent#881 reachability (`role_addressing.can_open_agent`, the gate's rule moved there; `skill_gate_service._can_open` delegates), every reachable person is recorded in `resolved_to` (a single Workspace addressee only when exactly one), and every arm is refused **422** by name with the role's label, never a person: `role_unavailable` (no assignments provider answers — address `primary` or `operator`), `role_unassigned` (nobody seated), `role_cannot_open_agent` (nobody seated can open the agent). No owner or operator fallback. The ANSWER is fenced to that `resolved_to` snapshot (trinity-enterprise#1042, `ask_service._seat_fenced` in `may_end`): a person outside the seat — an admin included — is refused 403 `not_addressee` with the role's label and a remedy, never a person; an admin may cancel, never answer; cancel and bulk cancel are not narrowed; an empty or unreadable snapshot is nobody; the four kinds (`approver` included) are unchanged; `addressed_view` carries `{waiting_on, can_decide}` for such a row so the card goes read-only before the click. A malformed id is `invalid_to`, whose `allowed` names the `role:<id>` form beside the four kinds. Reports and messages keep the four kinds (`invalid_to` for a role id).
   - **Caps:** the file path's #1632 rate buckets (**429 `rate_limited`**), checked right after the replay and before every check that reads the database, so a refused ask spends a token and the re-ask scan cannot be repeated for free (a replay spends none); and the per-agent depth cap made atomic — replay check, count and insert under one per-agent lock — (**429 `queue_full`**). A file entry re-using the id that lands between the replay check and the insert (the poller does not take the lock) makes the insert a replay of that row, never an error.
   - **Receipt:** `status`, `id`, `request_id`, `raised_by`, `channel`, `type`, `to_role`, `resolved`, `ask_status`, `disposition`, `disposed_at`, `expires_at`, `wakes_on_ending` (the owner's wake opt-in), `supersedes_expired` (the predecessor's `request_id`), `differs` on a replay — the role, never a person's email. The reads keep the rule: the operator queue's get and list routes withhold `addressed_to_email` (the resolved person, like `resolved_to`) from every non-person principal — on every row since trinity-enterprise#715.
   - **Provenance and the file contract:** `raised_by` and `channel` (`mcp` for an agent's raise, `gate` for a gate's; the column also holds `file`) come from the call, never from content. A native row is outside the file contract everywhere: the poller skips a file entry re-using its id, and the write-backs, the stopped-agent sweeps and the delivery bookkeeping never touch it; Clear All hides it once answered.
@@ -679,7 +763,7 @@
   - **Caps (their own budget):** at most 10 pending approvals per requester per agent, 50 per agent, and 10 new gated requests per requester per minute, checked before the in-container read. Gate asks never count against the agent's own ask budget.
   - **Anyone may ask** — agents, people, schedules, channel users, public-link visitors, paid callers and connector clients. A paid call is not settled: nothing ran, and an approved run later goes through uncharged (stated limit).
   - **People stay with people (#715):** the approval card names the person who asked and the notice the person who decided, so gate rows are among the rows a machine key never reads (`operator_queue_service.is_about_a_person`) and an agent's own readback refuses them; the notice to a requesting agent states the outcome, never who decided it.
-  - **Who decides:** only a person the approval was addressed to (`may_end`, in the ask sink, so every answer door inherits it); an admin may cancel it, never approve it.
+  - **Who decides:** only a person the approval was addressed to (and, since trinity-enterprise#1042, a person seated in the canon role an ask was addressed to) (`may_end`, in the ask sink, so every answer door inherits it); an admin may cancel it, never approve it.
   - **Exactly once:** on the ending (an observer in every worker, plus a sweep in the operator-queue poll cycle), `pending → dispatching` is a compare-and-set that also writes the run's id; then the agent's existence, the requesting agent's existence and every fingerprint are re-checked (a changed skill is `stale`, nothing runs). The run starts like an async `/task` — a busy agent queues it, and a request from a public-facing surface keeps the owner's public-channel caller prompt — and is recorded `dispatched`. The sweep reconciles the gaps a dead process leaves: a run that started but was never recorded is recorded and reported; a claim whose run never started is `unknown`, reported to the requester and the approver, and never re-run; a pending request whose ask is gone is `cancelled`. An unreachable agent is `not_run`. The approved run's result goes back where the request came from — the Workspace thread or the channel conversation — through the completion report, which otherwise skips a requester's trigger as "answered inline". Deleting or renaming the agent cancels its waiting requests; the ask is ended as the acting person only when a person acts (an agent key leaves it open and inert).
   - **The requester is told on every ending:** an agent by a platform task (trigger `skill_gate`) naming the request, the outcome and both execution ids; a person by an Inbox notice addressed to them — except of a decision they made themselves (an approval that then could not run is still sent). Notices name skills without a slash, so a notice never reads as a request to run one. Schedules, channel users, public visitors, paid callers, connectors and system keys get the request id in the immediate answer only, and are told nothing more will come. A person's notice never carries the decider's email (trinity#3274): it names the decider's display name for a request a platform session or key made, and "the agent's approver" for everyone else (the Workspace, the inline connector, a decider with no usable name). **And again when an approved run ends** (trinity#3520): the same requester (agent task or Inbox notice) is told once, at the run's terminal, with the request id, the execution id, the status and a bounded quote of the run's reply or error, so a run that "succeeded" while declining the request is visible; the record moves to `succeeded` / `failed`, and a run whose terminal hook never ran (a restart mid-run) is reported by the sweep. An approved `/task` or fan-out run is sent the caller's message and system prompt where they were, never their concatenation, and its card shows exactly those strings, with the system prompt labelled. The UI's run senders show the server's message instead of an error and poll nothing; the public link stops at its held turn's `skipped` row.
   - **Stated limits:** an agent acting outside the skill with its own credential (capability confinement is the boundary); the window between the dispatch-time fingerprint and the agent reading the files; a revoked agent permission between the request and the approval is not re-checked; plugin (`plugin:skill`) names are not matched; history is not re-read — the Workspace's, a channel thread's, a room's, a public link's or a Telegram group's earlier messages, nor sender labels or a group title (one past mention would hold every later turn; on Claude Code the in-container hook is the backstop, on Codex and Gemini nothing is); a schedule-name approval runs the message without the name.

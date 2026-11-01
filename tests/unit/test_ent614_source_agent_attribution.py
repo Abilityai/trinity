@@ -804,18 +804,21 @@ class TestEmitEndpointsStateTheFlag:
         assert db.create_agent_event.call_args.kwargs["source_agent"] == "worker-a"
         assert dispatch.trigger_subscription.call_args.kwargs["agent_originated"] is False
 
-    def test_emit_for_agent_by_a_sibling_agent_is_not_vouched(self):
-        """An agent-scoped key resolves to the OWNER, so agent B can reach every agent
-        its owner has — including A's emit route. B emitting as A is the same forgery."""
+    def test_emit_for_agent_by_a_sibling_agent_is_refused(self):
+        """The route opens with the self-gate (trinity-enterprise#719): an agent key
+        emits only as its own agent, so B naming A is refused before anything is
+        recorded or dispatched."""
         from models import EmitEventRequest
         from routers.event_subscriptions import emit_event_for_agent
 
-        with _emit_env() as (_db, dispatch):
+        with _emit_env() as (db, dispatch), pytest.raises(HTTPException) as ei:
             asyncio.run(emit_event_for_agent(
                 "worker-a", EmitEventRequest(event_type="prediction.resolved"),
                 _p(agent_name="worker-b", username="worker-b", mcp_scope="agent"),
             ))
-        assert dispatch.trigger_subscription.call_args.kwargs["agent_originated"] is False
+        assert ei.value.status_code == 403
+        db.create_agent_event.assert_not_called()
+        dispatch.trigger_subscription.assert_not_called()
 
     def test_emit_for_agent_by_the_agent_itself_is_vouched(self):
         """The one case that IS an agent-originated event on this route."""
