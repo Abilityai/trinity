@@ -26,6 +26,7 @@ from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .execution_env import build_execution_env
+from . import gemini_settings
 from .subprocess_lifecycle import _capture_pgid, _terminate_process_group
 from .gemini_cli_args import (
     RESUME_MISSING_MARKER,
@@ -382,6 +383,11 @@ class GeminiRuntime(AgentRuntime):
             # Gemini subprocess and any descendants. Tag is inherited at
             # every fork/exec/setsid, lets the post-wait sweep identify
             # and kill orphans the same way the Claude path does.
+            # trinity-enterprise#986: the agent can rewrite its own settings
+            # between turns, and only a turn creates the installation id, so the
+            # usage-statistics opt-out is re-asserted here, synchronously, with
+            # no await before the spawn.
+            gemini_settings.ensure_usage_statistics_disabled()
             # Use Popen for real-time streaming
             process = subprocess.Popen(
                 cmd,
@@ -928,6 +934,7 @@ class GeminiRuntime(AgentRuntime):
             # descendant across fork/exec/setsid/double-fork. The post-wait
             # sweep below uses it to identify orphans the same way the Claude
             # path does.
+            gemini_settings.ensure_usage_statistics_disabled()  # ent#986, as on the chat path
             process = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,

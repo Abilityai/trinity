@@ -38,6 +38,41 @@
       "description": "McpKeysTab mounted: an ops_write key is badged 'Ops (writes)' distinct from 'Ops (read-only)'; an admin is offered the 'Ops (operational writes)' radio beside the read-only one and creating sends scope 'ops_write' exactly; a non-admin is offered no bounded scope."
     },
     {
+      "file": "unit/test_3180_operational_write_audit.py",
+      "feature": "abilityai/trinity#3180",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "Circuit-breaker reset (CONFIGURATION circuit_breaker_reset) and execution terminate (EXECUTION execution_terminate) each write one audit_log row on success, through the real resolver and the real routes: a session and a user-scoped key carry the right actor and key id; terminate covers queued cancel, parked cancel and container-proxy terminate; refused and failed calls, and an already_finished terminate, write none; with DISPATCH_BREAKER_ENABLED off and the per-agent breaker disabled the reset still writes its row."
+    },
+    {
+      "file": "unit/test_ent986_gemini_usage_statistics.py",
+      "feature": "trinity-enterprise#986",
+      "added": "2026-10-28",
+      "categories": [
+        "agent-server",
+        "gemini-runtime",
+        "git"
+      ],
+      "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
+    },
+    {
+      "file": "unit/test_4051_per_worker_unit_db.py",
+      "feature": "#4051",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4051: each unit-test process, every xdist worker included, defaults TRINITY_DB_PATH / TRINITY_RETAINED_RESULTS_DIR / TRINITY_CHAT_SESSION_FILE to its own pid, not the xdist controller's (bites under CI's -n auto)."
+    },
+    {
       "file": "unit/test_ent1042_role_answer_fence.py",
       "feature": "trinity-enterprise#1042",
       "added": "2026-11-01",
