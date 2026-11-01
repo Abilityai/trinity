@@ -333,6 +333,40 @@ class TestDeployNamesDeclaredOnly:
     def test_a_manifest_without_declared_only_members_has_an_empty_list(self, world):
         assert _deploy(world, _manifest({"lead": {}}), dry_run=True).agents_declared_only == []
 
+    def test_the_failed_branch_carries_the_declared_only_names(self, world, monkeypatch):
+        world.fail_create.add(f"{SYSTEM}-lead")
+        r = _deploy_route(world, monkeypatch, _manifest({"lead": {}, "canon": {"deploy": False}}))
+        assert r.status_code == 500 and r.json()["status"] == "failed"
+        assert r.json()["agents_declared_only"] == [f"{SYSTEM}-canon"]
+
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_the_route_answers_nothing_to_deploy_as_a_400(self, world, monkeypatch, dry_run):
+        text = _manifest({"canon": {"deploy": False}, "docs": {"deploy": False}})
+        r = _deploy_route(world, monkeypatch, text, dry_run=dry_run)
+        assert r.status_code == 400
+        assert r.json()["detail"].startswith("nothing_to_deploy:")
+        assert world.create_calls == []
+
+
+def _deploy_route(world, monkeypatch, text, *, dry_run=False):
+    """POST /api/systems/deploy through the real router; only the agent-create
+    seam is the world's (the route passes none, so the service would reach Docker)."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from routers import systems
+
+    real = systems.deploy_manifest
+
+    async def deploy(*a, **k):
+        return await real(*a, create_agent_fn=world.create, **k)
+    monkeypatch.setattr(systems, "deploy_manifest", deploy)
+    app = FastAPI()
+    app.include_router(systems.router)
+    app.dependency_overrides[systems.get_current_user] = lambda: world.user(W.ALICE)
+    client = TestClient(app, raise_server_exceptions=False)
+    return client.post("/api/systems/deploy", json={"manifest": text, "dry_run": dry_run})
+
 
 # ===========================================================================
 # S7 / S8 / S9 — skill delivery says what was (not) delivered

@@ -562,19 +562,19 @@ export function createSystemTools(
       canAccess: applySystemAccess,
       description:
         "Reconcile a live instance to a system manifest: the idempotent sibling of deploy_system, "
-        + "same manifest format. Per declared member: absent → created; existing → its declared fields "
-        + "updated in place; an agent carrying the system's tag but not declared → reported as drift. "
-        + "It never deletes, stops, restarts, renames or suffixes an existing agent, so applying an "
-        + "unchanged manifest twice changes nothing. "
+        + "same manifest format. Per declared member: absent → created; existing → declared fields "
+        + "updated in place; an undeclared agent carrying the system's tag → reported as drift. "
+        + "It never deletes, stops, restarts, renames or suffixes an existing agent, so re-applying an "
+        + "unchanged manifest changes nothing. "
         + "dry_run defaults to TRUE, unlike deploy_system: a call without it returns the plan "
         + "(per-member verdicts create | update | unchanged | blocked, drift, blockers) and writes "
         + "nothing; pass dry_run: false only to apply a plan a human has reviewed. "
         + "Switch on `status`, never the HTTP code: 'valid' | 'invalid' on a dry run; 'applied' | "
         + "'partial' | 'failed' | 'refused' on a real run (a refused run wrote nothing). A result "
         + "without `status` (a 400/422 manifest error, a 401, an unexpected 500) has `success: false` "
-        + "and a `detail`: read those. Every entry in "
-        + "`blockers[]` names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
-        + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
+        + "and a `detail`. Each "
+        + "`blockers[]` entry names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
+        + "evidence (an agent matching the system by NAME ONLY) is refused before any write; its "
         + "remedy says which tag to add (tag_agent). Under `naming: bare` an untagged agent the manifest "
         + "declares is adopted instead (one tag write, listed in `adopted[]`). "
         + "Per-member skills, skill_sets, gates, grants, seat and person_seats are additive: an "
@@ -583,9 +583,9 @@ export function createSystemTools(
         + "a real run's `write` and `adopted[]` name only what landed. "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
         + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
-        + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
-        + "do NOT fall back to deploy_system there, it is create-only and would create suffixed "
-        + "copies (`_2`) of members that already exist.",
+        + "and their keys are refused (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
+        + "do NOT fall back to deploy_system: it is create-only and would make suffixed "
+        + "copies (`_2`) of existing members.",
       parameters: z.object({
         manifest: z
           .string()
