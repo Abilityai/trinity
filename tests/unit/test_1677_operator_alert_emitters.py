@@ -71,15 +71,6 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
-        "platform-only: raised from probe_archive_writability() at the start of an "
-        "archival RUN (daily maintenance cadence), and the id is bucketed per path "
-        "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
-        "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
-        "platform-only: edge-triggered on the durable prior-status transition "
-        "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
-        "bound by the daily job cadence and no agent input reaches it (#2216)",
     ("services/lease_reaper_service.py", "_create_park_item"):
         "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
         "create — must never be throttled (the reason a db-sink bound was rejected)",
