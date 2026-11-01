@@ -323,7 +323,7 @@ async def set_agent_permissions(
         target_id=agent_name,
         endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
-        details={"targets": body.get("permissions") or body.get("targets")},
+        details={"targets": body.get("permitted_agents", [])},
     )
     return result
 
