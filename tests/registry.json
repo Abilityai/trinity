@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4132_export_round_trip.py",
+      "feature": "#4132",
+      "added": "2026-11-01",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "#4132: export -> dry-run apply (the real exporter and the real apply route) on the same system has nothing to create, nothing to write and no drift: a seat the provider does not answer is unobserved on export and apply, never a seat_missing write; a held skill, set, retired capability or unresolvable gate is in sync with no verdict while an unheld one still gets it; two exports in reverse roster order are byte-identical; the person-seats header names every member, and person_seats declared in an export read back as seat_unobserved; per-group round trips (folders, tags, resources, schedules, full-mesh and explicit edges, naming, the template alone, deploy: false)."
+    },
+    {
       "file": "unit/test_ent719_org_tags_person_only.py",
       "feature": "abilityai/trinity-enterprise#719",
       "added": "2026-10-27",

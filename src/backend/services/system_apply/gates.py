@@ -9,7 +9,9 @@ this module clears, drops or tombstones a row.
 
 * `read_member` — the snapshot's read (`db.list_agent_skill_gates`, every row,
   tombstones included: a declared gate on a `cleared` tombstone is a write).
-* `plan` — pure over what was read, validated through the gate map's own
+* `plan` — pure over what was read. A declared gate equal to the stored
+  explicit row is in sync before any verdict (#4132); every other one is
+  validated through the gate map's own
   public `validate_gate_changes`, so the dry run reports exactly the refusal
   the write would give (`invalid_skill_name`, `invalid_approver`,
   `approver_unavailable`, `unknown_role`, `invalid_deadline`) as blockers.
@@ -48,6 +50,9 @@ _REACH_NOTES = {
     "not_shared": ("approver_not_shared: the people this approver names can't open the "
                    "agent, so they would never see an approval; share the agent with them"),
 }
+#: #4130: `set_gate` stored the row but could not write the running agent's marker.
+MARKER_NOTE = ("the gate is stored; the running agent's marker could not be written, so the "
+               "hook fails open until the next check heals it")
 
 
 def declared(cfg) -> Dict[str, Dict[str, Any]]:
@@ -102,6 +107,16 @@ def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
     rows = stored or {}
     declared_keys = set()
     for skill, spec in declared(cfg).items():
+        # #4132: a declared gate equal to the stored explicit row (approver
+        # equal; deadline omitted or equal) is never written, so the validator
+        # does not judge it — an approver this install can no longer resolve
+        # is still the member's gate, in sync.
+        held = rows.get(skill)
+        if (held is not None and held["origin"] == ORIGIN_SET
+                and spec.get("approver") == held["approver"]
+                and spec.get("deadline_hours", held["deadline_hours"]) == held["deadline_hours"]):
+            declared_keys.add(skill)
+            continue
         changes = {k: spec[k] for k in GATE_FIELDS if k in spec}
         try:
             key, fields = skill_gate_map_service.validate_gate_changes(name, skill, changes)
@@ -159,7 +174,7 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
             raise _Refused(f"{e.code}: {e.message}") from e
         return True
 
-    if not await attempt(name, short, STEP, write):
+    if not await attempt(name, short, STEP, write, key=skill):
         return
     out.gates_unlanded.discard((name, skill))
     # ent#881: the write surface's warning is a report here — a gate whose
@@ -169,6 +184,9 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
             out.extra_changes.setdefault(name, []).append(apply_change(
                 STEP, "report", warning, current=result["gate"]["approver"], desired=[skill],
                 note=_REACH_NOTES["not_shared" if warning == "approver_not_shared" else "unfilled"]))
+        elif warning == "marker_not_written":
+            out.extra_changes.setdefault(name, []).append(apply_change(
+                STEP, "report", "gate_marker_not_written", desired=[skill], note=MARKER_NOTE))
 
 
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, Dict[str, Dict]]:
@@ -259,4 +277,6 @@ async def deploy(agent_names: Dict[str, str], agents_config: Dict, current_user,
             for w in result.get("warnings") or []:
                 if w in ("approver_unassigned", "approver_not_shared"):
                     warnings.append(f"Gate on '{skill}' for '{name}': {w}.")
+                elif w == "marker_not_written":
+                    warnings.append(f"Gate on '{skill}' for '{name}': marker_not_written — {MARKER_NOTE}.")
     return warnings

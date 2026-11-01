@@ -435,9 +435,23 @@ def test_a_tag_still_wins_for_a_member_without_the_prefix(monkeypatch):
     from services import system_service as svc
 
     monkeypatch.setattr(svc.db, "get_tags_for_agents",
+                        lambda names: {"helper": ["acme"], "acme-api": ["acme"]}, raising=False)
+    out = svc.system_member_names("acme", ["acme-web", "acme-api", "helper", "other"])
+    assert sorted(out) == ["acme-api", "acme-web", "helper"]
+
+
+def test_every_tagged_member_unprefixed_reads_as_bare_the_accepted_residual(monkeypatch):
+    """#4131 (ruling D): with every tagged member unprefixed the system is read
+    as bare, the way export infers it, and an untagged `acme-*` is not a
+    member. The accepted residual: a prefixed system whose only tagged member
+    was renamed off the prefix AND whose other member lost its tag drops that
+    member here."""
+    from services import system_service as svc
+
+    monkeypatch.setattr(svc.db, "get_tags_for_agents",
                         lambda names: {"helper": ["acme"]}, raising=False)
     out = svc.system_member_names("acme", ["acme-web", "helper", "other"])
-    assert sorted(out) == ["acme-web", "helper"]
+    assert sorted(out) == ["helper"]
 
 
 def test_a_tag_read_failure_never_returns_FEWER_members_than_the_prefix(monkeypatch):

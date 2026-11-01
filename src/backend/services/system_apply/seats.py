@@ -16,7 +16,8 @@ nothing in this repo writes a seat.
   name; an email-shaped value is refused without being echoed.
 * `read_member` — the snapshot's read. A provider error or malformed answer is
   a READ failure (it raises, so the snapshot blocks the member retryably);
-  "no hook" is not.
+  "no hook" is not, and neither is a provider that answers nothing (#4132:
+  case `unobserved`, planned as `seat_unobserved`).
 * `plan` — `seat_missing` / `seat_differs` writes when the writer exists and
   the caller passes the grant gate, `seat_requires_interactive_admin` when the
   writer exists and the caller does not, otherwise `seat_unobserved`;
@@ -27,7 +28,8 @@ nothing in this repo writes a seat.
 * `run` — op `seat_set` through `assignment_provider.write_seat`; a refusal is
   recorded in `failed[]` with the module's code.
 * `export_member` — `seat:` when the provider says the agent holds one;
-  without a provider that can say, the export names the gap instead.
+  without a provider that can say — or one that answers nothing (#4132) —
+  the export names the gap instead.
   Person seats are not exported: the seam answers per seat, it does not list.
 * `deploy` — create mode's phase, after grants, behind the grant phase's own
   principal check: `deploy_system` is agent-callable, so anything but an
@@ -57,6 +59,8 @@ _HELD_BACK_NOTE = ("seating an agent requires an admin in a signed-in session, t
                    "gate as a grant; nothing was written. Run apply from such a session")
 _UNOBSERVED_NOTE = ("no assignment module on this install answers this; the seat is "
                     "neither read nor written, which is not the same as in sync")
+_NO_ANSWER_NOTE = ("the assignment module gave no answer for this agent; the seat is "
+                   "neither read nor written, which is not the same as in sync")
 _DIFFERS_NOTE = ("another declaration may hold this seat; apply moves it only on a "
                  "real run")
 _PERSON_NOTE = "apply never fills a person seat: a person assigns themselves or is assigned"
@@ -146,10 +150,15 @@ def read_member(name: str, cfg) -> Tuple[Optional[Dict[str, Any]], Dict[Tuple[st
         answer = assignment_provider.resolve_seat(name)
         if answer["reason"] in ("error", "malformed"):
             raise SeatReadFailed("the seat this agent holds")
-        role = answer["role_id"]
-        if role is not None and _role_id(role) is None:
-            raise SeatReadFailed("the seat this agent holds")
-        seat = {"case": answer["case"], "role_id": role.lower() if role else None}
+        if answer["reason"] == "no_answer":
+            # #4132: the provider answered nothing — it cannot say, which is
+            # not "holds none" (that would plan a `seat_missing` write).
+            seat = {"case": "unobserved", "role_id": None}
+        else:
+            role = answer["role_id"]
+            if role is not None and _role_id(role) is None:
+                raise SeatReadFailed("the seat this agent holds")
+            seat = {"case": answer["case"], "role_id": role.lower() if role else None}
     people: Dict[Tuple[str, str], str] = {}
     for entry in cfg.person_seats or []:
         status = assignment_provider.resolve_person_seat(name, entry["role"], entry["kind"])
@@ -165,7 +174,7 @@ def export_member(name: str) -> Optional[str]:
     means "cannot say", not "holds none"), and `SeatReadFailed` on a provider
     error or an answer that is not a role id (never exported)."""
     answer = assignment_provider.resolve_seat(name)
-    if answer["reason"] in ("no_provider", "unsupported"):
+    if answer["reason"] in ("no_provider", "unsupported", "no_answer"):
         raise SeatUnobserved("the seat this agent holds")
     if answer["reason"] in ("error", "malformed"):
         raise SeatReadFailed("the seat this agent holds")
@@ -189,6 +198,9 @@ def plan(mp, *, seat: Optional[Dict[str, Any]], people: Optional[Dict[Tuple[str,
         if not assignment_provider.seat_writer_installed():
             mp.changes.append(apply_change(SEAT_STEP, "report", UNOBSERVED_CODE,
                                            desired=cfg.seat, note=_UNOBSERVED_NOTE))
+        elif not creating and seat and seat["case"] == "unobserved":
+            mp.changes.append(apply_change(SEAT_STEP, "report", UNOBSERVED_CODE,
+                                           desired=cfg.seat, note=_NO_ANSWER_NOTE))
         elif creating or not (seat and seat["case"] == "holds" and seat["role_id"] == cfg.seat):
             current = None if creating or not seat or seat["case"] == "none" else dict(seat)
             if not seat_writer:
@@ -255,7 +267,7 @@ async def run(op, actor, out, attempt) -> None:
             raise _Refused(f"{result['refused']}: the assignment module refused the seat")
         return True
 
-    await attempt(name, short, SEAT_STEP, write)
+    await attempt(name, short, SEAT_STEP, write, key=role)
 
 
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, str]:
