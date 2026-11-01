@@ -393,6 +393,67 @@ class TestCase3DeclaredOnlyTagged:
         assert sorted(started) == ["acme-canon", "acme-web"]
 
 
+    def test_a_tagged_declared_only_agent_only_shared_with_the_caller(self, ew, monkeypatch):
+        """Plan test 13: BOB owns `acme-canon`, tags it and shares it with
+        ALICE. It is outside apply's manageable roster (no report: apply says
+        nothing about an agent the caller cannot manage), but inside the
+        restart route's accessible roster, which reaches it by the tag."""
+        ew.seed_agent("acme-web")
+        ew.seed_agent("acme-canon", owner=W.BOB)
+        db.share_agent("acme-canon", W.BOB, ew.user(W.ALICE).email)
+        res = W.apply(ew, _manifest("web", ("canon", "deploy: false")), dry_run=True)
+        canon = next(m for m in res.members if m.name == "acme-canon")
+        assert canon.verdict == "declared_only"
+        assert not [c for c in canon.changes if c.code in ("declared_only_member_tagged",
+                                                                 "declared_only_member_prefixed")]
+        client, started = _restart_client(ew, monkeypatch, [_row("acme-web"), _row("acme-canon")])
+        r = client.post(f"/api/systems/{SYSTEM}/restart")
+        assert r.status_code == 200, r.text
+        assert sorted(started) == ["acme-canon", "acme-web"]
+
+
+# ===========================================================================
+# A prefixed system's UNTAGGED `<system>-x` declared-only member: restart
+# reaches it by name, so apply says so (a report, no write)
+# ===========================================================================
+
+def _dry_run_through_the_route(world, manifest_yaml: str):
+    """A real `POST /api/systems/apply` handler call, dry run (writes nothing,
+    so no create/start seam is needed)."""
+    from starlette.requests import Request
+
+    from models import SystemApplyRequest
+    from routers import systems
+
+    request = Request({"type": "http", "method": "POST", "path": "/api/systems/apply",
+                       "headers": [], "client": ("127.0.0.1", 1), "query_string": b""})
+    return asyncio.run(systems.apply_system(
+        SystemApplyRequest(manifest=manifest_yaml, dry_run=True), request,
+        current_user=world.user(W.ALICE)))
+
+
+class TestPrefixedDeclaredOnlyUntagged:
+
+    def test_apply_reports_that_restart_reaches_it_by_name(self, ew, monkeypatch):
+        ew.seed_agent("acme-web")                 # tagged: the system reads as prefixed
+        ew.seed_agent("acme-canon", tags=())      # untagged, prefix-shaped, declared-only
+        res = _dry_run_through_the_route(ew, _manifest("web", ("canon", "deploy: false")))
+        assert res.status == "valid", res
+        canon = next(m for m in res.members if m.name == "acme-canon")
+        assert canon.verdict == "declared_only"
+        codes = [c.code for c in canon.changes]
+        assert "declared_only_member_tagged" not in codes
+        (c,) = [c for c in canon.changes if c.code == "declared_only_member_prefixed"]
+        assert c.action == "report" and c.current == "acme-canon"
+        assert f"'{SYSTEM}-'" in c.note and "restart" in c.note and "teardown" in c.note
+        assert "rename" in c.note.lower()
+        assert not [op for op in canon.changes if op.action == "write"]
+        # The statement is true: the restart route reaches it.
+        client, started = _restart_client(ew, monkeypatch, [_row("acme-web"), _row("acme-canon")])
+        assert client.post(f"/api/systems/{SYSTEM}/restart").status_code == 200
+        assert sorted(started) == ["acme-canon", "acme-web"]
+
+
 # ===========================================================================
 # Restart / get over a bare system (D): the bare member is handled, the
 # prefix lookalike is not
@@ -437,6 +498,8 @@ class TestAdoptedWarningNamesTheBareExport:
         res = W.apply(ew, _manifest("acme-writer", naming="bare"), dry_run=True)
         (line,) = [w for w in res.warnings if "adopted" in w]
         assert "naming=bare" in line
+        # The other-direction residual: restart/get/export read it as prefixed.
+        assert "restart" in line and f"untagged '{SYSTEM}-*'" in line
 
     def test_an_unprefixed_adoption_says_nothing_about_export(self, ew):
         ew.seed_agent("scout", tags=())
