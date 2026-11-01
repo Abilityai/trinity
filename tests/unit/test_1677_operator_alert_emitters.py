@@ -69,29 +69,12 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"):
-        "platform-only: raised from probe_archive_writability() at the start of an "
-        "archival RUN (daily maintenance cadence), and the id is bucketed per path "
-        "per UTC day — with on_conflict_do_nothing that is <=1 row/path/day even in "
-        "a restart loop; no agent input reaches it (#2205, mirrors #2216)",
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"):
-        "platform-only: edge-triggered on the durable prior-status transition "
-        "(ok->failed), plus a staleness re-alarm throttled to weekly; volume is "
-        "bound by the daily job cadence and no agent input reaches it (#2216)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
     ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
-        "platform-only: edge-triggered once per failure series (2→3 crossing, #389)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
-        "platform-only: edge-triggered per threshold crossing (#1595)",
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        "platform-only: deterministic per-episode id (sync-diverged-{agent}-"
-        "{diverged_since}), and an episode must last > 24 h before it can raise "
-        "one, so at most one per agent per day (trinity-enterprise#706)",
 }
 
 

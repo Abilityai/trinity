@@ -1,6 +1,168 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1030_export_access.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030: a manifest export says no more than the direct read routes: grants and seat for owner or admin, gates through the gate read's allowlist, withheld groups named uniformly whether or not anything is held, no principal reads none, and the route hands the caller to the exporter. resources export the effective value (stored override first), an unreadable override is named instead of falling back to the label, and re-applying an export keeps a pending limit."
+    },
+    {
+      "file": "unit/test_ent1030_summary.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP6: SystemApplyResponse.summary has skills/grants/gates/roles/members each with write/report/unobserved (grants keeps held_back); one manifest exercising every group under an interactive admin, a non-admin creator and an admin's own MCP key (S8), dry run and real run counting alike and the second dry run writing nothing; member.unobserved lists roles without the provider hooks; a read error (person seats, skills) is the retryable blocker, never unobserved, and a blocked member is counted in no group; two bare manifests on one agent add and never remove (S6); the deploy preview's configured counts appear only for a member that declares a group."
+    },
+    {
+      "file": "../src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1030 CP6: ManifestPreview mounted in jsdom — the one 'after create, also configured' line sums every agent's configured counts with plurals, says person seats are reported and never filled, and renders nothing when no agent declares a configuration group."
+    },
+    {
+      "file": "unit/test_ent1030_declared_only.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP5: deploy: false — verdict declared_only; template_in_catalog / template_not_in_catalog (github: via the catalog, local: via create mode's resolver) and declared_only_member_live reports; a live declared-only member is never created, tagged, edged or deleted and is not drift, nor a blocker when the caller cannot manage it; a failed catalog read is the retryable blocker; explicit edges (either end) and folders naming one are named 400s, presets resolve over deployed members with a warning; one warning per declared-only member names every key it ignores; a live one is never started, stopped or written (Docker recorders + every row naming it); deploy and its dry run skip it and list it in warnings; every export carries the declared-only # unobserved: header."
+    },
+    {
+      "file": "unit/test_ent1030_seats.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP4: a manifest member's seat: and person_seats: — parsed by name, an email-shaped value refused without being echoed; without the optional provider hooks (set_seat, person_seat_status, read through getattr) the class is unobserved, never in sync and never a blocker, and nothing writes a seat (AST + raise pin); with them a missing or different seat is written through the hook (created members after create) and a refusal lands in failed[]; person seats are report-only (filled / vacant / unobserved; unobserved with a not-yet-exists note on a member apply will create); a provider read error is the retryable member_reads_unavailable; no report or export carries an email; export emits the held seat and round-trips, and without a seat reader names each seat in its # unobserved: line; deploy seats through the hook only for an admin in a signed-in session (agent key, an admin's user key and a non-admin are held back with seats_require_interactive_admin, nothing written) and passes the username as attribution."
+    },
+    {
+      "file": "unit/test_ent1030_gates.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP3: a manifest member's gates: (the approval map) — the dry run refuses through the one public skill_gate_map_service.validate_gate_changes exactly as set_gate would; writes go through set_gate with trigger=apply so ent#753/ent#848/ent#881 admission holds and a reachability answer is a note, never silent; an undeclared stored gate is reported, never cleared (AST + live pin); a declared gate on a cleared tombstone is a write; gates are written before skills on existing and created members; deploy under an agent key writes gates only with skills.manage and lists what it held back; export emits gates: and names a failed read. A gate that did not land holds its skill, or a set carrying it, on deploy and apply, including a write that raised; the deploy dry run names the refusal."
+    },
+    {
+      "file": "unit/test_ent1030_grants.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1030 CP2: a manifest member's grants: are written only by an admin in a signed-in session (the grant route's own gate, dependencies.assert_interactive_admin, spelled once); every other caller gets grant_requires_interactive_admin + summary.grants.held_back + one warning, never a blocker; an agent key deploying a manifest writes no grant; extras are reported, never revoked; the service's refusals land in failed[]; route and apply share the audit verbs."
+    },
+    {
+      "file": "unit/test_ent1030_naming.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030: manifest naming — prefixed (default) vs bare member names, bare adoption of live agents (adopted[] + the restart/teardown warning), the manageability fence (a merely-shared agent is a member_name_unavailable blocker), export naming inference, and export of permissions as stored edges / full-mesh preset with a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1030_skills.py",
+      "feature": "trinity-enterprise#1030",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "trinity-enterprise#1030 CP1: a manifest member's skills: and skill_sets: — assigned through the skills route's own sequence, additive only (an extra is reported, never unassigned), created members assigned before start, an agent key fenced by skills.manage, a failed read the retryable blocker, export of individual rows and held sets that round-trips, and a failed read named in the # unobserved: line."
+    },
+    {
+      "file": "unit/test_ent1007_ask_to_canon_role.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing"
+      ],
+      "description": "trinity-enterprise#1007 item 1: ask_operator `to: role:<id>` — the sink resolves a canon role on the raising agent's own roster with ent#881 reachability, stores the id lower-cased (a mixed-case retry replays without differs), and refuses every arm by name (role_unavailable / role_unassigned / role_cannot_open_agent; a malformed id is invalid_to naming the form) with the role's label and never a person; the gate's _can_open delegates to role_addressing.can_open_agent and its patch surface still governs _approvers."
+    },
+    {
+      "file": "unit/test_ent1007_mcp_fork_body.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "mcp",
+        "agent-create",
+        "fork-to-own"
+      ],
+      "description": "trinity-enterprise#1007 item 6: the body MCP create_agent sends for a fork (import_intent fork + fork_to_own {destination_repo}) survives models.AgentConfig with github_pat None and private defaulting True; private:false is carried; the agents.manage create gate still refuses a non-holder agent key before anything is created."
+    },
+    {
+      "file": "unit/test_ent1007_agent_kind_label.py",
+      "feature": "trinity-enterprise#1007",
+      "added": "2026-10-31",
+      "categories": [
+        "unit",
+        "agent-create",
+        "docker-labels",
+        "mcp"
+      ],
+      "description": "trinity-enterprise#1007 item 7: create stamps the effective kind on the trinity.kind label; AgentStatus.kind reads it on the full and fast paths; absent, empty or unrecognised reads None (unknown), never a default; a rebuild from nothing carries no label; the ordinary recreate seeds labels from the old container (AST pin); every /info shape carries the label kind, overriding any agent-server value."
+    },
+    {
+      "file": "unit/test_ent1001_endpoint_env.py",
+      "feature": "trinity-enterprise#1001",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1001: .env cannot set proxy/TLS-trust names (every runtime), the runtime's own endpoint names (that runtime only) or AGENT_RUNTIME; container-baseline values still apply; Claude settings env pinned by a root-owned managed-settings.d drop-in written from the container env; Codex -c endpoint pins and $CODEX_HOME/.env stripping; Gemini spawns carry every pin against the CLI's own fill-only .env loader; CLI-version guards."
+    },
+    {
+      "file": "unit/test_3993_no_retry_max_turns.py",
+      "feature": "#3993",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "scheduler",
+        "reliability"
+      ],
+      "description": "#3993: RETRY-001 skips a turn-limit failure on both dispatch paths (push text, pull [max_turns] prefix) and still retries every other failure; a /task max_turns completes its idempotency claim, and a replay re-raises the stored 422 with X-Trinity-Error-Code: max_turns without dispatching."
+    },
+    {
+      "file": "unit/test_ent1003_gemini_wall_clock.py",
+      "feature": "trinity-enterprise#1003",
+      "added": "2026-10-29",
+      "categories": [
+        "agent-server",
+        "gemini-runtime"
+      ],
+      "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -2240,6 +2402,18 @@
       "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
     },
     {
+      "file": "unit/test_3254_sync_health_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "git-sync",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 S2: the git sync health alerts on the platform-alert seam, driven through the real SyncHealthService poll cycle against db_harness with a pinned clock. D2: Kind.row_type keeps sync_failing / sync_diverged / git_bloat as the row type; a kind without one keeps alert or its budgeted type; an explicit row_type that differs from budgeted_type is refused. Per kind (sync_failing, sync_diverged, git_bloat_size, git_bloat_maintenance): the row carries its subject, a re-read bumps seen_count and moves last_seen_at / expires_at, the falling edge ends it cancelled / platform / condition_cleared; a restarted poller's reading lands on the same row; a person's acknowledgement through ask_service.answer stands, a re-read inside the snooze files nothing, the recovery clear never overwrites it; diverged_since is a sync_diverged material key, so after a person's ending two days of re-reads of that episode stay snoozed and a new episode inside the 7 days files its own row, and a pre-move person-ended row (its context carries diverged_since) snoozes its own episode only. R9: a poll inside 6 h touches nothing; a push-denied failure polled for 31 simulated days keeps one pending row with a moving deadline; a row whose recovery clear was lost expires 30 days after its last reading. AC 5: size and maintenance are two subjects and end separately. The divergence row survives a sync-failing precedence, is re-read under it (31 simulated days keep one row; a failed re-read is retried on the next poll; a restarted poller looks the row up and re-reads it; a worker's miss is looked up again after 6 h, so a row another worker raised is not stranded), a precedence never raises one, even across a restart, and it ends only with its diverged_since episode. R10: an unreachable agent, git switched off, a never cycle, an unknown tuple or a missing / malformed / negative measurement never ends an alert. /cso: an agent-written error past the 64 KiB context belt cannot keep the sync_failing alert out. R1: pre-move sync-failing / sync-diverged ids derive the seam subject; git-bloat ids are exempt and get a lifetime stamp only."
+    },
+    {
       "file": "unit/test_1600_proactive_history.py",
       "feature": "#1600",
       "added": "2026-07-16",
@@ -3539,6 +3713,18 @@
         "reliability"
       ],
       "description": "Daily database-backup service (#2216, services/db_backup_service.py). Run orchestration: day-keyed idempotence (second run same day no-ops), the DB_BACKUP_ENABLED off path touching nothing, and durable system_settings status on every terminal (ent#236 — in-process state is invisible to the other worker). The Redis lease is pinned as duplicate-I/O SUPPRESSION, never a correctness boundary: taken/released, a held lease skips, Redis down fails OPEN to the day-key guard alone, release is own-token compare-and-delete (a foreign token is never deleted), and the TTL is derived from PG_DUMP_TIMEOUT_SECONDS so retuning the dump timeout visibly re-opens the math (learnings 2026-07-31). Prune runs on EVERY attempt — success, failure, and the no-space skip — which is the Catch-22 regression guard: prune-only-on-success means a full disk skips the backup, bypasses the prune, and an operator lowering the window frees nothing. Free-space preflight skips loudly with an alarm; an unavailable size estimate proceeds rather than failing closed. The alarm has two triggers because 'does not fail silently' must hold over time: the edge fires exactly once per failure episode and re-arms only after a success intervenes, and the staleness re-alarm never fires while fresh, fires past the 3-day threshold, then respects the 7-day re-fire window, covers an install that never succeeded at all, and agrees with the status block's own `stale` flag. Knobs: malformed and out-of-range env values fall back with a WARNING while an unset one is silent (#1871 shape), and the retention reader's INVERTED coercion (garbage → 14, never → 0 keep-forever) is parametrized. PG arm with the subprocess mocked: the conninfo URI normalizes the SQLAlchemy driver suffix away and strips the password while PRESERVING query params (?sslmode=require survives — re-parsing into -h/-p/-U would permanently break managed PG), the password reaches pg_dump via PGPASSWORD env ONLY and never argv, a no-password URL leaves PGPASSWORD unset, an unparseable URL never echoes the URL (no password in the log or the durable status), non-zero exit raises with size-capped stderr, a missing binary names the image rebuild (#1814 class), and the timeout path KILLS AND REAPS the child (wait_for cancels the await, never the process) before unlinking the partial tmp and reaching status + alarm."
+    },
+    {
+      "file": "unit/test_3254_backup_archive_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit",
+        "reliability"
+      ],
+      "description": "#3254: the database-backup and log-archive alarms report through the platform alert seam (#3246), on the unit island's real SQLite with the clock frozen at a pinned date in every module the path reads it from. db_backup_failure (the edge alarm) and db_backup_stale (the weekly re-alarm) are two subjects on the _db-backup host keyed by the backup directory (AC 5); log_archive_unwritable is keyed by the archive path on _log-archive. Per kind: two readings are one pending row with the subject, seen_count 2 and a moved last_seen_at and expires_at; the success site ends it as the platform (condition_cleared): an ok ends both backup kinds, a success the boot pre-migration hook wrote to the settings ends the stale row at the next staleness check, a successful write probe ends the archive row; a further failure, a no-space skip, a status reset with no success on record and a skipped probe (archival off, non-local backend) end nothing; a person's ending through ask_service.answer lands acknowledged, is never overwritten by the clear, and snoozes the next reading; key parity: the key equals the upgrade sweep's reading of a pre-move row, and the seam's row reads back as the same kind. Two workers (the Redis lease failed open), serialised by the outcome lock: a failure the sibling records while this worker clears keeps its alarm; a success the sibling records while this worker raises the failure alarm ends it; a success recorded while this worker raises the stale alarm ends that row; an outcome lock that cannot be taken fails open with a WARNING. The clock 30 days ahead: a persisting staleness re-alarmed weekly by the real _staleness_check keeps exactly one pending row through day 30 while the one-off failure reading expires on day 14, and a person's ending of the stale row silences one weekly re-alarm, not more. No Docker."
     },
     {
       "file": "unit/test_2216_boot_pre_migration_backup.py",

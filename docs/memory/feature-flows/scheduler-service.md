@@ -615,6 +615,9 @@ tick. Users opt in (1-5) when a missed tick is genuinely costly.
 Execution fails → _maybe_schedule_retry()
     ├─ Skip SKIPPED / CANCELLED, and rows the lease reaper poison-parked
     │    (`error` starts with `poison_lease` — already with the operator, #2845)
+    ├─ Skip a turn-limit failure (#3993): the push row's "Task exceeded turn
+    │    limit:" text or the pull row's `[max_turns]` prefix. The same task under
+    │    the same cap stops at the same place, so a retry only repeats it.
     ├─ Check schedule.max_retries > 0
     ├─ Check attempt_number <= max_retries
     ├─ Calculate delay (2x for 429/rate-limit, capped at 300s)
