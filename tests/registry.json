@@ -12,6 +12,17 @@
       "description": "ent#986: Gemini usage statistics off (privacy.usageStatisticsEnabled=false) at startup, MCP inject and before every turn; JSONC/invalid settings; both runtime spellings; .env cannot relocate the CLI settings; .gemini credential files git-ignored."
     },
     {
+      "file": "unit/test_4051_per_worker_unit_db.py",
+      "feature": "#4051",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "infrastructure",
+        "regression"
+      ],
+      "description": "#4051: each unit-test process, every xdist worker included, defaults TRINITY_DB_PATH / TRINITY_RETAINED_RESULTS_DIR / TRINITY_CHAT_SESSION_FILE to its own pid, not the xdist controller's (bites under CI's -n auto)."
+    },
+    {
       "file": "unit/test_ent1042_role_answer_fence.py",
       "feature": "trinity-enterprise#1042",
       "added": "2026-11-01",
