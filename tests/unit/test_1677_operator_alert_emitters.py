@@ -57,8 +57,6 @@ _EXCLUDE_DIRS = ("enterprise/",)
 # inventory the operating-room feature flow points at.
 # ---------------------------------------------------------------------------
 _ALLOWED_CALLERS = {
-    ("client_portal/service.py", "_alert_collided_inbox"):
-        "platform-only: idempotent id per portal client's legacy dir (ent#308)",
     ("database.py", "DatabaseManager.create_operator_queue_item"):
         "the facade delegation itself (the _operator_queue_ops.create_item spelling)",
     ("database.py", "DatabaseManager.create_operator_queue_item_with_outcome"):
@@ -71,18 +69,12 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/lease_reaper_service.py", "_create_park_item"):
-        "platform-only + LOAD-BEARING: #1402 poison-park parks ONLY on a successful "
-        "create — must never be throttled (the reason a db-sink bound was rejected)",
     ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
     ("services/operator_queue_service.py", "create_bounded_alert_outcome"):
         "the #1677 budget helper's own admit-path create (the seam itself)",
     ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
         "the #1677 budget episode alert: cooldown-gated, bucketed reserved id",
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        "platform-only: fires only for schedules the operator enabled validation "
-        "on; cadence operator-bound (#1632 classification)",
 }
 
 
