@@ -93,10 +93,14 @@ def _gate_human_removal(current_user: User, name: str) -> None:
     that warning is about deleting an AGENT (where the `is_system` guard
     matters), not about a row belonging to one.
     """
-    # The same "is this an agent key" predicate `assert_own_agent` uses, so a
-    # principal that is not one always meets the owner gate below.
+    # The self-gate first, exactly as the routes call it, so this helper is never
+    # weaker than they are when reached alone: it holds an agent key to its own
+    # canvas and the system key to `trinity-system`'s (trinity-enterprise#719).
+    # An agent key is then done (`agent_principal_name`, the predicate the
+    # self-gate uses); every other principal, the system key included, meets the
+    # owner gate below.
+    assert_own_agent(current_user, name, detail=_OWN_CANVAS)
     if agent_principal_name(current_user) is not None:
-        assert_own_agent(current_user, name, detail=_OWN_CANVAS)
         return
     assert_agent_owner(current_user, name, detail="Only the agent's owner may change its canvases")
 
