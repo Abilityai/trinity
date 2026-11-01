@@ -328,7 +328,8 @@ class TestExportNaming:
         db.add_agent_permission("scout-lead", "catalog-entry", W.ALICE)
         text, doc = _export(world, ["scout-lead", "catalog-entry"])
         assert doc["naming"] == "bare"
-        assert list(doc["agents"]) == ["scout-lead", "catalog-entry"]
+        # #4132: members in name order, whatever order the roster read gave.
+        assert list(doc["agents"]) == ["catalog-entry", "scout-lead"]
         assert doc["permissions"] == {"explicit": {"scout-lead": ["catalog-entry"]}}
         manifest, _ = _parse(text)
         assert system_service.declared_names(manifest) == {"scout-lead": "scout-lead", "catalog-entry": "catalog-entry"}

@@ -1461,6 +1461,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # be a strict subset of `agents` and permission edges to real members would
     # be dropped from the backup in silence.
     member_names = {a['name'] for a in agents}
+    # #4132: by name, so two exports of one system are byte-identical whatever
+    # order the roster read returned — members, edges and every header list
+    # follow this order.
+    agents = sorted(agents, key=lambda a: a['name'])
 
     # Extract short names (remove system prefix)
     agent_configs = {}
@@ -1483,6 +1487,8 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # header so an export never reads as "nothing here" when it means "unknown".
     unobserved_reads: List[str] = []
     withheld: List[str] = []
+    # #4132: members whose person seats an export can never state.
+    person_seats_unread: List[str] = []
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
@@ -1523,7 +1529,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         try:
             resources = _export_resources(full_name, agent.get('resources'))
             if resources:
-                config["resources"] = resources
+                config["resources"] = dict(sorted(resources.items()))
         except Exception as e:
             logger.warning(f"Failed to get the resources of {full_name}: {e}")
             unobserved_reads.append(f"resources of {full_name}")
@@ -1572,7 +1578,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                         "enabled": bool(s.enabled),
                         "timezone": s.timezone
                     }
-                    for s in schedules
+                    for s in sorted(schedules, key=lambda s: s.name)
                 ]
         except Exception as e:
             logger.warning(f"Failed to get schedules for {full_name}: {e}")
@@ -1582,7 +1588,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             agent_tags = db.get_agent_tags(full_name)
             # Filter out the system prefix tag (auto-applied on import)
             # so export shows only explicitly configured tags
-            non_prefix_tags = [t for t in agent_tags if t != system_name]
+            non_prefix_tags = sorted(t for t in agent_tags if t != system_name)
             if non_prefix_tags:
                 config["tags"] = non_prefix_tags
         except Exception as e:
@@ -1642,6 +1648,9 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             except Exception as e:
                 logger.warning(f"Failed to get the seat of {full_name}: {e}")
                 unobserved_reads.append(f"seat of {full_name}")
+            # #4132: the seam answers per seat and never lists who fills what,
+            # so the person seats a member needs can never be read back.
+            person_seats_unread.append(full_name)
 
         agent_configs[short_name] = config
 
@@ -1733,6 +1742,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+    if person_seats_unread:
+        yaml_output = (f"# unobserved: person seats are not exported (the assignment module "
+                       f"answers per seat and never lists them): "
+                       f"{', '.join(person_seats_unread)}\n" + yaml_output)
     yaml_output = DECLARED_ONLY_EXPORT_HEADER + "\n" + yaml_output  # CP5, T6 = A
     if withheld:
         # The same line whether or not anything is held: it reports the caller's

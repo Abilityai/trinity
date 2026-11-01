@@ -252,3 +252,95 @@ class TestHeldValues:
                 f"    gates:\n      deploy: {{approver: primary}}\n")
         res = _dry_run(world, monkeypatch, text)
         assert [c.code for c in _member(res).changes] == ["gate_differs"]
+
+
+# ===========================================================================
+# CP3 — deterministic text, the person-seats line, the per-group round trip.
+# ===========================================================================
+
+B = f"{SYSTEM}-b"
+
+
+def _seed_full(world, order):
+    from database import db
+    from db_models import ScheduleCreate
+    for n in order:
+        world.seed_agent(n, tags=(SYSTEM, "zeta", "alpha") if n == LEAD else (SYSTEM, "alpha", "zeta"))
+    for sched in (("nightly", "0 1 * * *"), ("daily", "0 9 * * *"))[:: 1 if order[0] == LEAD else -1]:
+        db.create_schedule(LEAD, W.ALICE, ScheduleCreate(name=sched[0], cron_expression=sched[1],
+                                                        message=f"/{sched[0]}"))
+    db.upsert_shared_folder_config(LEAD, expose_enabled=True, consume_enabled=False)
+    db.set_resource_limits(LEAD, memory="8g", cpu="4")
+    db.add_agent_permission(LEAD, B, W.ALICE)
+    db.add_agent_permission(B, LEAD, W.ALICE)
+
+
+class TestDeterministicText:
+    def test_two_exports_in_reverse_roster_order_are_byte_identical(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
+        _seed_full(world, [B, LEAD])
+        one, _ = _export([B, LEAD])
+        two, _ = _export([LEAD, B])
+        assert one == two
+        doc = yaml.safe_load(one)
+        assert list(doc["agents"]) == ["b", "lead"]
+        assert doc["agents"]["lead"]["tags"] == ["alpha", "zeta"]
+        assert [s["name"] for s in doc["agents"]["lead"]["schedules"]] == ["daily", "nightly"]
+        assert list(doc["agents"]["lead"]["resources"]) == sorted(doc["agents"]["lead"]["resources"])
+
+
+class TestPersonSeatsHeader:
+    def test_every_export_names_the_person_seats_it_cannot_state(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
+        world.seed_agent(LEAD)
+        world.seed_agent(B)
+        text, doc = _export([LEAD, B])
+        line = next(l for l in text.splitlines() if "person seats" in l)
+        assert line.startswith("# unobserved: person seats are not exported")
+        assert line.endswith(f": {B}, {LEAD}")
+        assert all("person_seats" not in a for a in doc["agents"].values())
+
+
+class TestGroupRoundTrips:
+    def test_folders_tags_resources_schedules_mesh_template_round_trip(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
+        _seed_full(world, [LEAD, B])
+        text, doc = _export([LEAD, B])
+        lead = doc["agents"]["lead"]
+        assert lead["folders"] == {"expose": True, "consume": False}
+        assert lead["tags"] == ["alpha", "zeta"] and lead["template"] == "local:plain"
+        assert lead["resources"] and len(lead["schedules"]) == 2
+        assert doc["permissions"] == {"preset": "full-mesh"}
+        _assert_round_trips(_dry_run(world, monkeypatch, text))
+
+    def test_explicit_edges_round_trip(self, world, monkeypatch):
+        from database import db
+        W.install_seat_reader(monkeypatch)
+        world.seed_agent(LEAD)
+        world.seed_agent(B)
+        world.seed_agent(f"{SYSTEM}-c")
+        db.add_agent_permission(LEAD, B, W.ALICE)
+        text, doc = _export([LEAD, B, f"{SYSTEM}-c"])
+        assert doc["permissions"] == {"explicit": {"lead": ["b"]}}
+        _assert_round_trips(_dry_run(world, monkeypatch, text))
+
+    @pytest.mark.parametrize("naming", [None, "bare"])
+    def test_naming_round_trips(self, world, monkeypatch, naming):
+        W.install_seat_reader(monkeypatch)
+        world.seed_agent(LEAD)
+        world.seed_agent("helper")
+        text, doc = _export([LEAD, "helper"], naming=naming)
+        if naming is None:
+            assert doc.get("naming") is None and "members omitted" in text.splitlines()[0]
+            assert list(doc["agents"]) == ["lead"]
+        else:
+            assert doc["naming"] == "bare" and list(doc["agents"]) == [LEAD, "helper"]
+            _assert_round_trips(_dry_run(world, monkeypatch, text))
+
+    def test_deploy_false_is_named_and_never_exported(self, world, monkeypatch):
+        W.install_seat_reader(monkeypatch)
+        world.seed_agent(LEAD)
+        text, doc = _export([LEAD])
+        assert system_service.DECLARED_ONLY_EXPORT_HEADER in text.splitlines()
+        assert all("deploy" not in a for a in doc["agents"].values())
+        _assert_round_trips(_dry_run(world, monkeypatch, text))
