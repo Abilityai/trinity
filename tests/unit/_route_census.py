@@ -141,6 +141,7 @@ _DEPENDS_FACTORIES = {
 }
 _IMPERATIVE_GATES = {
     ("dependencies", "reject_non_interactive_principal"): "interactive",
+    ("dependencies", "assert_interactive_admin"): "interactive",  # ent#1030: the grant gate
     ("dependencies", "assert_person"): "person",
     ("dependencies", "reject_non_person_principal"): "person",
     (

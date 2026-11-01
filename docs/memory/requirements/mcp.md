@@ -243,6 +243,18 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
 - **Tests**: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered, audit-wrapped tool: over the real MCP transport; a session with no API key (which that transport's authentication refuses before any tool runs) in-process through FastMCP's own session; and the other-hostname case in-process too, by choice, so an https DNS origin needs no network (`fetch` stubbed).
 - **Flow**: `docs/memory/feature-flows/system-manifest.md`
 
+#### 7.7.1 `naming:` on the systems tools (trinity-enterprise#1030)
+
+- **Status**: ✅ Implemented (text + one optional parameter, no new tool).
+- **Rules**: `get_system_manifest({system_name, naming?})` forwards `naming` (`prefixed` | `bare`, a zod enum, so any other value is refused before a request) as the export route's `?naming=` override and sends no query when it is omitted (the backend infers). Its `system_name` text says membership is by the system tag with a `'{system_name}-*'` fallback, replacing the stale "All agents matching" line (#2373). `deploy_system` and `apply_system` name `naming: bare` in their manifest text; `apply_system` says an untagged declared agent is adopted under it (`adopted[]`). Every systems tool description stays under the 2,048-character cut (#3234).
+- **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
+
+#### 7.7.2 The target-state keys on the systems tools (trinity-enterprise#1030)
+
+- **Status**: ✅ Implemented (text only, no new tool or parameter).
+- **Rules**: `deploy_system`'s manifest text shows `skills` / `skill_sets`, `gates`, `grants` (written only for an admin in a signed-in session), `seat` / `person_seats` (no person) and `deploy: false`. `apply_system`'s description says these keys are additive — an absent key or a held extra is reported, never revoked — that grants need a signed-in admin, and that `summary` counts write | report | unobserved per group; its manifest text lists the keys, says a person seat never carries a person or an email, and names the `declared_only` verdict. Every systems tool description stays under the 2,048-character cut (#3234; `apply_system` is at 1,983).
+- **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
+
 ---
 
 ## 32. A2A Agent Discoverability (#737)
@@ -1798,3 +1810,35 @@ derived, and `User.mcp_scope` is a Pydantic field, not a column.
   admits the system key and acts as `trinity-system`, an agent key is unchanged, and seven
   other credential shapes (user, connector, portal_delegate, ops, anonymous, a system key
   naming no agent, an unknown future scope) are refused without reaching the network.
+
+## Permission Edges & Self-Change Grants — read over MCP (trinity-enterprise#991)
+
+- **Status**: ✅ Implemented (2026-10-31)
+- **Requirement ID**: MCP-EDGES-GRANTS-READ
+- **GitHub Issue**: abilityai/trinity-enterprise#991
+- **Description**: two read-only tools in `src/mcp-server/src/tools/permissions.ts`, so a
+  reconciler can observe the two manifest rows it could not read before:
+  - `get_agent_permissions(agent_name)` → `GET /api/agents/{name}/permissions?strict=true`.
+    Returns `source_agent` and `permitted_agents` only. `available_agents` is dropped: it is the
+    caller's roster, not data about the agent. The output carries
+    `observed_within: "caller_reach_with_container"`, because the route lists only edge targets
+    that have a container and that the caller can see. An edge missing from the list is not a
+    removed edge. Strict mode makes a Docker fault an error (503), never "no edges".
+    Access row `enforce` on `agent_name`: an agent key reads itself, an edge target, or an agent
+    it spawned (the #3810 read set), the same set as the backend's access tier.
+  - `get_agent_capability_grants(agent_name)` → `GET /api/agents/{name}/capability-grants`,
+    returned verbatim (all five capabilities, `granted` true/false, `granted_by`, `granted_at`).
+- **Scope is the route's, unchanged (ruling T1 = A, T2 = A).** No backend change. The grants
+  route stays owner tier (`OwnedAgentByName`): an agent key reads itself or an agent it spawned,
+  **never an edge peer**; a person key reads only as owner or admin (ent#756). The tool's access
+  row is therefore `baselined` on that backend fence, not `enforce`, because an edge-gated row
+  would claim an edge peer is admitted when the route refuses it. A refusal (the route's uniform
+  404) is returned as an error that says "refused, not 'no grants'". A reconciler that observes
+  a fleet it did not spawn reads with a person-scoped key (ent#1034), not through edges.
+- **No write tools.** Granting an edge or a capability stays human-only (Invariant #8,
+  grant-vs-use).
+- **Tests**: `src/mcp-server/src/tools/permissions.test.ts`. It covers the route and strict flag,
+  the dropped roster and the observability label, a 503 that stays an error, the grants payload
+  verbatim, a refused peer that reads as refused, both access rows, and the gate as `server.ts`
+  registers it (real transport, agent key: no edge refused before the backend, edge admitted, an
+  edge peer's grants refused).

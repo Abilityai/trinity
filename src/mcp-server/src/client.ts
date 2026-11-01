@@ -1034,6 +1034,37 @@ export class TrinityClient {
   }
 
   /**
+   * An agent's permission edges, as the strict route reports them
+   * (trinity-enterprise#991). THROWS on any failure: a 503 (Docker unreadable)
+   * or a 404 is never an empty edge list. `getPermittedAgents` keeps its own
+   * names-only, fail-closed contract for the access gate.
+   */
+  async getAgentPermissionsStrict(name: string): Promise<{
+    source_agent: string;
+    permitted_agents: Array<{ name: string; [key: string]: unknown }>;
+    available_agents?: Array<{ name: string; [key: string]: unknown }>;
+  }> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/permissions?strict=true`
+    );
+  }
+
+  /**
+   * The five self-change permissions an agent holds or not, with who granted
+   * each and when (trinity-enterprise#164, read over MCP since ent#991).
+   */
+  async getAgentCapabilityGrants(name: string): Promise<{
+    agent_name: string;
+    grants: Array<{ capability: string; granted: boolean; granted_by: string | null; granted_at: string | null }>;
+  }> {
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/capability-grants`
+    );
+  }
+
+  /**
    * Check if source agent is permitted to call target agent (Phase 9.10)
    */
   /**

@@ -541,6 +541,69 @@ def test_departed_agent_is_not_woken(rooms_db, allow_all, fake_execute):
     assert out["woke"] == [] and calls == []
 
 
+def test_a_removed_agent_that_is_added_back_is_a_member_again(rooms_db, allow_all, fake_execute):
+    """trinity-enterprise#959 sign-off: a re-add answered `added` and posted
+    "joined the room" while the INSERT hit the participant row's UNIQUE triple
+    and changed nothing, so `left_at` stayed set. Once membership honoured
+    `left_at`, the agent it said had rejoined got the uniform 404 on fetch and
+    post, and was never woken. Only the moderator's add rejoins: an @mention of
+    a removed agent still never wakes it (`test_departed_agent_is_not_woken`)."""
+    from shared_sessions import service, db as rdb
+    calls, _ = fake_execute
+    room = _mk_room()
+    agent_a = _user(agent_name="agent-a")
+    service.remove_participant(_user(), room["id"], "agent-a")
+
+    assert service.add_participant(_user(), room["id"], "agent-a", role="scribe")["added"] is True
+
+    p = rdb.get_participant(room["id"], "agent", "agent-a")
+    assert p["left_at"] is None and p["role"] == "scribe"
+    _run(service.post_message(agent_a, room["id"], "back again"))  # 404s while it is out
+    out = _run(service.post_message(_user(), room["id"], "@agent-a welcome back"))
+    assert out["woke"] == ["agent-a"] and len(calls) == 1
+
+
+def test_a_reply_already_running_lands_after_its_waker_is_removed(rooms_db, allow_all, fake_execute,
+                                                                   monkeypatch):
+    """trinity-enterprise#959 round 2 (Codex re-review): agent-a posts `@agent-b`
+    with its own key, so agent-b's turn runs under agent-a's principal and its
+    reply re-enters `post_message` as agent-a. A moderator removes agent-a while
+    agent-b is still running. The reply was dispatched while agent-a was a
+    member and is already paid for, so it must still land — while agent-a's own
+    request after its removal is refused like a non-member's."""
+    from shared_sessions import service, db as rdb
+    calls, replies = fake_execute
+    room = _mk_room()
+    agent_a = _user(agent_name="agent-a")
+
+    import services.task_execution_service as tes
+    inner = tes.get_task_execution_service().execute_task
+
+    async def _removed_mid_turn(**kwargs):
+        if kwargs["agent_name"] == "agent-b":
+            service.remove_participant(_user(), room["id"], "agent-a")   # the moderator
+        return await inner(**kwargs)
+
+    monkeypatch.setattr(tes, "get_task_execution_service",
+                        lambda: types.SimpleNamespace(execute_task=_removed_mid_turn))
+    replies["agent-b"] = "agent-b: the numbers are in"
+
+    _run(service.post_message(agent_a, room["id"], "@agent-b over to you"))
+
+    assert rdb.get_participant(room["id"], "agent", "agent-a")["left_at"] is not None
+    landed = [m for m in rdb.get_messages(room["id"])
+              if m["sender_kind"] == "agent" and m["sender_identity"] == "agent-b"]
+    assert [m["content"] for m in landed] == ["agent-b: the numbers are in"]
+
+    # agent-a's own request, now that it is out, is a non-member's.
+    with pytest.raises(service.RoomError) as ei:
+        _run(service.post_message(agent_a, room["id"], "still here?"))
+    assert (ei.value.status_code, ei.value.code) == (404, "room_not_found")
+    with pytest.raises(service.RoomError) as ei:
+        service.get_room(agent_a, room["id"])
+    assert ei.value.status_code == 404
+
+
 def test_room_lifecycle_mutations_require_a_moderator(rooms_db, allow_all):
     """ent#220 #4: a member AGENT (reachable via its own key, a prompt-injection
     surface) must not close a room or rewrite its roster. Only the human

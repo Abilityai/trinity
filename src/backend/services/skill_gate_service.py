@@ -337,24 +337,12 @@ def _resolved_people(agent_name: str, role: str) -> List[str]:
 
 
 def _can_open(agent_name: str, email: str) -> bool:
-    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
-
-    A decision is made in the Workspace (the agent on the person's roster:
-    owned or shared) or in Operations (an operator or admin with access to the
-    agent). A platform account is asked `can_user_access_agent` — owner, shared
-    or admin, which covers both doors; an email with no account only has the
-    Workspace, so the agent must be shared with it. Fails closed: an unreadable
-    lookup is "cannot open", which refuses by name rather than waits silently."""
-    try:
-        user = db.get_user_by_email(email)
-        if user:
-            return bool(db.can_user_access_agent(user["username"], agent_name))
-        from client_portal.service import agent_on_roster
-        return bool(agent_on_roster(agent_name, email, include_owned=False))
-    except Exception:  # noqa: BLE001
-        logger.warning("[SkillGate] could not tell whether an approver can open %s",
-                       agent_name, exc_info=True)
-        return False
+    """Can this approver reach a gated approval on `agent_name`? The rule is
+    `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
+    trinity-enterprise#1007 so an ask to a canon role applies the same one).
+    This name stays the gate's seam: `_approvers` reads it, and the tests
+    patch it."""
+    return role_addressing.can_open_agent(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
