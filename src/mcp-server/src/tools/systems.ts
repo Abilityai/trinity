@@ -235,6 +235,8 @@ export function createSystemTools(
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
+        "`deploy: false` members are skipped and listed in `agents_declared_only[]`; a manifest whose every " +
+        "member is `deploy: false` is refused with a 400 `nothing_to_deploy` (use apply_system to report on them). " +
         "Pass strict: true to restore abort-on-first-error.",
       parameters: z.object({
         manifest: z
@@ -577,7 +579,8 @@ export function createSystemTools(
         + "declares is adopted instead (one tag write, listed in `adopted[]`). "
         + "Per-member skills, skill_sets, gates, grants, seat and person_seats are additive: an "
         + "absent key or a held extra is reported, never revoked; grants are written only for an "
-        + "admin in a signed-in session. `summary` counts write | report | unobserved per group. "
+        + "admin in a signed-in session. `summary` counts write | report | unobserved per group; "
+        + "a real run's `write` and `adopted[]` name only what landed. "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
         + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
         + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
