@@ -335,3 +335,146 @@ class TestDropAddressee:
         with pytest.raises(ValueError):
             ask_service.drop_addressee(rid, people["alice"], reason="because")
         assert _ids(people["alice"]) == [rid]
+
+
+# ===========================================================================
+# The gate raise: no chat, and the platform's own attachment
+# ===========================================================================
+
+PROJECT_KEYS = ("workspace_project_id", "workspace_project_task", "workspace_project_event")
+ATTACHMENT = {"workspace_project_id": "p1", "workspace_project_task": "t1",
+              "workspace_project_event": "assigned"}
+
+
+def _gate_raise(agent, rid, email, **kw):
+    from services import ask_service
+    body = {"request_id": rid, "type": "alert", "title": "T-003 is yours",
+            "question": "Collect the evidence."}
+    body.update(kw.pop("body", {}))
+    return ask_service.raise_ask(agent, body, raised_by="gate", channel="gate",
+                                 addressee=email, **kw)
+
+
+def _agent_raise(agent, rid, **body):
+    from services import ask_service
+    b = {"request_id": rid, "type": "question", "title": "Which vendor?", "question": "q",
+         "to": "primary"}
+    b.update(body)
+    return ask_service.raise_ask(agent, b, raised_by="agent", channel="mcp")
+
+
+def _context(real_db, receipt):
+    return real_db.get_operator_queue_item(receipt["id"])["context"] or {}
+
+
+class TestGateRaiseAttachment:
+    def test_attach_chat_false_opens_no_chat(self, real_db, agent, people, monkeypatch):
+        """A reach row must not create a Main chat between the person and a
+        platform agent they cannot open: with `attach_chat=False` the
+        attachment is never resolved and the row carries no chat."""
+        from services import operator_queue_service as oqs
+        calls = []
+        monkeypatch.setattr(oqs, "_workspace_attachment",
+                            lambda a, e, **kw: calls.append((a, e)) or ("thread-x", False))
+
+        r = _gate_raise(agent, REACH + "p1-t1-assigned-20", people["alice"], attach_chat=False)
+
+        assert calls == []
+        assert "workspace_session_id" not in _context(real_db, r)
+        [ask] = _page(people["alice"]).items
+        assert ask.id == r["id"] and ask.chat_id is None
+
+    def test_attach_chat_defaults_to_true(self, real_db, agent, people, monkeypatch):
+        from services import operator_queue_service as oqs
+        calls = []
+        monkeypatch.setattr(oqs, "_workspace_attachment",
+                            lambda a, e, **kw: calls.append((a, e)) or ("thread-x", False))
+
+        r = _gate_raise(agent, REACH + "p1-t1-assigned-21", people["alice"])
+
+        assert calls == [(agent, people["alice"])]
+        assert _context(real_db, r)["workspace_session_id"] == "thread-x"
+
+    @pytest.mark.parametrize("kw", [{"attach_chat": False}, {"platform_context": {}},
+                                    {"platform_context": ATTACHMENT}])
+    def test_an_agent_raise_may_pass_neither(self, agent, kw):
+        from services import ask_service
+        body = {"request_id": f"r-{uuid.uuid4().hex[:8]}", "type": "question", "title": "t",
+                "question": "q", "to": "primary"}
+        with pytest.raises(ValueError):
+            ask_service.raise_ask(agent, body, raised_by="agent", channel="mcp", **kw)
+
+    def test_platform_context_is_merged_for_platform_keys_only(self, real_db, agent, people):
+        r = _gate_raise(agent, REACH + "p1-t1-assigned-22", people["alice"], attach_chat=False,
+                        platform_context={**ATTACHMENT, "other": 1, "execution_id": "forged"})
+
+        ctx = _context(real_db, r)
+        assert {k: ctx.get(k) for k in PROJECT_KEYS} == ATTACHMENT
+        assert "other" not in ctx and "execution_id" not in ctx
+
+    def test_platform_context_wins_over_agent_authored_keys(self, real_db, agent, people):
+        r = _gate_raise(agent, REACH + "p1-t1-assigned-23", people["alice"], attach_chat=False,
+                        platform_context=ATTACHMENT,
+                        body={"context": {"workspace_project_id": "forged", "keep": 1}})
+
+        ctx = _context(real_db, r)
+        assert ctx["workspace_project_id"] == "p1" and ctx["keep"] == 1
+
+    def test_the_project_keys_are_platform_keys(self):
+        from services import operator_queue_service as oqs
+        assert set(PROJECT_KEYS) <= set(oqs._PLATFORM_CONTEXT_KEYS)
+
+
+class TestAgentContentIsStrippedOfTheProjectKeys:
+    def test_on_the_native_path(self, real_db, agent, people, roster):
+        roster.add((agent, people["alice"]))
+        from services import assignment_provider
+
+        class _P:
+            def assignment_for(self, agent_name, triggered_by):
+                return None
+
+            def people_for(self, agent_name, role):
+                return {"emails": [people["alice"]]}
+        assignment_provider.register_provider(_P())
+
+        r = _agent_raise(agent, f"r-{uuid.uuid4().hex[:8]}",
+                         context={**{k: "forged" for k in PROJECT_KEYS}, "keep": 1})
+
+        ctx = _context(real_db, r)
+        assert not set(PROJECT_KEYS) & set(ctx) and ctx["keep"] == 1
+        [ask] = _page(people["alice"]).items
+        assert ask.id == r["id"] and ask.project is None
+
+    def test_on_the_file_path(self, agent, people, monkeypatch):
+        from services import operator_queue_service as oqs
+        monkeypatch.setattr(oqs, "_validated_addressee", lambda a, raw: raw)
+
+        out = oqs._clamp_ingested_item(
+            {"id": "f981-forged", "title": "t", "question": "q",
+             "addressed_to_email": people["alice"],
+             "context": {**{k: "forged" for k in PROJECT_KEYS}, "keep": 1}},
+            agent)
+
+        assert not set(PROJECT_KEYS) & set(out["context"]) and out["context"]["keep"] == 1
+
+
+class TestProjection:
+    def test_project_is_projected_from_the_platform_keys(self, real_db, agent, people):
+        r = _gate_raise(agent, REACH + "p1-t1-assigned-24", people["alice"], attach_chat=False,
+                        platform_context=ATTACHMENT)
+
+        [ask] = _page(people["alice"]).items
+        assert ask.id == r["id"]
+        assert ask.project == {"id": "p1", "task_id": "t1", "event": "assigned"}
+
+    def test_a_row_without_them_projects_none(self, real_db, agent, people):
+        _seed(real_db, agent, REACH + "p1-t1-assigned-25", addressed_to=people["alice"])
+        [ask] = _page(people["alice"]).items
+        assert ask.project is None
+
+    def test_an_attachment_without_a_project_id_is_nothing(self, real_db, agent, people):
+        _gate_raise(agent, REACH + "p1-t1-assigned-26", people["alice"], attach_chat=False,
+                    platform_context={"workspace_project_task": "t1"})
+        [ask] = _page(people["alice"]).items
+        assert ask.project is None

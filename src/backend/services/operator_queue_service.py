@@ -873,10 +873,18 @@ _WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
 # Separate from the two keys above on purpose: discussing an ask moves neither
 # where it was raised nor where a background ask's reply goes.
 _WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
+# trinity-enterprise#981: the project attachment of a row the platform raised
+# about a person — which project, which task, which event. Written only through
+# `ask_service.raise_ask(platform_context=...)` on a gate raise; read by
+# `client_portal/asks/service.py::_project` as the client-facing `project`.
+_WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
+_WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
+_WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
+    _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
 })
 
 

@@ -247,6 +247,22 @@ def _linked_request_id(item: dict, key: str,
     return other.get("request_id")
 
 
+def _project_attachment(context: dict) -> Optional[dict]:
+    """`{id, task_id, event}` from the platform-written project keys
+    (trinity-enterprise#981), or None without a project id. Platform-written
+    only: the keys are stripped from agent content at both ingestion
+    boundaries, so what is read here is what the platform attached."""
+    from services.operator_queue_service import (
+        _WORKSPACE_PROJECT_EVENT_KEY, _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY)
+    pid = context.get(_WORKSPACE_PROJECT_ID_KEY)
+    if not isinstance(pid, str) or not pid:
+        return None
+    task, event = context.get(_WORKSPACE_PROJECT_TASK_KEY), context.get(_WORKSPACE_PROJECT_EVENT_KEY)
+    return {"id": pid,
+            "task_id": task if isinstance(task, str) and task else None,
+            "event": event if isinstance(event, str) and event else None}
+
+
 def _project(item: dict, *, viewer_email: Optional[str] = None,
              resume_requested: Optional[bool] = None,
              is_platform: bool = False) -> WorkspaceAsk:
@@ -268,6 +284,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     # stripped from agent content like the two keys above.
     discussion = context.get("workspace_discussion_id")
     from services.operator_queue_service import is_aged
+    project = _project_attachment(context)
     ended_at, ended_by = _ending_of(item, viewer_email)
     agent_ending = ask_service.agent_ending_kind(item) if ended_by == "agent" else None
     return WorkspaceAsk(
@@ -290,6 +307,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
         discussion_chat_id=discussion if isinstance(discussion, str) and discussion else None,
+        project=project,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),

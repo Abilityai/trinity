@@ -550,9 +550,21 @@ def raise_ask(
     platform_execution_id: Optional[str] = None,
     addressees: Optional[List[str]] = None,
     to_role_override: Optional[str] = None,
+    attach_chat: bool = True,
+    platform_context: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `attach_chat` and `platform_context` (trinity-enterprise#981) are the
+    gate's too — an agent's raise passing either is a programming error.
+    `attach_chat=False` skips the Workspace attachment: an addressed ask
+    normally resolves (and may create) the pair's Main, which a row the
+    platform raises about a person under a platform agent must not do. The
+    row then carries no chat. `platform_context` is what the PLATFORM says
+    about the row — merged into `context` AFTER the agent-content strip and
+    only for keys in `_PLATFORM_CONTEXT_KEYS`, so the same keys are stripped
+    from anything an agent authored and written only here.
 
     `addressees` + `to_role_override` (trinity-enterprise#848) are the gate's
     pre-resolved audience: the very people `skill_gate_service.enforce` decided
@@ -647,6 +659,8 @@ def raise_ask(
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     named = _named_addressee(addressee, raised_by)
     pre = _named_addressees(addressees, to_role_override, raised_by, named)
+    if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
+        raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
     norm = _validated_ask(ask, oqs, raised_by=raised_by)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
@@ -674,18 +688,25 @@ def raise_ask(
     turn = _platform_turn(agent_name, platform_execution_id)
     if turn:
         context["execution_id"] = turn
-    if addressee:
+    if addressee and attach_chat:
         # The chat the raising turn serves (ent#734), else the addressee's Main
         # (ent#429/#523), resolved at raise time. Only after the caps passed:
         # attaching may create Main. Only an AGENT's raise reads the turn: a
         # gate's ask is a background ask, and belongs to the Inbox only
-        # (the ent#610 amendment of 2026-09-30).
+        # (the ent#610 amendment of 2026-09-30). A gate may skip this
+        # (trinity-enterprise#981): a row about a person under a platform
+        # agent opens no chat.
         thread, in_turn = oqs._workspace_attachment(
             agent_name, addressee, execution_id=turn if raised_by == "agent" else None)
         if thread:
             context[oqs._WORKSPACE_THREAD_KEY] = thread
         if thread and in_turn:
             context[oqs._WORKSPACE_TURN_KEY] = True
+    for key, value in (platform_context or {}).items():
+        # trinity-enterprise#981: the platform's own attachment, platform keys
+        # only — after the strip in `_validated_ask`, so it is the one writer.
+        if key in oqs._PLATFORM_CONTEXT_KEYS:
+            context[key] = value
     item = {
         "id": norm["request_id"],
         "type": norm["type"],
