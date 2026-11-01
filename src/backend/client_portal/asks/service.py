@@ -441,10 +441,21 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
                      if chat_id is not None and offset == 0 else [])
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
                    if _on_roster(a, email, is_platform, strict=True)}
-        if allowed:
-            total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
-            items = db.list_operator_queue_items(accessible_agent_names=allowed,
-                                                 limit=limit, offset=offset, **filters)
+        # trinity-enterprise#981: a row the platform raised about the viewer
+        # reaches them by address — the platform chose this row's addressee;
+        # the roster was never its fence. One reserved sub-family
+        # (`ADDRESSEE_REACH_ID_PREFIXES`, raised by the gate, addressed to the
+        # viewer), OR'd beside the access set INSIDE the SQL, for the page and
+        # its count alike. So an empty access set is no longer "nothing": a
+        # viewer on no roster at all may still have such a row.
+        reach = _reach_prefixes()
+        if allowed or reach:
+            total = db.count_operator_queue_items(
+                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+                **filters)
+            items = db.list_operator_queue_items(
+                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+                limit=limit, offset=offset, **filters)
         else:
             total, items = 0, []
     except AsksUnavailable:
@@ -504,6 +515,22 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
     return list_asks_page(email, is_platform, agent_name, include_ended=include_ended).items
 
 
+def _reach_prefixes() -> tuple:
+    """The request-id family that reaches its addressee by address
+    (trinity-enterprise#981) — read from the one constant, so the list's SQL
+    branch and the per-ask door (`_owned_ask`) key on the same prefixes."""
+    from services.operator_queue_service import ADDRESSEE_REACH_ID_PREFIXES
+    return tuple(ADDRESSEE_REACH_ID_PREFIXES)
+
+
+def _reaches_by_address(item: dict) -> bool:
+    """Is this a row the platform addressed to its reader — reserved
+    sub-prefix AND `raised_by == 'gate'` — so the roster is not its fence
+    (trinity-enterprise#981)? Who the reader is stays `_is_addressed_to`."""
+    from services.operator_queue_service import is_addressee_reach
+    return is_addressee_reach(item)
+
+
 def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = False) -> dict:
     """The ask row, when it is one THIS viewer may read — else the uniform 404.
 
@@ -515,6 +542,11 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
     disagree about who owns an ask. The kind check is the list's own
     `_VISIBLE_KINDS`: an ask no list shows is not answerable either.
 
+    trinity-enterprise#981: a row the platform raised about the viewer
+    (`_reaches_by_address`) is theirs by address — the platform chose this
+    row's addressee; the roster was never its fence — so for that one family
+    the roster is not asked. The addressee match comes first either way.
+
     `strict` is the READ mode: an unreadable roster raises `AsksUnavailable`
     (503) instead of looking like "not yours" — asked only after the addressee
     matched, so it discloses nothing about someone else's ask. The answer path
@@ -525,7 +557,8 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
         not item
         or not _is_addressed_to(item, email)
         or item.get("type") not in _VISIBLE_KINDS
-        or not _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict)
+        or not (_reaches_by_address(item)
+                or _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict))
     ):
         raise AskError(404, "not_found", "Ask not found")
     return item

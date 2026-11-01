@@ -508,6 +508,37 @@ MIN_DEADLINE_MINUTES = 15
 _REASK_SCAN = 200
 
 
+def drop_addressee(ask_id: str, email: str, *, reason: str) -> bool:
+    """The PLATFORM takes one person off a row it addressed
+    (trinity-enterprise#981): removed from `resolved_to`, and the single
+    addressee cleared when it named them. The row is NOT ended — it stays, as
+    it is, for the people it was also delivered to; a row that named nobody
+    else is the caller's to end (`clear_platform`). The Workspace list and its
+    doors match the address (`_is_addressed_to` and its SQL twin), so from
+    this write on that person no longer reads the row. `reason` is one of
+    `PLATFORM_ENDING_REASONS`, like `clear_platform`'s. Returns whether
+    anything changed; no audit row carries the person's address — ids and the
+    reason only.
+    """
+    if reason not in PLATFORM_ENDING_REASONS:
+        raise ValueError(f"platform ending reason must be one of {PLATFORM_ENDING_REASONS}, got {reason!r}")
+    changed = bool(db.drop_operator_queue_addressee(ask_id, email))
+    if not changed:
+        return False
+    audit = [{
+        "event_action": "platform_addressee_dropped",
+        "source": "system",
+        "target_type": "operator_queue",
+        "target_id": ask_id,
+        "details": {"reason": reason},
+    }]
+    try:
+        operator_resume_service.spawn_on_loop(lambda: _announce(audit, None))
+    except Exception:  # noqa: BLE001 — the write is committed; it must stand
+        logger.warning("[AskService] could not schedule the addressee-dropped audit", exc_info=True)
+    return True
+
+
 def raise_ask(
     agent_name: str,
     ask: Mapping[str, Any],
