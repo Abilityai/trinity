@@ -20,6 +20,7 @@
 | F-009 | INFO | STATIC | File Structure | At least one `.claude/skills/` or `.claude/commands/` file exists |
 | F-010 | SOFT | STATIC | File Structure | `dashboard.yaml` exists |
 | F-011 | INFO | STATIC | File Structure | `ARCHITECTURE.md` (or `docs/architecture.md`) exists |
+| F-014 | SOFT | STATIC | File Structure | The last `.trinity/setup.sh` run exited 0 |
 | S-001 | HARD | STATIC | Security | `.env` is excluded in `.gitignore` |
 | S-002 | HARD | STATIC | Security | `.mcp.json` is excluded in `.gitignore` |
 | S-003 | HARD | STATIC | Security | No hardcoded secrets in any committed file |
@@ -148,6 +149,10 @@ Without a dashboard, the Trinity Dashboard tab shows nothing. Not required, but 
 **F-011** — `ARCHITECTURE.md` (or `docs/architecture.md`) exists  
 Severity: INFO | Type: STATIC  
 Describes the agent's design, data flows, key components, and how it fits into a broader agentic system. Especially valuable for multi-agent or complex agents. CLAUDE.md can `@import` this file to keep the system prompt concise while giving Claude full architectural context.
+
+**F-014** — The last `.trinity/setup.sh` run exited 0  
+Severity: SOFT | Type: STATIC  
+Reads `.trinity/setup-status.json` (`exit_code`, `started_at`, `finished_at`), written by `startup.sh` after the hook runs (#4002). A non-zero exit fails with the exit code and times: the agent is running without packages it declared. The file is agent-writable, so only those keys are read. A missing file is a SKIP (no setup script, or an image that predates #4002). F-012/F-013 are retired ids, hence F-014.
 
 ---
 

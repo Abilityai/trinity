@@ -165,7 +165,7 @@ Every payment verify and settle is a call to the Nevermined facilitator, and eve
 
 | Tool | Description |
 |------|-------------|
-| `configure_nevermined` | Set NVM API Key, environment, Agent ID, Plan ID and credits per request |
+| `configure_nevermined` | Set NVM API Key, environment, Agent ID, Plan ID and credits per request. Takes a signed-in session, so an MCP API key is refused: configure on the agent's **Payments** tab |
 | `get_nevermined_config` | Retrieve current payment configuration |
 | `toggle_nevermined` | Enable or disable payments |
 | `get_nevermined_payments` | View payment history |

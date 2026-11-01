@@ -136,6 +136,13 @@
                         title="Read-only machine credential — fleet health, telemetry, execution and subscription reads only">
                     Ops (read-only)
                   </span>
+                  <!-- #3180: the bounded WRITE tier. Badged for the same reason
+                       as `ops`: unbadged, it would read as a Standard key. -->
+                  <span v-else-if="key.scope === 'ops_write'"
+                        class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-warning-100 dark:bg-status-warning-900/50 text-status-warning-800 dark:text-status-warning-300"
+                        title="Operational-write machine credential — circuit-breaker reset, agent start/stop and execution terminate only">
+                    Ops (writes)
+                  </span>
                   <span v-else-if="key.scope === 'system'" class="ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-status-urgent-100 dark:bg-status-urgent-900/50 text-status-urgent-800 dark:text-status-urgent-300">
                     System
                   </span>
@@ -252,10 +259,10 @@
                 placeholder="Used for..."
               />
 
-              <!-- ent#163 / #2323. Admin-only, and deliberately an explicit
-                   choice rather than a default: both non-standard scopes are
-                   consequential (one acts as other people, one is a machine
-                   credential), so neither should be a stray click.
+              <!-- ent#163 / #2323 / #3180. Admin-only, and deliberately an
+                   explicit choice rather than a default: every non-standard scope
+                   is consequential (one acts as other people, two are machine
+                   credentials), so none should be a stray click.
 
                    #2389 — a radio group, not the two independent checkboxes this
                    started as: the scopes are mutually exclusive (one column), so
@@ -284,6 +291,24 @@
                       <em>reads</em> only — every write and every other endpoint is
                       refused, and it gets no MCP tools. It stays bound to this
                       account: if your admin role is removed or the account is
+                      suspended, the key stops working, so mint it under an account
+                      that is not offboarded with a person.
+                    </span>
+                  </span>
+                </label>
+
+                <!-- #3180 — the write sibling of `ops`, admin-only like it. -->
+                <label class="flex items-start gap-2 cursor-pointer">
+                  <input type="radio" value="ops_write" v-model="newKey.scope" class="mt-0.5 text-action-primary-600 focus:ring-action-primary-500" />
+                  <span class="text-sm scope-label">
+                    Ops (operational writes)
+                    <span class="scope-hint">
+                      Bounded machine credential for ops automation. It can do four
+                      things only: reset an agent's circuit breaker, start or stop an
+                      agent, and terminate an execution. It cannot start or stop the
+                      system agent or an ephemeral agent, cannot read (use an Ops
+                      read-only key for that), and gets no MCP tools. It stays bound
+                      to this account: if your admin role is removed or the account is
                       suspended, the key stops working, so mint it under an account
                       that is not offboarded with a person.
                     </span>

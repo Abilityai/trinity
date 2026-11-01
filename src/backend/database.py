@@ -132,6 +132,7 @@ from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
 from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
+from db.memory_facts import MemoryFactOperations  # trinity-enterprise#1022 retrieval memory
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
@@ -1056,6 +1057,7 @@ class DatabaseManager:
         self._agent_shared_files_ops = AgentSharedFilesOperations()
         self._settings_ops = SettingsOperations()
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
+        self._memory_fact_ops = MemoryFactOperations()  # trinity-enterprise#1022
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
         self._skill_sets_ops = SkillSetsOperations()
@@ -3206,6 +3208,52 @@ class DatabaseManager:
             execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
         )
 
+    # ------------------------------------------------------------------
+    # Retrieval memory facts (trinity-enterprise#1022, MEM-002)
+    # ------------------------------------------------------------------
+
+    def get_memory_opt_out(self, agent_name: str) -> bool:
+        return self._agent_ops.get_memory_opt_out(agent_name)
+
+    def set_memory_opt_out(self, agent_name: str, opt_out: bool) -> bool:
+        return self._agent_ops.set_memory_opt_out(agent_name, opt_out)
+
+    def insert_memory_fact(self, **kwargs):
+        return self._memory_fact_ops.insert_memory_fact(**kwargs)
+
+    def list_memory_facts(self, agent_name: str, user_email: str, **kwargs):
+        return self._memory_fact_ops.list_memory_facts(agent_name, user_email, **kwargs)
+
+    def memory_scope_fingerprint(self, agent_name: str, user_email: str):
+        return self._memory_fact_ops.memory_scope_fingerprint(agent_name, user_email)
+
+    def update_memory_fact_text(self, fact_id: str, agent_name: str, **kwargs) -> bool:
+        return self._memory_fact_ops.update_memory_fact_text(fact_id, agent_name, **kwargs)
+
+    def soft_delete_memory_fact(self, fact_id: str, agent_name: str, *, deleted_by: str, execution_id=None) -> bool:
+        return self._memory_fact_ops.soft_delete_memory_fact(fact_id, agent_name, deleted_by=deleted_by, execution_id=execution_id)
+
+    def mark_memory_facts_recalled(self, fact_ids, *, agent_name: str) -> None:
+        return self._memory_fact_ops.mark_memory_facts_recalled(fact_ids, agent_name=agent_name)
+
+    def prune_memory_scope(self, agent_name: str, user_email: str, *, cap: int) -> int:
+        return self._memory_fact_ops.prune_memory_scope(agent_name, user_email, cap=cap)
+
+    def count_memory_retains_since(self, agent_name: str, since_iso: str) -> int:
+        return self._memory_fact_ops.count_memory_retains_since(agent_name, since_iso)
+
+    def memory_fact_stats(self, agent_name=None) -> dict:
+        return self._memory_fact_ops.memory_fact_stats(agent_name)
+
+    def insert_memory_fact_events(self, rows) -> int:
+        return self._memory_fact_ops.insert_memory_fact_events(rows)
+
+    def list_memory_fact_events(self, agent_name: str, **kwargs):
+        return self._memory_fact_ops.list_memory_fact_events(agent_name, **kwargs)
+
+    def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
+        return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
+
     def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
         return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
 
@@ -4051,12 +4099,6 @@ class DatabaseManager:
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
 
-    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
-        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
-        return self._operator_queue_ops.update_pending_problem_report(
-            agent_name, request_id, question=question, context=context, now=now,
-        )
-
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
         return self._operator_queue_ops.get_item_for_agent_by_request_id(agent_name, request_id)
@@ -4118,6 +4160,11 @@ class DatabaseManager:
             item_id, disposed_by_email=disposed_by_email, reason=reason,
             disposition=disposition,
         )
+
+    def drop_operator_queue_addressee(self, item_id, email):
+        # trinity-enterprise#981: one person off a row's address; the row stays
+        # for its other addressees. A boolean: did anything change.
+        return self._operator_queue_ops.drop_addressee(item_id, email)
 
     def set_operator_queue_discussion_link(self, item_id, key, chat_id):
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
@@ -4185,10 +4232,12 @@ class DatabaseManager:
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
 
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None):
-        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+                                            max_pending_for_type=None, keep_text=False,
+                                            snooze_since=None, snoozed=None):
+        # Returns {"outcome": created|updated|snoozed|refused_at_budget, "row", "changed"}.
         return self._operator_queue_ops.create_platform_item(
             agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+            keep_text=keep_text, snooze_since=snooze_since, snoozed=snoozed,
         )
 
     def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):

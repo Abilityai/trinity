@@ -179,6 +179,9 @@ Must exclude secrets, instance-specific files, and large content.
 .env
 .env.*
 .mcp.json
+.gemini/settings.json
+.gemini/oauth_creds.json
+.gemini/installation_id
 credentials.json
 *.pem
 *.key
@@ -1088,9 +1091,11 @@ Credentials are managed as files in the agent workspace:
 
 ### Injecting Credentials
 
-- **Via UI**: Agent Detail → Credentials tab → Quick Inject (paste KEY=VALUE text)
-- **Via MCP**: `inject_credentials(agent_name, {".env": "KEY=value\n"})`
-- **Via API**: `POST /api/agents/{name}/credentials/inject`
+- **Via UI**: Agent Detail → **Settings › Credentials** → Quick Inject (paste KEY=VALUE text)
+- **Via API**: `POST /api/agents/{name}/credentials/inject`, signed in or with your own user-scoped key
+- **Via MCP**: `inject_credentials`, with your own user-scoped key (what `/trinity:onboard` does after a deploy)
+
+Injecting takes a person: a signed-in session or the owner's own user-scoped key. An agent's own key and the system key are refused.
 
 ### Export/Import for Git
 
@@ -1098,7 +1103,7 @@ To persist credentials across deployments:
 
 1. **Export**: Click "Export to Git" → encrypts `.env` and `.mcp.json` → writes `.credentials.enc`
 2. **Commit**: The `.credentials.enc` file is safe to commit (AES-256-GCM encrypted)
-3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there the owner imports it once with **Import from Git** on the Credentials tab (or the `import_credentials` MCP tool)
+3. **Import**: `startup.sh` does not decrypt the file. The platform imports a `.credentials.enc` once the agent is ready, except on installs with no encryption key; there an operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written with and restarts the backend, and the platform imports it at the agent's next start, or the owner, signed in, imports it at once with **Import from Git** under the agent's **Settings › Credentials**
 
 ### Your Agent Should
 
@@ -2372,6 +2377,7 @@ pip install --user opencv-python moviepy
 2. **Keep setup.sh idempotent**: Use `-y` flags, check if already installed
 3. **Minimize apt-get**: Each install adds startup time
 4. **Document dependencies**: List required packages in README.md
+5. **Do not `exec` the last step**: the platform protects the running `setup.sh` from the orphan sweep by its command line, and `exec` replaces that command line, so a long final install can be killed
 
 ---
 
