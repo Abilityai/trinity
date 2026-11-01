@@ -12,11 +12,10 @@
  *
  * Runner: node:test → `node --import tsx --test src/tools/*.test.ts`.
  */
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import { strict as assert } from "node:assert";
 import { createMemoryTools } from "./memory.js";
-import { ApiError } from "../client.js";
-import type { TrinityClient } from "../client.js";
+import { ApiError, TrinityClient } from "../client.js";
 
 function makeTools(
   write: (agent: string, body: Record<string, unknown>) => Promise<unknown>,
@@ -73,10 +72,90 @@ describe("write_user_memory (ent#419)", () => {
       "memory_tool_directive",
       "memory_link_in_instruction",
       "memory_prompt_marker",
+      "memory_turn_not_live",
+      "memory_turn_ambiguous",
     ]) {
       assert.ok(description.includes(code), `description does not name ${code}`);
     }
     assert.ok(description.includes("`│ `"), "description does not tell the agent to drop the margin");
+  });
+
+  // #4121: on a shared agent a live neighbour refuses the write, and the turn can
+  // end before a retry works, so the agent must say the note was lost.
+  it("tells the agent a refused write was not saved, and carries the turn refusal's code", async () => {
+    const { description } = makeTools(async () => ({})).writeUserMemory;
+    assert.match(description, /not saved/);
+    const detail = {
+      code: "memory_turn_ambiguous",
+      message: "Another turn for someone else is running on this agent right now. Nothing was saved.",
+    };
+    const tools = makeTools(async () => {
+      throw new ApiError(422, JSON.stringify({ detail }));
+    });
+    const out = JSON.parse(
+      await tools.writeUserMemory.execute({ execution_id: "exec-1", memory_text: "x", agent_name: "analyst" }, {})
+    );
+    assert.equal(out.success, false);
+    assert.match(out.error, /memory_turn_ambiguous/);
+    assert.match(out.error, /Nothing was saved/);
+  });
+
+  it("offers no user-key path: with no agent key it names the agent's own key, never agent_name", async () => {
+    let called = false;
+    const tools = makeTools(async () => {
+      called = true;
+      return {};
+    });
+    const out = JSON.parse(await tools.writeUserMemory.execute({ execution_id: "exec-1", memory_text: "x" }, {}));
+    assert.equal(out.success, false);
+    assert.equal(called, false);
+    assert.match(out.error, /agent's own MCP key/);
+    assert.doesNotMatch(out.error, /Pass agent_name/);
+  });
+});
+
+// #4121: both doors refuse a finished run, and a resumed session copies an id from
+// its own history, so a typed id alone would lose a live turn's note. With a key on
+// the request the real client is built per call, hence the prototype stub.
+describe("the turn id both memory doors send (#4121)", () => {
+  const session = (executionId?: string) => ({
+    session: { mcpApiKey: "trinity_mcp_test", scope: "agent", agentName: "analyst", executionId },
+  });
+  const keyed = () => createMemoryTools({ getBaseUrl: () => "http://backend:8000" } as unknown as TrinityClient, true);
+
+  afterEach(() => mock.restoreAll());
+
+  it("write_user_memory sends the platform's header, not a stale typed id", async () => {
+    const write = mock.method(TrinityClient.prototype, "writeUserMemory", async () => ({ success: true }) as never);
+    await keyed().writeUserMemory.execute({ execution_id: "stale-from-history", memory_text: "x" }, session("the-live-turn"));
+    assert.equal(write.mock.calls.length, 1);
+    assert.deepEqual(write.mock.calls[0].arguments, ["analyst", { execution_id: "the-live-turn", memory_text: "x" }]);
+  });
+
+  it("search_memory sends the platform's header, not a stale typed id", async () => {
+    const search = mock.method(TrinityClient.prototype, "searchMemory", async () => ({ hits: [] }) as never);
+    await keyed().searchMemory.execute({ execution_id: "stale-from-history", query: "q" }, session("the-live-turn"));
+    assert.deepEqual(search.mock.calls[0].arguments, ["analyst", { execution_id: "the-live-turn", query: "q" }]);
+  });
+
+  it("an interactive session's `manual` header is what goes out, so it cannot name someone's live turn", async () => {
+    const write = mock.method(TrinityClient.prototype, "writeUserMemory", async () => ({ success: true }) as never);
+    await keyed().writeUserMemory.execute({ execution_id: "someones-live-turn", memory_text: "x" }, session("manual"));
+    assert.deepEqual(write.mock.calls[0].arguments, ["analyst", { execution_id: "manual", memory_text: "x" }]);
+  });
+
+  it("an agent image without the header falls back to the typed id", async () => {
+    const write = mock.method(TrinityClient.prototype, "writeUserMemory", async () => ({ success: true }) as never);
+    await keyed().writeUserMemory.execute({ execution_id: "typed", memory_text: "x" }, session());
+    assert.deepEqual(write.mock.calls[0].arguments, ["analyst", { execution_id: "typed", memory_text: "x" }]);
+  });
+
+  it("a model typing `manual` with no header sends nothing and says so", async () => {
+    const write = mock.method(TrinityClient.prototype, "writeUserMemory", async () => ({ success: true }) as never);
+    const out = JSON.parse(await keyed().writeUserMemory.execute({ execution_id: "manual", memory_text: "x" }, session()));
+    assert.equal(out.success, false);
+    assert.match(out.error, /nothing was saved/);
+    assert.equal(write.mock.calls.length, 0);
   });
 });
 

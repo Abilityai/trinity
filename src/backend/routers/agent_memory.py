@@ -362,7 +362,7 @@ async def search_retrieval_memory_agent_endpoint(
                         "verified turn or on the agent's own headless runs."),
         })
     scope = await asyncio.to_thread(memory_service.scope_for, agent_name, subject.user_email)
-    if await asyncio.to_thread(_another_live_scope, agent_name, execution.id, scope):
+    if await asyncio.to_thread(memory_service.another_live_scope, agent_name, execution.id, scope):
         raise HTTPException(status_code=422, detail={
             "code": "memory_turn_ambiguous",
             "message": ("Another turn for someone else is running on this agent right now, so whose memory this "
@@ -379,24 +379,3 @@ async def search_retrieval_memory_agent_endpoint(
         })
     return MemorySearchResponse(agent_name=agent_name, scope="agent" if scope == memory_service.AGENT_SCOPE else "person",
                                 hits=[_hit(r) for r in records])
-
-
-def _another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
-    """Whether a live turn on ``agent_name`` other than ``execution_id`` resolves
-    to a scope other than ``scope``. Read from the ledger (only ``running`` rows,
-    never a request); a ledger that cannot be read counts as ambiguous."""
-    try:
-        for row in db.get_running_turn_attribution(agent_name):
-            if row["id"] == execution_id:
-                continue
-            other = db.get_execution(row["id"])
-            if other is None:
-                continue
-            other_subject = memory_subject.resolve(other)
-            other_scope = memory_service.scope_for(agent_name, other_subject.user_email) if other_subject.kind != memory_subject.SKIP else None
-            if other_scope != scope:
-                return True
-        return False
-    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
-        logger.warning("[memory] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
-        return True

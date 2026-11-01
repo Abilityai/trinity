@@ -213,6 +213,31 @@ def scope_for(agent_name: str, user_email: Optional[str]) -> str:
     return AGENT_SCOPE if email == owner_email(agent_name) else email
 
 
+def another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution_id`` resolves
+    to a scope other than ``scope``. Read from the ledger (only ``running`` rows,
+    never a request); a ledger that cannot be read counts as ambiguous.
+
+    The ent#926 rule behind both agent doors that take an execution id, search
+    and the MEM-001 write: nothing proves which turn a request comes from, so
+    while two live turns serve different scopes neither door can tell them apart."""
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution_id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is None:
+                continue
+            other_subject = memory_subject.resolve(other)
+            other_scope = scope_for(agent_name, other_subject.user_email) if other_subject.kind != memory_subject.SKIP else None
+            if other_scope != scope:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[memory] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True
+
+
 def status() -> Dict[str, Any]:
     """Honest status for the Settings card: enabled, available (and why not),
     model, backend, counts. Never builds the model here — a first enable kicks
