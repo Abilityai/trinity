@@ -344,3 +344,48 @@ class TestGroupRoundTrips:
         assert system_service.DECLARED_ONLY_EXPORT_HEADER in text.splitlines()
         assert all("deploy" not in a for a in doc["agents"].values())
         _assert_round_trips(_dry_run(world, monkeypatch, text))
+
+
+class TestTemplateAlone:
+    def test_a_member_whose_only_field_is_its_template_round_trips(self, world, monkeypatch):
+        """The export writes the `trinity.template` label verbatim and apply
+        compares that same label: nothing to report, nothing to write."""
+        W.install_seat_reader(monkeypatch)
+        template = "github:Org/scout"
+        world.seed_agent(LEAD, template=template)
+        text = system_service.export_manifest(
+            SYSTEM, [{"name": LEAD, "status": "running", "template": template}],
+            viewer=W.owner_viewer())
+        doc = yaml.safe_load(text)
+        assert doc["agents"]["lead"]["template"] == template
+        res = _dry_run(world, monkeypatch, text)
+        _assert_round_trips(res)
+        assert "template" not in [c.field for c in _member(res).changes]
+
+        # The comparison is live: a different template is reported, never written.
+        edited = text.replace(f"template: {template}", "template: local:plain")
+        codes = _codes(_member(_dry_run(world, monkeypatch, edited)))
+        assert ("template", "report", "template_differs") in codes
+
+
+class TestPersonSeatsRoundTrip:
+    def test_declared_person_seats_round_trip_as_unobserved_through_the_header(
+            self, world, monkeypatch):
+        """The export names the member under `person seats are not exported`;
+        a manifest that declares them reads back as `seat_unobserved` — a
+        report, never drift and never a write."""
+        W.install_seat_reader(monkeypatch)
+        world.seed_agent(LEAD)
+        text, _ = _export([LEAD])
+        header = next(l for l in text.splitlines() if "person seats" in l)
+        assert header.startswith("# unobserved: person seats are not exported")
+        assert header.endswith(f": {LEAD}")
+
+        declared = text.replace(
+            "  lead:\n",
+            "  lead:\n    person_seats:\n    - role: fleet-owner\n      kind: approver\n", 1)
+        assert declared != text and declared.splitlines()[:3] == text.splitlines()[:3]
+        res = _dry_run(world, monkeypatch, declared)
+        _assert_round_trips(res)
+        assert _codes(_member(res)) == [("person_seats", "report", "seat_unobserved")]
+        assert _member(res).changes[0].desired == [{"role": "fleet-owner", "kind": "approver"}]
