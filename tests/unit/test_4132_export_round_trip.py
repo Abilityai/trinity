@@ -171,3 +171,84 @@ class TestUnobservedRoundTrip:
         _assert_round_trips(res)
         assert _codes(_member(res)) == [("seat", "report", "seat_unobserved")]
         assert res.summary["roles"]["unobserved"] == 1
+
+
+# ===========================================================================
+# CP2 — a value the member already holds is in sync: it is never written, so
+# no library, catalog or validator verdict can block it.
+# ===========================================================================
+
+LIBRARY = {"deploy", "notes"}
+
+
+@pytest.fixture
+def lib(world, monkeypatch):
+    """A skills library holding `LIBRARY` and no sets."""
+    from services import skill_set_service
+    from services.skill_service import skill_service
+    monkeypatch.setattr(skill_service, "get_skill",
+                        lambda n: {"name": n} if n in LIBRARY else None)
+    monkeypatch.setattr(skill_set_service, "library_sets", lambda **_k: {})
+    return world
+
+
+class TestHeldValues:
+    def test_a_held_skill_that_left_the_library_round_trips(self, lib, monkeypatch):
+        from database import db
+        lib.seed_agent(LEAD)
+        db.assign_skill(LEAD, "research", W.ALICE)  # held; no longer in LIBRARY
+        text, doc = _export([LEAD])
+        assert doc["agents"]["lead"]["skills"] == ["research"]
+        _assert_round_trips(_dry_run(lib, monkeypatch, text))
+
+    def test_a_skill_not_held_still_gets_the_library_verdict(self, lib, monkeypatch):
+        lib.seed_agent(LEAD)
+        text = f"name: {SYSTEM}\nagents:\n  lead:\n    template: local:plain\n    skills: [research]\n"
+        res = _dry_run(lib, monkeypatch, text)
+        assert [(b.code, b.member) for b in res.blockers] == [("skill_unknown", LEAD)]
+
+    def test_a_held_set_that_left_the_catalog_round_trips(self, lib, monkeypatch):
+        from database import db
+        lib.seed_agent(LEAD)
+        db.assign_skill_set(LEAD, "ops-core", "src-1", W.ALICE, None, {"ops-core": ["notes"]})
+        text, doc = _export([LEAD])
+        assert doc["agents"]["lead"]["skill_sets"] == ["ops-core"]
+        _assert_round_trips(_dry_run(lib, monkeypatch, text))
+
+    def test_a_held_grant_whose_capability_was_retired_round_trips(self, world, monkeypatch):
+        from database import db
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from services.system_apply import grants as apply_grants
+        world.seed_agent(LEAD)
+        assert db.grant_agent_capability(LEAD, CAPABILITY_SKILLS_MANAGE, W.ADMIN)
+        monkeypatch.setattr(apply_grants, "CAPABILITIES",
+                            apply_grants.CAPABILITIES - {CAPABILITY_SKILLS_MANAGE})
+        admin = world.user(W.ADMIN)
+        text, doc = _export([LEAD], viewer=admin)
+        assert doc["agents"]["lead"]["grants"] == [CAPABILITY_SKILLS_MANAGE]
+        _assert_round_trips(_dry_run(world, monkeypatch, text, user=admin))
+
+    @pytest.mark.parametrize("approver", ["approver", "role:lead-role"])
+    def test_a_stored_gate_the_validator_cannot_resolve_round_trips(self, world, monkeypatch,
+                                                                    approver):
+        """No assignment module: `approver` / `role:` no longer validate, but
+        the row stands and the export states it."""
+        from database import db
+        world.seed_agent(LEAD)
+        db.write_skill_gate(LEAD, "deploy", changes={"approver": approver, "deadline_hours": 4},
+                            origin="set", set_by=W.ALICE, set_by_agent=None)
+        text, doc = _export([LEAD])
+        assert doc["agents"]["lead"]["gates"] == {"deploy": {"approver": approver,
+                                                             "deadline_hours": 4}}
+        _assert_round_trips(_dry_run(world, monkeypatch, text))
+
+    def test_a_gate_restating_a_library_default_is_still_a_write(self, world, monkeypatch):
+        """T3: only an explicit stored row is in sync."""
+        from database import db
+        world.seed_agent(LEAD)
+        db.write_skill_gate(LEAD, "deploy", changes={"approver": "primary"},
+                            origin="library_default", set_by="library", set_by_agent=None)
+        text = (f"name: {SYSTEM}\nagents:\n  lead:\n    template: local:plain\n"
+                f"    gates:\n      deploy: {{approver: primary}}\n")
+        res = _dry_run(world, monkeypatch, text)
+        assert [c.code for c in _member(res).changes] == ["gate_differs"]

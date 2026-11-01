@@ -101,9 +101,14 @@ def plan(mp, *, held_skills: Optional[List[str]], held_sets: Optional[List[str]]
         return
     names, set_names = declared(cfg)
     name, short = mp.name, mp.short_name
+    have = set(held_skills or [])
+    have_sets = set(held_sets or [])
+    # #4132: a name the member already holds is never written, so no library
+    # verdict applies to it — a held skill that has since left the library is
+    # in sync, never a blocker.
     ok_names: List[str] = []
     for n in names:
-        verdict = skill_verdicts.get(n)
+        verdict = None if n in have else skill_verdicts.get(n)
         if verdict is not None:
             blockers.append(apply_blocker(verdict[0], name, verdict[1],
                                           "Fix the skill name in the manifest, or add the "
@@ -112,7 +117,7 @@ def plan(mp, *, held_skills: Optional[List[str]], held_sets: Optional[List[str]]
             ok_names.append(n)
     ok_sets: List[str] = []
     for n in set_names:
-        verdict = set_verdicts.get(n)
+        verdict = None if n in have_sets else set_verdicts.get(n)
         if verdict is not None:
             blockers.append(apply_blocker(verdict[0], name, verdict[1],
                                           "Fix the set name in the manifest, or fix the set "
@@ -120,7 +125,6 @@ def plan(mp, *, held_skills: Optional[List[str]], held_sets: Optional[List[str]]
         else:
             ok_sets.append(n)
 
-    have = set(held_skills or [])
     missing = [n for n in ok_names if n not in have]
     if missing:
         mp.changes.append(apply_change(SKILLS_STEP, "write", "skill_missing",
@@ -132,7 +136,6 @@ def plan(mp, *, held_skills: Optional[List[str]], held_sets: Optional[List[str]]
             SKILLS_STEP, "report", "skill_extra", current=extra,
             note="apply never unassigns a skill; unassign it by hand if it is unwanted"))
 
-    have_sets = set(held_sets or [])
     for n in (s for s in ok_sets if s not in have_sets):
         mp.changes.append(apply_change(SKILL_SETS_STEP, "write", "skill_set_missing",
                                        current=sorted(have_sets), desired=[n]))
