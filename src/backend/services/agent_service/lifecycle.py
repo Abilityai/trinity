@@ -666,11 +666,14 @@ async def start_agent_internal(agent_name: str) -> dict:
     # trinity-enterprise#752: the skill-gate marker tells the in-container hook
     # to refuse skills while the platform cannot be reached — only on an agent
     # that has gates. It lives on the writable layer, so a fresh container has
-    # none. Fire-and-forget like the spawns above, and for gated agents only:
-    # the common agent with no gates costs no exec.
+    # none, and a stop and start keeps it: clearing the last gate on a stopped
+    # agent cannot exec, so the start has to remove it. The Bash guardrail reads
+    # it too (trinity-enterprise#1002), so a leftover marker would refuse nested
+    # CLIs on an agent with no gates. Every start syncs, at the cost of one exec.
+    # Fire-and-forget like the spawns above.
     try:
         from services import skill_gate_service
-        skill_gate_service.spawn_gate_marker_sync(agent_name)
+        skill_gate_service.spawn_gate_marker_sync(agent_name, only_if_gated=False)
     except Exception as e:
         logger.warning(
             "[ent#752] failed to spawn the skill-gate marker sync for %s on "

@@ -3,7 +3,11 @@
 
 Denies commands matching baseline regex patterns plus any per-agent literal
 substrings configured via extra_bash_deny. Fail-closed.
+
+An agent with gated skills also gets the gated_bash_deny rows
+(trinity-enterprise#1002). The root-owned marker says which agents those are.
 """
+import os
 import sys
 
 sys.path.insert(0, "/opt/trinity/hooks")
@@ -16,6 +20,9 @@ from lib import (  # noqa: E402
     run_hook,
 )
 
+# Must equal `_skill_gate.MARKER` (unit-tested).
+SKILL_GATES_MARKER = "/opt/trinity/skill-gates-active"
+
 
 def main() -> None:
     data = read_stdin_json()
@@ -25,7 +32,10 @@ def main() -> None:
         allow()
 
     config = load_config()
-    baseline = compile_patterns(config.get("bash_deny", []))
+    rows = list(config.get("bash_deny", []))
+    if os.path.lexists(SKILL_GATES_MARKER):
+        rows += config.get("gated_bash_deny", [])
+    baseline = compile_patterns(rows)
     extras = config.get("extra_bash_deny", []) or []
 
     for pattern, reason in baseline:

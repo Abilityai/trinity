@@ -34,6 +34,8 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 
 When a command is blocked, the agent sees a clear denial message with the reason. The event is logged to `/logs/guardrails.jsonl`.
 
+On an agent with [gated skills](../guides/keeping-agents-in-bounds.md), the deny-list also refuses starting a coding-agent CLI: `claude`, `codex` or `gemini` as a command, for example `claude -p "hello"` or `cd repo && codex exec "fix it"`. Naming one is fine (`ls .claude`, `grep claude notes.md`, `which codex`), and so is a command that starts no session: `--version`, `--help`, `mcp`, and `plugin` on `claude` and `codex`. The rule applies to the whole agent while it has at least one gate, from the moment the gate is saved, and per-agent overrides cannot remove it. An agent with no gates is not affected. Any skill on a gated agent that runs `claude -p` for a sub-step stops working, not only the gated one; rewrite that step as described in the [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is).
+
 ### 2. Credential File Protection
 
 The `PreToolUse` hook on `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` blocks modifications to sensitive paths:
@@ -172,8 +174,8 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## Limitations
 
 - **Baseline cannot be relaxed** -- Per-agent overrides only add restrictions, never remove them.
-- **Restart required** -- Guardrail changes require stopping and starting the agent; the bar at the top of Settings lists the pending save and restarts the agent for you.
-- **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection.
+- **Restart required** -- Guardrail changes require stopping and starting the agent; the bar at the top of Settings lists the pending save and restarts the agent for you. The rule for gated skills is the exception: it follows the agent's gates with no restart.
+- **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection. The patterns do not parse quotes, so text inside a quoted string or heredoc that reads like a command can be refused too.
 - **Claude Code only** -- The hooks and the turn limit apply to Claude Code. Codex honours read-only mode through its sandbox; Gemini CLI turns are not covered.
 - **Partial UI coverage** -- Settings › Guardrails manages turn limits and Settings › General the execution timeout; deny lists and disallowed tools are configured via the API.
 
