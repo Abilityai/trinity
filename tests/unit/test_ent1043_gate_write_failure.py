@@ -281,3 +281,88 @@ class TestHeldSkillRunsUngated:
         assert failure.reason.split(";")[0] == "agent_not_found: Agent not found"
         assert len([f for f in res.failed if f.name == LEAD]) == 1
 
+
+
+class TestPreviousGateStands:
+    """CP2: a stored gate with another approver is still in force after the
+    rewrite fails — reported as `previous_gate_stands`, never as ungated."""
+
+    @pytest.mark.parametrize("fail", FAILURES)
+    def test_a_failed_rewrite_names_the_gate_still_in_force(self, world, monkeypatch, fail):
+        world.seed_agent(LEAD)
+        db.assign_skill(LEAD, "research", W.ALICE)
+        _set_gate(LEAD, "research", approver="primary", deadline_hours=4)
+        code = fail(monkeypatch)
+        res = _apply(world, monkeypatch, _manifest({"research": {"deadline_hours": 12}}))
+        assert "research" in db.get_agent_skill_names(LEAD)
+        gate = skill_gate_service.read_gates(LEAD)["research"]
+        assert (gate.approver, gate.deadline_hours) == ("primary", 4)
+        member = _member(res)
+        assert res.status == "partial" and member.applied is False
+        [failure] = _gate_failures(res)
+        assert failure.reason.startswith(code)
+        assert "still runs under its previous gate (approver primary)" in failure.reason
+        [report] = _reports(member, PREVIOUS)
+        assert report.desired == ["research"]
+        assert report.current == {"skill": "research", "approver": "primary", "deadline_hours": 4}
+        assert _reports(member, UNGATED) == []
+        assert _ungated_lines(res) == []
+        assert res.summary["gates"]["write"] == 0
+
+
+class TestHeldThroughASet:
+    """CP2: a skill the member holds only through a set (no individual row)
+    is held all the same — the admission read does not care how it arrived."""
+
+    def test_a_set_held_skill_is_reported_ungated(self, world, monkeypatch):
+        world.seed_agent(LEAD)
+        asyncio.run(skill_assignment_service.assign_set_and_deliver(
+            LEAD, "ops-core", world.user(W.ALICE), acting_agent=None))
+        assert "research" in db.get_agent_skill_names(LEAD)
+        _refuse_after_validation(monkeypatch)
+        res = _apply(world, monkeypatch, _manifest({"research": {}}))
+        _assert_still_assigned_and_ungated()
+        _assert_result_says_ungated(res, "agent_not_found")
+
+
+class TestNothingElseMoves:
+    """CP2: the #4125 hold-back is untouched, a landed gate on a held skill
+    reports nothing new, and the dry run predicts no failure."""
+
+    def test_a_new_assignment_in_the_same_run_is_still_held_back(self, world, monkeypatch):
+        """`research` is held (reported ungated); `deploy` is new (held back,
+        #4125). One failure path, two different answers, both named."""
+        world.seed_agent(LEAD)
+        db.assign_skill(LEAD, "research", W.ALICE)
+        _refuse_after_validation(monkeypatch)
+        res = _apply(world, monkeypatch,
+                     _manifest({"research": {}, "deploy": {}}, skills=["research", "deploy"]))
+        assert db.get_agent_skill_names(LEAD) == ["research"]
+        assert any(f.step == "skills" and f.reason.startswith("gate_not_written")
+                   for f in res.failed)
+        member = _member(res)
+        assert [c.desired for c in _reports(member, UNGATED)] == [["research"]]
+        assert _ungated_lines(res, "deploy") == []
+        assert len(_ungated_lines(res, "research")) == 1
+
+    def test_a_landed_gate_on_a_held_skill_reports_nothing_new(self, world, monkeypatch):
+        world.seed_agent(LEAD)
+        db.assign_skill(LEAD, "research", W.ALICE)
+        res = _apply(world, monkeypatch, _manifest({"research": {}}))
+        assert res.status == "applied", res.failed
+        assert "research" in skill_gate_service.read_gates(LEAD)
+        member = _member(res)
+        assert _reports(member, UNGATED) == [] and _reports(member, PREVIOUS) == []
+        assert _ungated_lines(res) == []
+        assert res.summary["gates"]["write"] == 1
+
+    def test_the_dry_run_predicts_no_failure(self, world, monkeypatch):
+        world.seed_agent(LEAD)
+        db.assign_skill(LEAD, "research", W.ALICE)
+        _refuse_after_validation(monkeypatch)
+        res = _apply(world, monkeypatch, _manifest({"research": {}}), dry_run=True)
+        assert res.dry_run is True and res.failed == []
+        member = _member(res)
+        assert [c.code for c in member.changes if c.field == "gates"] == ["gate_missing"]
+        assert _ungated_lines(res) == []
+        assert "research" not in skill_gate_service.read_gates(LEAD)
