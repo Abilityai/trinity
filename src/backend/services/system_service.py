@@ -2787,6 +2787,9 @@ class ApplyMemberState:
     # #4131: the declared-only name is an agent on the caller's roster that
     # carries the system tag, so restart and teardown reach it.
     tagged_by_system: bool = False
+    # #4131: an untagged roster agent holding the name is a member by the
+    # `<system>-` prefix alone (prefixed mode), so restart reaches it by name.
+    prefixed_by_system: bool = False
 
 
 @dataclass
@@ -3010,6 +3013,9 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             state.tagged_by_system = bool(  # #4131
                 roster_ok and snapshot.membership.tags_readable
                 and snapshot.membership.evidence.get(name) in ("tag", "both"))
+            state.prefixed_by_system = bool(
+                roster_ok and snapshot.membership.tags_readable
+                and snapshot.membership.evidence.get(name) == "prefix")
             try:
                 state.template_in_catalog = _template_in_catalog(manifest.agents[short].template)
             except Exception as e:  # noqa: BLE001
@@ -3849,13 +3855,18 @@ def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers
 _DECLARED_ONLY_LIVE_NOTE = (
     "a live agent holds this name; apply never deletes it and never reconciles it. Remove "
     "`deploy: false` to manage it as a member, or delete it by hand if it is unwanted")
-# #4131: `deploy: false` governs apply only. Membership of restart and teardown
-# is the system tag, so a declared-only name that carries it is reached by both.
+# #4131: `deploy: false` governs apply only. Restart and teardown reach a
+# declared-only name that is a member by the system tag (or, in prefixed mode,
+# by the `<system>-` prefix of an untagged name).
 _DECLARED_ONLY_TAGGED_NOTE = (
     "this agent carries the system tag '{system}', so restarting the system restarts it "
     "and a teardown of the system removes it; `deploy: false` governs apply only. Remove "
     "the tag by hand (DELETE /api/agents/{name}/tags/{system}, or the untag_agent tool) "
     "if it should stay out")
+_DECLARED_ONLY_PREFIXED_NOTE = (
+    "this agent is untagged but its name starts with '{system}-', so restarting the system "
+    "restarts it and a teardown of the system removes it; `deploy: false` governs apply "
+    "only. Rename the agent if it should stay out")
 _TEMPLATE_NOT_IN_CATALOG_NOTE = (
     "apply never adds a template to the catalog; an admin adds it in Settings")
 
@@ -3882,6 +3893,10 @@ def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState,
         mp.changes.append(_apply_change(
             "members", "report", "declared_only_member_tagged", current=mp.name,
             note=_DECLARED_ONLY_TAGGED_NOTE.format(system=system, name=mp.name)))
+    elif state.prefixed_by_system:  # #4131
+        mp.changes.append(_apply_change(
+            "members", "report", "declared_only_member_prefixed", current=mp.name,
+            note=_DECLARED_ONLY_PREFIXED_NOTE.format(system=system)))
 
 
 def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -4106,7 +4121,10 @@ def _adoption_line(system: str, adopted: List["SystemApplyAdoption"], *, done: b
         # #4131: a default export infers `prefixed` once a member carries the
         # prefix and would omit the bare members; name the explicit export.
         + (f" Export this system with ?naming=bare (get_system_manifest naming=\"bare\"), "
-           f"since an adopted name starts with '{system}-'."
+           f"since an adopted name starts with '{system}-'. While a tagged member's "
+           f"name starts with '{system}-', restart, teardown, the system view and export "
+           f"read the system as prefixed, so an untagged '{system}-*' agent is reached "
+           f"by name too."
            if any(a.name.startswith(f"{system}-") for a in adopted) else ""))
 
 
