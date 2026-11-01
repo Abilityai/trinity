@@ -26,7 +26,7 @@ answers.
 | DB | `src/backend/db/agent_settings/` + `db/schema.py` / `db/tables.py` | `a2a_exposed` getter/setter on the `AgentOperations` mixin (Invariant #2) |
 | MCP tools | `src/mcp-server/src/tools/a2a.ts` (+ `a2a.test.ts`) | ent#160 control surface (Invariant #13) |
 | UI | `components/A2aPanel.vue` | Sharing tab: exposure toggle, card URL, advertised skills, inbound allow-list, outbound endpoints |
-| Front door | `src/frontend/nginx.conf` | `location /a2a/` → backend, `proxy_buffering off` for SSE, `X-Real-IP` set so the rate limiter sees the true client |
+| Front door | `src/frontend/nginx.conf` + `nginx-server.conf` | `location /a2a/` → backend, `proxy_buffering off` for SSE; appends the caller to `X-Forwarded-For`, which the backend's client-address middleware reads from this trusted hop only (ent#873) |
 
 ## Endpoints
 
@@ -111,9 +111,13 @@ from one URL.
 `A2A_CARD_RATE_LIMIT = 60` per `A2A_CARD_RATE_WINDOW = 60`s per IP, via the
 shared `services/rate_limiter` (Redis sliding window, fail-open), enforced
 **before** any of that work — limiting after the expensive part would not fix
-the flood. Client IP resolves through `routers.public._get_client_ip`, which
-only trusts `X-Real-IP`/`X-Forwarded-For` from a trusted proxy, so headers can't
-spoof past it. Mirrors `public.py` (`PUBLIC_LINK_LOOKUP_RATE_LIMIT`), `files.py`
+the flood. The key is the canonical client address `routers.public._get_client_ip`
+returns — since trinity-enterprise#873 a plain reader of what
+`utils/client_ip.ClientAddressMiddleware` resolved for every request, so
+headers from anything but a trusted proxy (`architecture/security.md` §1a)
+cannot choose it. The address is attribution and rate-limit identity only; it
+never authenticates an inbound caller (every inbound call needs a credential or
+payment, whatever its source). Mirrors `public.py` (`PUBLIC_LINK_LOOKUP_RATE_LIMIT`), `files.py`
 (`_DOWNLOAD_RATE_LIMIT`), and `webhooks.py` (#1424).
 
 The JSON-RPC body is capped at `_MAX_RPC_BODY_BYTES` (1 MB) **before** parsing —

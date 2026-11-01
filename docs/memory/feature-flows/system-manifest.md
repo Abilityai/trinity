@@ -137,6 +137,10 @@ permissions:
 
 ### API Endpoints
 - **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML
+- **Apply** (trinity-enterprise#695): `POST /api/systems/apply` - Reconcile a live system to
+  its manifest (create the absent, update the declared fields of the present, report the
+  undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
+  persons only. See "Phase 4: Apply" below
 - **Management**: `GET /api/systems` - List all deployed systems
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
@@ -159,6 +163,11 @@ permissions:
 
 ### MCP Tools
 - `deploy_system` - Deploy from YAML manifest
+- `apply_system` (ent#695) - Reconcile a live instance to a manifest: absent members created,
+  existing ones updated in place, undeclared tagged agents reported as drift; never suffixes.
+  A new tool, not a `mode` on `deploy_system`, so an older build fails closed. `dry_run`
+  defaults to **`true`**; 404/405 (no apply route on this build) come back as `not_available`
+  with a warning not to fall back to `deploy_system`
 - `list_systems` - List deployed systems
 - `restart_system` - Restart all system agents
 - `get_system_manifest` - Export system configuration as YAML
@@ -469,6 +478,8 @@ resolve_agent_names("my-system", {"worker": ...})
 #          ["Agent 'my-system-worker' already exists, will create 'my-system-worker_2'"])
 ```
 
+**Naming (trinity-enterprise#1030)**: `resolve_agent_names(system_name, agents, naming=)` names each member through `_member_name` — the one rule (`member_name(manifest, short)` / `declared_names(manifest)` are the manifest-level entry points that apply's snapshot and plan and the bundled catalog call). `naming: bare` makes the key the full name (`scout-lead`, not `my-system-scout-lead`); the `_N` suffix on a taken name is unchanged in both modes.
+
 #### configure_permissions() (Lines 215-293)
 ```python
 async def configure_permissions(
@@ -613,6 +624,34 @@ async def start_all_agents(agent_names: List[str]) -> Dict[str, str]:
     """
 ```
 
+#### Apply mode (trinity-enterprise#695): `apply_manifest()` and its four parts
+
+`deploy_manifest` is CREATE mode and is untouched. Apply is the sibling verb, built from four
+functions in this file, so the dry run and the real run share one plan (P-D):
+
+| Function | Kind | What it does |
+|---|---|---|
+| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → create |
+| `resolve_apply_plan(manifest, snapshot)` | pure | Per-member `verdict` + `changes[]` + the ordered write-set (`ApplyOp`s); drift (tagged, undeclared; a `<declared>_<N>` is noted as a suffixed copy); every blocker; prompt and view verdicts. Field rules below |
+| `resolve_declared_schedule_actions(declared, live, *, match=schedule_match_policy)` | pure | `create` / `update` (declared fields only) / `in_sync` / `enabled_differs` (report) / `undeclared` (report) / `unlinked` (report) / `ambiguous` + `declared_twice` (blockers). `schedule_match_policy` is the ent#694 / #1198 seam: exact name, unique on both sides, by default |
+| `execute_apply_plan(plan, …, lease)` | writes only | Creates absent members (the `AgentConfig` create builds) and tags each with the system tag at once; filters every other write to members that exist; then tags, edges, folders, resource overrides, schedules, prompt, view, phase by phase; then starts the created members one at a time. Every write's outcome comes from the writer's return value; nothing raises after the first write |
+
+Field rules (existing members): tags `add_agent_tag` (never `set_agent_tags`); edges from
+`resolve_permission_edges` over the full map, self-edges dropped, missing ones `add_agent_permission`
+(never `set_agent_permissions`), extras between declared members reported `permission_extra`;
+folders only the declared keys; resources a declared key that differs from the effective value
+(override → label → default) written with `set_resource_limits`, the omitted key's stored value
+kept; template reported `template_differs`; schedules updated in place through `update_schedule`,
+never `enabled`, created as the agent owner, an update the caller cannot make refused up front
+(`schedule_not_updatable_by_caller`); prompt written only by an admin; view found among the
+caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
+creates get create's semantics; their template-dependent fields (a same-named template schedule,
+a template resource that overrides a declared one) are resolved after the create, against a fresh
+read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
+and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
+
+**Bare adoption (trinity-enterprise#1030)**: `read_apply_snapshot` marks a bare, managed, tag-less member `ApplyMemberState.untagged` instead of gating it `member_claimed_by_another_system`; `_plan_existing_member` turns that into a `member_adopted` change plus a `tag` op for the system tag; `resolve_apply_plan` collects `ApplyPlan.adopted` and the restart/teardown warning; `_apply_report` copies it to `SystemApplyResponse.adopted`.
+
 #### export_manifest() (Lines 414-551)
 ```python
 def export_manifest(system_name: str, agents: List[Dict]) -> str:
@@ -655,6 +694,20 @@ marker, which `agent_git_config` does not have yet.
 
 **Bug Fix (2025-12-18)**:
 - Line 542: Changed `db.get_setting()` → `db.get_setting_value()` to avoid Python object serialization in YAML
+
+**Naming on export (trinity-enterprise#1030)**: `export_manifest(system_name, agents, *, naming=None)` — `naming` overrides (the route's `?naming=`); None infers `bare` when `_member_short_name` finds no prefixed member, else `prefixed`. `_member_short_name(full, system, naming)` returns the full name under `bare`, so the agents loop and both permission loops key members through the one helper. Omitted members put a leading `# unobserved:` comment line on the YAML.
+
+**Skills (trinity-enterprise#1030)**: `services/system_apply/skills.py` owns `skills:` / `skill_sets:` — `read_library` (one verdict per declared name, into `ApplySnapshot.skill_verdicts` / `skill_set_verdicts`), `read_member` (individual rows + `skill_set_service.held_sets`, into `ApplyMemberState.skills` / `skill_sets`), `plan` (called from `resolve_apply_plan` via `_plan_skills` for created and managed members), `run` (`_run_op` kinds `skill_assign` / `skill_set_assign`, last in `_APPLY_OP_PHASES`). Writes call `skill_assignment_service.assign_and_deliver` / `assign_set_and_deliver`, the sequence the skills router's assign route now also calls. Deploy: `assign_manifest_skills` (step 10b). Export: per member after tags. Assigning a set goes through `skill_set_service.assign`, which may drop set-derived rows of another held set whose source drifted — the same as the set route; individual rows are never touched.
+
+**Grants (trinity-enterprise#1030 CP2)**: `services/system_apply/grants.py` owns `grants:` — `read_member` (`db.list_agent_capabilities`, into `ApplyMemberState.grants`), `plan` (via `_plan_grants`; a write only when `ApplySnapshot.grant_writer`, i.e. `dependencies.is_interactive_admin(current_user)`, else the `grant_requires_interactive_admin` report), `summarize` (`ApplyPlan.summary["grants"]` → `SystemApplyResponse.summary` plus the one warning line), `run` (`_run_op` kind `grant`, last in `_APPLY_OP_PHASES`; `capability_grant_service.set_grant(name, cap, True, actor)` then the shared `audit_grant_change`), `deploy` / `deploy_hold_back_warning` (deploy step 10c and the dry-run preview). The gate itself is `dependencies.assert_interactive_admin`, which the two capability-grant routes (`routers/agent_config.py`, `routers/skills.py`) also call after `Depends(require_admin)`. Export: per member after skills.
+
+**Gates (trinity-enterprise#1030 CP3)**: `services/system_apply/gates.py` owns `gates:` — `read_member` (`db.list_agent_skill_gates`, every row, into `ApplyMemberState.gates`), `plan` (via `_plan_gates` for created and managed members; each declared gate through `skill_gate_map_service.validate_gate_changes`, the public validator `set_gate` itself calls, so a refusal is the same blocker code the write would give; `gate_missing` / `gate_differs` writes with ent#881's `approver_reason` as the `note`; `gate_undeclared` report, never a clear), `summarize` (`ApplyPlan.summary["gates"]`), `run` (`_run_op` kind `gate_set`, step `gates`, BEFORE `skill_assign` in `_APPLY_OP_PHASES`; `skill_gate_map_service.set_gate(..., ctx=gate_context(user, trigger="apply"))`; a reachability warning from the write becomes a per-member report), `export_member` (`set` rows only), `deploy` / `deploy_hold_back_warning` (deploy step 10a, before the skills step 10b, and the dry-run preview; `dependencies.capability_refusal(skills.manage)` is the T8 gate). Export: per member after grants. A `role:` approver on a member created in the same run is refused (`unknown_role` / `approver_unavailable`): the member has no roster yet, and person seats are report-only, so nothing in the run can seed one.
+
+**Seats (trinity-enterprise#1030 CP4)**: `services/system_apply/seats.py` owns `seat:` and `person_seats:` — `parse_seat` / `parse_person_seats` (called from `parse_manifest`; shapes and email-shaped values refused by name, never echoed), `read_member` (into `ApplyMemberState.seat` / `.person_seats`; a provider error raises, so the snapshot blocks the member retryably), `plan` (via `_plan_seats(mp, state, snapshot)`; `seat_missing` / `seat_differs` writes only when `assignment_provider.seat_writer_installed()` AND the caller passes the grant gate (`seat_writer=snapshot.grant_writer`, i.e. `dependencies.is_interactive_admin`) — a writer but any other caller is the report `seat_requires_interactive_admin` — else `seat_unobserved`; person seats `seat_filled` / `seat_vacant` / `seat_unobserved` reports only — `seat_unobserved` with a "does not exist yet" note on a member apply will create, since nothing was read), `summarize` (`summary.roles.held_back` and its one warning line, appended in `resolve_apply_plan` beside the grants one), `run` (`_run_op` kind `seat_set`, last in `_APPLY_OP_PHASES`; `assignment_provider.write_seat`), `export_member` (`seat:` from `resolve_seat` when it says `holds`; with no provider, or one without `seat_for`, it raises `SeatUnobserved` and the export names `seat of <member>` in its `# unobserved:` line, as a failed read does), `deploy` / `deploy_hold_back_warning` (deploy step 10d and the dry-run preview; behind the grant phase's gate, `dependencies.is_interactive_admin` — any other caller, an agent key included, is held back with `seats_require_interactive_admin` and nothing is written). The core judges the principal before `write_seat`; the `created_by` it passes is the username, attribution only, and a provider never re-judges from it. The provider hooks are `set_seat` and `person_seat_status` on `services/assignment_provider.py`, read through `getattr` (`seat_writer_installed`, `person_seat_reader_installed`, `write_seat`, `resolve_person_seat`).
+
+**Declared-only members (trinity-enterprise#1030 CP5)**: `SystemAgentConfig.deploy` (`parse_manifest` refuses a non-boolean). `validate_manifest` refuses explicit edges and `folders:` naming one, warns for presets, and adds one warning per declared-only member naming every other key it carries (`_DECLARED_ONLY_IGNORED_KEYS`) — parsed, never applied or reported. `read_apply_snapshot` classifies a `deploy: false` member before any gate: `ApplyMemberState.declared_only`, `.live` (the same global `taken` predicate) and `.template_in_catalog` (`_template_in_catalog`), then nothing else. `resolve_apply_plan` → `_plan_declared_only` (verdict `declared_only`, reports only, no op) and `_desired_edges` over deployed members only; the executor's `exists` set leaves declared-only members out. `deploy_manifest` resolves names over deployed members only and adds one `warnings` line listing the skipped names. `export_manifest` always prepends `DECLARED_ONLY_EXPORT_HEADER`.
+
+**Summary and `unobserved` (trinity-enterprise#1030 CP6)**: `services/system_apply/summary.py` — `GROUP_FIELDS` (group → change fields), `member_unobserved(mp)` (into `ApplyMemberPlan.unobserved` → `SystemApplyMember.unobserved`) and `build(members, extras=…)` (into `ApplyPlan.summary`, called at the end of `resolve_apply_plan`; `grants.held_back` comes from `apply_grants.summarize`, which still owns the held-back warning line). Deploy's dry run adds `_configured_preview(cfg)` counts to each `agents_to_create` entry that declares a group; `src/frontend/src/components/systems/ManifestPreview.vue` → `configuredLine` renders them as one line (`data-testid="manifest-configured-line"`), pinned by `src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js`.
 
 ### Router Layer (`src/backend/routers/systems.py`)
 
@@ -804,6 +857,27 @@ failed after volume creation can 409 on the same name until the orphan-volume
 sweep reclaims it (#1667 guard; the 409 reason carries the `docker volume rm`
 remediation verbatim). Idempotent converge (`on_conflict: skip`) is deferred to
 trinity-enterprise#124.
+
+#### POST /api/systems/apply (trinity-enterprise#695)
+```python
+@router.post("/apply", response_model=SystemApplyResponse, dependencies=[Depends(require_person)])
+async def apply_system(body: SystemApplyRequest, request: Request,
+                       current_user: User = Depends(require_role("creator"))):
+    result = await apply_manifest(body.manifest, current_user, request, dry_run=body.dry_run)
+    if not result.dry_run and result.status in ("applied", "partial", "failed"):
+        await platform_audit_service.log(...)            # CONFIGURATION / system_apply; a failure is a warning
+        for name in result._tags_written:                 # thin trigger, identifiers only (#918)
+            await tags_router._broadcast_tags_changed(name)
+    if result.status == "refused":                       # 503 if every blocker is retryable, else 409
+        return JSONResponse(status_code=503 or 409, content=result.model_dump())
+    if result.status == "failed":
+        return JSONResponse(status_code=500, content=result.model_dump())
+    return result
+```
+- `SystemApplyRequest{manifest, dry_run: bool = True}`, `extra="forbid"`.
+- `require_person`: an agent-scoped key is refused before any read (on existing agents apply
+  reaches permission grants, other agents' schedules and the platform prompt).
+- A refused run writes no audit row (nothing changed).
 
 #### GET /api/systems (Lines 199-244)
 ```python
@@ -1354,6 +1428,32 @@ db.set_agent_permissions(
 Returns: 3 (total permissions configured)
 ```
 
+### Phase 4: Apply (trinity-enterprise#695)
+
+```
+POST /api/systems/apply {manifest, dry_run?=true}       [require_role("creator") + require_person]
+  ├─ parse_manifest + validate_manifest                  create's own; every named 400, `agents: {}` included
+  ├─ read_apply_snapshot → resolve_apply_plan            reads, then pure; a failed read is a retryable blocker
+  ├─ dry_run → 200 valid | invalid                       no fleet-state write, no lock key
+  ├─ blockers → 409 | 503 refused                        no fleet-state write, no lock key
+  ├─ SingleFlightLock("system_apply:<name>", 900 s)      busy → apply_in_progress; no Redis → apply_lock_unavailable
+  │    └─ ApplyLeaseKeeper renews every 300 s (atomic compare-and-expire); any result but owned stops the run
+  ├─ read_apply_snapshot → resolve_apply_plan again      a blocker found only now → refused, lock released
+  ├─ confirm ownership → execute_apply_plan
+  │    create absent members → tag each with the system tag at once
+  │    → tags → edges → folders → resource overrides → schedules (a created member's re-read first)
+  │    → prompt (admin) → view → start the created members one at a time
+  ├─ atomic release
+  └─ 200 applied | partial · 500 failed                  one audit row; `agent_tags_changed` per tagged member
+```
+
+Re-applying an unchanged manifest writes nothing and reports every member `unchanged` (AC1).
+An existing member is never stopped, recreated, renamed or restarted; a member created in the
+same run is started by the platform's own start path, which may recreate it once to take a
+declared resource its template overrode (the same path create mode's start takes for folder
+drift). Weak evidence — any member matched to the system by its name only — is refused by name
+before any write, with a remedy for each kind (AC5).
+
 ## MCP Tools Layer
 
 ### Tool Definitions (`src/mcp-server/src/tools/systems.ts`)
@@ -1387,6 +1487,55 @@ All tools support MCP API key authentication when `requireApiKey=true` in server
 On a total failure the backend answers HTTP 500 with the report as the body; the
 MCP client's `ApiError` embeds that body in the tool error message, so the report
 is still visible to the calling agent (trinity-enterprise#125).
+
+#### apply_system
+The reconcile verb (trinity-enterprise#695), proxying `POST /api/systems/apply`. A NEW tool
+rather than a `mode` argument on `deploy_system`: a released `deploy_system` has no `mode` in
+its schema, so `mode: "apply"` sent to an older instance would be dropped and run create
+(suffixing the fleet), while an unknown tool name fails closed. `deploy_system` is unchanged.
+```typescript
+{
+  name: "apply_system",
+  parameters: z.object({
+    manifest: z.string(),            // the same YAML deploy_system takes
+    dry_run: z.boolean().optional()  // defaults to TRUE
+  }),
+  execute: async ({ manifest, dry_run }, context?) => {
+    const preview = dry_run ?? true;           // opposite of deploy_system's `|| false`
+    try {
+      const apiClient = getClient(context?.session);  // inside the try: a missing key is returned
+      const response = await apiClient.request("POST", "/api/systems/apply", {
+        manifest,
+        dry_run: preview
+      });
+      return JSON.stringify(response, null, 2);
+    } catch (error) {
+      return applyFailure(error, context);     // never throws
+    }
+  }
+}
+```
+
+`applyFailure` is a deliberately thin mapping, so a status-code change in the backend apply
+contract cannot silently break the tool:
+
+| Backend answer | Tool result | Audit row |
+|---|---|---|
+| 2xx | the body, verbatim | `success: true` |
+| 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | not a denial |
+| 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
+| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | not a denial; the row reads `success: true` (`ToolOutcome` has no non-denial kind yet; the backend's own `system_apply` audit row records the real outcome) |
+| a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | not a denial |
+| no HTTP status (missing API key, transport failure) | `{success: false, error}`, plus a `note` on a real run whose request went out (writes may have landed; run a dry run, then re-apply) | not a denial |
+
+Policy row in `access.ts`: `kind: "none"` (a manifest, not an agent target; the backend enforces
+the per-member manage checks and refuses every non-person key), and the tool's own `canAccess`
+shows it to `user`-scoped (person) sessions only. With API-key auth on, each call
+builds a client on the server's configured backend URL carrying the calling session's own key.
+Tests: `src/mcp-server/src/tools/systems.apply.test.ts`, always through the registered,
+audit-wrapped tool: over the real MCP transport; a keyless session (which that transport's
+authentication refuses first) in-process through FastMCP's own session; and the other-hostname
+case in-process by choice, so its https DNS origin needs no network (`fetch` stubbed).
 
 #### list_systems (Lines 105-133)
 ```typescript
@@ -1712,6 +1861,14 @@ Conflicts: my-system-worker, my-system-worker_2 exist
 Result: my-system-worker_3
 Warning: "Agent 'my-system-worker' already exists, will create 'my-system-worker_3'"
 ```
+
+**Apply never suffixes (trinity-enterprise#695)**: `POST /api/systems/apply` never calls
+`get_next_agent_name`. A declared name that exists and that the caller may manage is reconciled
+in place; one that exists and the caller may not manage (or a soft-deleted or reserved name) is
+refused as `member_name_unavailable`; only a free name is created. Copies left by earlier
+create-mode deploys (`my-system-worker_2`) are tagged and undeclared, so apply reports them as
+drift with the note "suffixed copy from an earlier create-mode deploy; apply never removes it" —
+the recovery story: remove them by hand once the original is reconciled.
 
 ### System Grouping
 
@@ -2244,8 +2401,9 @@ lifespan (safety-net, gated on `setup_completed`, strong task ref) both call
    - Honest status: partial / failed / seed-path error (e.g. parse-broken
      override) / unreadable-override / crash-interrupted partial fleet (the
      converge backstop finding only SOME names reserved) each raise ONE
-     operator-queue alert (direct DB create on `trinity-system`,
-     deterministic `system-seed-<kind>` id — a #1632 reserved prefix, so an
+     operator-queue alert (`platform_alerts.observe` on `trinity-system`,
+     subject `system_seed:<kind>`, ended by the platform when a later seed
+     succeeds; the id carries the #1632 reserved prefix `system-seed-`, so an
      agent cannot pre-create-and-silence it; best-effort).
 
 **Manifest resolution**: `TRINITY_DEFAULT_SYSTEM_MANIFEST` env, read at call

@@ -44,40 +44,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
     # -- PR 2 ---------------------------------------------------------------
-    ("services/skill_service.py", "SkillService._announce_reconcile_refusal"):
-        ("skills-reconcile-", _PR2),
-    ("services/skills_sync_service.py", "SkillsLibrarySyncService._announce_fleet_failures"):
-        ("skills-fleet-reinject-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
-        ("sync-failing-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        ("sync-diverged-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
-        ("git-bloat-", _PR2),
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
-    ("services/retention_guard.py", "announce_refusal"): ("retention-guard-", _PR2),
-    ("services/system_seed_service.py", "SystemSeedService._notify_operator"): ("system-seed-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_refused"):
-        ("ent615-git-token-scrub-", _PR2),
-    ("services/git_service/token_scrub.py", "_alarm_git_token_scrub_unreadable"):
-        ("ent615-git-token-scrub-unreadable-", _PR2),
-    ("services/lease_reaper_service.py", "_create_park_item"): ("poison-", _PR2),
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        ("val_", _PR2),
-    ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
-    ("services/operator_queue_service.py", "_maybe_emit_alert_budget_episode"):
-        ("alert-budget-", _PR2),
-    # The #1677 budget helper stays as it is in PR 1; the budgeted emitters
-    # below call it and move onto the seam (which composes the budget) in PR 2.
-    ("services/operator_queue_service.py", "create_bounded_alert_outcome"): (None, _PR2),
-    ("services/operator_queue_service.py", "OperatorQueueSyncService._maybe_emit_flood_alert"):
-        ("queue-flood-", _PR2),
-    ("services/idempotency_service.py", "_on_unguarded_effect"): ("effect-unguarded-", _PR2),
-    ("services/task_execution_service.py", "_alert_skill_not_found"): ("skill-not-found-", _PR2),
-    ("services/git_service/gitignore_sweep.py", "_emit_gitignore_untracked_alert"):
-        ("gitignore-untracked-", _PR2),
-    ("client_portal/service.py", "raise_problem_report"): ("workspace-problem-", _PR2),
 }
 
 # Writers that are not platform emitters: the facades, the agent-authored
@@ -93,7 +59,17 @@ _NOT_EMITTERS = {
 
 # A hook kind on the seam whose emitter has no place that knows the condition
 # cleared: kind -> the reason, so "reviewed" is told apart from "forgotten".
-NO_CLEAR_SITE: dict = {}
+NO_CLEAR_SITE: dict = {
+    # #3254: the per-type budget is measured only inside the seam's own locked
+    # create, so no emitter observes it freeing up.
+    "alert_budget": "the budget is measured only inside the seam's create; each "
+                    "further refusal re-reads it, otherwise its 14-day lifetime ends it",
+    # #3254: only the dispatch path's `if unresolved_command:` could see a command
+    # resolve, and `detect_unresolved_slash_command` returns None both for
+    # "resolved" and for "not a slash command" — a clear there would be invented.
+    "skill_not_found": "nothing observes a command start resolving; each scheduled "
+                       "run re-reads it, otherwise its 14-day lifetime ends it",
+}
 
 _DIRECT = ("create_operator_queue_item", "create_operator_queue_item_with_outcome",
            "create_native_operator_queue_item")
@@ -291,3 +267,17 @@ def test_only_the_seam_calls_the_platform_accessors():
             if name in _SEAM_ONLY and rel not in _SEAM_ONLY[name]:
                 offenders.append((rel, qual, name, call.lineno))
     assert not offenders, f"platform-alert accessors called outside the seam: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Must-act kinds (#3254 AC 4)
+# ---------------------------------------------------------------------------
+
+def test_no_clear_site_names_a_person_kind():
+    """A kind a person must act on is never ended by the platform: no
+    `platform_alerts.clear` / `reconcile` call outside the seam names one."""
+    from services import platform_alerts as pa
+    person = {k.name for k in pa.KINDS.values() if k.clears == pa.CLEARS_PERSON}
+    assert {"poison", "portal_inbox_collision"} <= person, "the guard lost its subjects"
+    named = person & _seam_kind_calls()
+    assert not named, f"the platform would end a must-act kind: {sorted(named)}"

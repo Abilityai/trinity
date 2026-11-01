@@ -41,7 +41,7 @@ describe('the strip after the move (ent#887/#888/#891)', () => {
 })
 
 describe('old ?tab= links keep landing (nothing bookmarked breaks)', () => {
-  const cases = { info: 'general', guardrails: 'guardrails', credentials: 'storage', folders: 'storage', access: 'people' }
+  const cases = { info: 'general', guardrails: 'guardrails', credentials: 'credentials', folders: 'storage', access: 'people' }
   for (const [tab, section] of Object.entries(cases)) {
     it(`?tab=${tab} opens Settings › ${section}`, () => {
       expect(TAB_ALIASES[tab]).toBe('settings')
@@ -73,11 +73,20 @@ describe('which panes a viewer gets', () => {
   it('an owner gets every landed pane, General first', () => {
     const shown = settingsSections().map((s) => s.id)
     expect(shown[0]).toBe('general')
-    expect(shown).toEqual(['general', 'guardrails', 'people', 'channels', 'integrations', 'storage'])
+    expect(shown).toEqual(['general', 'credentials', 'guardrails', 'people', 'channels', 'integrations', 'storage'])
   })
 
-  it('the system agent gets General, Guardrails and Integrations only', () => {
-    expect(settingsSections({ isSystem: true }).map((s) => s.id)).toEqual(['general', 'guardrails', 'integrations'])
+  it('the system agent gets General, Credentials, Guardrails and Integrations only', () => {
+    // ent#951: the Credentials tab was shown to the system agent before #3798;
+    // folding it into Storage (hidden for the system agent) took it away.
+    expect(settingsSections({ isSystem: true }).map((s) => s.id))
+      .toEqual(['general', 'credentials', 'guardrails', 'integrations'])
+  })
+
+  it('Credentials is its own pane, directly after General (ent#951)', () => {
+    const credentials = SETTINGS_SECTIONS.find((s) => s.id === 'credentials')
+    expect(credentials.label).toBe('Credentials')
+    expect(SETTINGS_SECTIONS.map((s) => s.id).indexOf('credentials')).toBe(1)
   })
 
   it('every pane answers one question', () => {
@@ -90,7 +99,8 @@ describe('"Find a setting" filters the rail', () => {
 
   it('finds a control by a word that is not in the pane name', () => {
     expect(ids('timeout')).toEqual(['general'])
-    expect(ids('credentials')).toEqual(['storage'])
+    expect(ids('credentials')).toEqual(['credentials'])
+    expect(ids('secrets')).toEqual(['credentials'])
   })
 
   it('is case-insensitive and ignores surrounding space', () => {

@@ -165,7 +165,9 @@ class AgentRuntime(ABC):
             allowed_tools: List of allowed tool names (None = all tools)
             system_prompt: Custom system prompt
             timeout_seconds: Execution timeout
-            max_turns: Maximum agentic turns for runaway prevention (None = unlimited)
+            max_turns: Per-task turn cap for runaway prevention; may only tighten the
+                agent's guardrail (#2328). None = the guardrail (runtimes without a
+                turn-cap flag log it and rely on the timeout)
             execution_id: Optional execution ID for process registry (enables termination tracking)
             resume_session_id: Optional Claude Code session ID to resume (EXEC-023)
             persist_session: If True, omit ``--no-session-persistence`` so the

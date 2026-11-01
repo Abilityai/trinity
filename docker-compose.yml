@@ -91,6 +91,7 @@ services:
       # tuning lever rather than a dead feature — but this service uses an explicit
       # environment list, so forward them or the .env knobs do nothing (#1056 class).
       - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_DELEGATION_MAX_INFLIGHT=${NEVERMINED_DELEGATION_MAX_INFLIGHT:-4}  # concurrent Nevermined delegation verify/revoke calls, fleet-wide
       - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
@@ -292,6 +293,8 @@ services:
       # FULL non-empty default — a bare :- would arrive set-but-empty and shadow
       # the code default (#1076 class).
       - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      # Original PDF delivery is opt-in; extraction stays in the agent.
+      - ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
@@ -457,7 +460,10 @@ services:
     read_only: false
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header
+    # --no-proxy-headers (trinity-enterprise#873): no forwarded address is ever
+    # believed in dev — Vite is not a trusted proxy, so requests are attributed
+    # to their socket peer. Topology and trust are deliberately unchanged here.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header --no-proxy-headers
     mem_limit: 4g
     cpus: 4
 

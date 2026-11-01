@@ -325,8 +325,8 @@
                 <button
                   type="submit"
                   class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
-                  :disabled="!input.trim() || sending"
-                  title="Send"
+                  :disabled="!input.trim() || sending || messageLimit.over"
+                  :title="messageLimit.over ? messageLimit.message : 'Send'"
                 >
                   <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 12h14M12 5l7 7-7 7" /></svg>
                 </button>
@@ -334,6 +334,7 @@
             </div>
           </div>
         </form>
+        <PortalMessageLimit :limit="messageLimit" />
         <p v-if="sendError" class="mt-1.5 text-xs text-status-danger-600 dark:text-status-danger-400">{{ sendError }}</p>
         <!-- #2794: what came with the message that created this room. The room
              is otherwise silent about attachments, so without this the person
@@ -400,12 +401,15 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalTypeahead from './PortalTypeahead.vue'
+import PortalMessageLimit from './PortalMessageLimit.vue'
+import { ROOM_MESSAGE_MAX_CHARS, messageLimitState, messageRefusalReason } from './portalMessageLimit'
 import PortalTagMarks from './PortalTagMarks.vue'
 import { usePeoplePicker } from '@/composables/usePeoplePicker'
 import { noOneCalled, peopleRows, personToken, tagsFor, typeaheadHeading } from './portalMentions'
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalJumpToLatest from './PortalJumpToLatest.vue'
 import { workSignalFromRoom } from './portalRail'
+import { roomTranscriptComplete } from './portalInbox'
 import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
 import PortalAttachmentChip from './PortalAttachmentChip.vue'
 import { useComposerDraft } from '@/composables/useComposerDraft'
@@ -449,7 +453,7 @@ const props = defineProps({
   // room id there so it cannot follow the reader into another conversation.
   carryNotice: { type: Object, default: null },
 })
-const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project'])
+const emit = defineEmits(['open-menu', 'rooms-changed', 'toggle-star', 'participants-changed', 'work-state', 'open-work', 'dismiss-carry-notice', 'open-project', 'read'])
 
 const store = useClientPortalStore()
 
@@ -466,6 +470,8 @@ const loading = ref(true)
 const sending = ref(false)
 const sendError = ref(null)
 const input = ref('')
+// #3706: the server's limit, stated before sending (the 1:1's #3460 rule).
+const messageLimit = computed(() => messageLimitState(input.value.trim(), ROOM_MESSAGE_MAX_CHARS))
 // trinity-enterprise#657: the room's unsent text outlives this instance. The
 // room is keyed on its id (the shell remounts per room), so the key never
 // changes in-instance; `send()` giving the text back on failure makes it a
@@ -902,6 +908,12 @@ function isMine(m) {
 // messages, and both concat them — duplicate bubbles and duplicate Vue keys on
 // one seq, self-correcting only on a full reload.
 let loading_ = false
+// trinity-enterprise#959 fix round 1 (Codex code review #2): a read the room
+// OWES — set by an open or an agent's message landing — and paid only once the
+// transcript on screen is the whole room (`roomTranscriptComplete`). The full
+// load is one oldest-first page, so a room longer than that is read when the
+// poll has brought the rest, not on the first page; a failed load owes nothing.
+let readOwed = false
 
 async function load({ full = false } = {}) {
   if (loading_ && !full) return
@@ -919,6 +931,16 @@ async function load({ full = false } = {}) {
     // counts toward the jump-to-latest control.
     if (full) await pinToBottom()
     else if (incoming.length) await onMessagesArrived(incoming.length)
+    // trinity-enterprise#959: the room on screen is read — on open (every door:
+    // the sidebar, the Inbox, a link) and whenever an agent's message lands in
+    // it, the rule a chat follows for a reply that arrives while you watch.
+    // Without it the room would badge in the sidebar while the person reads it.
+    // Only once ALL of it is on screen (fix round 1): see `readOwed`.
+    if (full || incoming.some((m) => m && m.sender_kind === 'agent')) readOwed = true
+    if (readOwed && roomTranscriptComplete(messages.value.length, data)) {
+      readOwed = false
+      emit('read', props.roomId)
+    }
   } catch (err) {
     if (full) sendError.value = 'Could not load this conversation.'
   } finally {
@@ -930,6 +952,8 @@ async function load({ full = false } = {}) {
 async function send() {
   const text = input.value.trim()
   if (!text || sending.value) return
+  // Enter reaches `send()` without the button, so the limit is checked here too.
+  if (messageLimit.value.over) return
   sending.value = true
   sendError.value = null
   input.value = ''
@@ -957,8 +981,8 @@ async function send() {
     await load()
   } catch (err) {
     const detail = err?.response?.data?.detail
-    sendError.value = detail?.message || (typeof detail === 'string' ? detail : null)
-      || 'That message was not delivered.'
+    sendError.value = messageRefusalReason(err) || detail?.message
+      || (typeof detail === 'string' ? detail : null) || 'That message was not delivered.'
     input.value = text        // give it back rather than losing what they typed
     resetTypeahead()
   } finally {
@@ -989,8 +1013,9 @@ async function addAgent(name) {
 function startPolling() {
   stopPolling()
   pollTimer = setInterval(() => {
-    // Nothing to wait for once the room is closed.
-    if (!isClosed.value && !document.hidden) load()
+    // Nothing to wait for once the room is closed — except the rest of a long
+    // closed room the open still owes its read on (trinity-enterprise#959).
+    if ((!isClosed.value || readOwed) && !document.hidden) load()
   }, POLL_MS)
 }
 function stopPolling() {
@@ -1000,6 +1025,7 @@ function stopPolling() {
 
 watch(() => props.roomId, async () => {
   messages.value = []
+  readOwed = false
   loading.value = true
   resetTypeahead()
   // #2624: the outgoing room's element is about to be replaced, so re-arm

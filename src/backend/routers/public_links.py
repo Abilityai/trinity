@@ -158,11 +158,16 @@ async def update_public_link(
         raise HTTPException(status_code=404, detail="Public link not found")
 
     # Update the link
+    # #3584: an `expires_at` the request SENT as null/empty removes the expiry;
+    # an absent one leaves it alone (a rename or toggle must not clear it).
+    clear_expiry = ("expires_at" in update_request.model_fields_set
+                    and not update_request.expires_at)
     updated_link = db.update_public_link(
         link_id=link_id,
         name=update_request.name,
         enabled=update_request.enabled,
-        expires_at=update_request.expires_at
+        expires_at=update_request.expires_at or None,
+        clear_expiry=clear_expiry,
     )
 
     # Broadcast event

@@ -357,7 +357,9 @@ class TestDedupRing:
 
 
 class TestUrlReconstruction:
-    """Ensures uvicorn --proxy-headers + nginx X-Forwarded-Proto handling."""
+    """Ensures the nginx X-Forwarded-Proto handling (uvicorn runs with
+    --no-proxy-headers since trinity-enterprise#873, so the header is the only
+    source of the client's scheme)."""
 
     @pytest.mark.unit
     def test_upgrades_http_to_https_when_forwarded_proto_set(self):

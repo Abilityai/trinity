@@ -39,6 +39,8 @@ The button at the bottom of the sidebar signs out. For a platform user it is lab
 
 The main app and every Workspace tab in the same browser share one platform sign-in, and open tabs follow it. Sign out and back in on one tab, and a Workspace tab left open from the old session picks up the new one instead of ending it. Sign out on one tab, and the other tabs drop the session too, without a background tab jumping to the sign-in page. A client signed in with an email code is not sent to the operator sign-in page just because the same browser also holds an expired operator login.
 
+If your Trinity session ends while a Workspace tab is open (it expired, the backend restarted, or your password was changed somewhere else), the tab takes you to the Trinity sign-in page, and signing in brings you back to the chat you were on. If it ended because you signed out in another tab, the Workspace tab stays where it is and shows its sign-in form. **Have a Trinity account? Sign in** under the form takes you to the Trinity sign-in and back to the same page.
+
 ### The layout
 
 Three columns on a desktop screen: the **sidebar** on the left, the **conversation** in the middle, and a **side panel** on the right (the rail, or the agent's canvas during a voice call). The seam beside the sidebar, and the one beside the rail while it is open, are drag handles — drag to resize, double-click to reset. The conversation takes whatever is left, and the panel's maximum follows the viewport, so a width set on a large screen is clamped on a smaller one. On a phone the sidebar becomes a drawer behind the **Menu** button, and the rail becomes a strip above the composer that opens a bottom sheet.
@@ -109,7 +111,7 @@ One box: the message field on top, the controls in a row inside it. Enter sends;
 - **Speak replies aloud** — a speaker button above the composer, shown only when the agent has a voice configured, reads each reply in the agent's ElevenLabs voice on your side. Click again to mute. It is hidden during a call, when the orb owns playback. See [Voice Replies](../advanced/voice-replies.md).
 - **Send** becomes **Stop** while a turn runs.
 
-A message can be up to 8,000 characters. Within the last 500 the composer shows a count (*7,650 of 8,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
+A message can be up to 100,000 characters, in a chat or a room. Within the last 500 the composer shows a count (*99,650 of 100,000 characters*); past the limit it names the limit and holds **Send** until you shorten the message. Very long words and links wrap inside the message bubble.
 
 An agent that is stopped or unreachable is labelled above the field before you type; the message still sends, and the server's refusal is the answer.
 
@@ -301,7 +303,7 @@ Workspace is a client-facing shell over the platform's existing agent behavior, 
 | `/agents/{name}/sessions/{id}` | PATCH | Rename a chat — `{title}`, one line, ≤100 characters |
 | `/agents/{name}/sessions/{id}/archive` | PUT / DELETE | Close (archive) a chat / reopen it. Nothing is deleted |
 | `/agents/{name}/history?session_id=&limit=` | GET | A chat's messages, the in-flight marker and the last turn's outcome. No message carries its cost |
-| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 8,000 characters |
+| `/agents/{name}/chat` | POST | Send a turn and wait for the reply — the synchronous integration surface; accepts `session_id`, `new_thread`, `model`, `open_canvas_id` (the canvas on screen, passed as context; an id the caller cannot see resolves to nothing) and `tags` (addresses of people to tag). `message` is at most 100,000 characters |
 | `/agents/{name}/chat/stream` | POST | Begin a turn, returning an execution id to watch; same body |
 | `/agents/{name}/executions/{id}/stream` | GET | Live activity for one of your own turns (SSE) |
 | `/agents/{name}/executions/{id}/terminate` | POST | Stop one of your own turns |

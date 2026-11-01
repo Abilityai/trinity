@@ -27,6 +27,8 @@ If two-factor authentication applies to the account (requires an entitlement), a
 
 When you sign up via email (if whitelisted), you receive the **role recorded on your whitelist entry** — `user` unless the admin picked another role when adding the email (Settings → Access → Email Whitelist has a role picker, default `user`).
 
+Adding a whitelist entry takes an admin's signed-in session, whichever role is picked, `user` included: the entry gives the person a signed-in session at that role on their first sign-in. An API key gets a 403, even an admin's own key.
+
 Being granted access to an agent — sharing, or an approved access request — does **not** create a platform account. The person signs in to the [Workspace](../sharing-and-access/workspace.md) with a code emailed to them. Whitelist rows that sharing wrote before this changed are still there, and the accounts they produce are Workspace-only `user` accounts.
 
 Admins can change a user's role at any time via Settings. To give someone the operator UI, raise them to `operator`.

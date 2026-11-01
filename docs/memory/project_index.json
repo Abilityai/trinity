@@ -9,7 +9,7 @@
   "tech_stack": {
     "frontend": ["Vue.js 3.5", "Tailwind CSS 3.4", "Pinia 2.3", "Vite 6", "Auth0 Vue"],
     "backend": ["FastAPI 0.115", "Python 3.11", "Docker SDK 7.1", "SQLite", "Redis 5.2"],
-    "agent_runtime": ["Python 3.11", "Node.js 20", "Go 1.23", "Claude Code"],
+    "agent_runtime": ["Python 3.11", "Node.js 24", "Go 1.23", "Claude Code"],
     "infrastructure": ["Docker", "nginx", "Cloudflare Tunnel", "Tailscale", "GCP"]
   },
   "features": {

@@ -28,7 +28,7 @@ People (JWT, their own `user` key) and the system agent are never fenced.
 | `schedules.manage` | create / update / delete / enable / disable a schedule; its webhook and webhook secret | the agent's **own** schedules (#2996); `trigger` |
 | `instructions.manage` | `CLAUDE.md`, `AGENTS.md`, `.claude/**` except `.claude/skills/**` through the file routes; `git/reset-to-main-preserve-state` | — |
 | `agents.manage` | create a durable agent, delete, `deploy-local`, `systems/deploy`, `PUT /model`, and `read-only` / `resources` / `timeout` / `public-channel-model` / `guardrails` | spawning or discarding an **ephemeral** agent (ent#69) |
-| `projects.manage` (ent#588) | start a Workspace project for its owner (owner = creator and first member, agent = steward, members-only) and import one of its own folder projects — MCP `create_project` / `import_project`, checked by the projects module before any read | working on a project it is already active on; adding people or changing visibility is never granted |
+| `projects.manage` (ent#588) | start a Workspace project for its owner (owner = creator and first member, agent = steward, members-only) and import one of its own folder projects — MCP `create_project` / `import_project`; as a project's steward, PROPOSE members, agents, steward, visibility and task owners for the creator to approve once (ent#980, MCP `propose_project_changes`) — checked by the projects module before any read | working on a project it is already active on; adding people or changing visibility directly is never granted — only proposed |
 
 Bounds on a holder:
 - **Reach** (every capability): on every fenced route that names a target —
@@ -97,6 +97,17 @@ enforce_agent_capability → capability_refusal(user, cap)
                    '<capability>' ... Settings → Permissions to change itself"}
                                                   audit: capability_refused
 ```
+
+## Reading grants over MCP (trinity-enterprise#991)
+
+`get_agent_capability_grants(agent_name)` (`src/mcp-server/src/tools/permissions.ts`)
+reads `GET /api/agents/{name}/capability-grants` and returns it verbatim. The route's
+scope is unchanged: an agent key reads itself or an agent it spawned, never an edge
+peer; a person key reads only as owner or admin (ent#756). The access row is
+`baselined` on that `OwnedAgentByName` fence, not `enforce`, because the MCP edge gate
+would admit an edge peer the route refuses. A refusal (the uniform 404) comes back as an
+error saying "refused, not 'no grants'". There is no write tool: granting stays an
+admin's interactive action.
 
 ## Upgrade effect
 

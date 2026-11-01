@@ -503,6 +503,10 @@ _EXPECTED_READ_ONLY = (
     # ent#820 review: fixed-name credential files a share holder must not read
     ".netrc", ".git-credentials", ".docker/config.json", ".config/gh/hosts.yml",
     ".gemini/oauth_creds.json",
+    # ent#949: registry/upload/sync/Terraform tokens and shell history — owner
+    # tier to read, still owner-writable.
+    ".npmrc", ".pypirc", ".config/rclone/rclone.conf",
+    ".terraform.d/credentials.tfrc.json", ".bash_history", ".zsh_history",
     "*.key", "*.pem", "*.p12", "*.pfx",
 )
 

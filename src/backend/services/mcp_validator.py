@@ -304,7 +304,10 @@ def _resolves_to_private_ip(hostname: str) -> bool:
         # getaddrinfo returns a list of (family, type, proto, canonname, sockaddr).
         # We only need the IP from sockaddr.
         infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
+    except (socket.gaierror, UnicodeError):
+        # UnicodeError: getaddrinfo's own idna encode refuses a host with an
+        # empty label (`a..example.com`) or a label over 63 characters before
+        # any lookup, so it never reaches gaierror.
         return True  # fail closed
     for info in infos:
         sockaddr = info[4]

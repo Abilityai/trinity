@@ -122,9 +122,14 @@ _MARKER_RE = re.compile(r"\[… [\d,]+ characters omitted")
 # 1. A long reply lands
 # ===========================================================================
 
-def test_a_reply_over_the_inbound_cap_lands_whole_as_one_message(rooms_db, allow_all, fake_execute):
-    """The reported case: 9,119 characters, billed, and absent from the room."""
+def test_a_reply_over_the_inbound_cap_lands_whole_as_one_message(rooms_db, allow_all, fake_execute,
+                                                                 monkeypatch):
+    """The reported case: 9,119 characters, billed, and absent from the room.
+
+    The inbound cap is pinned at its #3210-era 8,000: since #3706 it equals the
+    reply bound, and no reply is then both over one and under the other."""
     from shared_sessions import service
+    monkeypatch.setattr(service, "MAX_CONTENT_CHARS", 8000)
     _calls, replies = fake_execute
     brief = _brief(9119)
     assert len(brief) > service.MAX_CONTENT_CHARS

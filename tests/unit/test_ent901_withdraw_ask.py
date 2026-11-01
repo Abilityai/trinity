@@ -700,8 +700,11 @@ class TestWithdrawRoute:
         sys.path.insert(0, os.path.dirname(__file__))
         import _route_census as rc
         key = "routers/operator_queue.py::withdraw_my_ask"
-        assert key in rc.AGENT_CALLABLE
-        assert rc.AGENT_CALLABLE[key][0] == "POST /api/agents/{name}/operator-queue/{request_id}/withdraw"
+        # trinity-enterprise#840: a get_self_acting_agent route is self-gated, so
+        # it is listed AND recognised (the path is still pinned at runtime).
+        assert key in rc.AGENT_CALLABLE_SELF
+        assert rc.AGENT_CALLABLE_SELF[key][0] == "POST /api/agents/{name}/operator-queue/{request_id}/withdraw"
+        assert rc.walk().routes[key].self_gate.kind == "get_self_acting_agent"
 
 
 # ===========================================================================

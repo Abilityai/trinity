@@ -7,12 +7,11 @@ client never calls. Both payment doors derived that origin from
 `request.base_url`, which is http on a standard Trinity deployment for two
 independent reasons:
 
-* `docker-compose.prod.yml` / `docker-compose.hosted.yml` override the image
-  `command:` and drop the Dockerfile CMD's `--proxy-headers
-  --forwarded-allow-ips=*`, so uvicorn does not trust `X-Forwarded-*` at all and
-  `request.url.scheme` stays http behind ANY proxy — which is why
-  `public_base_url` reads the RAW header and never `request.url.scheme`
-  (restoring those flags is a trust change, deliberately deferred);
+* uvicorn does not apply `X-Forwarded-*` (every launcher runs it with
+  `--no-proxy-headers` since trinity-enterprise#873, which resolves the client
+  ADDRESS from trusted proxies itself), so `request.url.scheme` stays http
+  behind ANY proxy — which is why `public_base_url` reads the RAW header and
+  never `request.url.scheme`;
 * the frontend nginx forwarded `X-Forwarded-Proto $scheme`, and `$scheme` is http
   on that hop, clobbering the upstream terminator's https. Fixed by the
   `$fwd_proto` map, guarded here.
@@ -400,7 +399,16 @@ class TestNginxForwardsTheClientScheme:
     no runtime seam to mount — the regression it prevents is a redeployed image
     that silently sends http again."""
 
-    CONF = (REPO / "src/frontend/nginx.conf").read_text()
+    # ent#873: the server body moved into an include both listeners share, so
+    # the effective configuration is the main file (maps, listeners) plus that
+    # include — and only while BOTH server blocks still include it.
+    MAIN = (REPO / "src/frontend/nginx.conf").read_text()
+    SERVER = (REPO / "src/frontend/nginx-server.conf").read_text()
+    CONF = MAIN + SERVER
+
+    def test_both_listeners_serve_the_shared_locations(self):
+        assert self.MAIN.count("include /etc/nginx/nginx-server.conf;") == 2
+        assert self.MAIN.count("server {") == 2
 
     def test_the_map_preserves_an_upstream_https(self):
         assert "map $http_x_forwarded_proto $fwd_proto {" in self.CONF
@@ -416,7 +424,9 @@ class TestNginxForwardsTheClientScheme:
         # /api/, /a2a/ and /mcp all proxy to the backend; a door that lied about
         # the scheme on one of them would mint tokens for the wrong origin.
         # 4 since ent#623: the /.well-known/aauth- discovery location forwards it too.
-        assert self.CONF.count("proxy_set_header X-Forwarded-Proto $fwd_proto;") == 4
+        # 5 since ent#873: /ws forwards the client and the scheme like the rest.
+        assert self.SERVER.count("proxy_set_header X-Forwarded-Proto $fwd_proto;") == 5
+        assert self.MAIN.count("proxy_set_header") == 0
 
     def test_hsts_still_reads_the_incoming_header_directly(self):
         assert "map $http_x_forwarded_proto $hsts_header {" in self.CONF

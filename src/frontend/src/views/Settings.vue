@@ -221,6 +221,12 @@
             <TelemetrySharingPanel />
           </div>
 
+          <!-- trinity-enterprise#1022 — retrieval memory. OSS-core, default-off;
+               the honest status line says why it cannot run when it cannot. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <RetrievalMemoryPanel />
+          </div>
+
           <!-- ent#463 — Operator-intake Settings home. Identified contact
                capture (email + optional profile), NOT anonymous telemetry.
                First-run form (SetupPassword.vue) is the other producer; both
@@ -318,6 +324,10 @@
               </div>
             </div>
           </div>
+
+          <!-- #3825: change the admin's password in the app. Only an account
+               that has a password (has_password) renders it. -->
+          <ChangePasswordPanel v-if="activeTab === 'general' && authStore.user?.has_password" class="mb-6" />
 
           <div v-if="activeTab === 'general'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2333,6 +2343,7 @@ import NavBar from '../components/NavBar.vue'
 import McpKeysTab from '../components/settings/McpKeysTab.vue'
 import SubscriptionsPanel from '../components/settings/SubscriptionsPanel.vue'
 import UserGitHubPatPanel from '../components/settings/UserGitHubPatPanel.vue'
+import ChangePasswordPanel from '../components/settings/ChangePasswordPanel.vue'
 import AgentPermissionsMatrix from '../components/AgentPermissionsMatrix.vue'
 import SkillSourcesPanel from '../components/SkillSourcesPanel.vue'
 import SkillManagersPanel from '../components/SkillManagersPanel.vue'
@@ -2344,6 +2355,7 @@ import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vu
 import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import RetrievalMemoryPanel from '../components/settings/RetrievalMemoryPanel.vue'
 import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'

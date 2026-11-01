@@ -36,7 +36,7 @@ def live_paths():
 
 def _stored() -> dict:
     stored = dict(rc.load_baseline())
-    for table in (rc.AGENT_CALLABLE, rc.OWN_AUTH):
+    for table in (rc.AGENT_CALLABLE_SELF, rc.AGENT_CALLABLE_ANY, rc.OWN_AUTH):
         stored.update({k: v[0] for k, v in table.items()})
     stored.update({k: v[0] for k, v in rc.ADMIN_WIDENED.items()})
     stored.update({k: v[0] for k, v in rc.DELEGATED.items()})

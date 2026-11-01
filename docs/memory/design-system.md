@@ -130,7 +130,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
 | BaseCard | `components/base/BaseCard.vue` | `CredentialSetupChecklist.vue` surface |
 
-The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`.
+The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16` because the config extends the opacity scale with `16` — before #2122 those classes silently compiled to **nothing** (16 is not in Tailwind's default scale), so the dark chips that used them shipped without a background. The behavioral/state primitives were already shipped and keep their homes: `ConfirmDialog.vue`, `OverflowTabs.vue`, `LoadFailed.vue`/`InlineError.vue`, `ScanlineReveal.vue`, and `BoundedRegion.vue` (the bounded viewport, #3451 — recipe under Data table).
 
 ### BaseButton
 
@@ -316,6 +316,17 @@ Guarded by `tests/unit/overflowTabsTablist.mount.spec.js`.
 - **Do:** bounded container + sticky header + stated total.
 - **Don't:** render 5,000 rows into the page and let it scroll for minutes.
 
+### Bounded region — fill the window (#3451)
+
+**Shipped primitive:** `components/BoundedRegion.vue` — the principle-28 viewport for any list, table or feed. A named, focusable `role="region"` (required `label`; `tabindex="0"` so the scroll is reachable from the keyboard) that scrolls on one axis with a reserved gutter. Two sizes: `fill` (default) takes the rest of a flex column from a **0px basis** with a **20rem floor**; `:fill="false"` leaves the cap to the consumer (`max-h-*`). `scrollToTop()` is for a new query. Reference adoption: the four Operations list tabs.
+
+**Recipe — the list takes the window's remaining height:** the page root is `min-h-dvh flex flex-col`, and every element between it and the region is a flex column that grows from a 0px basis (`grow basis-0 flex flex-col`); an element that also carries `mx-auto` needs `w-full`, because auto margins in a column flexbox suppress the stretch. The page is then `max(window, chrome + 20rem)` high whatever the item count: below the floor it scrolls by the shortfall, never by the rows.
+- **Never `flex-1` in that chain.** Tailwind's `flex-1` is a 0% basis, and a percentage of an auto-height column resolves as the content's height — the list regrows the page (measured: 30,306 px for 300 rows, identically in Chromium, Firefox and WebKit). One block wrapper in the chain does the same, or leaves the list short with a band of empty page below it.
+- **Wrap the whole state chain** (loading / failed / empty / rows / Load more) in the region, so a poll that swaps the rows keeps the node and the reader's place (principle 5); a filter change calls `scrollToTop()`, a poll never does.
+- **Nothing that toggles on its own stacks above the region** (principle 30). Page scroll anchoring used to absorb a banner appearing above a scrolled reader; it cannot when the scroller's own box moves. Put a selection's bulk actions in the list's fixed-height header row and a live count in an existing fixed row; a failure banner raised by the user's own verb may sit above (principle 18).
+- **Do:** stated total and filters outside the region; Load more as its last child; an inset (`-mx-1 px-1 py-1`) when cards inside carry a ring or shadow.
+- **Don't:** a magic `h-[calc(100vh-…px)]` — it breaks the first time a subtitle wraps or a banner appears.
+
 ### Empty states
 
 **Recipe:** dashed border-strong (gray-300 / gray-700), radius 8, centered, padding 34×20; 40px icon in a chrome circle (tertiary ink); title 14.5/650; **one line of purpose** (13, tertiary); **exactly one primary action**. The dashed border is the signature that distinguishes "nothing yet" from loading or failed (principle 15).
@@ -426,6 +437,24 @@ non-chart adoption fails CI (the two pre-ruling holdovers, `LibrarySkillsSection
 overlay `onboarding/FirstRunOverlay.vue` — were swept to skeletons by #1921, so the
 holdover list is empty).
 
+**The one chart that owns its loading face (trinity-enterprise#968, operator ruling
+2026-10-22).** The Workspace agent band's activity chart is a waveform signature
+(`components/portal/ActivityWave.vue`, geometry in `utils/activityWave.js`): four rounded
+beats per day mirrored on the centre line, each a clipped pill of that day's sources, the
+seams softened by a vertical blur. A beam wiping that in reads as a loading bar over a
+signature, so this chart — and only this chart — renders its own loading face: the resting
+beats breathe as a slow travelling wave (CSS `scaleY`, staggered per beat) while an indigo
+glint sweeps across them (one SMIL gradient translate), and on arrival each beat grows out
+of the centre line left to right with slight overshoot (~1.5s end to end). What makes it an
+exception rather than a precedent: the PHASES are still `utils/scanlinePhase.js`'s — a
+cache-hit mount lands straight in `loaded` and never animates (the band is rebuilt on every
+chat-tab switch with its numbers in hand), a background refresh never re-enters `loading`,
+an empty week snaps (`reveal=false`) rather than celebrates, and `prefers-reduced-motion`
+stills the breathing, drops the SMIL glint and skips the reveal. Only the fallback timer
+differs (`WAVE_REVEAL_FALLBACK_MS`, 1.6s, since 700ms would cut the reveal mid-flight).
+The allowlist in `tests/unit/portalLoadingTreatment.spec.js` no longer lists the band; a
+second chart wanting its own face is a new ruling, not a copy of this one.
+
 `content-class` (#2163) is the consumer's hook on the primitive's OWN content wrapper —
 `.scan-content` is child-owned DOM and `:deep()` is forbidden here, so a zone whose
 loaded content must FILL the zone (a full-height flex column, rather than be measured by
@@ -496,7 +525,7 @@ The behavioral half of the standard (the visual half is §1–6). Confirmed in t
 
 ### D. Data loading & refresh
 
-12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface.
+12. Two loading treatments, decided by the surface (design session 2026-07; amended 2026-09-06, #2540): the scanline beam + wipe-in reveal on **chart** surfaces only; a skeleton placeholder keyed on "no data yet" on every other first load — pages, panels, lists, threads. No bespoke spinners; no scanline over a non-chart surface. One named exception (operator ruling 2026-10-22, trinity-enterprise#968): the Workspace agent band's activity wave owns its loading face — resting beats breathing under a glint, then growing in — under the scanline's own phase rules; it is a signature, not a spinner, and it is the only chart so exempted.
 13. First load animates; background refresh is invisible — stale-while-revalidate, in-place swap.
 14. Loading means "no data yet", never "fetch in flight"; cache hits skip the animation; reduced motion is honored.
 
@@ -528,6 +557,7 @@ The recurring failure modes, in one place:
 | `dark:text-gray-500` on meta text | `dark:text-gray-300` (secondary) or `-400` (tertiary) |
 | A new skeleton/spinner for a loading chart | The scanline primitive, keyed off store state |
 | A scanline beam over a page, list or thread | A skeleton placeholder keyed on `hasLoaded` (§6, #2540) |
+| A second chart with its own bespoke loading motion | The scanline primitive — the Workspace band's wave is a named exception (§6, trinity-enterprise#968), not a pattern |
 | A "Loading…" line or an `animate-spin` on a page | The skeleton recipe (§6), keyed on a verdict |
 | Skeleton re-flash on a 30s poll | Stale-while-revalidate, in-place swap |
 | A toggle whose `v-if` pops a block open and shoves the form below it, unreviewed | Prefer a reserved footprint or a height transition; either way, a human toggles it and watches what moves (principle 29, a recommendation) |

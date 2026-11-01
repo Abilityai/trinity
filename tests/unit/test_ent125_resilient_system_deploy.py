@@ -100,7 +100,7 @@ def env(monkeypatch):
     monkeypatch.setattr(
         system_service,
         "resolve_agent_names",
-        lambda system_name, agents: (
+        lambda system_name, agents, naming="prefixed": (
             {s: f"{system_name}-{s}" for s in agents}, []
         ),
     )

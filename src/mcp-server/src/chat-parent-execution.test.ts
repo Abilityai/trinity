@@ -158,6 +158,12 @@ async function boot(opts: { pull?: boolean; reportBackEnabled?: boolean } = {}):
           source_mcp_key_id: "key-agent-1",
         }]);
       }
+      // #3296 review: the caller's own turn row, read to scope a delegation's key
+      // to its retry chain. None of these turns is a retry.
+      const turnRow = url.match(/^\/api\/agents\/([^/]+)\/executions\/([^/?]+)$/);
+      if (turnRow && req.method === "GET") {
+        return json(res, 200, { id: decodeURIComponent(turnRow[2]), agent_name: decodeURIComponent(turnRow[1]) });
+      }
       if (url === "/api/mcp/validate") {
         return json(res, 200, {
           valid: true,
@@ -525,7 +531,9 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     const msg = { agent_name: TARGET, message: "t9", ...PA };
     const pairs: Array<[CallResult, CallResult]> = [
       [await off.call("chat_with_agent", { ...msg, execution_id: TYPED }), await off.call("chat_with_agent", msg)],
-      [await off.call("chat_with_agent", msg, HEADER), await off.call("chat_with_agent", msg)],
+      // #3296: header vs no header is no longer a report-back-only change — the
+      // header is the caller's TURN and scopes the key (T12). Under one header
+      // the parent changes only by the `manual` opt-out, the pair below.
       [await off.call("chat_with_agent", msg, HEADER), await off.call("chat_with_agent", { ...msg, execution_id: "manual" }, HEADER)],
     ];
     for (const [a, b] of pairs) {
@@ -573,10 +581,10 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     );
   });
 
-  it("T12: the same text from two turns shares one key but names two parents (Q4 characterization)", async () => {
+  it("T12: the same text from two turns gets two keys and names two parents (#3296, was the Q4 characterization)", async () => {
     const a = await off.call("chat_with_agent", { agent_name: TARGET, message: "t12", ...PA }, HEADER);
     const b = await off.call("chat_with_agent", { agent_name: TARGET, message: "t12", ...PA }, HEADER_2);
-    assert.equal(a.rec?.key, b.rec?.key);
+    assert.notEqual(a.rec?.key, b.rec?.key, "a later turn is a new delegation, not a replay of the first");
     assert.equal(parentOf(a), HEADER);
     assert.equal(parentOf(b), HEADER_2);
   });
@@ -596,7 +604,8 @@ describe("#3232 parent_execution_id leaves the MCP server (real transport)", () 
     const timeout = await off.call("chat_with_agent", { agent_name: TARGET, message: "t13b", execution_id: TYPED }, HEADER);
     assert.equal(timeout.out.status, "queued_timeout");
     assert.equal(timeout.out.report_back, "requested");
-    assert.equal("report_back_note" in timeout.out, false);
+    // #3296 review: a typed-arm REPLAY says where its report goes (the 409 is an in-flight replay).
+    assert.equal(timeout.out.report_back_note, chatMod.REPORT_BACK_TYPED_REPLAY_NOTE);
     assert.equal(timeout.arms.length, 1);
     assert.equal(timeout.arms[0].executionId, "exec-child-replay");
     assert.equal(timeout.arms[0].body.parent_execution_id, HEADER, "the header turn wins over the typed id here too");
@@ -682,7 +691,7 @@ describe("#3295 a sequential /chat call that ends in a receipt is armed to repor
     await off?.stop();
   });
 
-  it("T21: default-armed receipt (409 in-flight replay) → one arm with the header turn, result requested + the default note", async () => {
+  it("T21: default-armed receipt (409 in-flight replay) → one arm with the header turn, result requested + the replay note (#3296)", async () => {
     for (const tool of ["chat_with_agent", DEDICATED] as const) {
       const args = tool === DEDICATED ? { message: "t21" } : { agent_name: TARGET, message: "t21" };
       const agent = tool === DEDICATED ? HELPER : TARGET;
@@ -697,7 +706,8 @@ describe("#3295 a sequential /chat call that ends in a receipt is armed to repor
       assert.deepEqual(r.arms[0].body, { parent_execution_id: HEADER }, tool);
       assert.equal(r.arms[0].sourceAgent, CALLER, `${tool}: the arm names the caller like the dispatch does`);
       assert.equal(r.out.report_back, "requested", tool);
-      assert.equal(r.out.report_back_note, chatMod.REPORT_BACK_DEFAULT_NOTE, tool);
+      // #3296: a replayed receipt says it repeats an earlier run, not the fresh default.
+      assert.equal(r.out.report_back_note, chatMod.REPORT_BACK_REPLAY_NOTE, tool);
       assert.equal("report_back_reason" in r.out, false, tool);
     }
   });

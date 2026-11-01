@@ -296,6 +296,13 @@ async def voice_websocket(
         await websocket.close(code=4001, reason="Invalid token claims")
         return
 
+    # #3825: a token signed out by logout (#187) or by a password change is
+    # refused here as on every other platform door.
+    from dependencies import is_token_revoked, session_predates_user_revoke
+    if is_token_revoked(payload.get("jti")) or session_predates_user_revoke(payload):
+        await websocket.close(code=4001, reason="Session signed out")
+        return
+
     user = db.get_user_by_username(username)
     if not user:
         await websocket.close(code=4001, reason="Unknown user")

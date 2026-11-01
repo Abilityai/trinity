@@ -188,6 +188,11 @@ def _orchestrate(monkeypatch, settings, users, agents):
     monkeypatch.setattr(sss.system_seed_service, "_resolve_manifest", _manifest)
     monkeypatch.setattr(sss, "_connect_seeded_agents", lambda *r: None)
     monkeypatch.setattr(sss, "_notify_cornelius_failure", lambda m: None)
+    # #3254 re-pin (write-observation point): the seed's alarms now end through
+    # the platform-alert seam on a concluded pass; this suite asserts who gets
+    # provisioned, so the clear stays off the database like the notifier above.
+    monkeypatch.setattr(sss.SystemSeedService, "_clear_operator_alarms",
+                        staticmethod(lambda *kinds: None))
     asyncio.run(sss.ensure_first_run_seeded())
     return provisioned
 

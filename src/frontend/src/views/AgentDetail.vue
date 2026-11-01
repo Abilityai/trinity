@@ -73,7 +73,10 @@
           </button>
         </div>
 
-        <div v-if="agent" :class="['ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
+        <!-- `sm:ml-16` makes room for the header avatar that hangs off the card's
+             left edge. Below `sm` the avatar sits inside the card, so the page
+             keeps its full width (#3542). -->
+        <div v-if="agent" :class="['sm:ml-16', isFullscreenTab ? 'flex-1 flex flex-col min-h-0' : '']">
           <!-- Agent Header Component -->
           <AgentHeader
             :agent="agent"
@@ -139,7 +142,7 @@
             <!-- Tasks Tab Content (#1500: fullscreen flex-fill like Chat; padding
                  lives on TasksPanel's scroll root so content scrolls under it) -->
             <div v-if="activeTab === 'tasks'" class="flex-1 min-h-0 flex flex-col overflow-hidden">
-              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" @create-schedule="handleCreateSchedule" />
+              <TasksPanel :agent-name="agent.name" :agent-status="agent.status" :highlight-execution-id="route.query.execution" :initial-message="taskPrefillMessage" :own-rows-only="!agent.can_share" @create-schedule="handleCreateSchedule" />
             </div>
 
             <!-- Chat Tab Content.
@@ -188,9 +191,13 @@
                    with no `dashboard.yaml`, which is precisely the agent this
                    surface exists for. Mounted first so the declared numbers
                    lead. -->
+              <!-- trinity-enterprise#1006: an owner sees the tiles with no
+                   metrics declared too — the empty state is where they
+                   declare the first one. -->
               <DeclaredMetricsTiles
-                v-if="hasDeclaredMetrics"
+                v-if="hasDeclaredMetrics || canManageMetrics"
                 :agent-name="agent.name"
+                :can-manage="canManageMetrics"
               />
               <DashboardPanel
                 :agent-name="agent.name"
@@ -333,6 +340,11 @@
                     @navigate-tab="handleOverviewNavigate"
                     @info-item-click="handleInfoItemClick"
                   />
+                  <CredentialsPane
+                    v-else-if="section === 'credentials'"
+                    :agent-name="agent.name"
+                    :agent-status="agent.status"
+                  />
                   <GuardrailsPane
                     v-else-if="section === 'guardrails'"
                     :agent-name="agent.name"
@@ -439,6 +451,7 @@ import DeclaredMetricsTiles from '../components/DeclaredMetricsTiles.vue'
 // trinity-enterprise#887/#888/#890/#891 — the Settings home and its panes
 import AgentSettingsHome from '../components/agent-settings/AgentSettingsHome.vue'
 import GeneralPane from '../components/agent-settings/GeneralPane.vue'
+import CredentialsPane from '../components/agent-settings/CredentialsPane.vue'
 import GuardrailsPane from '../components/agent-settings/GuardrailsPane.vue'
 import PeoplePane from '../components/agent-settings/PeoplePane.vue'
 import ChannelsPane from '../components/agent-settings/ChannelsPane.vue'
@@ -624,6 +637,9 @@ const hasDashboard = ref(false)
 // as tiles with no `dashboard.yaml` at all, and both flags arrive from the same
 // DB-only /exists probe, so this is never a second request.
 const hasDeclaredMetrics = ref(false)
+// Owner tier — the same `can_share` flag the owner-only tabs read; the
+// declaration routes enforce it server-side (trinity-enterprise#1006).
+const canManageMetrics = computed(() => Boolean(agent.value?.can_share) && !agent.value?.is_system)
 // #58 (trinity-enterprise) — Brain Orb: per-agent half of the gate. True when the
 // agent's template.yaml declares the generalizable `brain-orb` capability token.
 const hasBrainOrb = ref(false)

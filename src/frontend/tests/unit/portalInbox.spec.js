@@ -69,7 +69,7 @@ describe('item keys', () => {
     expect(parseItemKey(itemKey('ask', 'a1'))).toEqual({ type: 'ask', id: 'a1' })
     expect(parseItemKey(itemKey('thread', 'x:y'))).toEqual({ type: 'thread', id: 'x:y' })
   })
-  it.each([null, '', 'ask:', ':a', 'room:r1', 'nokey', 42])('refuses %j', (k) => {
+  it.each([null, '', 'ask:', ':a', 'room:', 'chat:r1', 'nokey', 42])('refuses %j', (k) => {
     expect(parseItemKey(k)).toBeNull()
   })
   it('tabs', () => {
@@ -105,7 +105,7 @@ describe('Action (D8)', () => {
 })
 
 describe('Unread (D1)', () => {
-  it('chats with arrivals; archived INCLUDED; rooms excluded; latest.at orders', () => {
+  it('chats with arrivals; archived INCLUDED; a room not marked member excluded (ent#959); latest.at orders', () => {
     const threads = [
       thread('read', { unread: 0 }),
       thread('arch', { unread: 1, archived_at: iso(D), last_message_at: iso(3 * H) }),
@@ -160,7 +160,7 @@ describe('All — literally all (§3g D-4a)', () => {
     expect(items.map((r) => r.id)).toEqual(['empty', 'a'])
   })
 
-  it('rooms are not listed (PR C)', () => {
+  it('a room not marked member is not listed (ent#959 — portalInboxRooms.spec.js covers member rooms)', () => {
     expect(allItems([{ id: 'r', is_room: true, last_message_at: iso(H) }], [], {}, NOW)).toEqual([])
   })
 
@@ -271,7 +271,7 @@ function genThreads(r) {
   for (let i = 0; i < n; i++) {
     const kind = r()
     if (kind < 0.1) {
-      // Rooms report unread 0 until PR C (the backend counts threads only).
+      // A room with no `member` bit is not the viewer's (ent#959), and the server counts no unread for it.
       out.push({ id: `room${i}`, is_room: true, unread: 0, agent_names: agents.slice(0, 2), last_message_at: iso(r() * 40 * D) })
       continue
     }

@@ -9,8 +9,8 @@ The hook is **language-agnostic** — Trinity execs the file directly, so the in
 As the author of a poll-driven agent template, I want a cheap deterministic gate to run before Claude wakes so empty polls (scan→no work) don't burn tokens. As a Trinity operator, I don't want to configure the gate per schedule — the agent template owns it, I just schedule the cadence.
 
 ## Entry Points
-- **Template contract**: ship `~/.trinity/pre-check` as a `+x` executable file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, etc.). Prints chat prompt to stdout when work is found; exits 0 with empty stdout to skip; exits non-zero on error (fail-open).
-- **Backend endpoint** (internal, `X-Internal-Secret` auth): `POST /api/internal/agents/{name}/pre-check` — runs the script and returns stdout + exit code. Called only by `trinity-scheduler`.
+- **Template contract**: ship `~/.trinity/pre-check` as a `+x` executable file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, etc.). Prints chat prompt to stdout when work is found; exits 0 with empty stdout to skip; exits non-zero on error (fail-open). The hook gates **every** cron schedule on the agent; `TRINITY_SCHEDULE_ID` / `TRINITY_SCHEDULE_NAME` / `TRINITY_SCHEDULE_MESSAGE` in its environment name the one firing (#3966), so it can gate one schedule and print the others' message back.
+- **Backend endpoint** (internal, `X-Internal-Secret` auth): `POST /api/internal/agents/{name}/pre-check` — runs the script and returns stdout + exit code. Optional JSON body `{"schedule_id", "schedule_name", "schedule_message"}` (#3966; model `InternalPreCheckRequest`); a bodyless request runs the hook as before. Called only by `trinity-scheduler`.
 - **No operator-facing API change**: schedule CRUD endpoints and the Schedules UI are unchanged. Operators create normal cron schedules; agents own the gate.
 
 ## Frontend Layer
@@ -23,7 +23,7 @@ Uses `services/docker_service.execute_command_in_container` (the same primitive 
 
 Two exec steps:
 1. `test -f /home/developer/.trinity/pre-check` (5s timeout). If the file doesn't exist, return `{"hook_present": False}` immediately — scheduler treats as "no decision, fire as usual." Note `-f`, not `-x`: a file present but missing the executable bit is treated as "hook present" so the operator gets a 126 in the logs rather than a silent backward-compat fall-through.
-2. `/home/developer/.trinity/pre-check` (60s timeout). Trinity execs the path directly — no `python3` prefix. Interpreter resolution is the file's shebang. Returns the output (capped at 32 KB) and exit code.
+2. `/home/developer/.trinity/pre-check` (60s timeout). Trinity execs the path directly — no `python3` prefix. Interpreter resolution is the file's shebang. The schedule fields the request carried are exported as `TRINITY_SCHEDULE_ID` / `TRINITY_SCHEDULE_NAME` / `TRINITY_SCHEDULE_MESSAGE` through the exec's `environment` (Exec Create body, not argv; only the fields present, verbatim; none → no extra environment). Returns the output (capped at 32 KB) and exit code.
 
 Returns:
 ```json
@@ -31,9 +31,9 @@ Returns:
 ```
 
 ## Scheduler Layer
-**Service**: `src/scheduler/service.py` — `_run_pre_check(agent_name)`
+**Service**: `src/scheduler/service.py` — `_run_pre_check(agent_name, schedule=None)`
 
-Calls the backend's internal endpoint (not the agent directly — topology stays "scheduler → backend → agent"). The scheduler→backend HTTP call uses `config.pre_check_timeout` (env `PRE_CHECK_TIMEOUT`, default 70s — the agent-side hook deadline is 60s, this adds headroom; lifted from a literal in #1022). A timeout fails open (`None` → fire as usual) and is logged with the exception **type** rather than the empty parens a bare `httpx` timeout would otherwise print (#1022). Translates the backend response into a scheduler decision:
+Calls the backend's internal endpoint (not the agent directly — topology stays "scheduler → backend → agent"). `_apply_pre_check_gate` passes the firing schedule, whose id, name and message go in the request body (#3966); without a schedule the POST carries no body. The scheduler→backend HTTP call uses `config.pre_check_timeout` (env `PRE_CHECK_TIMEOUT`, default 70s — the agent-side hook deadline is 60s, this adds headroom; lifted from a literal in #1022). A timeout fails open (`None` → fire as usual) and is logged with the exception **type** rather than the empty parens a bare `httpx` timeout would otherwise print (#1022). Translates the backend response into a scheduler decision:
 
 | Backend response | Scheduler decision |
 |---|---|
@@ -48,7 +48,7 @@ Intercept point in `_execute_schedule_with_lock`: called only when `triggered_by
 ```python
 effective_message = schedule.message
 if triggered_by == "schedule":
-    decision = await self._run_pre_check(schedule.agent_name)
+    decision = await self._run_pre_check(schedule.agent_name, schedule)
     if decision is not None:
         if not decision.get("fire", True):
             self.db.create_skipped_execution(...)
@@ -115,6 +115,8 @@ New event type: `schedule_execution_skipped`.
 - `_execute_schedule_with_lock` branch — skip records execution with correct reason; fire-true with message uses override; fail-open routes through backend; fire-true without message uses `schedule.message`; manual trigger bypasses pre-check.
 
 Full scheduler suite: 162/162 passing (was 161 before; +1 for the new `malformed JSON` case).
+
+**Schedule identity** (`tests/unit/test_3966_pre_check_schedule_context.py`, #3966, in the per-PR unit island): each cron schedule reaches the backend with its own id/name/message; a schedule-less call stays bodyless; the stdout contract is unchanged; the backend exports exactly the fields sent (verbatim, quotes and newlines included) and none without a body; the endpoint hands the body to the service and still serves a bodyless request.
 
 No test file on the agent-server side — there's no agent-server router anymore.
 

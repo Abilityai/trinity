@@ -420,7 +420,7 @@ def test_two_different_messages_in_one_execution_produce_two_outbound_calls(monk
     monkeypatch.setattr(idem.db, "idempotency_claim", _claim, raising=False)
     monkeypatch.setattr(
         idem.db, "idempotency_complete",
-        lambda scope, key, execution_id, snapshot: store.__setitem__(key, snapshot),
+        lambda scope, key, execution_id, snapshot, **_: store.__setitem__(key, snapshot),
         raising=False,
     )
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
@@ -468,7 +468,7 @@ def test_the_same_label_within_one_execution_replays_without_a_second_call(monke
     monkeypatch.setattr(idem.db, "idempotency_claim", _claim, raising=False)
     monkeypatch.setattr(
         idem.db, "idempotency_complete",
-        lambda scope, key, execution_id, snapshot: store.__setitem__(key, snapshot),
+        lambda scope, key, execution_id, snapshot, **_: store.__setitem__(key, snapshot),
         raising=False,
     )
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
@@ -553,7 +553,7 @@ def test_a_failed_call_releases_the_claim_so_a_retry_is_possible(monkeypatch, en
     monkeypatch.setattr(idem.db, "idempotency_claim",
                         lambda scope, key: {"state": "new"}, raising=False)
     monkeypatch.setattr(idem.db, "idempotency_release",
-                        lambda scope, key: released.append(key), raising=False)
+                        lambda scope, key, **_: released.append(key), raising=False)
     monkeypatch.setattr(idem, "resolve_and_validate_execution",
                         lambda eid, agent: {"id": eid} if eid else None)
 
@@ -654,6 +654,22 @@ def test_both_routes_404_when_the_kill_switch_is_off(client, monkeypatch):
     assert client.http.post(
         "/api/agents/bot/a2a/task", json={"endpoint": "partner", "task_id": "t"}
     ).status_code == 404
+
+
+def test_with_the_switch_off_a_malformed_body_is_the_same_404(client, monkeypatch):
+    """trinity-enterprise#840: the switch is a DEPENDENCY, solved before the body
+    is validated, so a disabled route answers a body that fails schema
+    validation with the same 404 as a good one — not a 422 that says the route
+    exists (the aauth `require_live` shape). The service's own switch check
+    cannot do this: it runs after validation. With the switch on, the same body
+    is an ordinary 422. (JSON that does not parse is a 422 either way: FastAPI
+    decodes the body before it solves dependencies.)"""
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: False)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 404
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 404
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: True)
+    assert client.http.post("/api/agents/bot/a2a/call", json={}).status_code == 422
+    assert client.http.post("/api/agents/bot/a2a/task", json={}).status_code == 422
 
 
 def _settings_singleton():
@@ -1263,7 +1279,7 @@ def test_a_402_releases_the_claim_and_is_never_snapshotted(monkeypatch, endpoint
     monkeypatch.setattr(idem.db, "idempotency_claim",
                         lambda scope, key: {"state": "new"}, raising=False)
     monkeypatch.setattr(idem.db, "idempotency_release",
-                        lambda scope, key: released.append(key), raising=False)
+                        lambda scope, key, **_: released.append(key), raising=False)
     monkeypatch.setattr(idem.db, "idempotency_complete",
                         lambda *a, **k: completed.append(a), raising=False)
     monkeypatch.setattr(idem, "resolve_and_validate_execution",

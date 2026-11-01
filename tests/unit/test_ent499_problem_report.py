@@ -97,19 +97,24 @@ def test_no_client_address_appears_in_the_id():
 # --- the emitter -------------------------------------------------------------
 
 def _run(monkeypatch, *, comment, created=True, raises=False):
+    """#3254 re-pin (write-observation point): the report goes through
+    `platform_alerts.observe`, so that is what is faked. `seen["item"]` is the
+    reading as the seam receives it, with the budget type its kind carries."""
     from client_portal import service
-    import services.operator_queue_service as oqs
+    from services import platform_alerts
 
     seen = {}
 
-    async def _fake(agent_name, item):
+    def _fake(agent_name, kind, key=None, **kw):
         if raises:
             raise RuntimeError("queue down")
         seen["agent_name"] = agent_name
-        seen["item"] = item
-        return created
+        seen["item"] = {"kind": kind, "key": key,
+                        "type": platform_alerts.KINDS[kind].budgeted_type, **kw}
+        return (platform_alerts.OBSERVED_CREATED if created
+                else platform_alerts.OBSERVED_REFUSED_AT_BUDGET)
 
-    monkeypatch.setattr(oqs, "create_bounded_alert", _fake)
+    monkeypatch.setattr(platform_alerts, "observe", _fake)
     ok = asyncio.run(service.raise_problem_report(
         "analyst", "client@example.com",
         target_kind="message", target_id="m1", comment=comment))
@@ -208,7 +213,8 @@ def test_the_emitter_is_routed_not_allowlisted():
          node.func.id if isinstance(node.func, ast.Name) else "")
         for node in ast.walk(fn) if isinstance(node, ast.Call)
     }
-    assert "create_bounded_alert" in called
+    # #3254 re-pin: the budgeted seam is `platform_alerts.observe` now.
+    assert "observe" in called
     assert "create_operator_queue_item" not in called
 
 

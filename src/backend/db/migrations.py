@@ -4912,6 +4912,43 @@ def _migrate_execution_conversation_key(cursor, conn):
     conn.commit()
 
 
+
+def _migrate_execution_chat_session_id(cursor, conn):
+    """#3380 — a /chat turn names the thread it answers.
+
+    One nullable column on `schedule_executions`. The #2944 watchdog claims a
+    finished turn whose waiting connection a restart destroyed; without the
+    thread it could finalize the row but not write the reply into it.
+    Nullable, no backfill: old rows stay NULL and recover as before.
+    PostgreSQL half: Alembic `0106_execution_chat_session_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "chat_session_id",
+        "ALTER TABLE schedule_executions ADD COLUMN chat_session_id TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_idempotency_claim_token(cursor, conn):
+    """#3298 — an idempotency claim names its owner.
+
+    One nullable column on `idempotency_keys`. A claim left `in_flight` by a dead
+    process can now be reclaimed safely: attach/complete/release compare-and-set
+    on the token, so the original request, if it was only slow, cannot overwrite
+    or delete the reclaimer's row. Nullable, no backfill: a pre-existing claim
+    has no token and is matched by `IS NULL`.
+    PostgreSQL half: Alembic `0105_idempotency_claim_token`.
+    """
+    _safe_add_column(
+        cursor,
+        "idempotency_keys",
+        "claim_token",
+        "ALTER TABLE idempotency_keys ADD COLUMN claim_token TEXT",
+    )
+    conn.commit()
+
 def _migrate_metric_points_restatement(cursor, conn):
     """trinity-enterprise#729 — a corrected value restates its row (R45).
 
@@ -5343,6 +5380,59 @@ HELD_PORTAL_ROWS_BACKFILL = (
 )
 
 
+def _migrate_nevermined_delegations(cursor, conn):
+    """trinity-enterprise#966 — a person funds an agent with a card mandate
+    held by Nevermined.
+
+    * ``nevermined_organization`` — the instance's one Nevermined organization
+      (singleton row ``id = 'default'``): org id, environment, and the widget
+      secret + agent API key in one AES-256-GCM envelope (Invariant #12).
+    * ``agent_delegations`` — the delegation id a person bound to an agent. One
+      active row per agent, enforced by a partial unique index; a deleted
+      agent's row is kept (``agent_deleted_at``) as a financial record.
+
+    Additive. Idempotent. Mirrored by Alembic 0102_nevermined_delegations,
+    which executes the same statements (``NEVERMINED_DELEGATIONS_DDL``).
+    """
+    for statement in NEVERMINED_DELEGATIONS_DDL:
+        cursor.execute(statement)
+    conn.commit()
+
+
+# trinity-enterprise#966: shared by both tracks (`0102_nevermined_delegations`
+# imports it), so the SQLite and PostgreSQL tables cannot drift apart.
+NEVERMINED_DELEGATIONS_DDL = (
+    "CREATE TABLE IF NOT EXISTS nevermined_organization ("
+    " id TEXT PRIMARY KEY,"
+    " org_id TEXT NOT NULL,"
+    " environment TEXT NOT NULL,"
+    " encrypted_credentials TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " updated_at TEXT NOT NULL,"
+    " updated_by TEXT)",
+    "CREATE TABLE IF NOT EXISTS agent_delegations ("
+    " id TEXT PRIMARY KEY,"
+    " agent_name TEXT NOT NULL,"
+    " delegation_id TEXT NOT NULL,"
+    " payment_method_id TEXT,"
+    " provider TEXT,"
+    " environment TEXT NOT NULL,"
+    " api_key_injected INTEGER NOT NULL DEFAULT 0,"
+    " created_by TEXT NOT NULL,"
+    " created_at TEXT NOT NULL,"
+    " revoked_at TEXT,"
+    " revoked_by TEXT,"
+    " agent_deleted_at TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent"
+    " ON agent_delegations(agent_name, created_at DESC)",
+    # One active binding per agent at the DB, not only in service code. A
+    # deleted agent's kept row is not active: it must never block a later
+    # agent of the same name.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active"
+    " ON agent_delegations(agent_name)"
+    " WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
+)
+
 def _migrate_agent_peer_skill_grants(cursor, conn):
     """abilityai/trinity-enterprise#662 — a peer may run what an agent declares;
     what an admin assigned needs a grant.
@@ -5637,6 +5727,228 @@ def _migrate_agent_skill_gates(cursor, conn):
     conn.commit()
 
 
+def _migrate_a2a_caller_identity(cursor, conn):
+    """abilityai/trinity-enterprise#862 — store the AAuth peer identity that
+    triggered an inbound A2A execution so it is visible on the execution row.
+    Additive: NULL for all existing rows. Mirrored by Alembic 0103_a2a_caller_identity."""
+    _safe_add_column(
+        cursor, "schedule_executions", "a2a_caller_identity",
+        "ALTER TABLE schedule_executions ADD COLUMN a2a_caller_identity TEXT",
+    )
+    conn.commit()
+
+
+
+def _migrate_agent_sync_state_git_stats_at(cursor, conn):
+    """#4000 — `agent_sync_state.git_stats_at`: when the agent last measured
+    git_dir_bytes / pack_count / loose_objects (canary RD-04 ages it). Nullable,
+    no backfill: an old base image never sends it, and RD-04 falls back to
+    `last_sync_at` while it is NULL. Mirrored by Alembic
+    0104_agent_sync_state_git_stats_at."""
+    _safe_add_column(
+        cursor, "agent_sync_state", "git_stats_at",
+        "ALTER TABLE agent_sync_state ADD COLUMN git_stats_at TEXT",
+    )
+    conn.commit()
+
+
+def _migrate_agent_memory_facts(cursor, conn):
+    """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
+
+    One row per extracted fact, scoped by ``(agent_name, user_email)`` where
+    ``''`` is the agent scope shared with the owner. The partial unique index on
+    the live ``text_hash`` makes a two-worker duplicate an IntegrityError the
+    writer catches. Schema is also in db/schema.py for fresh installs; mirrored
+    by Alembic revision 0108_agent_memory_facts for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_memory_facts)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_facts (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL,
+                source TEXT NOT NULL,
+                execution_id TEXT,
+                recall_count INTEGER DEFAULT 0,
+                last_recalled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+        "ON agent_memory_facts(agent_name, user_email, deleted_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+        "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL"
+    )
+    conn.commit()
+    print("Created agent_memory_facts table with indexes (trinity-enterprise#1022)")
+
+
+def _migrate_agent_ownership_memory_opt_out(cursor, conn):
+    """trinity-enterprise#1022 — per-agent retrieval-memory opt-out.
+
+    Adds ``memory_opt_out INTEGER DEFAULT 0`` to ``agent_ownership``. The
+    platform switch (``trinity_memory_enabled``, default off) gates globally;
+    this column lets an owner keep one agent out once the platform is on.
+    Mirrored by Alembic revision 0109_agent_ownership_memory_opt_out.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "memory_opt_out",
+        "ALTER TABLE agent_ownership ADD COLUMN memory_opt_out INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_memory_provenance(cursor, conn):
+    """trinity-enterprise#1022 — fact provenance: the journal and the last writer.
+
+    ``agent_memory_fact_events`` is one append-only row per thing that happened
+    to a fact or to a candidate that never became one (add / update / delete /
+    none / screened / prune / recall / forget), keyed to the execution that did
+    it; ``agent_memory_facts.updated_by_execution_id`` is the last run that
+    rewrote or retired the row. Schema is also in db/schema.py for fresh
+    installs; mirrored by Alembic revision 0110_agent_memory_provenance.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_memory_facts",
+        "updated_by_execution_id",
+        "ALTER TABLE agent_memory_facts ADD COLUMN updated_by_execution_id TEXT",
+    )
+    cursor.execute("PRAGMA table_info(agent_memory_fact_events)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                fact_id TEXT,
+                op TEXT NOT NULL,
+                execution_id TEXT,
+                candidate_text TEXT,
+                previous_text TEXT,
+                neighbour_ids TEXT,
+                score REAL,
+                actor TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+        "ON agent_memory_fact_events(agent_name, fact_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+        "ON agent_memory_fact_events(agent_name, execution_id)"
+    )
+    conn.commit()
+    print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+
+# trinity-enterprise#529: which pre-existing rows are still the untouched bundled
+# seed, and so follow the platform's pin from now on. Shared verbatim by Alembic
+# 0107_skill_sources_follow_bundled_pin, so the two tracks cannot disagree.
+#
+# - The built-in catalog URL only: it is the only URL the seed ever wrote by
+#   default, and a fork may not carry the platform's next tag.
+# - A ref that was a bundled pin (`git log -G DEFAULT_SKILL_SOURCE_REF --
+#   config.py`: v0.1.0, v0.2.0, v0.3.0, v0.5.0). The list is frozen history.
+# - No `skill_source_update` audit row naming `ref`, `url` or `ref_type`: the
+#   PUT and apply routes record the field NAMES they were sent, so this keeps
+#   rows an admin retargeted and lets a toggle or a rename through ("where it
+#   points" decides, the owner's AC2 ruling). `enabled` is not checked: a
+#   disabled row is marked but stays paused, because the follow needs it on.
+#
+# Limits: the audit write is best-effort and audit rows are pruned after the
+# retention window, so a retarget whose row was lost and which landed on a
+# historical pin reads as untouched. Both routes audit the field NAMES they were
+# sent. For a PUT that is the runtime rule too (`update_source`: naming `ref`
+# ends following, even unchanged). A declarative `apply` (the MCP tools) that
+# re-states `ref` while changing only `priority` reads as touched here although
+# the runtime rule keeps it following (conservative: it stops, it never moves).
+SKILL_SOURCE_FOLLOW_BACKFILL_SQL = """
+    UPDATE skill_sources SET follows_bundled_pin = 1
+    WHERE is_default = 1
+      AND created_by = 'seed:ent237'
+      AND ref_type = 'tag'
+      AND url = 'github.com/abilityai/trinity-skills'
+      AND ref IN ('v0.1.0', 'v0.2.0', 'v0.3.0', 'v0.5.0')
+      AND NOT EXISTS (
+          SELECT 1 FROM audit_log a
+          WHERE a.target_type = 'skill_source'
+            AND a.target_id = skill_sources.id
+            AND a.event_action = 'skill_source_update'
+            AND (a.details LIKE '%"ref"%'
+                 OR a.details LIKE '%"url"%'
+                 OR a.details LIKE '%"ref_type"%')
+      )
+"""
+
+
+def _migrate_skill_sources_follow_bundled_pin(cursor, conn):
+    """trinity-enterprise#529 — the untouched default source follows the
+    platform's bundled pin. Adds the marker (`follows_bundled_pin`, set by the
+    seed, cleared by an admin retarget) and the latest-follow record
+    (`followed_from_ref`, `followed_at`), then backfills the marker for rows
+    seeded before it existed (`SKILL_SOURCE_FOLLOW_BACKFILL_SQL`). Mirrored by
+    Alembic 0107_skill_sources_follow_bundled_pin."""
+    _safe_add_column(
+        cursor, "skill_sources", "follows_bundled_pin",
+        "ALTER TABLE skill_sources ADD COLUMN follows_bundled_pin "
+        "INTEGER NOT NULL DEFAULT 0",
+    )
+    _safe_add_column(
+        cursor, "skill_sources", "followed_from_ref",
+        "ALTER TABLE skill_sources ADD COLUMN followed_from_ref TEXT",
+    )
+    _safe_add_column(
+        cursor, "skill_sources", "followed_at",
+        "ALTER TABLE skill_sources ADD COLUMN followed_at TEXT",
+    )
+    cursor.execute(SKILL_SOURCE_FOLLOW_BACKFILL_SQL)
+    conn.commit()
+
+
+def _migrate_platform_alert_subjects_resweep(cursor, conn):
+    """#3254 — the #3246 upgrade sweep, run a second time. Data only.
+
+    `platform_alert_subjects` swept the platform-alert backlog once, on the
+    upgrade that carried it. The emitters #3254 moves onto the seam kept
+    filing rows with no `subject` until each move landed, and the seam
+    cannot see such a row: `observe` would file a second pending row beside
+    it, `clear` could not end it, and the snooze could not see a person's
+    ending of it. This re-runs the unchanged `run_platform_alert_sweep` over
+    them: the subject's existing holder keeps the slot whatever its age
+    (#3255's rule), else the newest stays; the rest end as one `superseded`
+    batch. Agent-raised and gate rows, and the gitignore and problem-report
+    rows (no subject, no lifetime), are never touched; a git-bloat row gets
+    a lifetime only. A fresh install has no rows and plans nothing; a second
+    run plans nothing. Runs at import, before any emitter starts.
+
+    Mirrored by the Alembic revision 0111_platform_alert_resweep.
+    """
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -5808,4 +6120,14 @@ MIGRATIONS = [
     ("agent_peer_skill_grants", _migrate_agent_peer_skill_grants),
     ("admin_email_not_username", _migrate_admin_email_not_username),
     ("held_gate_turns", _migrate_held_gate_turns),
+    ("nevermined_delegations", _migrate_nevermined_delegations),
+    ("a2a_caller_identity", _migrate_a2a_caller_identity),
+    ("agent_sync_state_git_stats_at", _migrate_agent_sync_state_git_stats_at),
+    ("idempotency_claim_token", _migrate_idempotency_claim_token),
+    ("execution_chat_session_id", _migrate_execution_chat_session_id),
+    ("skill_sources_follow_bundled_pin", _migrate_skill_sources_follow_bundled_pin),
+    ("agent_memory_facts", _migrate_agent_memory_facts),
+    ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
+    ("agent_memory_provenance", _migrate_agent_memory_provenance),
+    ("platform_alert_subjects_resweep", _migrate_platform_alert_subjects_resweep),
 ]

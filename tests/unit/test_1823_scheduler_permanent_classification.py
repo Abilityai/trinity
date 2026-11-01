@@ -124,7 +124,7 @@ def _raise_zoneinfo_not_found(**_kwargs):
 def test_unresolvable_timezone_is_classified_permanent(monkeypatch, caplog):
     """ZoneInfoNotFoundError -> permanent arm: recorded, bounded, not retried."""
     module, svc = _service(monkeypatch)
-    monkeypatch.setattr(module, "CronTrigger", _raise_zoneinfo_not_found)
+    monkeypatch.setattr(module, "MonotonicCronTrigger", _raise_zoneinfo_not_found)
     schedule = _schedule(module)
 
     with caplog.at_level("ERROR"):
@@ -148,7 +148,7 @@ def test_permanent_failure_is_logged_only_once(monkeypatch, caplog):
     from a per-tick ERROR flood into a single diagnosable line.
     """
     module, svc = _service(monkeypatch)
-    monkeypatch.setattr(module, "CronTrigger", _raise_zoneinfo_not_found)
+    monkeypatch.setattr(module, "MonotonicCronTrigger", _raise_zoneinfo_not_found)
     schedule = _schedule(module)
 
     with caplog.at_level("ERROR"):
@@ -174,7 +174,7 @@ def test_transient_failure_is_still_transient(monkeypatch, caplog):
     def _boom(**_kwargs):
         raise RuntimeError("jobstore unavailable")
 
-    monkeypatch.setattr(module, "CronTrigger", _boom)
+    monkeypatch.setattr(module, "MonotonicCronTrigger", _boom)
     schedule = _schedule(module)
 
     with caplog.at_level("ERROR"):
@@ -199,7 +199,7 @@ def test_bare_keyerror_is_not_reclassified_as_permanent(monkeypatch, caplog):
     def _boom(**_kwargs):
         raise KeyError("some_internal_field")
 
-    monkeypatch.setattr(module, "CronTrigger", _boom)
+    monkeypatch.setattr(module, "MonotonicCronTrigger", _boom)
     schedule = _schedule(module)
 
     with caplog.at_level("ERROR"):

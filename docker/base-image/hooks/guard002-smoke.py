@@ -30,6 +30,8 @@ CASES = {
         ({"tool_name": "Write", "tool_input": {"file_path": "~/.ssh/id_rsa"}}, 2),
         ({"tool_name": "Write", "tool_input": {"file_path": "~/.claude.json"}}, 2),
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/notes.md"}}, 0),
+        ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/.env.local"}}, 2),
+        ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/.env.example"}}, 0),
     ],
     "read-only-guard.py": [
         ({"tool_name": "Write", "tool_input": {"file_path": "/home/developer/app.py"}}, 2),

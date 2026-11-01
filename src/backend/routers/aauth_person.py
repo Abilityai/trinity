@@ -15,8 +15,9 @@ Gates, in order:
    shared users and admins; here that would let a human make the backend sign
    as the agent, and the #623 invariant is that only the agent's own key path
    may cause a signature as that agent. A human principal gets 403
-   ``aauth_agent_only`` — stricter than ``a2a.py::_assert_outbound_self``,
-   which admits humans for attribution-only reasons. This is a *use* of the
+   ``aauth_agent_only`` — stricter than ``dependencies.assert_own_agent``
+   (the a2a call routes' self-gate), which admits humans for
+   attribution-only reasons. This is a *use* of the
    capability, not a grant, so ``reject_agent_principal`` is the wrong tool.
    An ephemeral ghost key is refused by construction (not on the
    ``_EPHEMERAL_ALLOWED_ROUTES`` fence); a connector key by

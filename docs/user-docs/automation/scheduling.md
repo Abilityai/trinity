@@ -282,7 +282,7 @@ An optional executable shipped by an agent template that gates each cron tick be
 ### How It Works
 
 1. The template ships `~/.trinity/pre-check` as an executable file with a shebang (`#!/usr/bin/env python3`, `#!/bin/bash`, etc.).
-2. Before each scheduled cron tick, Trinity runs the file inside the agent container.
+2. Before each scheduled cron tick, Trinity runs the file inside the agent container, with the firing schedule's id, name and message in its environment (see [For Template Authors](#for-template-authors)).
 3. The scheduler acts on the output:
 
 | Pre-check result | Scheduler action |
@@ -304,6 +304,16 @@ An optional executable shipped by an agent template that gates each cron tick be
 
 Place the hook at `~/.trinity/pre-check` (no extension), make it executable (`chmod +x`), and include a shebang. The hook receives no arguments. It should print the work description to stdout if there is work, or print nothing (empty stdout) if there is nothing to do.
 
+The hook runs before **every** cron schedule on the agent, and what it prints replaces the message of the schedule that is firing. Trinity tells it which schedule that is through three environment variables:
+
+| Variable | Value |
+|---|---|
+| `TRINITY_SCHEDULE_ID` | The firing schedule's id |
+| `TRINITY_SCHEDULE_NAME` | The firing schedule's name, as shown on the **Schedules** tab |
+| `TRINITY_SCHEDULE_MESSAGE` | The firing schedule's configured message, verbatim |
+
+An agent with more than one schedule should branch on them: gate the schedule the hook is for, and print `TRINITY_SCHEDULE_MESSAGE` back for the others so they run their own task. A name can be edited on the **Schedules** tab; key on the id if the hook must survive a rename. Output is capped at 32,000 characters, so a longer message is cut when printed back. Versions of Trinity before these variables existed leave them unset — a hook that may run there should treat an unset `TRINITY_SCHEDULE_ID` as "schedule unknown" rather than as "some other schedule".
+
 Example (Python):
 ```python
 #!/usr/bin/env python3
@@ -312,6 +322,21 @@ import sys
 if new_items:
     print(f"Review {len(new_items)} new PRs: {', '.join(new_items)}")
 # else: exit 0 with empty stdout → Trinity records a skip
+```
+
+Example (bash) — an agent with an hourly refresh and a daily brief, where only the refresh is gated:
+```bash
+#!/bin/bash
+# Every schedule except the hourly refresh runs its own message unchanged.
+if [ -n "$TRINITY_SCHEDULE_ID" ] && [ "$TRINITY_SCHEDULE_NAME" != "Hourly refresh" ]; then
+  printf '%s\n' "$TRINITY_SCHEDULE_MESSAGE"
+  exit 0
+fi
+# ... check for new data ...
+if [ -n "$new_data" ]; then
+  echo "/update-dashboard"
+fi
+# else: empty stdout → Trinity records a skip for the hourly refresh only
 ```
 
 ## Per-Schedule Timeout

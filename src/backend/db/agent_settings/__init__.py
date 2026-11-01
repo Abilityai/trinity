@@ -27,6 +27,7 @@ from .file_sharing import FileSharingMixin
 from .display_label import DisplayLabelMixin
 from .mcp_exposure import McpExposureMixin
 from .operator_resume import OperatorResumeMixin
+from .memory import MemoryOptOutMixin
 from .a2a_exposure import A2AExposureMixin
 from .tts import TtsMixin
 from .ephemeral import EphemeralMixin
@@ -43,6 +44,7 @@ __all__ = [
     'FileSharingMixin',
     'McpExposureMixin',
     'OperatorResumeMixin',
+    'MemoryOptOutMixin',
     'A2AExposureMixin',
     'TtsMixin',
     'EphemeralMixin',

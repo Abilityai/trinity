@@ -9,6 +9,7 @@
  * by count / max-day-total; hover shows the per-bucket breakdown.
  */
 import { ref, computed, nextTick, onBeforeUnmount } from 'vue'
+import { placeTooltip } from '@/utils/chartTooltip'
 
 const props = defineProps({
   // timeline points: [{ date, total, by_type: { bucket: count } }]
@@ -60,29 +61,15 @@ const hover = ref(null)
 // hovered bar. As an `absolute bottom-full` child of the bar it always opened
 // upward, so on the Workspace band — a 23px chart just under the header, inside
 // ScanlineReveal's clip-path — its top rows were covered and the date and top
-// buckets unreadable. Out of every parent, nothing can clip or cover it.
-const TIP_GAP = 4 // px between bar and tooltip (the old `mb-1`)
-const VIEWPORT_MARGIN = 8 // px the tooltip keeps from every viewport edge
+// buckets unreadable. Out of every parent, nothing can clip or cover it. The
+// placement rule itself (above / below / clamp) is
+// `utils/chartTooltip.js::placeTooltip`, shared with the Workspace band's wave
+// (trinity-enterprise#968) so the two charts cannot drift.
 const barEls = []
 const tipEl = ref(null)
 const tipPos = ref(null) // { top, left, side } once measured; hidden until then
 
 const hoverDay = computed(() => (hover.value == null ? null : props.data[hover.value]))
-
-// Above when it fits, else below when that fits, else whichever side has more
-// room (clamped). Horizontally centred on the bar, clamped into the viewport.
-function placeTooltip(bar, tip, vw, vh) {
-  const roomAbove = bar.top - TIP_GAP - VIEWPORT_MARGIN
-  const roomBelow = vh - bar.bottom - TIP_GAP - VIEWPORT_MARGIN
-  const side = tip.height <= roomAbove || (tip.height > roomBelow && roomAbove >= roomBelow)
-    ? 'above'
-    : 'below'
-  const rawTop = side === 'above' ? bar.top - TIP_GAP - tip.height : bar.bottom + TIP_GAP
-  const top = Math.max(VIEWPORT_MARGIN, Math.min(rawTop, vh - VIEWPORT_MARGIN - tip.height))
-  const rawLeft = bar.left + bar.width / 2 - tip.width / 2
-  const left = Math.max(VIEWPORT_MARGIN, Math.min(rawLeft, vw - VIEWPORT_MARGIN - tip.width))
-  return { top, left, side }
-}
 
 function positionTooltip() {
   const bar = hover.value == null ? null : barEls[hover.value]

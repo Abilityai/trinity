@@ -1,0 +1,65 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-22",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/419-memory-poisoning-gates",
+  "base": "dev f049d6731",
+  "issue": "abilityai/trinity-enterprise#419",
+  "phases_run": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_note": "Diff mode: each phase constrained to the changed files. Phases 3, 4 and 5 found no changed dependency, workflow, Dockerfile or compose file and so had nothing in scope.",
+  "stack_cve_quicklist": [
+    {"component": "Starlette (fastapi)", "verdict": "not reachable (diff)", "note": "The diff adds no request.url.path comparison; the new 422s are raised after Depends(get_current_user)."},
+    {"component": "Vite / Vitest", "verdict": "not reachable (diff)", "note": "No frontend change."},
+    {"component": "axios", "verdict": "not reachable (diff)", "note": "No lockfile change."},
+    {"component": "Redis image", "verdict": "not reachable (diff)", "note": "No Redis use added."},
+    {"component": "Claude Code in the base image", "verdict": "not reachable (diff)", "note": "No base-image change. The memory envelope now strips control characters, so a NUL in stored memory can no longer reach the --append-system-prompt argument (it failed the spawn with 'embedded null byte' before)."},
+    {"component": "runc / Docker host", "verdict": "not reachable (diff)", "note": "No exec path added."},
+    {"component": "Node CLIs in the base image", "verdict": "not reachable (diff)", "note": "No Dockerfile change."}
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "POST /api/agents/{agent_name}/user-memory (agent key, own agent only; adds the one-to-one channel rule and the write-boundary screen; both refuse with 422 after the existing 403/404 checks)",
+      "POST /api/agents/{agent_name}/decisions (the same one-to-one channel rule in _seat_for; validate_record screens decided/criterion/reversal)"
+    ],
+    "agent_context_ingress_changed": [
+      "MEM-001 memory block (format_user_memory_block): agent notes + conversation summary now inside a nonce'd, margined envelope; seat decisions follow with their own framing line, one line per field",
+      "Background summarizer prompt: each chat message clamped to 4,000 characters and margined under its role label; output screened, tripping lines dropped",
+      "Telegram group history block: delimiter copies defanged in one pass instead of deleted"
+    ],
+    "mcp_tools_changed": ["write_user_memory (description only)"]
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    {
+      "phase": 7,
+      "item": "End-to-end probe of POST /user-memory and of a rendered system prompt on a running stack",
+      "reason": "The operator asked for no live tests against localhost in this session. Unit coverage executes the router, the real format_user_memory_block, the summarizer and portal_chat -> execute_task(system_prompt=...); a sibling-stack run (/verify-local --skip-agent) follows."
+    },
+    {
+      "phase": 3,
+      "item": "Dependency scanners",
+      "reason": "Not run: the diff changes no dependency pin, lockfile or image install, so there is nothing new to scan."
+    }
+  ],
+  "verification": {
+    "identity_fields": "source_channel_client is stamped server-side only: message_router (verified speaker, one-to-one turns), client_portal, rooms (triggered_by=room), delegation inheritance (agent/mcp triggers), skill-gate replay (frozen from the original turn), internal scheduler path (X-Internal-Secret). No caller-supplied path sets it together with a channel trigger.",
+    "redos": "Crafted 8,000-character inputs (dotted domains, cue floods, label floods, pipe floods, combining marks, bullet/quote floods): worst 38.6 ms for prepare_write with a previous + screen_field. Summarizer-scale inputs to margin_lines (300k nested markers, 400k blank lines) are linear and pinned by time-budget tests.",
+    "secrets_in_diff": "none (prefix scan over the full diff and new files)",
+    "invisible_unicode_in_shipped_text": "none (tag-block, zero-width, bidi scan over changed non-test files)",
+    "failure_directions": "Router screen fail-closed (an exception is a 500; nothing stored). Envelope failure drops the memory for the turn (fail-closed for injection, logged). Summarizer screen inside its existing catch-all: an exception stores nothing. Missing source_channel_client resolves to a refusal, never to source_user_email. All stated in docstrings/comments.",
+    "tests": "tests/unit/test_ent419_memory_poisoning_gates.py 168 passed; 21/21 mutants killed (incl. a line-keyed exemption mutant that reopens the reorder/re-context/respell bypass); neighbouring suites 2,161 passed; MCP suite green."
+  },
+  "supply_chain_summary": {"scanner": "none needed (no dependency change in the diff)", "new_install_scripts": 0},
+  "filter_stats": {"candidates_considered": 9, "below_gate": 0, "hard_excluded": 0, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": {
+    "prior_reports_checked": ["cso-2026-09-29", "cso-2026-09-30"],
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "note": "Prior full runs list write_user_memory only in the agent-context ingress map (ASI06), not as a finding. This diff adds the screen and envelope on that ingress; the next full run should record the row as screened + enveloped."
+  }
+}

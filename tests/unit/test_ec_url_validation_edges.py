@@ -465,24 +465,27 @@ def test_C13_resolution_happens_exactly_once_and_the_answer_is_what_is_returned(
         pytest.param("https://" + "a" * 64 + ".example.com/", id="C12-label-64"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=UnicodeError,
-    reason=(
-        "BUG: a host the idna codec refuses escapes _validate_public_https_url as a "
-        "bare UnicodeError, not a PublicUrlRefusal with a kind — see #3322"
-    ),
-)
 def test_C12_an_unencodable_ascii_host_is_a_named_refusal(url):
     """`canonical_host`'s ASCII fallback re-admits a host `idna` rightly refused
     (empty label / >63 chars), and CPython's `getaddrinfo` then raises
-    `UnicodeError` from its own `idna` encode — not `gaierror`, so the
-    `except socket.gaierror` arm misses it. Fail-closed (it is still a
-    ValueError), but kind-less: the template-registry route echoes the codec's
-    text as its 400 detail, and the A2A wrapper can only guess `endpoint_invalid`.
-    """
-    with pytest.raises(uv.PublicUrlRefusal):
+    `UnicodeError` from its own `idna` encode, not `gaierror`. It must surface
+    as a `PublicUrlRefusal` of kind `invalid` with our own message, so the
+    template-registry route never echoes the codec's text and the A2A wrapper
+    gets a real reason (#3322)."""
+    with pytest.raises(uv.PublicUrlRefusal) as exc:
         _shared(url, FaithfulResolver({"peer.example.com": [PUBLIC_V4]}))
+    assert exc.value.kind == "invalid"
+    assert "idna" not in str(exc.value).lower()
+
+
+def test_C12_the_trusted_a2a_path_refuses_an_unencodable_host_by_name():
+    """The trusted-network arm resolves the host itself; a codec refusal there
+    must fall through to the ordinary refusal, not escape as UnicodeError."""
+    with pytest.raises(uv.A2AEndpointUrlError) as exc:
+        uv.validate_a2a_endpoint_url(
+            "http://a..example.com/", trusted_entries=["*.example.com"], resolver=FaithfulResolver()
+        )
+    assert exc.value.reason == "endpoint_not_https"
 
 
 @pytest.mark.parametrize(
@@ -635,25 +638,14 @@ def test_D3_preconditions_the_shape_is_live_and_carries_userinfo(gh_dns, url):
         pytest.param("o]/r", id="D4-shorthand-close-bracket"),
     ],
 )
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason=(
-        "BUG: reject_embedded_credentials leaks urlparse's bare ValueError('Invalid "
-        "IPv6 URL') on a bracket in the authority; the skills-source routes catch only "
-        "EmbeddedCredentialError, so a typo is a 500 — #3322"
-    ),
-)
 def test_D4_a_malformed_authority_is_not_a_bare_value_error(url):
-    """`routers/skills.py:940-943` (create) and `:983-986` (update) wrap this call
-    in `except EmbeddedCredentialError` ONLY, and run it BEFORE
-    `validate_skills_library_url` — whose own `except Exception -> "Invalid URL
-    format"` would have produced the 400. No global ValueError handler is
-    registered in `main.py`, so the request 500s. `strip_url_credentials` in the
-    same module documents this exact `urlparse` raise and guards it.
+    """The skills-source routes (`routers/skills.py` create, update and
+    `_validated_source_url`) wrap this call in `except EmbeddedCredentialError`
+    ONLY, and run it BEFORE `validate_skills_library_url`. No global ValueError
+    handler is registered in `main.py`, so a plain ValueError here is a 500.
 
     Expected: either `EmbeddedCredentialError` or no raise — never a plain
-    ValueError the route cannot map."""
+    ValueError the route cannot map (#3322)."""
     try:
         uv.reject_embedded_credentials(url)
     except uv.EmbeddedCredentialError:
@@ -661,8 +653,14 @@ def test_D4_a_malformed_authority_is_not_a_bare_value_error(url):
 
 
 @pytest.mark.parametrize("url", ["https://[::1/x", "x[/y", "o]/r"])
-def test_D4_preconditions_the_raise_is_a_plain_value_error_from_urlparse(url):
-    with pytest.raises(ValueError) as exc:
+def test_D4_the_validator_then_refuses_the_malformed_url(url):
+    """The other half of D4: with no bare raise from the credential check, the
+    route's next call names the bad URL itself, so the route answers 400."""
+    with pytest.raises(ValueError, match="Invalid URL format"):
+        uv.validate_skills_library_url(url)
+
+
+@pytest.mark.parametrize("url", ["https://tok@[::1/x", "x@[/y", "//tok@[oops"])
+def test_D4_a_userinfo_is_still_refused_when_urlparse_cannot_parse(url):
+    with pytest.raises(uv.EmbeddedCredentialError):
         uv.reject_embedded_credentials(url)
-    assert not isinstance(exc.value, uv.EmbeddedCredentialError)
-    assert "IPv6" in str(exc.value)

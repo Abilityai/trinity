@@ -21,6 +21,7 @@ from collections import defaultdict
 
 from database import db
 from services.docker_service import get_agent_container
+from services import memory_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     build_voice_capability_prompt,
@@ -338,6 +339,12 @@ def _check_rate_limit(key: str, max_msgs: Optional[int] = None, window: Optional
         return False
     _rate_limit_buckets[key].append(now)
     return True
+
+
+# #3603: what a channel member is told when a turn does not answer. A failed
+# turn's error is for the operator and never reaches the chat.
+CHANNEL_FAILURE_MESSAGE = "Sorry, I encountered an error processing your message. Please try again."
+CHANNEL_CANCELLED_MESSAGE = "That request was cancelled before it was answered."  # always, never the row's error
 
 
 class ChannelMessageRouter:
@@ -789,7 +796,10 @@ class ChannelMessageRouter:
                 user_memory = db.get_or_create_public_user_memory(
                     agent_name, verified_email
                 )
-                memory_system_prompt = format_user_memory_block(user_memory)
+                # trinity-enterprise#1022: retrieval memory for this message —
+                # same gate as the block (verified + one-to-one), fail-open.
+                retrieved = await memory_service.recall(agent_name, verified_email, message.text)
+                memory_system_prompt = format_user_memory_block(user_memory, retrieved=retrieved)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
@@ -877,11 +887,19 @@ class ChannelMessageRouter:
                 logger.info(f"[ROUTER:{channel}] Step 9 - task {result.status}: {error_msg}")
                 await self._resolve_indicator(adapter, message, success=False)
 
-                # Reply with the actual error if available, otherwise generic message
-                if error_msg and error_msg != "Unknown error":
-                    response_text = error_msg
+                # #3603: the error is the operator's diagnosis (a missing model
+                # key, an exit code, where to fix a credential) and a channel is
+                # read by its members — every member, in a group. They get a
+                # plain line; the detail stays on the execution row and in the
+                # log line above (the public-chat twin is #3478). A cancelled
+                # turn still says so (#679), in the fixed line: on a pull-pilot
+                # agent a terminated turn keeps the failure body's content and
+                # the pull sink stores it as the cancelled row's error, so that
+                # error can be the operator's too.
+                if result.status == "cancelled":
+                    response_text = CHANNEL_CANCELLED_MESSAGE
                 else:
-                    response_text = "Sorry, I encountered an error processing your message."
+                    response_text = CHANNEL_FAILURE_MESSAGE
 
                 await adapter.send_response(
                     message.channel_id,
@@ -917,7 +935,7 @@ class ChannelMessageRouter:
             await adapter.send_response(
                 message.channel_id,
                 ChannelResponse(
-                    text="Sorry, I encountered an error processing your message. Please try again.",
+                    text=CHANNEL_FAILURE_MESSAGE,
                     metadata={"bot_token": bot_token, "agent_name": agent_name}
                 ),
                 thread_id=message.thread_id,

@@ -37,7 +37,7 @@ Explicit permission model controlling which agents can communicate with which. R
 **A peer may run what an agent declares; what an admin assigned needs a grant.**
 
 - A permission lets Agent A run the skills Agent B **declares itself** (the skills in B's own repository).
-- A skill **assigned to B from the skills library** (one at a time, or through a skill set) is not included. When A asks B to run it, the call is refused with `skill_not_granted` and nothing runs. The refusal is recorded in the audit log.
+- A skill **assigned to B from the skills library** (one at a time, or through a skill set) is not included. When A asks B to run it, the call is refused with `skill_not_granted` and nothing runs. The refusal is recorded in the audit log. A message that only mentions such a skill with a leading slash (`/skill-name`) is refused too; writing the name without the slash delivers it.
 - B itself, B's schedules and B's loops can always run every skill B holds. People are unaffected.
 - An agent can run every skill on an agent **it spawned**. The reverse is not true: a spawned agent calling its parent needs a grant like any other agent.
 - To let A run one library skill on B, an admin turns it on in A's **Permissions** tab, under **Library skills on agents this agent can call**. Each skill is granted separately and can be turned off again. Removing A's permission to call B also removes these grants.
@@ -60,6 +60,7 @@ Turning **Mount Shared Folders** off on the consuming agent works the same way: 
 ## For Agents
 
 - Agents do not need to handle permissions themselves. Granting and withdrawing is **human-only**: an agent-scoped API key is refused on the write routes below, so an agent can never grant itself or another agent access.
+- Read an agent's permission edges over MCP with `get_agent_permissions`. The list is observed within the caller's view (`observed_within`): an edge whose target has no container, or that you cannot reach, is not listed, so a missing edge is not a removed edge. Granting stays in the UI.
 - The MCP tools that reach another agent's work check the permission before they run: chat, loops, and the tools that read another agent's schedules, executions, fan-out batches, reports, and operator-queue items. No special handling is required in agent code — read the `Access denied` result and ask the owner for a grant.
 
 **API Endpoints**: See [Backend API Docs](http://localhost:8000/docs) for full schemas.

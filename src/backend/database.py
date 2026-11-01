@@ -132,6 +132,7 @@ from db.shared_folders import SharedFolderOperations
 from db.agent_shared_files import AgentSharedFilesOperations
 from db.settings import SettingsOperations
 from db.public_links import PublicLinkOperations
+from db.memory_facts import MemoryFactOperations  # trinity-enterprise#1022 retrieval memory
 from db.email_auth import EmailAuthOperations
 from db.skills import SkillsOperations
 from db.skill_sets import SkillSetsOperations
@@ -151,6 +152,7 @@ from db.dashboard_history import DashboardHistoryOperations
 from db.slack import SlackOperations
 from db.slack_channels import SlackChannelOperations
 from db.nevermined import NeverminedOperations
+from db.nevermined_delegation import NeverminedDelegationOperations
 from db.operator_queue import OperatorQueueOperations
 from db.queue_mentions import QueueMentionOperations
 from db.event_subscriptions import EventSubscriptionOperations
@@ -457,11 +459,12 @@ _DEFAULT_SOURCE_SEED_NOTE = (
 def _default_skill_source_values():
     """The seed row, or None when seeding is disabled/misconfigured."""
     from config import (
+        BUNDLED_SKILL_SOURCE_URL,
         DEFAULT_SKILL_SOURCE_NAME,
         DEFAULT_SKILL_SOURCE_REF,
         DEFAULT_SKILL_SOURCE_URL,
     )
-    from db.skill_sources import DEFAULT_SOURCE_PRIORITY
+    from db.skill_sources import DEFAULT_SOURCE_PRIORITY, SEED_CREATED_BY
 
     url = (DEFAULT_SKILL_SOURCE_URL or "").strip()
     ref = (DEFAULT_SKILL_SOURCE_REF or "").strip()
@@ -478,7 +481,10 @@ def _default_skill_source_values():
         "enabled": 1,
         "priority": DEFAULT_SOURCE_PRIORITY,
         "last_sync_status": "never",
-        "created_by": "seed:ent237",
+        "created_by": SEED_CREATED_BY,
+        # trinity-enterprise#529: the built-in catalog follows the platform's
+        # pin on upgrade; a seed pointed at a fork does not.
+        "follows_bundled_pin": 1 if url == BUNDLED_SKILL_SOURCE_URL else 0,
     }
 
 
@@ -510,13 +516,14 @@ def _seed_fresh_install_skill_source(cursor, conn):
         cursor.execute(
             "INSERT OR IGNORE INTO skill_sources "
             "(id, name, url, ref, ref_type, is_default, enabled, priority, "
-            " last_sync_status, created_by, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " last_sync_status, created_by, follows_bundled_pin, "
+            " created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 values["id"], values["name"], values["url"], values["ref"],
                 values["ref_type"], values["is_default"], values["enabled"],
                 values["priority"], values["last_sync_status"],
-                values["created_by"], now, now,
+                values["created_by"], values["follows_bundled_pin"], now, now,
             ),
         )
         conn.commit()
@@ -865,15 +872,31 @@ _NO_ADMIN_AT_BOOT_NOTE = (
 )
 
 
+# #3825: printed when boot leaves the admin password alone because it was
+# changed in the app after this ADMIN_PASSWORD value was applied. Literal text
+# plus the username only: nothing derived from either password reaches a log.
+_ADMIN_ENV_SKIPPED_NOTE = (
+    "ADMIN_PASSWORD not re-applied to admin user '%s': the password was changed "
+    "in the app after this value was applied. To reset it from .env, set a "
+    "different value and restart."
+)
+
+
 def _ensure_admin_user_engine():
     """Ensure the admin user exists — engine-based path for PostgreSQL (#300).
 
     Reuses the dialect-agnostic ``UserOperations`` (already on SQLAlchemy Core)
-    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB;
-    updates the password when the env password no longer verifies.
+    instead of the raw-cursor sqlite path. Creates the admin on a fresh DB, and
+    re-applies the env password only when it differs from the one last applied
+    (#3825, ``utils.admin_identity.env_apply_decision``).
     """
+    from db.settings import SettingsOperations
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision, fingerprint_value,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
     if not admin_password:
         print(_NO_ADMIN_AT_BOOT_NOTE)
         return
@@ -882,32 +905,52 @@ def _ensure_admin_user_engine():
     pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     user_ops = UserOperations()
-    existing = user_ops.get_user_by_username(admin_username)
+    settings_ops = SettingsOperations()
+    existing = user_ops.get_user_by_username(name)
     if existing is None:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Created admin user '{admin_username}' with hashed password")
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+        print(f"Created admin user '{name}' with hashed password")
         return
 
-    existing_hash = existing.get("password")
-    needs_update = False
-    if existing_hash and not existing_hash.startswith("$2"):
-        needs_update = existing_hash == admin_password  # plaintext → bcrypt
-    elif existing_hash:
-        try:
-            needs_update = not pwd_context.verify(admin_password, existing_hash)
-        except Exception:
-            needs_update = True
-    else:
-        needs_update = True
-    if needs_update:
-        user_ops.update_user_password(admin_username, pwd_context.hash(admin_password))
-        print(f"Updated admin user '{admin_username}' password")
+    action, record = env_apply_decision(
+        admin_password, existing.get("password"),
+        settings_ops.get_setting_value(ADMIN_ENV_FINGERPRINT_KEY), name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        user_ops.update_user_password(name, pwd_context.hash(admin_password))
+        print(f"Updated admin user '{name}' password")
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        settings_ops.set_setting(
+            ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, pwd_context.hash(admin_password)))
+
+
+def _record_admin_env_fingerprint(cursor, conn, name, hashed):
+    """SQLite half of the #3825 fingerprint write (see `env_apply_decision`)."""
+    from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value
+
+    cursor.execute(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (ADMIN_ENV_FINGERPRINT_KEY, fingerprint_value(name, hashed), utc_now_iso()),
+    )
+    conn.commit()
 
 
 def _ensure_admin_user(cursor, conn):
-    """Ensure the admin user exists with properly hashed password."""
+    """Ensure the admin user exists with properly hashed password.
+
+    Re-applies `ADMIN_PASSWORD` only when it differs from the value last applied
+    (#3825), so a password changed in the app survives a restart."""
+    from utils.admin_identity import (
+        ADMIN_ENV_FINGERPRINT_KEY, ENV_APPLY, ENV_SKIP, env_apply_decision,
+    )
+
     admin_password = os.getenv("ADMIN_PASSWORD", "")
-    admin_username = os.getenv("ADMIN_USERNAME", "admin")
+    name = admin_username()
 
     # Warn operators if ADMIN_PASSWORD doesn't meet complexity requirements
     if admin_password:
@@ -922,7 +965,7 @@ def _ensure_admin_user(cursor, conn):
         except ImportError:
             pass  # password_validation module not available during early init
 
-    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (admin_username,))
+    cursor.execute("SELECT id, password_hash FROM users WHERE username = ?", (name,))
     existing = cursor.fetchone()
 
     if existing is None:
@@ -940,39 +983,37 @@ def _ensure_admin_user(cursor, conn):
         cursor.execute("""
             INSERT INTO users (username, password_hash, role, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (admin_username, hashed, "admin", now, now))
+        """, (name, hashed, "admin", now, now))
         conn.commit()
-        print(f"Created admin user '{admin_username}' with hashed password")
-    else:
-        # Check if existing password needs update (migration or change)
-        existing_hash = existing[1]
-        should_update = False
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
+        print(f"Created admin user '{name}' with hashed password")
+        return
 
-        from passlib.context import CryptContext
-        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+    if not admin_password:
+        return
 
-        if existing_hash and not existing_hash.startswith("$2"):
-            # Password is likely plaintext (bcrypt hashes start with $2)
-            if admin_password and existing_hash == admin_password:
-                should_update = True
-                print(f"Migrating admin user '{admin_username}' password from plaintext to bcrypt")
-        elif admin_password:
-            # Check if environment password matches DB hash
-            try:
-                if not pwd_context.verify(admin_password, existing_hash):
-                    should_update = True
-                    print(f"Environment password changed - updating admin user '{admin_username}'")
-            except Exception as e:
-                print(f"Error verifying password hash: {e}")
-                should_update = True
+    from passlib.context import CryptContext
+    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-        if should_update and admin_password:
-            hashed = pwd_context.hash(admin_password)
-            cursor.execute("""
-                UPDATE users SET password_hash = ?, updated_at = ?
-                WHERE username = ?
-            """, (hashed, utc_now_iso(), admin_username))
-            conn.commit()
+    cursor.execute("SELECT value FROM system_settings WHERE key = ?", (ADMIN_ENV_FINGERPRINT_KEY,))
+    row = cursor.fetchone()
+    action, record = env_apply_decision(
+        admin_password, existing[1], row[0] if row else None, name, pwd_context.verify,
+    )
+    if action == ENV_APPLY:
+        if existing[1] and not existing[1].startswith("$2"):
+            print(f"Migrating admin user '{name}' password from plaintext to bcrypt")
+        else:
+            print(f"Environment password changed - updating admin user '{name}'")
+        cursor.execute("""
+            UPDATE users SET password_hash = ?, updated_at = ?
+            WHERE username = ?
+        """, (pwd_context.hash(admin_password), utc_now_iso(), name))
+        conn.commit()
+    elif action == ENV_SKIP:
+        print(_ADMIN_ENV_SKIPPED_NOTE % name)
+    if record:
+        _record_admin_env_fingerprint(cursor, conn, name, pwd_context.hash(admin_password))
 
 
 class DatabaseManager:
@@ -1016,6 +1057,7 @@ class DatabaseManager:
         self._agent_shared_files_ops = AgentSharedFilesOperations()
         self._settings_ops = SettingsOperations()
         self._public_link_ops = PublicLinkOperations(self._user_ops, self._agent_ops)
+        self._memory_fact_ops = MemoryFactOperations()  # trinity-enterprise#1022
         self._email_auth_ops = EmailAuthOperations(self._user_ops)
         self._skills_ops = SkillsOperations()
         self._skill_sets_ops = SkillSetsOperations()
@@ -1035,6 +1077,7 @@ class DatabaseManager:
         self._slack_ops = SlackOperations()
         self._slack_channel_ops = SlackChannelOperations()
         self._nevermined_ops = NeverminedOperations()
+        self._nevermined_delegation_ops = NeverminedDelegationOperations()  # ent#966
         self._operator_queue_ops = OperatorQueueOperations()
         self._queue_mention_ops = QueueMentionOperations()  # trinity-enterprise#631
         self._event_subscription_ops = EventSubscriptionOperations()
@@ -1593,6 +1636,16 @@ class DatabaseManager:
     def release_claim_to_queued(self, execution_id: str) -> bool:
         return self._schedule_ops.release_claim_to_queued(execution_id)
 
+    # SUB-003 walk on a pulled turn (#3487)
+    def rotate_claim_token(self, execution_id: str, old_token: str, new_token: str) -> bool:
+        return self._schedule_ops.rotate_claim_token(execution_id, old_token, new_token)
+
+    def holds_claim_token(self, execution_id: str, claim_token: str) -> bool:
+        return self._schedule_ops.holds_claim_token(execution_id, claim_token)
+
+    def set_backlog_metadata_for_token(self, execution_id: str, claim_token: str, backlog_metadata: str) -> bool:
+        return self._schedule_ops.set_backlog_metadata_for_token(execution_id, claim_token, backlog_metadata)
+
     # Lease reaper (#1081 Phase 3 — #429 / #1402)
     def find_expired_leases(self, now_iso: str = None, limit: int = 500):
         return self._schedule_ops.find_expired_leases(now_iso, limit)
@@ -1858,6 +1911,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_running_turn_attribution(self, agent_name: str):
+        """Who each of the agent's running turns is for (trinity-enterprise#926)."""
+        return self._schedule_ops.get_running_turn_attribution(agent_name)
+
     def create_schedule_execution(
         self,
         schedule_id: str,
@@ -1890,6 +1947,14 @@ class DatabaseManager:
         """#3470 — re-point a row's SUB-004 attribution to the subscription that served."""
         return self._schedule_ops.set_execution_subscription(execution_id, subscription_id)
 
+    def set_execution_chat_session(self, execution_id: str, chat_session_id: str) -> bool:
+        """#3380 — name the /chat thread this turn answers."""
+        return self._schedule_ops.set_execution_chat_session(execution_id, chat_session_id)
+
+    def get_execution_chat_session_id(self, execution_id: str):
+        """#3380 — the /chat thread a turn answers, or None."""
+        return self._schedule_ops.get_execution_chat_session_id(execution_id)
+
     def resume_session_belongs_to_user(
         self, agent_name: str, claude_session_id: str, user_id: int
     ) -> bool:
@@ -1897,8 +1962,11 @@ class DatabaseManager:
             agent_name, claude_session_id, user_id
         )
 
-    def get_schedule_executions(self, schedule_id: str, limit: int = 50):
-        return self._schedule_ops.get_schedule_executions(schedule_id, limit)
+    def get_schedule_executions(self, schedule_id: str, limit: int = 50, *,
+                                source_user_id=None, include_unattributed=False):
+        return self._schedule_ops.get_schedule_executions(
+            schedule_id, limit, source_user_id=source_user_id,
+            include_unattributed=include_unattributed)
 
     def get_latest_execution_per_schedule(self, schedule_ids: list):
         return self._schedule_ops.get_latest_execution_per_schedule(schedule_ids)
@@ -1908,7 +1976,7 @@ class DatabaseManager:
 
     def get_agent_executions_summary(self, agent_name: str, limit: int = 50, *,
                                      exclude_triggers=None, scope_to_viewer=False,
-                                     viewer_email=None):
+                                     viewer_email=None, source_user_id=None):
         """Get execution summaries for list view - excludes large text fields.
 
         `exclude_triggers` filters before the LIMIT — see the operation's own
@@ -1918,7 +1986,8 @@ class DatabaseManager:
         """
         return self._schedule_ops.get_agent_executions_summary(
             agent_name, limit, exclude_triggers=exclude_triggers,
-            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email)
+            scope_to_viewer=scope_to_viewer, viewer_email=viewer_email,
+            source_user_id=source_user_id)
 
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
@@ -1930,9 +1999,11 @@ class DatabaseManager:
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
         return self._schedule_ops.get_execution_failure_stamp(execution_id)
 
-    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200):
+    def get_fan_out_executions(self, agent_name: str, fan_out_id: str, limit: int = 200, *,
+                               source_user_id=None):
         """Every execution row of one fan-out batch (#2670)."""
-        return self._schedule_ops.get_fan_out_executions(agent_name, fan_out_id, limit)
+        return self._schedule_ops.get_fan_out_executions(
+            agent_name, fan_out_id, limit, source_user_id=source_user_id)
 
     def get_all_agents_execution_stats(self, hours: int = 24):
         """Get execution statistics for all agents."""
@@ -1962,9 +2033,10 @@ class DatabaseManager:
         """ent#549 — this agent's RUNNING turns in one conversation."""
         return self._schedule_ops.get_running_in_conversation(agent_name, source_channel, chat_id)
 
-    def get_fleet_execution_stats(self, agent_names, hours: int = 24):
-        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18)."""
-        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours)
+    def get_fleet_execution_stats(self, agent_names, hours: int = 24, **own_rows):
+        """Aggregate stats for the fleet executions stat cards (EXEC-022 / Issue #18).
+        `own_rows` is the ent#875 narrowing (`own_rows_user_id` / `_email` / `_exempt_agents`)."""
+        return self._schedule_ops.get_fleet_execution_stats(agent_names, hours, **own_rows)
 
     def get_fleet_execution_timeline(self, agent_names, group_by: str, hours: int,
                                      split: str = None):
@@ -2232,8 +2304,10 @@ class DatabaseManager:
     def get_agent_activities(self, agent_name: str, activity_type: str = None, activity_state: str = None, limit: int = 100):
         return self._activity_ops.get_agent_activities(agent_name, activity_type, activity_state, limit)
 
-    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None):
-        return self._activity_ops.get_activities_in_range(start_time, end_time, activity_types, limit, agent_names)
+    def get_activities_in_range(self, start_time: str = None, end_time: str = None, activity_types: list = None, limit: int = 100, agent_names: list = None, *, own_rows_user_id=None, own_rows_exempt_agents=None):
+        return self._activity_ops.get_activities_in_range(
+            start_time, end_time, activity_types, limit, agent_names,
+            own_rows_user_id=own_rows_user_id, own_rows_exempt_agents=own_rows_exempt_agents)
 
     def get_latest_activity_for_agents(self, agent_names: list):
         return self._activity_ops.get_latest_activity_for_agents(agent_names)
@@ -2719,8 +2793,9 @@ class DatabaseManager:
         return self._public_link_ops.list_agent_public_links(agent_name)
 
     def update_public_link(self, link_id: str, name: str = None, enabled: bool = None,
-                           expires_at: str = None):
-        return self._public_link_ops.update_public_link(link_id, name, enabled, expires_at)
+                           expires_at: str = None, clear_expiry: bool = False):
+        return self._public_link_ops.update_public_link(
+            link_id, name, enabled, expires_at, clear_expiry=clear_expiry)
 
     def delete_public_link(self, link_id: str):
         return self._public_link_ops.delete_public_link(link_id)
@@ -2993,6 +3068,9 @@ class DatabaseManager:
     def update_skill_source(self, source_id: str, **fields):
         return self._skill_sources_ops.update_source(source_id, **fields)
 
+    def follow_skill_source_pin(self, source_id: str, **kwargs):
+        return self._skill_sources_ops.follow_bundled_pin(source_id, **kwargs)
+
     def delete_skill_source(self, source_id: str):
         return self._skill_sources_ops.delete_source(source_id)
 
@@ -3110,12 +3188,8 @@ class DatabaseManager:
     def increment_public_user_memory_count(self, agent_name: str, user_email: str) -> int:
         return self._public_link_ops.increment_message_count(agent_name, user_email)
 
-    def update_public_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        return self._public_link_ops.update_user_memory_agent_notes(
-            agent_name, user_email, agent_notes
-        )
+    def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
     def update_public_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str
@@ -3133,6 +3207,52 @@ class DatabaseManager:
             agent_name, user_email, agent_notes,
             execution_id=execution_id, triggered_by=triggered_by, schedule_id=schedule_id,
         )
+
+    # ------------------------------------------------------------------
+    # Retrieval memory facts (trinity-enterprise#1022, MEM-002)
+    # ------------------------------------------------------------------
+
+    def get_memory_opt_out(self, agent_name: str) -> bool:
+        return self._agent_ops.get_memory_opt_out(agent_name)
+
+    def set_memory_opt_out(self, agent_name: str, opt_out: bool) -> bool:
+        return self._agent_ops.set_memory_opt_out(agent_name, opt_out)
+
+    def insert_memory_fact(self, **kwargs):
+        return self._memory_fact_ops.insert_memory_fact(**kwargs)
+
+    def list_memory_facts(self, agent_name: str, user_email: str, **kwargs):
+        return self._memory_fact_ops.list_memory_facts(agent_name, user_email, **kwargs)
+
+    def memory_scope_fingerprint(self, agent_name: str, user_email: str):
+        return self._memory_fact_ops.memory_scope_fingerprint(agent_name, user_email)
+
+    def update_memory_fact_text(self, fact_id: str, agent_name: str, **kwargs) -> bool:
+        return self._memory_fact_ops.update_memory_fact_text(fact_id, agent_name, **kwargs)
+
+    def soft_delete_memory_fact(self, fact_id: str, agent_name: str, *, deleted_by: str, execution_id=None) -> bool:
+        return self._memory_fact_ops.soft_delete_memory_fact(fact_id, agent_name, deleted_by=deleted_by, execution_id=execution_id)
+
+    def mark_memory_facts_recalled(self, fact_ids, *, agent_name: str) -> None:
+        return self._memory_fact_ops.mark_memory_facts_recalled(fact_ids, agent_name=agent_name)
+
+    def prune_memory_scope(self, agent_name: str, user_email: str, *, cap: int) -> int:
+        return self._memory_fact_ops.prune_memory_scope(agent_name, user_email, cap=cap)
+
+    def count_memory_retains_since(self, agent_name: str, since_iso: str) -> int:
+        return self._memory_fact_ops.count_memory_retains_since(agent_name, since_iso)
+
+    def memory_fact_stats(self, agent_name=None) -> dict:
+        return self._memory_fact_ops.memory_fact_stats(agent_name)
+
+    def insert_memory_fact_events(self, rows) -> int:
+        return self._memory_fact_ops.insert_memory_fact_events(rows)
+
+    def list_memory_fact_events(self, agent_name: str, **kwargs):
+        return self._memory_fact_ops.list_memory_fact_events(agent_name, **kwargs)
+
+    def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
+        return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
     def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
         return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
@@ -3836,6 +3956,46 @@ class DatabaseManager:
         return self._voip_ops.count_calls_since(agent_name, hours=hours)
 
     # =========================================================================
+    # Nevermined card delegation (delegated to db/nevermined_delegation.py) - ent#966
+    # =========================================================================
+
+    def get_nevermined_organization(self):
+        return self._nevermined_delegation_ops.get_organization()
+
+    def get_nevermined_organization_secrets(self):
+        return self._nevermined_delegation_ops.get_organization_secrets()
+
+    def save_nevermined_organization(self, org_id, environment, secrets, updated_by):
+        return self._nevermined_delegation_ops.save_organization(
+            org_id, environment, secrets, updated_by
+        )
+
+    def delete_nevermined_organization(self):
+        return self._nevermined_delegation_ops.delete_organization()
+
+    def count_active_agent_delegations(self):
+        return self._nevermined_delegation_ops.count_active_delegations()
+
+    def get_active_agent_delegation(self, agent_name):
+        return self._nevermined_delegation_ops.get_active_delegation(agent_name)
+
+    def list_agent_delegation_history(self, agent_name, limit=10):
+        return self._nevermined_delegation_ops.list_delegation_history(agent_name, limit)
+
+    def insert_agent_delegation(self, agent_name, delegation_id, payment_method_id, provider,
+                                environment, api_key_injected, created_by):
+        return self._nevermined_delegation_ops.insert_delegation(
+            agent_name, delegation_id, payment_method_id, provider,
+            environment, api_key_injected, created_by,
+        )
+
+    def delete_agent_delegation_row(self, row_id):
+        return self._nevermined_delegation_ops.delete_delegation_row(row_id)
+
+    def revoke_agent_delegation(self, row_id, revoked_by):
+        return self._nevermined_delegation_ops.revoke_delegation(row_id, revoked_by)
+
+    # =========================================================================
     # Nevermined Payment Integration (delegated to db/nevermined.py) - NVM-001
     # =========================================================================
 
@@ -3938,12 +4098,6 @@ class DatabaseManager:
 
     def get_operator_queue_item(self, item_id):
         return self._operator_queue_ops.get_item(item_id)
-
-    def update_pending_problem_report(self, agent_name, request_id, *, question, context, now=None):
-        # trinity#3521: a comment sent after the thumbs-down reaches the alert.
-        return self._operator_queue_ops.update_pending_problem_report(
-            agent_name, request_id, question=question, context=context, now=now,
-        )
 
     def get_operator_queue_item_for_agent_by_request_id(self, agent_name, request_id):
         # trinity-enterprise#611: the agent's own readback — ignores Clear All.
@@ -4073,10 +4227,12 @@ class DatabaseManager:
         return self._operator_queue_ops.find_person_ended_by_subject(agent_name, subject, since)
 
     def create_platform_operator_queue_item(self, agent_name, item, *, subject,
-                                            max_pending_for_type=None):
-        # Returns {"outcome": created|updated|refused_at_budget, "row", "changed"}.
+                                            max_pending_for_type=None, keep_text=False,
+                                            snooze_since=None, snoozed=None):
+        # Returns {"outcome": created|updated|snoozed|refused_at_budget, "row", "changed"}.
         return self._operator_queue_ops.create_platform_item(
             agent_name, item, subject=subject, max_pending_for_type=max_pending_for_type,
+            keep_text=keep_text, snooze_since=snooze_since, snoozed=snoozed,
         )
 
     def end_operator_queue_items_by_platform(self, ids, *, reason, batch_id=None):
@@ -4344,6 +4500,10 @@ class DatabaseManager:
             agent_name, day_start_iso, limit
         )
 
+    def metric_point_usage(self, agent_name: str, metric: str, limit: int):
+        """`(count to limit, newest ts)` for one metric — the retire check (ent#1006)."""
+        return self._metric_point_ops.point_usage(agent_name, metric, limit)
+
     def latest_metric_points(
         self, agent_name: str, metric_names, per_metric_limit: int = 200
     ):
@@ -4401,17 +4561,21 @@ class DatabaseManager:
         """Atomically claim (scope, key). See IdempotencyOperations.claim."""
         return self._idempotency_ops.claim(scope, key, ttl_hours=ttl_hours, **intent)
 
-    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str) -> None:
+    def idempotency_attach_execution(self, scope: str, key: str, execution_id: str, *, claim_token=None) -> None:
         """Record the execution_id for an in-flight idempotency claim."""
-        return self._idempotency_ops.attach_execution(scope, key, execution_id)
+        return self._idempotency_ops.attach_execution(scope, key, execution_id, claim_token=claim_token)
 
-    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot) -> None:
+    def idempotency_complete(self, scope: str, key: str, execution_id, snapshot, *, claim_token=None) -> None:
         """Mark an idempotency claim completed and store the replay snapshot."""
-        return self._idempotency_ops.complete(scope, key, execution_id, snapshot)
+        return self._idempotency_ops.complete(scope, key, execution_id, snapshot, claim_token=claim_token)
 
-    def idempotency_release(self, scope: str, key: str) -> None:
+    def idempotency_release(self, scope: str, key: str, *, claim_token=None) -> None:
         """Delete an in-flight idempotency claim so a failed attempt can retry."""
-        return self._idempotency_ops.release(scope, key)
+        return self._idempotency_ops.release(scope, key, claim_token=claim_token)
+
+    def idempotency_reclaim_in_flight(self, scope: str, key: str, claim_token) -> bool:
+        """Compare-and-delete a stale in_flight claim still owned by claim_token (#3298)."""
+        return self._idempotency_ops.reclaim_in_flight(scope, key, claim_token)
 
     def idempotency_discard_completed(self, scope: str, key: str) -> None:
         """Delete a completed replay row whose recorded resource is gone (#2040 F3)."""
@@ -4462,7 +4626,7 @@ class DatabaseManager:
     def list_non_terminal_loops(self):
         return self._loop_ops.list_non_terminal_loops()
 
-    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> str:
+    def start_loop_run(self, loop_id: str, run_number: int, *, execution_id=None) -> Optional[str]:
         return self._loop_ops.start_loop_run(loop_id, run_number, execution_id=execution_id)
 
     def finalize_loop_run(self, run_id: str, **kwargs) -> bool:
@@ -4484,6 +4648,9 @@ class DatabaseManager:
 
     def schedule_loop_next_run(self, loop_id: str, next_run_at: str):
         return self._loop_ops.schedule_next_run(loop_id, next_run_at)
+
+    def rearm_lost_dispatch(self, loop_id: str, *, due_for):
+        return self._loop_ops.rearm_lost_dispatch(loop_id, due_for=due_for)
 
     def claim_due_loop(self, loop_id: str, next_run_at: str) -> bool:
         return self._loop_ops.claim_due_loop(loop_id, next_run_at)

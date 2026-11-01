@@ -1,0 +1,21 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-26",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/3952-s01-pull-pre-enqueue",
+  "base": "dev",
+  "issue": "abilityai/trinity#3952",
+  "phases_run": [0, 1, 2, 7, 9, 12, 13, 14],
+  "phases_note": "Diff touches src/backend/canary/invariants/s01_slot_row_bijection.py, tests/unit/test_canary_invariants.py, docs/memory/architecture/reliability.md, one learnings fragment. No dependency, workflow, Dockerfile, compose, endpoint, MCP, template or skill change, so Phases 3-6, 8, 10, 11 have no diff overlap.",
+  "stack_cve_quicklist": [],
+  "attack_surface": {"new_endpoints": 0, "new_ws_channels": 0, "new_agent_context_ingress": 0, "new_mcp_tools": 0},
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [],
+  "verification": "A10 check on the one new guard-like helper: `_older_than` fails toward reporting (missing or unparseable started_at counts as old), stated in its docstring; catch is narrow (TypeError, ValueError). Secrets-prefix and invisible-Unicode grep over added lines: no hits.",
+  "supply_chain_summary": {"scanner": "n/a (no dependency change in diff)"},
+  "filter_stats": {"candidates": 0, "reported": 0},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+  "trend": "n/a for diff run"
+}

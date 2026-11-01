@@ -105,7 +105,8 @@ class TestTheSuiteCanFinish:
 
     def test_the_suites_are_parallelised(self, workflow):
         run = _uncommented(_job(workflow, "test"))
-        assert re.search(r"-n\s+(auto|\d+)", run), (
+        # `logical`, not `auto`: under psutil `auto` is physical cores (#4096).
+        assert re.search(r"-n\s+(logical|\d+)", run), (
             "the nightly runs the suite serially — with two suites per leg "
             "that is ~30 minutes of work before any runner variance (#2461/#2462)"
         )

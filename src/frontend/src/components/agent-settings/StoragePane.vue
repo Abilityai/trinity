@@ -2,11 +2,12 @@
   <!--
     Settings › Storage — "What it keeps and shares" (trinity-enterprise#888).
 
-    Four places became one pane: the Git tab's configuration half (the bound
+    Three places became one pane: the Git tab's configuration half (the bound
     repository and the GitHub token), the Git-sync card from the old Settings
-    list, the Credentials tab and the Folders tab — plus file sharing, moved
-    here from Sharing › Distribution (operator call 2026-10-10: it governs what
-    leaves the disk, not where outsiders reach the agent).
+    list and the Folders tab — plus file sharing, moved here from Sharing ›
+    Distribution (operator call 2026-10-10: it governs what leaves the disk, not
+    where outsiders reach the agent). Credentials were a section here until
+    trinity-enterprise#951 gave them their own pane (CredentialsPane.vue).
 
     Rows that need a restart do not draw their own banner; they report to the
     one banner at the top of Settings.
@@ -51,10 +52,6 @@
       </template>
     </SettingsSection>
 
-    <SettingsSection title="Credentials" description="Files and variables injected into the container on boot. Values are never shown after upload." bare>
-      <CredentialsPanel :agent-name="agentName" :agent-status="agentStatus" embedded />
-    </SettingsSection>
-
     <SettingsSection title="Shared folders" description="What this agent exposes from its disk to other agents, and what it mounts from theirs." bare>
       <FoldersPanel :agent-name="agentName" :agent-status="agentStatus" :can-share="true" />
     </SettingsSection>
@@ -76,7 +73,6 @@ import GitHubAuthRow from './GitHubAuthRow.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BindRepoPanel from '../BindRepoPanel.vue'
 import GitSyncSettingsPanel from '../GitSyncSettingsPanel.vue'
-import CredentialsPanel from '../CredentialsPanel.vue'
 import FoldersPanel from '../FoldersPanel.vue'
 import FileSharingPanel from '../FileSharingPanel.vue'
 

@@ -161,12 +161,12 @@ def _mutation_target(path: str, verb: str) -> tuple[Path, str]:
     return target, named
 
 
-def _walk_dir_nofollow(rel_parts, *, create: bool = False) -> int:
-    """Open home/<rel_parts> as a directory, one component at a time, never
-    following a link; with `create`, make missing components. Returns the fd
-    (the caller closes it). A link → 403 `resolved_path_mismatch`; a file used
-    as a directory → 400."""
-    fd = os.open(_HOME.resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+def _walk_dir_nofollow(rel_parts, *, create: bool = False, base: Optional[Path] = None) -> int:
+    """Open <base>/<rel_parts> (the home by default) as a directory, one
+    component at a time, never following a link; with `create`, make missing
+    components. Returns the fd (the caller closes it). A link → 403
+    `resolved_path_mismatch`; a file used as a directory → 400."""
+    fd = os.open((_HOME if base is None else base).resolve(), os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for part in rel_parts:
             if create:
@@ -617,18 +617,22 @@ def if_match_holds(path: Path, if_match: Optional[str]) -> bool:
         os.close(dir_fd)
 
 
-def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
+def _write_bytes_atomic_at(dir_fd: int, name: str, data: bytes, mode: Optional[int] = None) -> None:
     """tmp + os.replace inside the opened directory. The tmp name is random and
     created O_EXCL|O_NOFOLLOW, so neither a crash leftover nor a planted link
-    blocks or redirects the write; an existing file keeps its mode (ent#820)."""
+    blocks or redirects the write. `mode` sets the file's permissions (created
+    with it, so the content is never briefly wider); None keeps an existing
+    file's mode (ent#820)."""
     old = _lstat_at(dir_fd, name)
     tmp_name = f".{name}.tmp-{secrets.token_hex(6)}"
     fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-                 0o644, dir_fd=dir_fd)
+                 0o644 if mode is None else mode, dir_fd=dir_fd)
     try:
         with os.fdopen(fd, "wb") as f:
-            f.write(content.encode("utf-8"))
-            if old is not None and stat_mod.S_ISREG(old.st_mode):
+            f.write(data)
+            if mode is not None:
+                os.fchmod(f.fileno(), mode)
+            elif old is not None and stat_mod.S_ISREG(old.st_mode):
                 os.fchmod(f.fileno(), stat_mod.S_IMODE(old.st_mode))
         os.replace(tmp_name, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     finally:
@@ -636,6 +640,33 @@ def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
             os.unlink(tmp_name, dir_fd=dir_fd)
         except FileNotFoundError:
             pass
+
+
+def _write_text_atomic_at(dir_fd: int, name: str, content: str) -> None:
+    _write_bytes_atomic_at(dir_fd, name, content.encode("utf-8"))
+
+
+def write_bytes_nofollow(rel: str, data: bytes, *, mode: Optional[int] = None,
+                         base: Optional[Path] = None) -> None:
+    """Write `data` to <base>/<rel> (the home by default) without following a
+    link anywhere on the way (ent#822): the parents are walked — and created —
+    one component at a time with O_NOFOLLOW, a final component that is a link
+    is refused rather than replaced, and the file goes in by tmp + os.replace.
+    A link at any level is a 403 `resolved_path_mismatch`, never a write that
+    lands somewhere else. For the agent server's own writers (credential
+    injection, snapshot restore); `rel` is a home-relative path they have
+    already validated."""
+    parts = Path(rel).parts
+    if not parts or Path(rel).is_absolute() or ".." in parts:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    dir_fd = _walk_dir_nofollow(parts[:-1], create=True, base=base)
+    try:
+        st = _lstat_at(dir_fd, parts[-1])
+        if st is not None and stat_mod.S_ISLNK(st.st_mode):
+            raise HTTPException(status_code=403, detail=dict(_LINK_REFUSAL))
+        _write_bytes_atomic_at(dir_fd, parts[-1], data, mode)
+    finally:
+        os.close(dir_fd)
 
 
 def write_text_atomic(path: Path, content: str) -> None:
@@ -681,6 +712,11 @@ async def update_file(
     # (#2915), and never through a link that changes the path's class
     # (ent#820). The final component is not followed: a link there is refused.
     requested_path, _named = _mutation_target(path, _policy.WRITE)
+
+    # The home itself is a directory, not a file to write: a named 400, as
+    # mkdir and DELETE answer, not the 500 its missing parent raised (ent#949).
+    if requested_path == _HOME.resolve():
+        raise HTTPException(status_code=400, detail="Not a file: /home/developer")
 
     # Check if it's a protected path (for editing)
     # Platform writes can bypass .trinity protection (but not .git, .env, etc.)

@@ -53,6 +53,7 @@ globalThis.ResizeObserver = globalThis.ResizeObserver || class {
 }
 
 const MAX = PORTAL_MESSAGE_MAX_CHARS
+const fmt = (n) => n.toLocaleString('en-US')
 const LIMIT = '[data-testid="portal-message-limit"]'
 // What FastAPI actually answers for an over-long `message` (Pydantic v2).
 const tooLong422 = (max = MAX) => ({ response: { status: 422, data: { detail: [{
@@ -75,7 +76,7 @@ afterEach(() => { wrapper?.unmount(); wrapper = null })
 async function mountChat() {
   wrapper = shallowMount(PortalConversation, {
     props: { agent: { name: 'scout', playbooks: [] }, sessionId: 's1' },
-    global: { renderStubDefaultSlot: true },
+    global: { renderStubDefaultSlot: true, stubs: { PortalMessageLimit: false } },
     attachTo: document.body,
   })
   await flushPromises()
@@ -109,13 +110,13 @@ describe('the client limit is the server limit (#3460)', () => {
     expect(messageLimitState('hello')).toMatchObject({ near: false, over: false, message: '' })
     const near = messageLimitState('x'.repeat(MAX - MESSAGE_LIMIT_WARN_WITHIN))
     expect(near).toMatchObject({ near: true, over: false })
-    expect(near.message).toBe('7,500 of 8,000 characters')
+    expect(near.message).toBe(`${fmt(MAX - MESSAGE_LIMIT_WARN_WITHIN)} of ${fmt(MAX)} characters`)
     expect(messageLimitState('x'.repeat(MAX - MESSAGE_LIMIT_WARN_WITHIN - 1)).near).toBe(false)
     expect(messageLimitState('x'.repeat(MAX))).toMatchObject({ near: true, over: false })
     const over = messageLimitState('x'.repeat(MAX + 1))
     expect(over.over).toBe(true)
-    expect(over.message).toContain('8,000 characters')
-    expect(over.message).toContain('8,001')
+    expect(over.message).toContain(`${fmt(MAX)} characters`)
+    expect(over.message).toContain(fmt(MAX + 1))
   })
 })
 
@@ -152,8 +153,8 @@ describe('the composer states the limit before sending (#3460)', () => {
 
     const notice = wrapper.find(LIMIT)
     expect(notice.exists()).toBe(true)
-    expect(notice.text()).toContain('8,000 characters')
-    expect(notice.text()).toContain('8,001')
+    expect(notice.text()).toContain(`${fmt(MAX)} characters`)
+    expect(notice.text()).toContain(fmt(MAX + 1))
     expect(notice.attributes('role')).toBe('alert')
     expect(sendButton().attributes('disabled')).toBeDefined()
 
@@ -175,7 +176,7 @@ describe('the composer states the limit before sending (#3460)', () => {
     await textarea().setValue(draft)
     expect(sendButton().attributes('disabled')).toBeUndefined()
     // Near the limit the count is visible, as a count rather than an alert.
-    expect(wrapper.find(LIMIT).text()).toBe('8,000 of 8,000 characters')
+    expect(wrapper.find(LIMIT).text()).toBe(`${fmt(MAX)} of ${fmt(MAX)} characters`)
     expect(wrapper.find(LIMIT).attributes('role')).toBeUndefined()
 
     await wrapper.find('form').trigger('submit')

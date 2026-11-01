@@ -34,6 +34,7 @@ from ..utils.helpers import iso_z_from_mtime
 # Second-layer credential-path policy (Invariant #5) — byte-identical vendored
 # copy of src/backend/services/credential_paths.py (#11).
 from ..credential_paths import is_allowed_credential_path
+from .files import write_bytes_nofollow
 
 _HOME = Path("/home/developer")
 
@@ -60,16 +61,18 @@ def _write_credential_file(rel_path: str, *, text: str = None, b64: str = None) 
     # that guard (#590 RCE-by-config).
     if b64 is not None and rel_path.rsplit("/", 1)[-1] == ".mcp.json":
         raise HTTPException(status_code=400, detail=".mcp.json may not be injected as binary")
-    target = _safe_credential_target(rel_path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _safe_credential_target(rel_path)
     if b64 is not None:
         try:
-            target.write_bytes(base64.b64decode(b64, validate=True))
+            data = base64.b64decode(b64, validate=True)
         except (binascii.Error, ValueError):
             raise HTTPException(status_code=400, detail=f"Invalid base64 for '{rel_path}'")
     else:
-        target.write_text(text or "")
-    target.chmod(0o600)
+        data = (text or "").encode("utf-8")
+    # ent#822: written without following a link — the resolved-containment
+    # check above alone let a link inside the home (a parent directory, or the
+    # file itself) redirect the credential onto another file there.
+    write_bytes_nofollow(rel_path, data, mode=0o600, base=_HOME)
     logger.info(f"Wrote credential file: {rel_path}")
     return rel_path
 

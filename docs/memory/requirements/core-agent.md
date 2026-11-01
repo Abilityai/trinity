@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented
 - **Description**: Create agents from templates (GitHub or local) or from scratch
 - **Key Features**: Web UI, REST API, GitHub templates (`github:Org/repo`), local templates, credential schema auto-detection
+- **Name prefill from the source (trinity-enterprise#964)**: picking a GitHub source prefills the dialog's Name, and so the permanent ID it derives, with the name that source already carries: a repository's own name without the owner (`Abilityai/trinity-pm` → `trinity-pm`), or the agent name a GitHub template declares (template.yaml `name:`, exposed as the catalog entry's `agent_name`), else its repository name. A Name the person typed is never replaced; a Name still equal to the previous prefill follows the new source; an ID override is kept. Blank and local templates start empty as before. The create payload is unchanged and the backend remains the authority on sanitization.
 
 ### 1.2 Agent Start/Stop Toggle
 - **Status**: ✅ Implemented (Updated 2026-01-26)
@@ -109,14 +110,14 @@
 - **Description**: Real-time container metrics on the agent's Overview tab (moved from the header by trinity-enterprise#887)
 - **Key Features**: CPU/memory usage, network I/O, uptime display, auto-refresh every 10 seconds
 
-### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353)
-- **Status**: 🚧 In Dev — General, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
+### 1.7 Agent Settings home (trinity#966; trinity-enterprise#887, #888, #890, #891, #353, #951)
+- **Status**: 🚧 In Dev — General, Credentials, Guardrails, People, Storage panes built; Channels and Integrations hold only the cards the old flat Settings list carried, and point at the Sharing / Permissions / A2A / Payments tabs until their steps land
 - **Description**: The agent page splits into a working strip and ONE Settings home: Settings is the last tab, pinned outside the overflow menu, with a left rail of panes, each answering one question. The header keeps identity (avatar, name, id, description), running state, the autonomy chip, the Brain door and Start/Stop; trinity-enterprise#950 amended it to also show the bound GitHub repository (linked, with branch and changed / ahead / behind counts, from the live git status — nothing when no repo is bound or the agent is stopped), the tags (two chips and a counted "+N"; owners add and remove them in a dialog that reuses the Settings › General tag editor) and a small context-window chart for a running agent ("—" until there is a reading, never a 0% ring), and to drop the Workspace and Talk doors (the Workspace is in the nav; the voice call lives in its composer). trinity-enterprise#955 (operator, 2026-10-19) brought two in-place edits back to the header for owners: a pencil beside the name that edits the **display label** inline (pre-filled with the label, never the slug; Enter/blur save, Esc cancels, empty clears), and the hover overlay on the avatar (camera when there is none; change-prompt + next-emotion when one exists with an identity prompt) — the same `set-label` / `open-avatar-modal` / `cycle-emotion` events Settings › General's Identity rows emit, so the page keeps one handler per verb. The id rename stays in Settings only. The same ruling restored the pre-#3798 rows: the funding badge doubling as the subscription switcher (row 1), the autonomy and read-only toggles with the tags and the live CPU / MEM sparklines (row 2), the 7-day spend row (row 3), and the GitHub line — repo, branch, commit, changed / ahead / behind — only when a repository is connected and **without** Pull / Push / Refresh (row 4; the Git tab keeps the verbs). `AgentLiveStrip` is deleted and Overview no longer shows a strip. Nothing else.
-- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials`/`folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
-- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, credentials, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
+- **FR-1 — URL**: `?tab=settings&section=<pane>`; Back steps between panes. Legacy `?tab=` values resolve: `info → general`, `guardrails → guardrails`, `credentials → credentials` (trinity-enterprise#951), `folders → storage`, `access → people`. A pane this viewer cannot see falls back to the first visible pane, never a blank one.
+- **FR-2 — One home per control**: no control exists in two places. General owns label/id/avatar/description/tags, runtime/model/funding, execution timeout, parallel capacity, read-only, memory/CPU, template details and the Danger zone (reset to main — only with a bound repository — and delete). Guardrails owns guardrail rules, self-change permissions (ent#756), a count of approval-gated skills linking to Skills, autonomy (read-only until the dial, PR #2984, merges), cross-model validation (entitled only) and reliability. Credentials (trinity-enterprise#951, directly after General) is the former Credentials tab — guided setup, credential files, Quick Inject, upload, export/import; its file list never reports "not present" for an agent it could not read (stopped, or a failed read), and an agent with no `.env` gets a next action. People is the former Access tab, unchanged. Storage owns repository binding, the GitHub token, git sync, shared folders and file sharing (moved from Sharing › Distribution). The Info, Credentials, Folders and Access tabs are removed; the Git tab keeps status, changes, commits, pull and push.
 - **FR-3 — One restart banner**: every change waiting for a restart (file sharing, shared folders, memory/CPU, guardrail rules, GitHub token, funding) is named in ONE banner at the top of Settings with one Restart (or Start, when stopped) button. It keeps its footprint when nothing waits. Memory/CPU is saved and applied on the next restart — no longer an immediate restart.
 - **FR-4 — Execution timeout (ent#353)**: minutes, 1–120, default 60; out-of-range input gets a named error before any request; #929's `agent_timeout_below_active_schedules` refusal is rendered as a sentence naming the longest schedule and an "Open Schedules" button.
-- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Guardrails and Integrations. At phone width the rail becomes a pane select; no horizontal page scroll.
+- **FR-5 — Who sees what**: Settings stays owner-only (`can_share`). The system agent gets General, Credentials, Guardrails and Integrations (Credentials since trinity-enterprise#951 — it always had the Credentials tab). At phone width the rail becomes a pane select; no horizontal page scroll.
 - **Open decision**: ent#891 asks that People hide when user management is unentitled. It is shown to every owner for now, because the pane holds OSS sharing (adding a person by email) that the Access tab offered to every owner; its entitled sections gate themselves.
 
 ---
@@ -262,7 +263,8 @@
   - `upstream` remote auto-added in the agent workspace (credential-less, public templates) so `git pull upstream main` adopts template improvements; `GIT_UPSTREAM_REPO` env var baked at creation.
   - Fork-to-own agents are pinned to source mode (origin main = the brain) with the 15-min auto-sync heartbeat enabled (pushing to your own main is the point).
   - Create Agent modal renders templates carrying `fork_to_own` as **featured cards** (tagline surfaced from template.yaml) with destination/PAT/visibility fields.
-- **Out of scope (v1)**: MCP `create_agent` tool does not accept `fork_to_own` (tool args are audit-logged — a PAT arg would persist in plaintext); PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
+- **MCP (since #4126)**: `create_agent` accepts the `fork_to_own` block minus `github_pat` (tool args land in transcripts — a PAT arg would persist there in plaintext); the caller's saved personal token is spent, and an agent key is refused `FORK_PAT_REQUIRED`.
+- **Out of scope (v1)**: PAT expiry/rotation UX (sync-health alerts detect push failures); upstream-update UI affordance.
 
 ### 4.5 Library Page (trinity-enterprise#263)
 - **Status**: ✅ Implemented (2026-07-31)
@@ -509,8 +511,11 @@
   use, so a single cap would be spent by activity the user cannot undo, making
   the 409's "unstar some first" advice false. Unstarring a chat that carries no
   read cursor deletes its row.
-- **Known gap**: rooms report `unread: 0`. A room keeps its own seq cursor, and
-  reconciling the two cursor models is follow-up work; stars work for both kinds.
+- **Rooms (trinity-enterprise#959)**: a room's unread is counted on the same per-viewer
+  timestamp cursor (`chat_kind = 'room'`, written when the person opens the room) and the
+  ent#557 baseline — agent messages only, and only for a room the viewer is an active
+  participant of in the identity space their credential acts in (§5.40 *Rooms*). Stars work
+  for both kinds.
 - **Not this issue**: opening an agent's own **page** (a destination with its own
   content rather than a chat) is abilityai/trinity-enterprise#360.
 - **Flow**: `docs/memory/feature-flows/workspace-sidebar-ia.md`
@@ -912,11 +917,16 @@ box; the words are recorded either way and handed to the agent's
   `unavailable` so it cannot render as a real zero.
 - **FR-5 — The rated agent reads tallies, never the words** (the issue's open
   grooming question, decided): `_redact_for_agent_principal` strips `comment` for
-  an agent-scoped caller and sets `comment_withheld`, so a reader can tell "no
-  comment" from "not yours to read". Two reasons: a score an agent can read is a
-  loop it may optimise for, and the comment is untrusted text written by an
-  annoyed stranger — handing it verbatim to the agent being criticised is a
-  prompt-injection path into it. Operator surfaces see the text.
+  every machine principal (the rated agent's key, the system scope, a connector
+  key) and for a human who is not an operator of the agent (a person it is merely
+  shared with), and sets `comment_withheld`, so a reader can tell "no comment"
+  from "not yours to read". Two reasons: a score an agent can read is a loop it
+  may optimise for, and the comment is untrusted text written by an annoyed
+  stranger — handing it verbatim to the agent being criticised is a
+  prompt-injection path into it. Operator surfaces (a human owner or admin) see
+  the text. The same readers see the rater only as its kind (`workspace` /
+  `operator`), never the address; that grader rule is canonical in
+  lifecycle-observability §46 FR-3 (ent#781).
 - **FR-6 — Degrades without the skill**: the rating and comment are durable
   **before** anything is dispatched. With the skill, a background turn runs
   `capture-feedback` with the client's words **fenced as data** (the
@@ -2062,6 +2072,76 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   writes (steps ride the poll while running).
 - **Flow**: `docs/memory/feature-flows/workspace-work.md`
 
+## Retrieval Memory (MEM-002, trinity-enterprise#1022)
+
+- **Status**: ✅ Implemented (default OFF)
+- **Description**: Everything an agent does leaves extracted, deduplicated
+  facts in the platform DB (`agent_memory_facts`); the facts most relevant to
+  the incoming request are recalled into the system prompt inside the ent#419
+  envelope as a third section. Runtime-agnostic: backend seams, no harness
+  hooks, nothing in the agent container.
+- **Switch**: `trinity_memory_enabled` (system setting, default `false`,
+  Settings → General); per-agent opt-out `agent_ownership.memory_opt_out`.
+  Fail-open everywhere: off / unavailable / error ⇒ the prompt is unchanged.
+- **Scopes**: `(agent_name, user_email)`; `''` is the agent scope, which the
+  agent's owner shares (an owner's turns resolve to it). Every other person has
+  their own scope; recall never crosses scopes. The subject is read off the
+  execution row by `services/memory_subject.resolve` — the agent never names
+  the person; the agent scope is an explicit trigger allowlist, and anonymous
+  public, group-channel, voice, paid, room and judge runs are skipped.
+- **Capture**: one seam — `event_dispatch_service.spawn_task_terminal_event`
+  (every CAS-won terminal). Credentials are redacted before extraction and
+  before storage; every fact passes `user_memory_guard.prepare_summary`.
+  Brakes: a credential to extract with (below), a per-agent daily budget
+  (`trinity_memory_daily_retain_limit`, default 200), a per-scope Redis lease,
+  a per-process semaphore, a 2,000-fact scope cap, and a partial unique index
+  on the live `text_hash`.
+- **Which credential** (trinity-enterprise#1027): every platform model call —
+  extraction and reconcile here, the MEM-001 summarizer, Workspace thread
+  titles, the compatibility AI checks — goes through the backend's one model
+  door, `services/model_gateway`. The credential follows the agent: a job
+  attributed to an agent on a Claude subscription runs on that agent's own
+  setup token (same bill as its chat), an agent on API-key auth or a job with
+  no agent behind it runs on the platform key, an unreadable token never
+  borrows the key. The model follows the credential: Haiku 4.5 on a
+  subscription (the one model the gateway serves plainly on a setup token),
+  Haiku 5.5 on the key; the backend never claims to be Claude Code. Knob
+  `trinity_model_credential` (Settings → General): `auto` (default, the only
+  mode that falls back), `subscription`, `platform_key`. Both status cards say
+  who would answer; the owner can run one exchange through the real path with
+  `POST …/retrieval-memory/extract-preview`, nothing stored.
+
+- **Search** (trinity-enterprise#1028): the same store and ranking on demand,
+  past the injected tail — the owner through `GET …/retrieval-memory/search`
+  (person-only, scope by email), the agent through MCP `search_memory` →
+  `POST …/retrieval-memory/search`, the scope read off the execution it names
+  by the whose-memory rule (a person's turn → their scope; a headless run → the
+  agent scope; anonymous / group → refused with the reason) — a run that must be
+  the agent's live turn and the only live scope on the agent (a finished run or
+  a concurrent other-scope turn is refused by name), an agent key only
+  for its own agent and no human at all (403 `agent_only` — a shared-with user
+  must not read a person's scope by naming their run; the owner has the GET door). Up to 50 hits, each with the rendered line, relevance and
+  score; every hit journaled as a `search` row carrying the query. Off or
+  unavailable is a named refusal, never an empty answer.
+- **Recall**: async, off the event loop; relevance gates (cosine ≥ 0.30),
+  recency re-orders (`cosine × (0.6 + 0.4 × 0.5^(age/half-life))` over
+  `updated_at`, half-life `trinity_memory_recency_half_life_days`, default 30,
+  `0` = off); top 5 within 1,500 chars; hits bump usage counters. Each recalled
+  line carries its revision date and the kind of run it came from
+  (`(2026-10-21, scheduled run) …`), never an execution id. Local ONNX
+  embeddings (`fastembed`, multilingual MiniLM, baked into the backend image,
+  offline at runtime).
+- **Provenance**: every fact keeps the execution it was born in and the last
+  one that rewrote or retired it; `agent_memory_fact_events` journals every
+  add / update / delete / none / screened / prune / recall / forget with the
+  execution, the proposed candidate, the replaced text and the neighbours
+  shown — the lineage behind each fact and the corpus the extraction prompt
+  is tuned against (90-day retention per agent).
+- **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
+  `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
+  soft delete.
+- **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
+
 ## 6. Activity Monitoring
 
 ### 6.1 Unified Activity Panel
@@ -2648,26 +2728,26 @@ issue if it's ever wanted. Also deferred: `data.json` caching/streaming.
 - **Routed through the budget, never allowlisted** (#1677). The volume here is
   driven by a *client* clicking, so this is an agent-influenceable emitter by
   the classification rule and goes through
-  `operator_queue_service.create_bounded_alert` with its own registered type
+  `platform_alerts.observe` (which applies the #1677 budget) with its own registered type
   `workspace_problem_report` and reserved id prefix `workspace-problem-`. A
   direct `create_operator_queue_item` would fail the CI emitter guard, and
   reusing the generic `alert` type would have made five unrelated alerts on that
   agent silence every problem report.
-- **One item per person per target per UTC day, by construction.** The id is
-  derived from the evaluator, the target and the day, so a re-rate hits
-  `create_item`'s `ON CONFLICT DO NOTHING`.
+- **One item per person per target per UTC day, by construction.** The subject's
+  key is a digest of the evaluator, the target and the day, so a re-rate updates
+  that day's pending item in place through `platform_alerts.observe` (#3254).
 - **A comment sent after the rating reaches the item** (trinity#3521). The
   Workspace records the thumbs-down on the click and sends the comment as a
   second request, so the click has usually raised the item already. A request
   that carries words rewrites the item's `question` and `context.has_comment`
-  through `db.update_pending_problem_report` — pending items of this type only,
+  through `platform_alerts.observe` (`keep_text=False`; a bare click passes `keep_text=True`) — pending items only,
   so an item a person already ended is never rewritten or reopened. Only words
   ever write text: a bare re-rate cannot erase a comment. The update adds no row,
-  so it spends no budget. Both requests run in the background, so the service
-  attaches once more after its own create (the click's create can land in
-  between). **Stated residual**: a comment sent after the operator ended that
+  so it spends no budget. Both requests run in the background, and which one
+  writes is decided inside the per-agent create lock, so either order keeps the
+  words. **Stated residual**: a comment sent after the operator ended that
   day's item does not reach it; the next day's item carries the next report.
-- **Emitted off the response path.** `create_bounded_alert` is async and the
+- **Emitted off the response path.** `raise_problem_report` is async and the
   rating route is a sync `def`, so the emit rides `BackgroundTasks` beside the
   existing `capture-feedback` dispatch. A rating is recorded whether or not the
   alert is raised: the client's action must never fail because the operator's
@@ -3831,7 +3911,7 @@ to localStorage in the clear.
 
 ### 5.40 Workspace Inbox — what needs you and what came back, across your agents (trinity-enterprise#610)
 - **Status**: 🚧 In progress (PR A: landing, Unread, All, the reading pane; PR B: role-addressed
-  Action after abilityai/trinity#3028; PR C: rooms in Unread)
+  Action after abilityai/trinity#3028; rooms in Unread and All: trinity-enterprise#959)
 - **Requirement ID**: WORKSPACE_INBOX
 - **GitHub Issue**: abilityai/trinity-enterprise#610 (preceded by the asks-honesty fix, §26.8)
 - **Description**: The Workspace opens on an **Inbox**: one place that answers "what needs me"
@@ -3849,8 +3929,8 @@ to localStorage in the clear.
   | Tab | Membership | Source |
   |---|---|---|
   | **Action** | asks addressed to me, pending (question, approval, alert), roster re-checked; **Newest first by default** (raised time, newest first; ties on id), **Urgency on the sort control** — expiring within 24h first (soonest first), then priority (critical > high > medium > low), then the longest-waiting (§3g C1, unchanged); see *Action's sort* below (trinity-enterprise#856) | the ONE asks list (`openAsks`) |
-  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included | the sidebar's `threads` + `GET /chat-state?previews=true` |
-  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed; rooms wait for PR C), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule, the 200-ask read cap when hit, and — to a viewer with rooms — that rooms are not here yet (§3g D-4) | the same two lists |
+  | **Unread** | chats with new arrivals — one row per chat, "N new", the latest arrival's excerpt; archived chats included; **rooms I am in count as chats** (one row per room, trinity-enterprise#959) | the sidebar's `threads` + `GET /chat-state?previews=true` |
+  | **All** | every chat the sidebar lists, of any age (read or not; an unused Main is not listed), **the rooms I am a member of** (trinity-enterprise#959), pending asks, and asks that ended in the last 7 days; its footer says the 7-day rule and the 200-ask read cap when hit (§3g D-4) | the same two lists |
 - **One unread model (AC 6)**: the unit of Unread is a **chat**, read through the existing
   #557 cursor (`POST /chat-state/thread/{id}/read`); there is no second cursor and no per-item
   read row. An arrival is an assistant message in my chat **or** a report addressed to me that
@@ -3894,6 +3974,35 @@ to localStorage in the clear.
   confirm), one chat is read directly. Success is a toast ("Marked 28 chats read") and a new
   tab visit; a partial failure names how many failed and those chats keep their count (the S4
   rollback) (§3g A9).
+- **Rooms (trinity-enterprise#959, the rest of AC 2)**: a room — a chat with more than one
+  agent — is a chat row in Unread and All, named by its agents ("Ada, Bo") and its title.
+  - *What is new*: an **agent's** message in the room after my read cursor (`POST
+    /chat-state/room/{id}/read`), or after my account baseline for a room I have never opened
+    — the chat rule (`role = 'assistant'`) in a room's terms. My own messages and the room's
+    system lines never count.
+  - *Who sees it*: membership is the grant. The count, the preview excerpt and the row exist
+    only for a room where the viewer has an active participant row in the identity space
+    their credential acts in — `workspace_user` + email for a Workspace session, `user` +
+    username for a platform session (ent#362) — so a non-member never gets a room's row, id,
+    name or count, even holding a cursor row for its id: stored room rows are filtered through
+    the reader's active memberships. The read write moves a room cursor only for an active
+    participant (an unknown or unauthorized id gets the same 204 and nothing is written). A
+    participant who left is not a member: the rooms API no longer lists or serves the room to
+    them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
+    a room only when `member` is true, and a deep link to another room resolves to nothing. A
+    platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
+  - *Reading it*: opening a room row shows its new messages in the pane (the room's own
+    membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
+    opens the room. The room on screen reads itself on open and whenever an agent message
+    lands in it, so the sidebar never badges the room being read. Either way a room is read
+    only once the transcript on screen reaches the room's whole message count; a room too long
+    for the pane stays unread and says so, and a failed open reads nothing. Mark all read reads
+    a room as a room.
+  - *Counts*: the room's count rides the same `sidebarThreads` projection, so the sidebar,
+    the agent rows (a room credits every agent in it), the tab title and the Inbox still read
+    one number (Σ "N new" == came).
+  - No new table, store or migration: the room cursor is a `enterprise_portal_chat_state`
+    row of the existing `room` kind.
 - **Where an ask lives (the 2026-09-30 ruling as amended, PR A2 on ent#734's data)**: an ask
   raised during a chat turn is a tile in THAT chat's thread, placed by server time among the
   messages and answerable in place; once ended — at once when answered there, the confirmation
@@ -4029,7 +4138,7 @@ to localStorage in the clear.
   - Archived chats stay in Unread; Σ "N new" equals the "came back" count.
   - Counts for the viewer's own chats with agents no longer on their roster are in the
     chat-state payload (since ent#359/#557) but nothing renders them.
-  - Rooms are not in Unread until PR C (no human room read cursor exists).
+  - Rooms are in Unread and All for their members since trinity-enterprise#959 (*Rooms* above).
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`

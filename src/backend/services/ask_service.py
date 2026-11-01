@@ -127,11 +127,30 @@ class AskConflict(Exception):
 
 class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
-    person it was addressed to (an admin may cancel it, never approve it)."""
+    person it was addressed to (an admin may cancel it, never approve it).
+    trinity-enterprise#1042: so may an ask addressed to a canon role id —
+    `role` is that `role:<id>`, None for any other ask."""
 
-    def __init__(self, item_id: str):
+    def __init__(self, item_id: str, *, role: Optional[str] = None):
         super().__init__("not_addressee")
         self.item_id = item_id
+        self.role = role
+
+    def role_message(self, *, cancelling: bool = False) -> Optional[str]:
+        """The refusal for a role-addressed ask: the role's label and what to do
+        next, never a person and never advice to widen a permission (the text
+        reaches a model through the MCP tool). None when no role id applies —
+        the door keeps its own wording."""
+        if self.role is None:
+            return None
+        from services import role_addressing
+        label = role_addressing.role_label(self.role)
+        if cancelling:
+            return (f"This ask was addressed to the {label} role; only a person seated "
+                    "in it or an admin can cancel it.")
+        return (f"This ask was addressed to the {label} role; only a person seated in it "
+                "can decide it. Ask someone seated in that role to answer it from their "
+                "Inbox, or have it cancelled so the agent can ask again.")
 
 
 @dataclass(frozen=True)
@@ -194,30 +213,79 @@ def register_ending_observer(fn: Callable[[EndingEvent], None]) -> Callable[[End
     return fn
 
 
-def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
-    """Who may end an ask — the one rule every ending door shares
-    (trinity-enterprise#751; the operator routes, the Workspace answer and a
-    bulk sweep all reach it through this sink).
+def _role_id_of(row: Mapping[str, Any]) -> Optional[str]:
+    """The canonical `role:<id>` the ask was addressed to, else None."""
+    from services import role_addressing
+    role_id = role_addressing.parse_role_id(row.get("to_role"))
+    return None if role_id is None else f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
 
-    Only a GATED-SKILL APPROVAL is narrowed: its decision runs a business action,
-    so it belongs to the people the ask was addressed to (`resolved_to`). An
-    admin may CANCEL one — the escalation — but never approve it. Every other
-    ask keeps the rule it had: any person with access to the agent, checked by
-    the caller. Person-only endings stay the routes' check
-    (`dependencies.reject_non_person_principal`), since an agent key carries its
-    owner's email."""
-    if not (row.get("raised_by") == "gate" and row.get("type") == "approval"):
+
+def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
+    """Whether ending `row` this way belongs to the people it resolved to
+    (`resolved_to`) — the one predicate `may_end` and `addressed_view` share,
+    so a card never offers a control the sink would refuse.
+
+    - A gated-skill approval (trinity-enterprise#751): its answer AND its cancel.
+    - An ask addressed to a canon role id (trinity-enterprise#1042): its answer
+      only — a cancel keeps the rule every ask has.
+    The four kinds are not fenced here."""
+    if row.get("raised_by") == "gate" and row.get("type") == "approval":
         return True
-    email = (getattr(actor, "email", None) or "").strip().casefold()
+    if cancelling:
+        return False
+    return _role_id_of(row) is not None
+
+
+def _resolved_people(row: Mapping[str, Any]) -> List[str]:
+    """`resolved_to` as a list of people; anything unreadable is nobody."""
     resolved = row.get("resolved_to") or []
     if isinstance(resolved, str):
         try:
             resolved = json.loads(resolved)
         except ValueError:
             resolved = []
-    if email and email in {str(p).strip().casefold() for p in resolved}:
+    if not isinstance(resolved, list):
+        return []
+    return list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
+
+
+def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
+    """Who may end an ask — the one rule every ending door shares
+    (trinity-enterprise#751; the operator routes, the Workspace answer and a
+    bulk sweep all reach it through this sink).
+
+    A seat-fenced ending (`_seat_fenced`) belongs to the people the ask was
+    addressed to (`resolved_to`, written at raise time): a gated-skill approval,
+    whose decision runs a business action, and the answer to an ask addressed to
+    a canon role id (trinity-enterprise#1042 — the role addresses the ask, the
+    seat authorises the answer). An empty or unreadable snapshot is nobody. An
+    admin may CANCEL a gate approval — the escalation — but never decide a
+    fenced ask. Every other ending keeps the rule it had: any person with access
+    to the agent, checked by the caller. Person-only endings stay the routes'
+    check (`dependencies.reject_non_person_principal`), since an agent key
+    carries its owner's email."""
+    if not _seat_fenced(row, cancelling=cancelling):
+        return True
+    email = (getattr(actor, "email", None) or "").strip().casefold()
+    if email and email in {p.casefold() for p in _resolved_people(row)}:
         return True
     return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
+
+
+def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str, Any]]:
+    """Who a seat-fenced ask waits on, and whether THIS person may decide it —
+    `may_end`'s own answer, so a card never offers a control the sink would
+    refuse (trinity-enterprise#980, widened to role-id asks by #1042). None for
+    every other ask.
+
+    The operator queue lists an ask to anyone who can use its agent, but a
+    fenced ask belongs to the people it was addressed to; without this an admin
+    saw Approve / Decline on someone else's decision and learned only from the
+    refusal that it was not theirs. An empty snapshot waits on nobody and nobody
+    may decide it — the sink's answer, never None."""
+    if not _seat_fenced(row):
+        return None
+    return {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +315,7 @@ def answer(
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
-        raise AskNotAddressee(item["id"])
+        raise AskNotAddressee(item["id"], role=_role_id_of(item))
     from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
@@ -284,7 +352,7 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     `AskNotAddressee` (a gate approval the actor may not end, #751)."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
-        raise AskNotAddressee(item_id)
+        raise AskNotAddressee(item_id, role=_role_id_of(current))
     updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
     if not updated:
         raise AskNotFound(item_id)
@@ -468,6 +536,10 @@ class AskRejected(Exception):
 
 ASK_TYPES = ("approval", "question", "alert")
 ASK_ROLES = ("primary", "approver", "viewer", "operator")
+# trinity-enterprise#1007: beside the four kinds, an agent's `to` may name a
+# canon role by id. This is the form the `invalid_to` refusal teaches; the id
+# itself is validated by `role_addressing.parse_role_id` (ROLE_ID_RE).
+ASK_ROLE_ID_FORM = "role:<id>"
 # Who raised a native ask, and the channel its row records. The column also holds
 # `file`, which only the file poller writes (`create_item_with_outcome`), never
 # this sink.
@@ -499,8 +571,9 @@ def raise_ask(
     `addressees` + `to_role_override` (trinity-enterprise#848) are the gate's
     pre-resolved audience: the very people `skill_gate_service.enforce` decided
     self-approval with, and the approver value the ask is recorded `to_role`
-    as — a kind, or a canon role `role:<id>` the sink's own `to` vocabulary
-    (`ASK_ROLES`, an agent's input) deliberately does not accept. Given, role
+    as — a kind, or a canon role `role:<id>` (an agent's own `to` may name one
+    too since trinity-enterprise#1007, resolved by `_address` on its own
+    roster; the gate's value is pre-resolved and skips that step). Given, role
     resolution (`_address`) is skipped, so the gate's audience and the ask's
     cannot diverge (no second resolve between the two). Gate raises only, like
     `addressee`; an agent's raise passing either is a programming error.
@@ -807,6 +880,8 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     platform-reserved prefix; a gate raise must use its own, `gate-`, so no
     agent can pre-create it and `is_platform_minted` keeps the row's endings
     from waking the agent."""
+    from services import role_addressing
+
     if not isinstance(ask, Mapping):
         raise AskRejected(422, "invalid_ask", "The ask must be an object.")
     rid = ask.get("request_id")
@@ -888,8 +963,15 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
         if proposal_bytes > oqs.OPERATOR_QUEUE_PROPOSAL_MAX_BYTES:
             raise _too_large("proposal", oqs.OPERATOR_QUEUE_PROPOSAL_MAX_BYTES, "bytes")
     to = ask.get("to") or ("operator" if kind == "alert" else "primary")
-    if to not in ASK_ROLES:
-        raise AskRejected(422, "invalid_to", "Unknown role.", allowed=list(ASK_ROLES))
+    role_id = role_addressing.parse_role_id(to)
+    if role_id is not None:
+        # trinity-enterprise#1007: a canon role, stored canonical (lower-cased)
+        # so a retry spelt `role:Head` replays against `role:head` with no
+        # false `differs`. Resolved — and refused by name — in `_address`.
+        to = f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
+    elif to not in ASK_ROLES:
+        raise AskRejected(422, "invalid_to", "Unknown role.",
+                          allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
     expires_at = ask.get("expires_at")
     _deadline(expires_at, floor=False)
     supersedes = ask.get("supersedes_expired")
@@ -1194,11 +1276,24 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     is delivered to each of them on read (trinity-enterprise#816, the
     2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
     membership), so `resolved` is true because a person's Inbox shows it. `role` is already validated
-    against `ASK_ROLES` by `_validated_ask` (the only caller passes its output),
-    so the one refusal left to map is an unfilled role.
+    by `_validated_ask` (the only caller passes its output): one of `ASK_ROLES`,
+    whose one refusal left to map is an unfilled role — or a canonical canon
+    role `role:<id>` (trinity-enterprise#1007), which
+    `role_addressing.resolve_role_id_for_ask` resolves on this agent's OWN
+    roster with ent#881 reachability applied; each of its arms
+    (`role_unavailable`, `role_unassigned`, `role_cannot_open_agent`) maps 1:1
+    to a 422 so the agent gets the remedy for the arm it hit, with the role's
+    label and never a person in the text.
     """
     from services import role_addressing
 
+    role_id = role_addressing.parse_role_id(role)
+    if role_id is not None:
+        try:
+            r = role_addressing.resolve_role_id_for_ask(agent_name, role_id)
+        except role_addressing.RoleRefused as e:
+            raise AskRejected(422, e.code, e.message, role=e.role)
+        return r.people, r.single, r.resolved
     try:
         r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
     except role_addressing.RoleRefused:

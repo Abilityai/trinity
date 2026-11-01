@@ -1,0 +1,8 @@
+{"version":"1.2.3","date":"2026-10-24","mode":"diff","scope":"all","issue":"abilityai/trinity#3932","base":"origin/dev@bbd0d4095",
+"phases_run":[0,1,2,6,7,9,10,12,13,14],
+"findings":[],
+"hypotheses":[{"category":"ws-broadcast-payload","asi":"ASI07","title":"Pull claim bars now broadcast message_preview on /ws like push bars","note":"Same agent_activity event and details push dispatch has always sent; the diff restores parity for pull runs and adds no new field or channel. The /ws thin-trigger rule (#918) is a pre-existing question for every activity broadcast."}],
+"coverage_gaps":["docker pass not run (no Dockerfile, dependency or compose change)","independent verifier not spawned (no findings)"],
+"supply_chain_summary":{"scanner":"none — diff adds no dependencies"},
+"totals":{"critical":0,"high":0,"medium":0,"low":0},
+"trend":"n/a (diff run)"}

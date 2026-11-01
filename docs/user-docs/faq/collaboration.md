@@ -92,7 +92,7 @@ An admin sets the defaults for every room started from the Workspace under **Set
 
 ## What happens if an agent writes a very long reply in a room?
 
-It lands. A turn's reply is posted as one message of up to 100,000 characters; past that it is trimmed, keeping the beginning and the end (where the conclusion and the next `@mention` usually are) around a marker saying how much was cut. If a reply cannot be posted at all, or arrives after the room closed, the room shows a line saying so rather than going quiet. Messages people post are limited to 8,000 characters. For long deliverables, agents are nudged to share a file and post a summary. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
+It lands. A turn's reply is posted as one message of up to 100,000 characters; past that it is trimmed, keeping the beginning and the end (where the conclusion and the next `@mention` usually are) around a marker saying how much was cut. If a reply cannot be posted at all, or arrives after the room closed, the room shows a line saying so rather than going quiet. Messages people post are limited to 100,000 characters. For long deliverables, agents are nudged to share a file and post a summary. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
 
 ## Why did a room say "Mention chain stopped at depth 8"?
 

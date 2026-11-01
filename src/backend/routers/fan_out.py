@@ -21,7 +21,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
-from dependencies import get_current_user, get_authorized_agent, resolve_source_agent
+from dependencies import get_current_user, get_authorized_agent, resolve_source_agent, viewer_row_scope
 from database import db
 from models import (
     FanOutBatchStatus,
@@ -100,7 +100,8 @@ async def fan_out(
     # fan-out replays the original aggregated result instead of re-dispatching
     # all N subtasks. Optional header; absent → no dedup.
     idem = idempotency_service.begin(
-        idempotency_service.make_agent_scope(name), idempotency_key
+        # trinity-enterprise#830: a client-chosen key is scoped to its caller.
+        idempotency_service.make_caller_scope(name, current_user), idempotency_key
     )
     if idem.replay:
         await platform_audit_service.log(
@@ -229,6 +230,7 @@ _FAN_OUT_ID_RE = re.compile(r"^fo_[A-Za-z0-9_-]{1,64}$")
 async def get_fan_out_status(
     fan_out_id: str,
     name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
 ):
     """Read one fan-out batch back from its execution rows (#2670).
 
@@ -251,7 +253,11 @@ async def get_fan_out_status(
     if not _FAN_OUT_ID_RE.match(fan_out_id or ""):
         raise HTTPException(status_code=404, detail="Fan-out not found")
 
-    rows = db.get_fan_out_executions(name, fan_out_id)
+    # trinity-enterprise#875: a share holder reads back only the batch rows they
+    # dispatched (filtered in SQL); a batch with none of theirs is the uniform 404.
+    scope = viewer_row_scope(current_user, name)
+    rows = (db.get_fan_out_executions(name, fan_out_id) if scope is None
+            else db.get_fan_out_executions(name, fan_out_id, source_user_id=scope))
     if not rows:
         raise HTTPException(status_code=404, detail="Fan-out not found")
 
