@@ -33,6 +33,9 @@ def main() -> None:
 
     config = load_config()
     rows = list(config.get("bash_deny", []))
+    # Fails open on purpose: with no marker the rows do not apply, because an
+    # agent with no gates keeps its CLIs. A gated agent whose marker write failed
+    # is covered again at its next start or skill check.
     if os.path.lexists(SKILL_GATES_MARKER):
         rows += config.get("gated_bash_deny", [])
     baseline = compile_patterns(rows)
