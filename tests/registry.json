@@ -6185,6 +6185,17 @@
       "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
     },
     {
+      "file": "unit/test_ent1002_nested_cli_guardrail.py",
+      "feature": "abilityai/trinity-enterprise#1002",
+      "added": "2026-11-01",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1002: on an agent with gated skills the Bash guardrail refuses a nested claude, codex or gemini. The real hook runs under its registered flags and env with the skill-gate marker on and off (an agent with no gates keeps the old behaviour); a per-agent override cannot remove the rows; every reader names the one marker path; a must-refuse and a must-pass corpus pin the rule, commands that start no session pass (--version, --help, mcp, and plugin except on gemini, where that word is a prompt), with two known-limit tables (quoted prose refused too, deliberate wrappers get past) so tightening it prompts a docs change; 512k adversarial commands stay under 1 s, since a hook that outlives its timeout lets the tool run; the image smoke fails a hook that ignores the marker and never leaves the marker behind. Mutation-proven. No Docker."
+    },
+    {
       "file": "unit/test_ent815_broad_list_agent_scope.py",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
