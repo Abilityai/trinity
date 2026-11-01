@@ -354,6 +354,8 @@ export function createSystemTools(
         "Restart all agents belonging to a system. " +
         "Membership is resolved from the system's tag when the agents carry one, " +
         "falling back to the '{system_name}-*' name prefix. " +
+        "A system whose tagged members all lack that prefix is read as bare-named, and then " +
+        "an untagged '{system_name}-*' agent is not a member. " +
         "Stops then starts each member. " +
         "Useful after configuration changes (credentials, schedules, shared folders). " +
         "Returns list of successfully restarted agents and any failures. " +
@@ -401,7 +403,8 @@ export function createSystemTools(
           .describe(
             "System name to export (e.g., 'content-production'). " +
             "Members are the agents carrying the system's tag (every deploy and apply writes it), " +
-            "plus untagged agents named '{system_name}-*' as a fallback."
+            "plus untagged agents named '{system_name}-*' as a fallback — except when every " +
+            "tagged member lacks that prefix (a bare-named system): then the tag alone decides."
           ),
         naming: z
           .enum(["prefixed", "bare"])

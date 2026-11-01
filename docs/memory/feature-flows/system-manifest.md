@@ -2496,6 +2496,16 @@ is answered from the inputs and never reaches the tag read, so it reports
 `tags_readable: True`. A destructive caller refuses on `False`, and refusing a teardown
 of a system with no members would be a 503 where 404 is the truth.
 
+### Naming-aware membership and the bare edge cases (#4131)
+
+`system_membership(system, roster, naming=None)` takes the manifest's naming. Apply (`read_apply_snapshot`, the only caller that passes it, pinned by an AST test) passes `manifest.naming`: under `bare` membership is the tag only — the tag read still runs, so an outage still reports `tags_readable=False` and apply refuses. With `naming=None` (`get_system`, `restart_system`, `get_system_manifest`, teardown: nothing stores the naming) bare is inferred the way `export_manifest` infers it — tags readable and every tagged member unprefixed — and the prefix step is dropped; a prefixed system (any tagged member carries `<system>-`), a system with no tagged member and the unreadable-tag path keep the #2373 union and the raw-prefix fallback untouched. So apply, list, get, restart and export agree that an untagged `<system>-x` beside a bare system is not a member. Accepted residual: a prefixed system whose every tagged member was renamed off the prefix while another member lost its tag is read as bare, and restart under-restarts that one member.
+
+Under `naming: bare` a declared untagged name is adopted whatever its shape; an undeclared untagged `<system>-x` is neither member, drift nor blocker. When an adopted name starts with `<system>-`, the adoption warning names the explicit `?naming=bare` export, because a default export then infers `prefixed`.
+
+Manifest keys accept the create route's charset (`MANIFEST_KEY_RE`, `[a-z0-9_.-]`, no leading `_`/`.`/`-`, no trailing `-`) in both modes, so a member the platform suffixed (`writer_2`, chained `writer_2_2`) exports under a key that parses again; the drift note recognises chained suffixes.
+
+`deploy: false` governs apply only. `read_apply_snapshot` sets `ApplyMemberState.tagged_by_system` when a declared-only name is a roster member by tag, and `_plan_declared_only` adds the report `declared_only_member_tagged` (`_DECLARED_ONLY_TAGGED_NOTE`: restart restarts it, teardown removes it, remove the tag by hand to keep it out). Declared-only names are excluded from the prefix-only evidence gate in both modes.
+
 ### The auto-view description is one constant
 
 Nothing persists a system↔view link: `create_system_view` marks the view it creates only

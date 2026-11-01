@@ -335,3 +335,111 @@ class TestDeclaredOnlyOutOfTheEvidenceGate:
         res = W.apply(ew, _manifest("web", ("canon", "deploy: false")), dry_run=True)
         assert res.status == "valid", res
         assert {m.name: m.verdict for m in res.members}["acme-canon"] == "declared_only"
+
+
+# ===========================================================================
+# Case 3 — a `deploy: false` member carrying the tag: apply says restart and
+# teardown reach it, and the restart route proves the statement true
+# ===========================================================================
+
+def _restart_client(world, monkeypatch, rows):
+    """The real restart route; the two Docker seams record instead of acting."""
+    started = []
+
+    async def _start(name):
+        started.append(name)
+
+    from routers import agents as agents_router
+    from services import docker_service
+    monkeypatch.setattr(agents_router, "start_agent_internal", _start)
+    monkeypatch.setattr(docker_service, "get_agent_container", lambda name: None)
+    return _client(world, monkeypatch, rows), started
+
+
+class TestCase3DeclaredOnlyTagged:
+
+    def _seed(self, world):
+        world.seed_agent("acme-web")
+        world.seed_agent("acme-canon")  # carries the system tag
+        return _manifest("web", ("canon", "deploy: false"))
+
+    def test_apply_reports_that_restart_and_teardown_reach_it(self, ew):
+        yaml_text = self._seed(ew)
+        res = W.apply(ew, yaml_text, dry_run=True)
+        canon = next(m for m in res.members if m.name == "acme-canon")
+        assert canon.verdict == "declared_only"
+        (c,) = [c for c in canon.changes if c.code == "declared_only_member_tagged"]
+        assert c.action == "report" and c.current == "acme-canon"
+        assert "restart" in c.note and "teardown" in c.note and f"'{SYSTEM}'" in c.note
+        assert "untag" in c.note.lower() or "tags/" in c.note
+        assert W.BOB not in c.note and W.ALICE not in c.note
+        assert res.drift == []
+        assert not [op for op in canon.changes if op.action == "write"]
+
+    def test_an_untagged_declared_only_member_gets_no_such_report(self, ew):
+        ew.seed_agent("acme-web")
+        ew.seed_agent("canon", tags=())
+        res = W.apply(ew, _manifest("acme-web", ("canon", "deploy: false"), naming="bare"),
+                      dry_run=True)
+        canon = next(m for m in res.members if m.name == "canon")
+        assert "declared_only_member_tagged" not in [c.code for c in canon.changes]
+
+    def test_the_restart_route_does_reach_it(self, ew, monkeypatch):
+        self._seed(ew)
+        client, started = _restart_client(ew, monkeypatch, [_row("acme-web"), _row("acme-canon")])
+        r = client.post(f"/api/systems/{SYSTEM}/restart")
+        assert r.status_code == 200, r.text
+        assert sorted(r.json()["restarted"]) == ["acme-canon", "acme-web"]
+        assert sorted(started) == ["acme-canon", "acme-web"]
+
+
+# ===========================================================================
+# Restart / get over a bare system (D): the bare member is handled, the
+# prefix lookalike is not
+# ===========================================================================
+
+class TestRestartAndGetOverABareSystem:
+
+    def _seed(self, world):
+        world.seed_agent("writer")                            # bare member, tagged
+        world.seed_agent("acme-x", tags=())                   # untagged lookalike
+        world.seed_agent("acme-extra-w", tags=("acme-extra",))  # another system's member
+        return [_row("writer"), _row("acme-x"), _row("acme-extra-w")]
+
+    def test_restart_restarts_the_bare_member_only(self, world, monkeypatch):
+        rows = self._seed(world)
+        client, started = _restart_client(world, monkeypatch, rows)
+        r = client.post(f"/api/systems/{SYSTEM}/restart")
+        assert r.status_code == 200, r.text
+        assert r.json() == {"restarted": ["writer"], "failed": []}
+        assert started == ["writer"]
+
+    def test_get_shows_the_bare_member_only(self, world, monkeypatch):
+        rows = self._seed(world)
+        client = _client(world, monkeypatch, rows)
+        r = client.get(f"/api/systems/{SYSTEM}")
+        assert r.status_code == 200, r.text
+        assert [a["name"] for a in r.json()["agents"]] == ["writer"]
+
+    def test_a_prefixed_system_still_restarts_its_untagged_member(self, world, monkeypatch):
+        world.seed_agent("acme-web")
+        world.seed_agent("acme-db", tags=())
+        client, started = _restart_client(world, monkeypatch, [_row("acme-web"), _row("acme-db")])
+        r = client.post(f"/api/systems/{SYSTEM}/restart")
+        assert r.status_code == 200, r.text
+        assert sorted(started) == ["acme-db", "acme-web"]
+
+
+class TestAdoptedWarningNamesTheBareExport:
+
+    def test_an_adopted_prefix_shaped_name_points_at_the_bare_export(self, ew):
+        ew.seed_agent("acme-writer", tags=())
+        res = W.apply(ew, _manifest("acme-writer", naming="bare"), dry_run=True)
+        (line,) = [w for w in res.warnings if "adopted" in w]
+        assert "naming=bare" in line
+
+    def test_an_unprefixed_adoption_says_nothing_about_export(self, ew):
+        ew.seed_agent("scout", tags=())
+        res = W.apply(ew, _manifest("scout", naming="bare"), dry_run=True)
+        (line,) = [w for w in res.warnings if "adopted" in w]
+        assert "naming=bare" not in line
