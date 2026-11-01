@@ -62,14 +62,16 @@ def plan(mp, *, held: Optional[List[str]], grant_writer: bool, blockers: List,
         return
     name, short = mp.name, mp.short_name
     wanted = declared(cfg)
-    unknown = [c for c in wanted if c not in CAPABILITIES]
+    have = set(held or [])
+    # #4132: a capability the member already holds is never written, so the
+    # catalog verdict does not apply to it.
+    unknown = [c for c in wanted if c not in CAPABILITIES and c not in have]
     if unknown:
         blockers.append(apply_blocker(
             "grant_unknown", name,
             f"'{', '.join(unknown)}' is not a capability.",
             f"Use one of: {', '.join(sorted(CAPABILITIES))}."))
         return
-    have = set(held or [])
     missing = [c for c in wanted if c not in have]
     if missing and grant_writer:
         mp.changes.append(apply_change(STEP, "write", "grant_missing",
