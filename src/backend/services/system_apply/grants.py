@@ -130,7 +130,7 @@ async def run(op, actor, out, attempt, *, request) -> None:
             raise _Refused(f"{e.code}: {e.message}") from e
         return True
 
-    if await attempt(name, short, STEP, write) and result.get("changed"):
+    if await attempt(name, short, STEP, write, key=cap) and result.get("changed"):
         await capability_grant_service.audit_grant_change(
             name, cap, True, actor, request=request)
 

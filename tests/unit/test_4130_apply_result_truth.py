@@ -233,6 +233,72 @@ class TestSummaryCountsLandedWrites:
         assert res.summary["skills"]["write"] == 2 and res.summary["members"]["write"] == 2
 
 
+def _apply_route(world, monkeypatch, text):
+    """A real `POST /api/systems/apply` handler call on a real run: the route
+    runs the real apply over the real `db`; only create/start are the world's."""
+    from starlette.requests import Request
+
+    from models import SystemApplyRequest
+    from routers import systems
+
+    real = systems.apply_manifest
+
+    async def apply_with_seams(manifest, user, request, *, dry_run):
+        return await real(manifest, user, request, dry_run=dry_run,
+                          create_agent_fn=world.create, start_agent_fn=world.docker.start)
+
+    monkeypatch.setattr(systems, "apply_manifest", apply_with_seams)
+    request = Request({"type": "http", "method": "POST", "path": "/api/systems/apply",
+                       "headers": [], "client": ("127.0.0.1", 1), "query_string": b""})
+    return asyncio.run(systems.apply_system(
+        SystemApplyRequest(manifest=text, dry_run=False), request,
+        current_user=world.user(W.ALICE)))
+
+
+class TestSummaryCountsEachWriteByItsOwnKey:
+    """Two writes of one kind on one member, one of which did not land: the
+    count is 1, not 2, and `failed[]` names the one that did not land."""
+
+    def test_two_sets_on_one_member_one_held_for_its_gate(self, world, monkeypatch):
+        lead = f"{SYSTEM}-lead"
+        world.seed_agent(lead)
+        sets = dict(SETS, **{"notes-kit": {
+            **SETS["ops-core"], "name": "notes-kit",
+            "members": [{"name": "notes", "present": True}]}})
+        monkeypatch.setattr(skill_set_service, "library_sets", lambda **_k: dict(sets))
+
+        async def boom(*_a, **_k):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", boom)
+        text = _manifest({"lead": {"skill_sets": ["ops-core", "notes-kit"],
+                                   "gates": {"deploy": {}}}})
+        assert _apply(world, text, dry_run=True).summary["skills"]["write"] == 2
+        res = _apply_route(world, monkeypatch, text)
+        assert res.status == "partial"
+        assert list(skill_set_service.held_sets(lead)) == ["notes-kit"]  # one landed
+        assert res.summary["skills"]["write"] == 1
+        held = [f for f in res.failed if f.step == "skill_sets"]
+        assert [(f.name, f.key) for f in held] == [(lead, "ops-core")]
+        assert held[0].reason.startswith("gate_not_written")
+
+    def test_two_gates_on_one_member_one_write_failing(self, world, monkeypatch):
+        lead = f"{SYSTEM}-lead"
+        world.seed_agent(lead)
+        real = skill_gate_map_service.set_gate
+
+        async def set_gate(agent_name, skill_name, **kw):
+            if skill_name == "deploy":
+                raise RuntimeError("db locked")
+            return await real(agent_name, skill_name, **kw)
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", set_gate)
+        text = _manifest({"lead": {"gates": {"deploy": {}, "research": {}}}})
+        assert _apply(world, text, dry_run=True).summary["gates"]["write"] == 2
+        res = _apply_route(world, monkeypatch, text)
+        assert res.status == "partial"
+        assert res.summary["gates"]["write"] == 1
+        assert [(f.name, f.step, f.key) for f in res.failed] == [(lead, "gates", "deploy")]
+
+
 # ===========================================================================
 # S5 / S6 / S12 — a declared-only member is neither re-read nor "applied"
 # ===========================================================================
