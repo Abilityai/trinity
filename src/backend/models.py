@@ -1456,6 +1456,9 @@ class SystemDeployResponse(BaseModel):
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
+    # #4130: final names of the `deploy: false` members, skipped and never
+    # created (the `warnings` line stays beside it). Every branch sets it.
+    agents_declared_only: List[str] = []
     prompt_updated: bool
     permissions_configured: int = 0
     schedules_created: int = 0
@@ -1529,8 +1532,9 @@ class SystemApplyMember(BaseModel):
     # platform's own drift predicates; independent of this run's writes. Apply
     # never restarts an existing member.
     restart_required: bool = False
-    # None on a dry run or a refused run; otherwise whether every write planned
-    # for this member succeeded.
+    # None on a dry run or a refused run, and for a declared-only member (nothing
+    # is planned or attempted for it, #4130); otherwise whether every write
+    # planned for this member succeeded.
     applied: Optional[bool] = None
     # trinity-enterprise#1030: the config groups the platform could not
     # observe for this member (no hook answers them on this install) — never
@@ -1576,6 +1580,10 @@ class SystemApplyFailure(BaseModel):
     short_name: str
     step: str
     reason: str  # Sanitized, truncated (`system_service._failure_reason`)
+    # What the write was for when a step writes more than one thing on a
+    # member — the skill(s), set, gate's skill, capability, seat, edge target
+    # or tag (#4130); None for a member-wide write.
+    key: Optional[str] = None
 
 
 class SystemApplyAdoption(BaseModel):
@@ -1612,13 +1620,18 @@ class SystemApplyResponse(BaseModel):
     # trinity-enterprise#1030: agents this run adopts (dry run) or adopted
     # into the system by tagging it, kept apart from `members` because adoption
     # is when an agent joins `restart_system` / teardown's reach.
+    # #4130: a dry run lists the plan; a refused run lists nobody; a real run
+    # lists only the members whose system tag landed.
     adopted: List[SystemApplyAdoption] = []
     # trinity-enterprise#1030: per config group — `skills`, `grants`, `gates`,
     # `roles` — and `members`, each `{"write": n, "report": n, "unobserved": n}`
     # (services/system_apply/summary.py). `grants` also carries `held_back:
     # [{"name", "grants": [...]}]` and `roles` `held_back: [{"name", "seat"}]`,
     # so a grant or seat the CALLER's credential could not write is loud
-    # (theme 3). Blocked members are counted nowhere.
+    # (theme 3). Blocked members are counted nowhere. #4130: `write` is the
+    # plan on a dry run ("would make") and only the LANDED writes on a real
+    # run, each by its own key (two sets on one member, one held: 1), none on
+    # a refused run; `report` / `unobserved` are plan counts.
     summary: Dict[str, Dict[str, Any]] = {}
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is

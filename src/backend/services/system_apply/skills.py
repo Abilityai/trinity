@@ -164,14 +164,35 @@ def set_held_for_gates(member: str, set_name: str, unlanded) -> List[str]:
     return outstanding if members is None else apply_gates.unlanded_in(member, members, unlanded)
 
 
+_DELIVERED = ("injected", "delivered", "unchanged")
+
+
+def delivery_failures(delivery) -> List[str]:
+    """Every per-skill `failed` / `conflict` entry of a delivery report, as
+    `name: error` (#4130) — e.g. `marker_not_written`: the package landed but
+    its marker did not, so the next sync reads the dir as agent-authored."""
+    out = []
+    for skill, entry in sorted(((delivery or {}).get("skills") or {}).items()):
+        if isinstance(entry, dict) and entry.get("status") in ("failed", "conflict"):
+            error = str(entry.get("error") or entry["status"])
+            out.append(f"{skill}: {error[:200]}")
+    return out
+
+
 def delivery_change(apply_change, field_name: str, names: List[str], delivery):
     """The delivery outcome of one write, as a report change: the row is the
     write; delivery is best-effort and named (#2703), never a failure."""
     status = (delivery or {}).get("status") or "not_delivered"
+    failures = delivery_failures(delivery)
     note = None
-    if status == "pending_start":
+    if failures:
+        note = (f"assigned, not delivered ({'; '.join(failures)}); "
+                "the next start or a skills sync delivers them")
+    elif status == "pending_start":
         note = "the agent is not running; the skills are delivered at its next start"
-    elif status not in ("injected", "delivered", "unchanged"):
+    elif status == "unchanged":
+        note = "the set's skills were already held; nothing new to deliver"
+    elif status not in _DELIVERED:
         note = (f"assigned, not delivered ({(delivery or {}).get('reason') or status}); "
                 "the next start or a skills sync delivers them")
     return apply_change(field_name, "report", "skill_delivery", current=status,
@@ -184,17 +205,17 @@ async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[s
     name, short = op.member, op.short_name
     result: Dict = {}
 
-    async def hold(step: str, skills: List[str]) -> None:
+    async def hold(step: str, skills: List[str], key) -> None:
         def refuse():
             raise RuntimeError(apply_gates.not_written_reason(skills))
-        await attempt(name, short, step, refuse)
+        await attempt(name, short, step, refuse, key=key)
 
     if op.kind == "skill_assign":
         # ent#753: a skill whose declared gate did not land is not delivered.
         held = apply_gates.unlanded_in(name, op.args["skills"], out.gates_unlanded)
         names = [n for n in op.args["skills"] if n not in held]
         if held:
-            await hold(SKILLS_STEP, held)
+            await hold(SKILLS_STEP, held, held)
         if not names:
             return
 
@@ -202,19 +223,37 @@ async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[s
             result.update(await skill_assignment_service.assign_and_deliver(
                 name, names, actor, acting_agent=acting_agent))
             return True
-        if await attempt(name, short, SKILLS_STEP, write):
+        if await attempt(name, short, SKILLS_STEP, write, key=names):
             out.extra_changes.setdefault(name, []).append(delivery_change(
                 apply_change, SKILLS_STEP, names, result.get("delivery")))
     elif op.kind == "skill_set_assign":
         held = set_held_for_gates(name, op.args["set"], out.gates_unlanded)
         if held:
-            await hold(SKILL_SETS_STEP, held)
+            await hold(SKILL_SETS_STEP, held, op.args["set"])
             return
 
         async def write():
             result.update(await skill_assignment_service.assign_set_and_deliver(
                 name, op.args["set"], actor, acting_agent=acting_agent))
             return True
-        if await attempt(name, short, SKILL_SETS_STEP, write) and result.get("added"):
+        if await attempt(name, short, SKILL_SETS_STEP, write, key=op.args["set"]):
+            # #4130: a set whose skills were all held already still says so.
+            added = list(result.get("added") or [])
             out.extra_changes.setdefault(name, []).append(delivery_change(
-                apply_change, SKILL_SETS_STEP, list(result["added"]), result.get("delivery")))
+                apply_change, SKILL_SETS_STEP, added,
+                result.get("delivery") if added else {"status": "unchanged"}))
+
+
+def deploy_delivery_warning(name: str, result) -> Optional[str]:
+    """Deploy's line for an assignment whose delivery report names a failed
+    skill or a status that delivered nothing (#4130). `pending_start` — the
+    normal case, members start after the skills phase — is not a line."""
+    delivery = (result or {}).get("delivery") if isinstance(result, dict) else None
+    if not delivery:
+        return None
+    failures = delivery_failures(delivery)
+    status = delivery.get("status")
+    if not failures and status in (*_DELIVERED, "pending_start"):
+        return None
+    detail = "; ".join(failures) or delivery.get("reason") or status or "not_delivered"
+    return f"Skills assigned to '{name}' but not delivered: {detail}."

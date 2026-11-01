@@ -3,7 +3,10 @@
 One count per config group — `skills`, `grants`, `gates`, `roles` — and one
 for `members`, each `{write, report, unobserved}`:
 
-* `write` — a change apply makes (or, on a dry run, would make);
+* `write` — a change apply makes (or, on a dry run, would make). On a real
+  run only a write that LANDED is counted, by its own key (#4130): a skill or
+  set held back for its gate, a writer that raised and every write of a
+  refused run are not, even beside a write of the same kind that landed;
 * `report` — a change apply only reports (an extra, a held-back grant or seat, a
   vacant person seat, a declared-only member);
 * `unobserved` — a group the platform could not observe for the member: the
@@ -16,7 +19,7 @@ nothing about it runs.
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 #: Config group -> the `SystemApplyChange.field` values it covers.
 GROUP_FIELDS: Dict[str, tuple] = {
@@ -41,16 +44,38 @@ def member_unobserved(mp) -> List[str]:
                    for g in [_group_of(c.field)] if g})
 
 
-def build(members: Dict, *, extras: Dict[str, Dict]) -> Dict[str, Dict]:
+def write_keys(change) -> List[Any]:
+    """The keys a `write` change's ops write — what the executor records in
+    `landed`: each skill / set / capability of a list, a gate's skill, a seat's
+    role."""
+    desired = change.desired
+    if isinstance(desired, dict):
+        return [desired.get("skill")]
+    if isinstance(desired, (list, tuple)):
+        return list(desired)
+    return [desired]
+
+
+def build(members: Dict, *, extras: Dict[str, Dict],
+          landed: Optional[Set[Tuple[str, str, Any]]] = None) -> Dict[str, Dict]:
     """The summary over every member's plan. `extras` adds group-specific
-    keys (`grants.held_back`, `roles.held_back`) beside the three counts."""
+    keys (`grants.held_back`, `roles.held_back`) beside the three counts.
+
+    `landed` is a real run's `(member, step, key)` set of writes that landed
+    (#4130); with it a `write` change counts only when a write of ITS OWN key
+    landed for that member (a group field IS the executor's step name), so two
+    sets or two gates on one member with one failure count 1; a created or
+    updated member counts only when any of its writes landed. None (a dry
+    run) counts the plan. `report` and `unobserved` are plan counts always."""
+    landed_members = None if landed is None else {entry[0] for entry in landed}
     out = {g: {"write": 0, "report": 0, "unobserved": 0} for g in GROUP_FIELDS}
     out["members"] = {"write": 0, "report": 0, "unobserved": 0}
     for mp in members.values():
         if mp.verdict == "blocked":
             continue
         if mp.verdict in ("create", "update"):
-            out["members"]["write"] += 1
+            if landed_members is None or mp.name in landed_members:
+                out["members"]["write"] += 1
         elif mp.verdict == "declared_only":
             out["members"]["report"] += 1
         if member_unobserved(mp):
@@ -60,7 +85,9 @@ def build(members: Dict, *, extras: Dict[str, Dict]) -> Dict[str, Dict]:
             if group is None:
                 continue
             if c.action == "write":
-                out[group]["write"] += 1
+                if landed is None or any((mp.name, c.field, k) in landed
+                                         for k in write_keys(c)):
+                    out[group]["write"] += 1
             elif c.code.endswith(UNOBSERVED_SUFFIX):
                 out[group]["unobserved"] += 1
             else:

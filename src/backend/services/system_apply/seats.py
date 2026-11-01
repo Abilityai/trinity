@@ -255,7 +255,7 @@ async def run(op, actor, out, attempt) -> None:
             raise _Refused(f"{result['refused']}: the assignment module refused the seat")
         return True
 
-    await attempt(name, short, SEAT_STEP, write)
+    await attempt(name, short, SEAT_STEP, write, key=role)
 
 
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, str]:

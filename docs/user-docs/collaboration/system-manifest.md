@@ -153,7 +153,7 @@ agents:
 Rules that hold for every key:
 
 - **An absent key is never a revoke.** Leaving a key out, or omitting an item a member already has, changes nothing. Apply reports what the member holds beyond the manifest (`skill_extra`, `grant_extra`, `gate_undeclared`, …) and never unassigns, revokes or clears it. Removing something is a human act in the agent's own settings.
-- **`summary`** in the apply result counts, per group (`skills`, `grants`, `gates`, `roles`, `members`), what is written, what is only reported, and what is **`unobserved`**. Unobserved means this install has nothing that can answer for that group (each member lists its unobserved groups). It is never shown as "in sync". A failed read is different: it blocks the member with the retryable `member_reads_unavailable`.
+- **`summary`** in the apply result counts, per group (`skills`, `grants`, `gates`, `roles`, `members`), what is written, what is only reported, and what is **`unobserved`**. Unobserved means this install has nothing that can answer for that group (each member lists its unobserved groups). It is never shown as "in sync". A failed read is different: it blocks the member with the retryable `member_reads_unavailable`. A dry run counts what apply *would* write; a real run counts only the writes that actually landed (a skill held back for its gate, or a write that failed, is not counted), and a refused run counts none. Likewise `adopted` lists only agents whose system tag was actually added.
 - **Export** writes each member's skills, skill sets, gates, grants and held seat back out, so the file re-applies unchanged. Person seats and declared-only members are not stored on the platform and are not exported. The first lines of every export are `# unobserved:` comments that say so (and name anything that could not be read — including every member's seat on an install with no assignment module). Grants, gates and seats appear only where the caller could read them directly: grants and seats for the agent's owner or an admin, and gates for anyone the Skills tab's gate read admits. An export names what was withheld from this caller. `resources` are the member's effective values, so re-applying an export keeps a limit that is waiting for a restart.
 - The deploy preview shows one line under **Agents to create** that totals what the created agents will be configured with. Anything held back is listed under the notes.
 
@@ -167,8 +167,9 @@ Deploy is **best-effort / continue-on-error by default**: if one agent fails to 
 | `partial` | Some agents failed; the survivors were still created and configured. | 200 |
 | `failed` | Zero agents created. | 500 (the full report is the response body) |
 | `valid` | Dry-run validation passed (nothing created). | 200 |
+| (refused) `nothing_to_deploy` | Every member is `deploy: false`, so deploy has nothing to create. Refused on the dry run and the real deploy; use apply to report on declared-only members. | 400 |
 
-A `partial` deploy returns the survivors **plus** a `failed[]` list. Each entry carries `{name, short_name, template, reason, status_code}` so you can see exactly which agents failed and why. A **total** failure returns HTTP 500 with the same full report as the body -- so always inspect `status` / `failed[]` rather than trusting the HTTP status alone.
+Members marked `deploy: false` are listed by name in `agents_declared_only[]`. A `partial` deploy returns the survivors **plus** a `failed[]` list. Each entry carries `{name, short_name, template, reason, status_code}` so you can see exactly which agents failed and why. A **total** failure returns HTTP 500 with the same full report as the body -- so always inspect `status` / `failed[]` rather than trusting the HTTP status alone.
 
 Two deploy options control this:
 
