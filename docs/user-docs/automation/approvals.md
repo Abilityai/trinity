@@ -68,6 +68,14 @@ WebSocket events fired along the way: `operator_queue_new` when the item arrives
 
 An item raised with `ask_operator` is addressed by role: `primary` (the default for approvals and questions) goes to the agent's owner, and `operator` (the default for alerts) goes to the operators with no single person. `approver` and `viewer` are refused until someone fills those roles. A queue-file entry can instead address an item to one person the agent is shared with by setting `addressed_to_email`. The address is checked at ingestion against the agent's own roster: someone the agent is not shared with, or a malformed value, turns the item into an ordinary operator ask rather than being refused. The `context` block of an ask is never shown to the addressee.
 
+**A canon role (`role:<id>`).** Where your install provides roles, an ask may name a role from the agent's canon, such as `role:finance-lead`. It reaches every person seated in that role on the agent's own roster who can open the agent, and nobody else: there is no fallback to the owner or the operators. When it cannot reach anyone, the ask is refused with a `422` that names the role (never a person) and the remedy:
+
+- `role_unavailable` — roles cannot be answered on this install right now. Address the ask to `primary` or `operator` instead.
+- `role_unassigned` — nobody is seated in the role for this agent yet. Ask the agent's owner to seat someone, or address the ask to `primary` or `operator`.
+- `role_cannot_open_agent` — the people seated in the role cannot open the agent, so they would never see the ask. Ask the agent's owner to share the agent with them.
+
+Reports and messages cannot be addressed to a role id; they refuse it with `invalid_to`.
+
 **A role several people fill.** When the role an ask is addressed to resolves to more than one person, the one ask reaches every one of them — it is in each person's Inbox, and the receipt reports `resolved: true`. The first answer wins: the others see the ask as ended, with **Answered · {name}** naming who answered it. **Dismiss** and **Discuss** are not offered on a shared ask, and the Workspace route refuses both with `422 shared_ask`, because one person's dismissal or discussion would end or redirect it for everyone.
 
 What that person sees in the [Workspace](../sharing-and-access/workspace.md):
