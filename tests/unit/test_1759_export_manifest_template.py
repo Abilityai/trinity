@@ -56,7 +56,7 @@ pytestmark = pytest.mark.unit
 def quiet_db(monkeypatch):
     """Silence the per-agent db enrichment; only `template` is under test."""
     db = MagicMock()
-    db.get_agent_folder_config.return_value = None
+    db.get_shared_folder_config.return_value = None
     db.list_agent_schedules.return_value = []
     db.get_agent_tags.return_value = []
     db.get_permitted_agents.return_value = []
