@@ -342,6 +342,116 @@
       "description": "trinity-enterprise#1003: a silent Gemini chat or task run is ended on a wall-clock timer (chat: execution_timeout_sec, default 1800s; task: timeout_seconds), its whole process group terminated, 504 like the Claude Code path; a run that finishes in time is never signalled."
     },
     {
+      "file": "unit/test_ent719_credential_and_key_routes_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "credentials",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "Human-only gates on the credential, paid-account and key routes, through the real routers over a real temp schema. Per route, every refused principal (the own agent key, an in-reach sibling, the system key, connector, ops, portal_delegate, an unknown scope, no mcp_scope, a vouched loopback, and the user key on an INTERACTIVE route) gets the same 403 on an existing and a missing target, well-formed or schema-invalid, with no ownership lookup and no state change; a real unvouched loopback JWT is refused by the entry fence; a signed-in person succeeds, and the user key succeeds on a PERSON route, inject included (the 2026-10-28 ent#719 ruling: /trinity:onboard Step 5e injects .env with the person's own user key, pinned by its own test). Other shape: with the feature off the person gets today's error and every machine principal 403 first."
+    },
+    {
+      "file": "unit/test_ent719_own_settings_identity_git_human_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "auth",
+        "unit"
+      ],
+      "description": "Owner-tier routes that change an agent's own settings, identity or git are human-only, through the real routers (agents, agent_brain_orb, agent_rename, git): circuit-breaker, label, mcp-exposed, operator-resume, voice-replies, rename, brain-orb postprocess, the per-agent PAT set and clear, git auto-sync, freeze-schedules-if-failing and initialize are PERSON (Depends(require_person) in the decorator; the PAT set by the 2026-10-28 ent#719 ruling, because /trinity:onboard sets a per-agent token with the person's own user key); the brain-orb voice token and bind-to-own-repo (it can persist the caller's saved GitHub token, which the request does not carry) are INTERACTIVE. Matrix: the agent's own key, a spawning sibling inside manage reach, an edge sibling (voice token), the system key and the owner's user key as real seeded bearers; connector, ops, portal_delegate, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope as stated principals; a real unvouched loopback JWT through the entry fence. Every refusal leaves the stored value unmoved; for every principal the route's rule refuses it is identical for a nonexistent agent and stays 403 for a schema-invalid body on the 11 routes that validate one; the stated principals, and the real keys on a fresh install, are refused with no agent lookup; the owner's session (and user key on PERSON routes) and a shared person on the voice token still succeed; the user key is refused on the voice token and the repository binding (supplied or saved token), sets the PAT as onboarding does, and clears it; send_voice_reply and GET git/auto-sync still admit the own key; fresh install with git never configured (a person gets 404 Git not configured on auto-sync and freeze and initializes; machine keys get 403 before any lookup); the census classifies each route by its rule."
+    },
+    {
+      "file": "unit/test_3254_budgeted_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal; the flood alarm as one queue_flood:<reason> row re-read every 6 hours through the real _sync_agent poll for 30 simulated days (R9), ended as the platform where the episode ends and never read when no episode runs (D8), retried after a failed write (#3130 I1), a person's ending standing through the re-read and the clear; the effect guard's refusal as one effect_unguarded:<effect>:<reason> row ended by its lifetime; the missing skill as one row per command, re-read by each run with the notification sent only for a new row, a pending pre-seam row still standing for its command; the gitignore sweep's must-act alert keyed by the canonical direction-tagged change-set digest (a repeat collapses, a different set or direction is another row, never expires, a person's ending stands); the Workspace problem report as one must-act row per person, target and day, keep_text at the sink and both click/comment interleavings keeping the words, the owner-only prefix kept, the delegate and the emitter landing on one subject; a person's acknowledgement through ask_service.answer landed mid-reading (between observe's read and the locked create, and between the locked find and the CAS) yields snoozed and no new row for the problem report, an inbox collision and the flood's re-read, the snooze being decided under the create's lock; the other shape, the clock 30 days ahead (the gitignore and problem-report rows still pending, a full skill_not_found budget frees itself and a new command files). Fresh DB per test (db_backend), both clocks frozen."
+    },
+    {
+      "file": "unit/test_3254_second_sweep.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "migrations",
+        "unit"
+      ],
+      "description": "#3254: the #3246 upgrade sweep run a second time, data only, on both tracks (SQLite `platform_alert_subjects_resweep`, Alembic `0111_platform_alert_resweep`), against the real post-#3246 operator_queue DDL (subject columns and partial unique index present). Registered on both tracks after the first sweep, no DDL in either half; per derivable moved kind (18 families) exactly one pending row per subject survives: the existing holder (seam row or first-sweep stamp) keeps the slot whatever its age, otherwise the newest subject-less row survives stamped; the rest end as ONE batch (cancelled / platform / superseded); must-act survivors keep expires_at NULL; person-ended legacy rows inside the snooze window get subject only; gitignore and problem-report legacy rows, agent-raised and gate rows untouched; git-bloat legacy rows a lifetime stamp only; idempotent (a second run changes and plans nothing); fresh install (no rows: one SELECT, no writes; the real three-pass lifecycle records it); the Alembic revision's own upgrade() on SQLite via an operations context and on PostgreSQL (`requires_postgres`, runs only with TEST_POSTGRES_URL). No Docker."
+    },
+    {
+      "file": "unit/test_3254_unended_kinds.py",
+      "feature": "Issue #3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 slice 6: the poison-park, inbox-collision and validation-failure alerts report through platform_alerts.observe (no clear site). Against the unit island's real SQLite with a frozen clock: two readings are one pending row with the subject <kind>:<key>, seen_count bumped, last_seen_at moved, expires_at moved for validation and NULL for the must-act kinds; the poison park follows the seam outcome (failed or refused never parks and the next pass retries, snoozed parks); an acknowledgement through ask_service.answer lands acknowledged and snoozes; a person's ending of a collision is final (no re-file at +8 days, a new claimant or a raised priority re-alerts); a legacy collision ended inside the sweep's window and a stamped legacy pending collision ended before its first refresh both stay snoozed although legacy rows carry no claimants_digest; the collision is observed at most once per 6 hours per claimant set and a failed reading is retried; each new subject equals the sweep's legacy derivation (R1); 30 days ahead the poison and collision rows are still pending with expires_at NULL while the validation row has expired."
+    },
+    {
+      "file": "unit/test_3254_sync_health_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "git-sync",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "#3254 S2: the git sync health alerts on the platform-alert seam, driven through the real SyncHealthService poll cycle against db_harness with a pinned clock. D2: Kind.row_type keeps sync_failing / sync_diverged / git_bloat as the row type; a kind without one keeps alert or its budgeted type; an explicit row_type that differs from budgeted_type is refused. Per kind (sync_failing, sync_diverged, git_bloat_size, git_bloat_maintenance): the row carries its subject, a re-read bumps seen_count and moves last_seen_at / expires_at, the falling edge ends it cancelled / platform / condition_cleared; a restarted poller's reading lands on the same row; a person's acknowledgement through ask_service.answer stands, a re-read inside the snooze files nothing, the recovery clear never overwrites it; diverged_since is a sync_diverged material key, so after a person's ending two days of re-reads of that episode stay snoozed and a new episode inside the 7 days files its own row, and a pre-move person-ended row (its context carries diverged_since) snoozes its own episode only. R9: a poll inside 6 h touches nothing; a push-denied failure polled for 31 simulated days keeps one pending row with a moving deadline; a row whose recovery clear was lost expires 30 days after its last reading. AC 5: size and maintenance are two subjects and end separately. The divergence row survives a sync-failing precedence, is re-read under it (31 simulated days keep one row; a failed re-read is retried on the next poll; a restarted poller looks the row up and re-reads it; a worker's miss is looked up again after 6 h, so a row another worker raised is not stranded), a precedence never raises one, even across a restart, and it ends only with its diverged_since episode. R10: an unreachable agent, git switched off, a never cycle, an unknown tuple or a missing / malformed / negative measurement never ends an alert. /cso: an agent-written error past the 64 KiB context belt cannot keep the sync_failing alert out. R1: pre-move sync-failing / sync-diverged ids derive the seam subject; git-bloat ids are exempt and get a lifetime stamp only."
+    },
+    {
+      "file": "unit/test_1632_operator_queue_caps.py",
+      "feature": "#1632",
+      "added": "2026-07-17",
+      "categories": [
+        "backend",
+        "unit",
+        "operator-queue",
+        "security",
+        "reliability"
+      ],
+      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632) and since #3254 reporting through platform_alerts.observe: reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Also pins #3385: an agent-authored `type` is truncated with the marker at OPERATOR_QUEUE_TYPE_MAX (64) while every platform-emitted and ask_operator type passes unchanged, the #2915 fingerprint bounds both sides so a clamped row is not a rewrite of its own oversize entry, and the DB belt rejects a type over 1 KiB. Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
+    },
+    {
+      "file": "unit/test_3254_backup_archive_alerts.py",
+      "feature": "#3254",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit",
+        "reliability"
+      ],
+      "description": "#3254: the database-backup and log-archive alarms report through the platform alert seam (#3246), on the unit island's real SQLite with the clock frozen at a pinned date in every module the path reads it from. db_backup_failure (the edge alarm) and db_backup_stale (the weekly re-alarm) are two subjects on the _db-backup host keyed by the backup directory (AC 5); log_archive_unwritable is keyed by the archive path on _log-archive. Per kind: two readings are one pending row with the subject, seen_count 2 and a moved last_seen_at and expires_at; the success site ends it as the platform (condition_cleared): an ok ends both backup kinds, a success the boot pre-migration hook wrote to the settings ends the stale row at the next staleness check, a successful write probe ends the archive row; a further failure, a no-space skip, a status reset with no success on record and a skipped probe (archival off, non-local backend) end nothing; a person's ending through ask_service.answer lands acknowledged, is never overwritten by the clear, and snoozes the next reading; key parity: the key equals the upgrade sweep's reading of a pre-move row, and the seam's row reads back as the same kind. Two workers (the Redis lease failed open), serialised by the outcome lock: a failure the sibling records while this worker clears keeps its alarm; a success the sibling records while this worker raises the failure alarm ends it; a success recorded while this worker raises the stale alarm ends that row; an outcome lock that cannot be taken fails open with a WARNING. The clock 30 days ahead: a persisting staleness re-alarmed weekly by the real _staleness_check keeps exactly one pending row through day 30 while the one-off failure reading expires on day 14, and a person's ending of the stale row silences one weekly re-alarm, not more. No Docker."
+    },
+    {
+      "file": "unit/test_3435_credential_tool_gates.py",
+      "feature": "#3435",
+      "added": "2026-10-09",
+      "categories": [
+        "backend",
+        "auth",
+        "credentials",
+        "mcp",
+        "unit"
+      ],
+      "description": "#3435: pins the EXISTING backend gates behind the export_credentials / import_credentials / get_credential_encryption_key MCP tools, by principal (real models.User objects): export admits an owner or admin person (JWT or user key) and import a signed-in owner or admin only (ent#719); both refuse the system key and every agent key with the route rule's exact 403, and give a non-owner the uniform 404; the key route admits an admin human, refuses a non-admin 403 'Admin access required', an agent key 403 human-only, an ops-scope key 403, and answers 503 when CREDENTIAL_ENCRYPTION_KEY is unset. Real router + real owner/admin dependencies; DB ownership, Docker and the encryption service stubbed. No Docker."
+    },
+    {
       "file": "unit/test_4085_scheduler_subscription_id.py",
       "feature": "#4085",
       "added": "2026-10-29",
@@ -374,30 +484,57 @@
       "description": "#4064: killpg only for a group the process leads (never the server's own, 0, negative or stale); every registered Popen in agent_server/services starts its own session and registers its pgid (AST guard)."
     },
     {
-      "file": "unit/test_ent719_credential_and_key_routes_human_only.py",
-      "feature": "abilityai/trinity-enterprise#719",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "credentials",
-        "auth",
-        "api",
-        "unit"
-      ],
-      "description": "Human-only gates on the credential, paid-account and key routes, through the real routers over a real temp schema. Per route, every refused principal (the own agent key, an in-reach sibling, the system key, connector, ops, portal_delegate, an unknown scope, no mcp_scope, a vouched loopback, and the user key on an INTERACTIVE route) gets the same 403 on an existing and a missing target, well-formed or schema-invalid, with no ownership lookup and no state change; a real unvouched loopback JWT is refused by the entry fence; a signed-in person succeeds, and the user key succeeds on a PERSON route, inject included (the 2026-10-28 ent#719 ruling: /trinity:onboard Step 5e injects .env with the person's own user key, pinned by its own test). Other shape: with the feature off the person gets today's error and every machine principal 403 first."
-    },
-    {
-      "file": "unit/test_ent719_own_settings_identity_git_human_only.py",
+      "file": "unit/test_ent719_org_tags_person_only.py",
       "feature": "abilityai/trinity-enterprise#719",
       "added": "2026-10-27",
       "categories": [
         "backend",
         "api",
         "security",
-        "auth",
         "unit"
       ],
-      "description": "Owner-tier routes that change an agent's own settings, identity or git are human-only, through the real routers (agents, agent_brain_orb, agent_rename, git): circuit-breaker, label, mcp-exposed, operator-resume, voice-replies, rename, brain-orb postprocess, the per-agent PAT set and clear, git auto-sync, freeze-schedules-if-failing and initialize are PERSON (Depends(require_person) in the decorator; the PAT set by the 2026-10-28 ent#719 ruling, because /trinity:onboard sets a per-agent token with the person's own user key); the brain-orb voice token and bind-to-own-repo (it can persist the caller's saved GitHub token, which the request does not carry) are INTERACTIVE. Matrix: the agent's own key, a spawning sibling inside manage reach, an edge sibling (voice token), the system key and the owner's user key as real seeded bearers; connector, ops, portal_delegate, an unknown scope, a user scope carrying an agent, a vouched loopback and a principal with no mcp_scope as stated principals; a real unvouched loopback JWT through the entry fence. Every refusal leaves the stored value unmoved; for every principal the route's rule refuses it is identical for a nonexistent agent and stays 403 for a schema-invalid body on the 11 routes that validate one; the stated principals, and the real keys on a fresh install, are refused with no agent lookup; the owner's session (and user key on PERSON routes) and a shared person on the voice token still succeed; the user key is refused on the voice token and the repository binding (supplied or saved token), sets the PAT as onboarding does, and clears it; send_voice_reply and GET git/auto-sync still admit the own key; fresh install with git never configured (a person gets 404 Git not configured on auto-sync and freeze and initializes; machine keys get 403 before any lookup); the census classifies each route by its rule."
+      "description": "The org-chart tags (dept-*, reports-to-*) take a person on the three tag-write routes, through the real tags router: the system key, agent keys (own, and on an agent it spawned) and every non-person scope are refused by the guard; a session and a user key pass; plain tags and the PUT delta rule still work on the own key and the system key; an agent with no tags; through the real systems router, a system name under a reserved prefix is refused for a person, the system key and an agent key holding agents.manage alike (dry run and deploy), while a plain system name still deploys and tags its agents; apply mode (POST /api/systems/apply, ent#695) refuses the same reserved system names for a session and a user key with the same named 400 (dry run and apply), nothing created or tagged, and a plain name's dry run passes the validator. Mutation: drop the system-name check -> the 8 apply rows red."
+    },
+    {
+      "file": "unit/test_ent719_workspace_grants_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "api",
+        "client-portal",
+        "security",
+        "unit"
+      ],
+      "description": "The Workspace's readiness flip, canvas pin and seat-decision record and actions take a person, through the real portal router and door: the system key and every non-person scope get 403 person_required before the roster (recording for another seat included); agent keys stay refused at the door; the owner on a session or a user key passes; a shared person and a Workspace client keep the owner-only, canvas-manager and own-seat answers; fresh install (never flipped, no decisions)."
+    },
+    {
+      "file": "unit/test_ent719_room_post_membership_first.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "POST /api/rooms/{room_id}/messages decides membership before the Idempotency-Key claim, through the real rooms router, service and idempotency service on a temp DB: a non-member (an unseated agent key of the same owner, another owner's agent key, an unseated agent key whose owner is an admin and which carries that role, a person's session, a person's user key, a Workspace client) gets the same 404 a missing room gets on a stored replay, on the in-flight 409, with a fresh key and with none, and never reaches the key claim (a spy on the real claim); a malformed body gets the same 422 member or not; a member's replay and 409 are unchanged; the system key, which holds no seat, is still admitted by the admin view (pinned as today's answer); a real loopback JWT is refused by the entry fence. Edge case: clock pinned, then 30 days ahead past the key window, a non-member is still refused and the member's repeat is a new post. Mutation: the check reverted (dev order) or moved to just after begin() turns 19 of 31 red."
+    },
+    {
+      "file": "unit/test_ent719_room_moderator_person.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "rooms",
+        "auth",
+        "security",
+        "api",
+        "unit"
+      ],
+      "description": "A room's moderator acts (close, add and remove an agent participant) take a person. Through the real rooms router with signed JWTs, a real Workspace session token and MCP keys whose row lookup alone is stubbed; two principals that no credential can present (a vouched loopback and one with no mcp_scope) are handed in by a dependency override of the door, and the Workspace cases stub the portal's block check and roster lookup. The system-scoped key gets 403 not_a_person on all three, both on a room its admin owner created (the account holds the moderator row) and on a room it holds no seat in, and the uniform 404 only on a room that does not exist; an unknown key scope, the vouched loopback and the principal with no mcp_scope get not_a_person too; a member agent gets 403 not_moderator and a non-member agent the uniform 404; connector, ops and portal-delegate keys and a real unvouched loopback JWT are refused at the door; a person admin (session and own user key), the room's creator as a person (session and own user key) and a Workspace moderator still moderate. Fresh install (one admin with no email, its own two agents): the system key, which resolves by username, cannot moderate a room the admin or the key started, and the signed-in admin can. The same roster grant through a post: a mention of an agent outside the room recruits it only for a person (session, own user key, or a Workspace client with the agent on its roster), never for the system key or an agent key that can reach the agent, nor for a woken agent's reply posted under the waking person's principal; the post still lands. With the fix reverted, 19 fail and 28 pass (kept-path guards, and refusals dev already makes). Mutation-proven (admin branch without the person check: 17 red; moderator-row branch without it: 14 red; the not_a_person refusal removed: 17 red; the mention recruit without the person check: 2 red; the recruit without its agent-reply check: 1 red; the person predicate refusing everyone: 10 red; a DELEGATED entry dropped: census rule 1 red); needs no Docker."
     },
     {
       "file": "unit/test_4002_setup_hook_tmpdir.py",
@@ -1237,17 +1374,6 @@
       "description": "#3246 C4: the seam's static guards — two-way prefix parity between the kind registry and _RESERVED_ID_PREFIXES (the four newly reserved families are platform-minted); the EMITTERS_NOT_YET_ON_SEAM ratchet (every direct or #1677-budgeted platform emitter listed with its follow-up, no stale entries, prefixes registered); the clear-site check (every hook kind on the seam has a platform_alerts.clear/reconcile call naming it, or a named NO_CLEAR_SITE reason); the caller guard (only the seam calls the #3246 accessors). AST, no DB."
     },
     {
-      "file": "unit/test_3254_budgeted_alerts.py",
-      "feature": "#3254",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "operator-queue",
-        "unit"
-      ],
-      "description": "#3254 (S7, the #1677 budget family on the platform-alert seam): the budgeted emitters and the budget episode report through platform_alerts.observe, and create_bounded_alert(_outcome) is a thin delegate of it. Pins the registry parity of _BUDGETED_ALERT_TYPES, the reach-back names importable from services.operator_queue_service, the delegate's outcome table (all five budgeted types admitted onto their kinds, an updated reading not counted as created, a mismatched id refused loudly), and the episode as one alert_budget:<type> row re-read by a later refusal; the flood alarm as one queue_flood:<reason> row re-read every 6 hours through the real _sync_agent poll for 30 simulated days (R9), ended as the platform where the episode ends and never read when no episode runs (D8), retried after a failed write (#3130 I1), a person's ending standing through the re-read and the clear; the effect guard's refusal as one effect_unguarded:<effect>:<reason> row ended by its lifetime; the missing skill as one row per command, re-read by each run with the notification sent only for a new row, a pending pre-seam row still standing for its command; the gitignore sweep's must-act alert keyed by the canonical direction-tagged change-set digest (a repeat collapses, a different set or direction is another row, never expires, a person's ending stands); the Workspace problem report as one must-act row per person, target and day, keep_text at the sink and both click/comment interleavings keeping the words, the owner-only prefix kept, the delegate and the emitter landing on one subject; a person's acknowledgement through ask_service.answer landed mid-reading (between observe's read and the locked create, and between the locked find and the CAS) yields snoozed and no new row for the problem report, an inbox collision and the flood's re-read, the snooze being decided under the create's lock; the other shape, the clock 30 days ahead (the gitignore and problem-report rows still pending, a full skill_not_found budget frees itself and a new command files). Fresh DB per test (db_backend), both clocks frozen."
-    },
-    {
       "file": "unit/test_3246_platform_alert_sweep.py",
       "feature": "#3246",
       "added": "2026-10-05",
@@ -1258,18 +1384,6 @@
         "unit"
       ],
       "description": "#3246 C2: the upgrade sweep, driven as the registered SQLite migration (`platform_alert_subjects`) against the real schema.py operator_queue DDL with the two new columns and indexes stripped (a pre-upgrade install holding duplicates). Ordered columns → sweep → index: `subject` / `last_seen_at` added PRAGMA-guarded; the newest pending row per derived subject survives stamped (subject, last_seen_at, context.seen_count=1, expires_at only where NULL — opt-out kinds keep NULL) and the rest end as ONE batch (cancelled / platform / superseded / NULL email / one batch_id); known kinds without a derivable subject get a lifetime stamp only (never merged on a guess); person-ended rows inside the 7-day snooze window get subject only; agent-raised, gate- and external-prefix rows untouched; a second run changes nothing; the partial unique index exists only after the run, bites on a second pending row, and matches schema.py's DDL; both tracks registered after the #3130 flood sweep, tables.py declares columns and both indexes. No Docker."
-    },
-    {
-      "file": "unit/test_3254_second_sweep.py",
-      "feature": "#3254",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "operator-queue",
-        "migrations",
-        "unit"
-      ],
-      "description": "#3254: the #3246 upgrade sweep run a second time, data only, on both tracks (SQLite `platform_alert_subjects_resweep`, Alembic `0111_platform_alert_resweep`), against the real post-#3246 operator_queue DDL (subject columns and partial unique index present). Registered on both tracks after the first sweep, no DDL in either half; per derivable moved kind (18 families) exactly one pending row per subject survives: the existing holder (seam row or first-sweep stamp) keeps the slot whatever its age, otherwise the newest subject-less row survives stamped; the rest end as ONE batch (cancelled / platform / superseded); must-act survivors keep expires_at NULL; person-ended legacy rows inside the snooze window get subject only; gitignore and problem-report legacy rows, agent-raised and gate rows untouched; git-bloat legacy rows a lifetime stamp only; idempotent (a second run changes and plans nothing); fresh install (no rows: one SELECT, no writes; the real three-pass lifecycle records it); the Alembic revision's own upgrade() on SQLite via an operations context and on PostgreSQL (`requires_postgres`, runs only with TEST_POSTGRES_URL). No Docker."
     },
     {
       "file": "unit/test_3246_platform_alerts_db.py",
@@ -2038,17 +2152,6 @@
       "description": "VALIDATE-001 input integrity (#2959): drives the real ValidationService with a fake auditor that PASSes only when the run's last-line status is in its prompt. A >10,000-char response validates against its last line (head+tail window); a custom validation_prompt without placeholders still carries the task and response; a full template is honoured and literal braces do not crash; an empty/whitespace/None response records business_status=validation_unavailable before any referee or validator run, files no operator-queue alert and is never a PASS; a validator cannot award itself 'unavailable'."
     },
     {
-      "file": "unit/test_3254_unended_kinds.py",
-      "feature": "Issue #3254",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "operator-queue",
-        "unit"
-      ],
-      "description": "#3254 slice 6: the poison-park, inbox-collision and validation-failure alerts report through platform_alerts.observe (no clear site). Against the unit island's real SQLite with a frozen clock: two readings are one pending row with the subject <kind>:<key>, seen_count bumped, last_seen_at moved, expires_at moved for validation and NULL for the must-act kinds; the poison park follows the seam outcome (failed or refused never parks and the next pass retries, snoozed parks); an acknowledgement through ask_service.answer lands acknowledged and snoozes; a person's ending of a collision is final (no re-file at +8 days, a new claimant or a raised priority re-alerts); a legacy collision ended inside the sweep's window and a stamped legacy pending collision ended before its first refresh both stay snoozed although legacy rows carry no claimants_digest; the collision is observed at most once per 6 hours per claimant set and a failed reading is retried; each new subject equals the sweep's legacy derivation (R1); 30 days ahead the poison and collision rows are still pending with expires_at NULL while the validation row has expired."
-    },
-    {
       "file": "test_github_pat.py",
       "feature": "Issue #347",
       "added": "2026-04-16",
@@ -2630,18 +2733,6 @@
       "description": "Git-maintenance health signals (#1595, backend): _coerce_nonneg_int boundary guard for agent-writable sync-state values; pack_count/loose_objects/maintenance_failures live round-trip via SyncStateOperations + db_harness; edge-triggered git_bloat operator alerts (size ceiling crossing + maintenance-failure streak, once per episode, re-armed after reset)."
     },
     {
-      "file": "unit/test_3254_sync_health_alerts.py",
-      "feature": "#3254",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "git-sync",
-        "operator-queue",
-        "unit"
-      ],
-      "description": "#3254 S2: the git sync health alerts on the platform-alert seam, driven through the real SyncHealthService poll cycle against db_harness with a pinned clock. D2: Kind.row_type keeps sync_failing / sync_diverged / git_bloat as the row type; a kind without one keeps alert or its budgeted type; an explicit row_type that differs from budgeted_type is refused. Per kind (sync_failing, sync_diverged, git_bloat_size, git_bloat_maintenance): the row carries its subject, a re-read bumps seen_count and moves last_seen_at / expires_at, the falling edge ends it cancelled / platform / condition_cleared; a restarted poller's reading lands on the same row; a person's acknowledgement through ask_service.answer stands, a re-read inside the snooze files nothing, the recovery clear never overwrites it; diverged_since is a sync_diverged material key, so after a person's ending two days of re-reads of that episode stay snoozed and a new episode inside the 7 days files its own row, and a pre-move person-ended row (its context carries diverged_since) snoozes its own episode only. R9: a poll inside 6 h touches nothing; a push-denied failure polled for 31 simulated days keeps one pending row with a moving deadline; a row whose recovery clear was lost expires 30 days after its last reading. AC 5: size and maintenance are two subjects and end separately. The divergence row survives a sync-failing precedence, is re-read under it (31 simulated days keep one row; a failed re-read is retried on the next poll; a restarted poller looks the row up and re-reads it; a worker's miss is looked up again after 6 h, so a row another worker raised is not stranded), a precedence never raises one, even across a restart, and it ends only with its diverged_since episode. R10: an unreachable agent, git switched off, a never cycle, an unknown tuple or a missing / malformed / negative measurement never ends an alert. /cso: an agent-written error past the 64 KiB context belt cannot keep the sync_failing alert out. R1: pre-move sync-failing / sync-diverged ids derive the seam subject; git-bloat ids are exempt and get a lifetime stamp only."
-    },
-    {
       "file": "unit/test_1600_proactive_history.py",
       "feature": "#1600",
       "added": "2026-07-16",
@@ -2664,19 +2755,6 @@
         "regression"
       ],
       "description": "Proactive GROUP messages persist to channel session history (#1649). Slack is a real recall fix: the broadcast is filed at the posted message's own ts, which IS the thread key an in-thread reply resolves to (asserted against the adapter). Telegram is bookkeeping only — group sessions are per-(sender, chat) with no group branch, so a broadcast uses a synthetic agent-sender key; a test pins that it deliberately does NOT match a participant's session, so the accepted trade-off can't be mistaken for a bug and a future adapter group-branch forces a re-decision. Router-level tests drive the real endpoints (the #1600 lesson: helper-only tests passed with the persistence call deleted outright). Also: #903 shared-thread attribution (sender_email=None), persist only on confirmed delivery, fail-soft, and send_message_detailed's ts capture keeping send_message's 2-tuple contract for its ~7 callers."
-    },
-    {
-      "file": "unit/test_1632_operator_queue_caps.py",
-      "feature": "#1632",
-      "added": "2026-07-17",
-      "categories": [
-        "backend",
-        "unit",
-        "operator-queue",
-        "security",
-        "reliability"
-      ],
-      "description": "Operator-queue create-path ingestion caps (#1632): the agent-authored sync boundary is bounded by a DB-measured pending-DEPTH cap (primary, Redis-independent), a per-agent + fleet RATE cap (fail-open, break on deny, real in-process-fallback exercise), a total truncate-with-marker field-hygiene clamp inside the #1525 try/except (title/question/context/options/execution_id/created_at/priority, non-dict context, boundary lengths, never-raises), the reserved-platform-id + malformed-id guard, the opqueue:leader cross-worker lock (non-leader poll cycle is a no-op), the one-per-episode flood alert (un-guessable id, cooldown, emit-failure-safe, platform-exempt), the oversize-file skip, and the generous DB-sink belt + count_pending_for_agent helper. Also pins the concrete platform producer validation_service._notify_operator_on_failure, converted to a direct db.create_operator_queue_item (#1632) and since #3254 reporting through platform_alerts.observe: reserved `val_` id (an agent can't pre-create and thereby suppress its own validation alarm), bypasses the agent-file sync caps, and stays best-effort (a create failure never fails validation) — the conversion also fixed a latent bug where the notification appended to a bare list and was never ingested. Also pins the _leader_ttl 30s floor (F1: lease outlasts one worst-case cycle + sleep, so leadership doesn't flap and the flood alert doesn't double-emit under --workers 2). Also pins #3385: an agent-authored `type` is truncated with the marker at OPERATOR_QUEUE_TYPE_MAX (64) while every platform-emitted and ask_operator type passes unchanged, the #2915 fingerprint bounds both sides so a clamped row is not a rewrite of its own oversize entry, and the DB belt rejects a type over 1 KiB. Pure/mocked (rate_limiter stubbed + one real in-process test; DB engine stubbed)."
     },
     {
       "file": "unit/test_1615_ssh_password_removed.py",
@@ -3941,18 +4019,6 @@
         "reliability"
       ],
       "description": "Daily database-backup service (#2216, services/db_backup_service.py). Run orchestration: day-keyed idempotence (second run same day no-ops), the DB_BACKUP_ENABLED off path touching nothing, and durable system_settings status on every terminal (ent#236 — in-process state is invisible to the other worker). The Redis lease is pinned as duplicate-I/O SUPPRESSION, never a correctness boundary: taken/released, a held lease skips, Redis down fails OPEN to the day-key guard alone, release is own-token compare-and-delete (a foreign token is never deleted), and the TTL is derived from PG_DUMP_TIMEOUT_SECONDS so retuning the dump timeout visibly re-opens the math (learnings 2026-07-31). Prune runs on EVERY attempt — success, failure, and the no-space skip — which is the Catch-22 regression guard: prune-only-on-success means a full disk skips the backup, bypasses the prune, and an operator lowering the window frees nothing. Free-space preflight skips loudly with an alarm; an unavailable size estimate proceeds rather than failing closed. The alarm has two triggers because 'does not fail silently' must hold over time: the edge fires exactly once per failure episode and re-arms only after a success intervenes, and the staleness re-alarm never fires while fresh, fires past the 3-day threshold, then respects the 7-day re-fire window, covers an install that never succeeded at all, and agrees with the status block's own `stale` flag. Knobs: malformed and out-of-range env values fall back with a WARNING while an unset one is silent (#1871 shape), and the retention reader's INVERTED coercion (garbage → 14, never → 0 keep-forever) is parametrized. PG arm with the subprocess mocked: the conninfo URI normalizes the SQLAlchemy driver suffix away and strips the password while PRESERVING query params (?sslmode=require survives — re-parsing into -h/-p/-U would permanently break managed PG), the password reaches pg_dump via PGPASSWORD env ONLY and never argv, a no-password URL leaves PGPASSWORD unset, an unparseable URL never echoes the URL (no password in the log or the durable status), non-zero exit raises with size-capped stderr, a missing binary names the image rebuild (#1814 class), and the timeout path KILLS AND REAPS the child (wait_for cancels the await, never the process) before unlinking the partial tmp and reaching status + alarm."
-    },
-    {
-      "file": "unit/test_3254_backup_archive_alerts.py",
-      "feature": "#3254",
-      "added": "2026-10-27",
-      "categories": [
-        "backend",
-        "operator-queue",
-        "unit",
-        "reliability"
-      ],
-      "description": "#3254: the database-backup and log-archive alarms report through the platform alert seam (#3246), on the unit island's real SQLite with the clock frozen at a pinned date in every module the path reads it from. db_backup_failure (the edge alarm) and db_backup_stale (the weekly re-alarm) are two subjects on the _db-backup host keyed by the backup directory (AC 5); log_archive_unwritable is keyed by the archive path on _log-archive. Per kind: two readings are one pending row with the subject, seen_count 2 and a moved last_seen_at and expires_at; the success site ends it as the platform (condition_cleared): an ok ends both backup kinds, a success the boot pre-migration hook wrote to the settings ends the stale row at the next staleness check, a successful write probe ends the archive row; a further failure, a no-space skip, a status reset with no success on record and a skipped probe (archival off, non-local backend) end nothing; a person's ending through ask_service.answer lands acknowledged, is never overwritten by the clear, and snoozes the next reading; key parity: the key equals the upgrade sweep's reading of a pre-move row, and the seam's row reads back as the same kind. Two workers (the Redis lease failed open), serialised by the outcome lock: a failure the sibling records while this worker clears keeps its alarm; a success the sibling records while this worker raises the failure alarm ends it; a success recorded while this worker raises the stale alarm ends that row; an outcome lock that cannot be taken fails open with a WARNING. The clock 30 days ahead: a persisting staleness re-alarmed weekly by the real _staleness_check keeps exactly one pending row through day 30 while the one-off failure reading expires on day 14, and a person's ending of the stale row silences one weekly re-alarm, not more. No Docker."
     },
     {
       "file": "unit/test_2216_boot_pre_migration_backup.py",
@@ -6765,19 +6831,6 @@
         "assignments"
       ],
       "description": "trinity-enterprise#837 D4 (mounted): People this agent serves shows each platform role on rows and pickers, writes the assignment and then shares the agent (never with the owner, yourself or an account with no email; a 409 is silent; a failed assignment shares nothing; a failed share lands in the row's Not shared warning), pins the agent across an in-flight switch, and warns on an old unshared row with Share with them. Mutation-proven."
-    },
-    {
-      "file": "unit/test_3435_credential_tool_gates.py",
-      "feature": "#3435",
-      "added": "2026-10-09",
-      "categories": [
-        "backend",
-        "auth",
-        "credentials",
-        "mcp",
-        "unit"
-      ],
-      "description": "#3435: pins the EXISTING backend gates behind the export_credentials / import_credentials / get_credential_encryption_key MCP tools, by principal (real models.User objects): export admits an owner or admin person (JWT or user key) and import a signed-in owner or admin only (ent#719); both refuse the system key and every agent key with the route rule's exact 403, and give a non-owner the uniform 404; the key route admits an admin human, refuses a non-admin 403 'Admin access required', an agent key 403 human-only, an ops-scope key 403, and answers 503 when CREDENTIAL_ENCRYPTION_KEY is unset. Real router + real owner/admin dependencies; DB ownership, Docker and the encryption service stubbed. No Docker."
     },
     {
       "file": "unit/test_3434_removed_routes.py",

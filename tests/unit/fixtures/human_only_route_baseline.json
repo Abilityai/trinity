@@ -231,9 +231,5 @@
   "routers/voice.py::voice_start": "POST /api/agents/{name}/voice/start",
   "routers/voice.py::voice_status": "GET /api/agents/{name}/voice/status",
   "routers/voice.py::voice_stop": "POST /api/agents/{name}/voice/stop",
-  "shared_sessions/router.py::add_participant": "POST /api/rooms/{room_id}/participants",
-  "shared_sessions/router.py::close_room": "POST /api/rooms/{room_id}/close",
-  "shared_sessions/router.py::create_room": "POST /api/rooms",
-  "shared_sessions/router.py::post_message": "POST /api/rooms/{room_id}/messages",
-  "shared_sessions/router.py::remove_participant": "DELETE /api/rooms/{room_id}/participants/{agent_name}"
+  "shared_sessions/router.py::create_room": "POST /api/rooms"
 }
