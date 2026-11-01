@@ -38,7 +38,6 @@ KNOWN_FACADE_GAPS: frozenset[str] = frozenset(
     {
         "create_validation_execution",
         "get_agent_last_activity",
-        "get_agent_schedules",
         "update_business_status",
     }
 )

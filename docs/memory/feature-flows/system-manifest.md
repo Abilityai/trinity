@@ -999,9 +999,10 @@ async def get_system(
 - Lines 264-268: Filter agents by `{system_name}-` prefix
 - Lines 270-274: Return 404 if no agents found
 - Lines 277-307: Enrich each agent with permissions, folders, schedules from database
-- Lines 289-290: Get permissions via `db.get_agent_permissions()`
-- Lines 293-298: Get folders via `db.get_agent_folder_config()`
-- Lines 301-302: Get schedules via `db.get_agent_schedules()`
+- Each of the three keys below is read in its own `try` (#4128): a failed read logs a warning and omits only that key, never the other two
+- Permissions via `db.get_permitted_agents()`, narrowed to the caller's accessible agents and sorted — the same targets `GET /api/agents/{name}/permissions` shows that caller
+- Folders via `db.get_shared_folder_config()`, a model read by attribute (`expose_enabled` / `consume_enabled` → `{expose, consume}`); omitted when the agent has no row
+- Schedules via `db.list_agent_schedules()`, each projected through `ScheduleResponse` so webhook credentials never reach the response
 
 #### POST /api/systems/{system_name}/restart (Lines 322-384)
 ```python
