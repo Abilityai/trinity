@@ -140,6 +140,16 @@ The fence covers the platform routes listed above, and nothing else:
 - **Calibration** is checked at grant time, for the holder only: a ready
   holder can still rewrite a calibrating sibling's `CLAUDE.md`, and a grant
   made before the calibrating stamp persists.
+- **An agent's own settings and git switches take a person, and no grant
+  reaches them** (trinity-enterprise#719, reviewed, not overlooked):
+  `circuit-breaker`, `label`, `mcp-exposed`, `operator-resume`,
+  `voice-replies`, `git/auto-sync`, `git/freeze-schedules-if-failing` and
+  `github-pat` are plain `require_person`, with no
+  `require_person_or_capability` path. An orchestrator holding
+  `agents.manage` therefore cannot reconfigure them on a sibling either: a
+  guardrail an agent can lift is not a guardrail, and the sibling case was
+  given up with it. Before ent#719 these routes took an agent key with no grant
+  at all.
 
 ## Tests
 
