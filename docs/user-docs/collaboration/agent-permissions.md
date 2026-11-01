@@ -60,6 +60,7 @@ Turning **Mount Shared Folders** off on the consuming agent works the same way: 
 ## For Agents
 
 - Agents do not need to handle permissions themselves. Granting and withdrawing is **human-only**: an agent-scoped API key is refused on the write routes below, so an agent can never grant itself or another agent access.
+- Read an agent's permission edges over MCP with `get_agent_permissions`. The list is observed within the caller's view (`observed_within`): an edge whose target has no container, or that you cannot reach, is not listed, so a missing edge is not a removed edge. Granting stays in the UI.
 - The MCP tools that reach another agent's work check the permission before they run: chat, loops, and the tools that read another agent's schedules, executions, fan-out batches, reports, and operator-queue items. No special handling is required in agent code — read the `Access denied` result and ask the owner for a grant.
 
 **API Endpoints**: See [Backend API Docs](http://localhost:8000/docs) for full schemas.

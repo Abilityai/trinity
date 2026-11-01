@@ -59,7 +59,7 @@ export interface AgentConfig {
   // trinity-enterprise#15: GitHub-repo import intent ("copy" | "clone" | "fork").
   import_intent?: string;
   // trinity-enterprise#93 / #1007: fork-to-own. No github_pat over MCP — tool
-  // args are audit-logged; the backend uses the caller's saved token.
+  // args land in transcripts; the backend uses the caller's saved token.
   fork_to_own?: {
     destination_repo: string;
     private?: boolean;
