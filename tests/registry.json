@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent981_addressee_reach.py",
+      "feature": "trinity-enterprise#981",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "A row the platform addressed reaches its addressee by address: a `gate-addressee-only-reach-` row raised by the gate lists, counts and opens for its single addressee or a `resolved_to` holder off the roster; a non-addressee gets the uniform 404; the wider addressee-only family and a non-gate row keep the roster fence; a reach row addressed to nobody reaches nobody; reach and roster rows page and count together; an ended reach row stays in the ended window. `drop_addressee` takes one person off a pending shared row (single addressee cleared only when it was them; platform ending reasons only). The gate raise's attach_chat / platform_context (platform keys only, winning over agent-authored keys), the project keys stripped from agent content on the native and file paths, and the project projection."
+    },
+    {
       "file": "unit/test_4132_export_round_trip.py",
       "feature": "#4132",
       "added": "2026-11-01",
@@ -7640,15 +7651,15 @@
       "description": "The backend's one model door (`services/model_gateway`): the credential follows the agent — its own subscription token, the platform key for an api-key agent or an agent-less job, nobody when a subscription token cannot be read (never a borrowed key); the model follows the credential (Haiku 4.5 on a subscription, Haiku 5.5 on the key, a model override honoured on the key only); `trinity_model_credential` ∈ auto/subscription/platform_key with the 429-on-subscription fallback in auto only; the request/send/complete surface over a scripted transport; the migrated callers (memory extract/reconcile, the MEM-001 summarizer, thread titles, the compatibility AI checks) executed through the door; the honest `extractor` plan on the platform card and the per-agent row; the owner's extract-preview door (facts + screened + who answered, nothing stored; 422 memory_no_subject / transcript_empty / no_extractor; an agent principal refused)."
     },
     {
-      "file": "unit/test_ent981_addressee_reach.py",
-      "feature": "trinity-enterprise#981",
+      "file": "unit/test_ent1043_gate_write_failure.py",
+      "feature": "trinity-enterprise#1043",
       "added": "2026-11-01",
       "categories": [
-        "backend",
         "unit",
-        "auth"
+        "systems",
+        "security"
       ],
-      "description": "A row the platform addressed reaches its addressee by address: a `gate-addressee-only-reach-` row raised by the gate lists, counts and opens for its single addressee or a `resolved_to` holder off the roster; a non-addressee gets the uniform 404; the wider addressee-only family and a non-gate row keep the roster fence; a reach row addressed to nobody reaches nobody; reach and roster rows page and count together; an ended reach row stays in the ended window. `drop_addressee` takes one person off a pending shared row (single addressee cleared only when it was them; platform ending reasons only). The gate raise's attach_chat / platform_context (platform keys only, winning over agent-authored keys), the project keys stripped from agent content on the native and file paths, and the project projection."
+      "description": "trinity-enterprise#1043: a gate write that fails on a skill the member already holds (a service refusal after the plan validated, a database fault, a lost lease), through the real apply route on the real database facade: the skill is still assigned and the admission read shows no gate, and the result says so — the failed[] reason carries the consequence, the member reports skill_runs_ungated (no gate in force) or previous_gate_stands (the stored gate still applies), one top-level warning line per ungated skill, applied false, summary.gates.write 0; a skill held only through a set; the #4125 hold-back of a new assignment in the same run untouched; a landed gate reports nothing new; the dry run predicts no failure."
     }
   ]
 }
