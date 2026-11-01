@@ -150,7 +150,8 @@ When validation fails (FAIL or PARTIAL verdict; never for `validation_unavailabl
 
 ```json
 {
-  "id": "val_{execution_id}_{timestamp}",
+  "id": "val_{execution_id}-{utc_now_iso}",
+  "subject": "validation_failed:{execution_id}",
   "type": "alert",
   "priority": "high",
   "status": "pending",

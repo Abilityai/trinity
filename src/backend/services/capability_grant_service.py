@@ -18,10 +18,13 @@ HTTP-free (Invariant #1): raises `CapabilityGrantRefused`, the router maps it.
 """
 from __future__ import annotations
 
-from typing import List
+import logging
+from typing import Any, Callable, List, Optional
 
 from database import db
-from db.capability_grants import CAPABILITIES, CAPABILITY_INSTRUCTIONS_MANAGE
+from db.capability_grants import CAPABILITIES, CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+
+logger = logging.getLogger(__name__)
 
 
 def _is_calibrating(agent_name: str) -> bool:
@@ -43,6 +46,58 @@ class CapabilityGrantRefused(Exception):
 
     def as_detail(self) -> dict:
         return {"code": self.code, "message": self.message}
+
+
+def grant_audit_action(capability: str, granted: bool) -> str:
+    """The AUTHORIZATION verb for one grant change, whichever door made it.
+
+    `skills.manage` keeps the skill-manager route's verb (#3236 review), so an
+    audit query for it finds both doors; every other capability is
+    `capability_grant` / `capability_revoke`.
+    """
+    if capability == CAPABILITY_SKILLS_MANAGE:
+        return "skill_manager_grant" if granted else "skill_manager_revoke"
+    return "capability_grant" if granted else "capability_revoke"
+
+
+async def audit_grant_change(
+    agent_name: str,
+    capability: str,
+    granted: bool,
+    actor_user: Any,
+    *,
+    request: Any = None,
+    source: str = "api",
+    log: Optional[Callable[..., Any]] = None,
+) -> None:
+    """The per-change audit row every grant door writes (trinity-enterprise#1030
+    CP2): the two routes and the manifest apply engine call this, so they
+    cannot drift on the verb or the row shape. Best-effort — the grant has
+    already committed, so a failed audit is logged, never raised.
+
+    `log` is the caller's audit sink (`platform_audit_service.log` as the
+    caller has it bound); it defaults to the service's own instance.
+    """
+    if log is None:
+        from services.platform_audit_service import platform_audit_service
+        log = platform_audit_service.log
+    from services.platform_audit_service import AuditEventType
+    client = getattr(request, "client", None)
+    try:
+        await log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action=grant_audit_action(capability, granted),
+            source=source,
+            actor_user=actor_user,
+            actor_ip=getattr(client, "host", None) if client else None,
+            endpoint=(getattr(request, "scope", None) or {}).get("path") if request else None,
+            request_id=getattr(getattr(request, "state", None), "request_id", None),
+            target_type="agent",
+            target_id=agent_name,
+            details={"capability": capability, "granted": granted},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("capability grant audit failed for %s", agent_name)
 
 
 def list_holders(capability: str) -> List[dict]:

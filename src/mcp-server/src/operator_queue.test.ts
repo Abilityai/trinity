@@ -659,3 +659,68 @@ describe("trinity-enterprise#901 withdraw_ask", () => {
     assert.ok(tools.respondToOperatorQueue.description.includes("withdraw_ask"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#1007 — ask_operator may address a canon role by id:
+// `to: role:<id>`. The schema admits the four kinds or a well-formed role id
+// (the backend's ROLE_ID_RE, `role:` prefix lower-case); the parameter's
+// description teaches the three named refusals a role id can earn; the tool
+// description keeps its headroom and the declared field set is unchanged.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
+  const tool = makeAskOperator(raisingClient().fake);
+  const schema = tool.parameters as any;
+
+  for (const to of ["role:a", "role:head-of-sales", "role:Head_Of.Sales-1", "role:" + "x".repeat(64),
+                    "primary", "approver", "viewer", "operator"]) {
+    it(`accepts to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, true);
+    });
+  }
+
+  for (const to of ["role:", "role:-x", "Role:x", "role:x\n", "role:" + "x".repeat(65), "role:x y", "boss", ""]) {
+    it(`rejects to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, false);
+    });
+  }
+
+  it("forwards the role id to the backend unchanged — the backend canonicalises and resolves", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "deploy-1", to_role: "role:head-of-sales" });
+    const body: OperatorAskCreate = { ...(ASK as any), to: "role:Head-of-sales" };
+    const out = JSON.parse(await makeAskOperator(fake).execute(body, agentCtx("self")));
+    assert.deepEqual(calls, [["self", body]]);
+    assert.equal(out.to_role, "role:head-of-sales");
+  });
+
+  for (const [status, detail] of [
+    [422, { code: "role_unavailable", message: "Canon roles cannot be addressed here.", role: "role:head-of-sales" }],
+    [422, { code: "role_unassigned", message: "Nobody fills Head of sales.", role: "role:head-of-sales" }],
+    [422, { code: "role_cannot_open_agent", message: "They cannot open self.", role: "role:head-of-sales" }],
+  ] as const) {
+    it(`a ${detail.code} refusal reaches the agent with the role, never a person`, async () => {
+      const fake = {
+        raiseAsk: async () => { throw new ApiError(status, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, to: "role:head-of-sales" } as any, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status, ...detail });
+    });
+  }
+
+  it("the `to` parameter teaches the role-id form, its three refusals and whose roster answers", () => {
+    const d = schema.shape.to.description as string;
+    assert.ok(d.includes("role:<id>"), d);
+    for (const code of ["role_unavailable", "role_unassigned", "role_cannot_open_agent"]) {
+      assert.ok(d.includes(code), code);
+    }
+    assert.match(d, /your own roster/);
+  });
+
+  it("the tool description keeps its headroom and the field set is unchanged", () => {
+    assert.ok(tool.description.length <= 1800, `ask_operator description is ${tool.description.length} characters`);
+    assert.deepEqual(Object.keys(schema.shape).sort(), [
+      "context", "expires_at", "options", "priority", "proposal", "question",
+      "replaces", "request_id", "supersedes_expired", "title", "to", "type",
+    ]);
+  });
+});
