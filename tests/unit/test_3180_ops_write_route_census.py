@@ -394,21 +394,21 @@ FAMILIES = [
     {"key": "routers/mcp_keys.py::list_mcp_api_keys_endpoint", "method": "GET", "own_gate": "interactive"},
     {"key": "routers/mcp_keys.py::ensure_default_mcp_api_key", "method": "POST", "own_gate": "interactive"},
     {"key": "routers/mcp_keys.py::revoke_mcp_api_key_endpoint", "method": "POST", "sacrifice": "revoke",
-     "own_gate": None},
+     "own_gate": "person"},
     {"key": "routers/mcp_keys.py::delete_mcp_api_key_endpoint", "method": "DELETE", "sacrifice": "delete",
-     "own_gate": None},
+     "own_gate": "person"},
     {"key": "routers/users.py::update_user_role", "method": "PUT", "json": {"role": "admin"}, "own_gate": "admin"},
     {"key": "routers/settings/whitelist.py::add_email_to_whitelist", "method": "POST",
      "json": {"email": "someone@example.com"}, "own_gate": "interactive"},
     {"key": "routers/settings/whitelist.py::remove_email_from_whitelist", "method": "DELETE", "own_gate": "admin"},
     {"key": "routers/credentials.py::inject_credentials", "method": "POST",
-     "json": {"files": {".env": "A=1\n"}}, "own_gate": None},
-    {"key": "routers/credentials.py::export_credentials", "method": "POST", "own_gate": None},
-    {"key": "routers/credentials.py::import_credentials", "method": "POST", "own_gate": None},
+     "json": {"files": {".env": "A=1\n"}}, "own_gate": "person"},
+    {"key": "routers/credentials.py::export_credentials", "method": "POST", "own_gate": "person"},
+    {"key": "routers/credentials.py::import_credentials", "method": "POST", "own_gate": "interactive"},
     {"key": "routers/subscriptions.py::register_subscription", "method": "POST",
      "json": {"name": "sweep-sub", "token": "sk-ant-oat01-sweep"}, "own_gate": "admin"},
     {"key": "routers/subscriptions.py::assign_subscription_to_agent", "method": "PUT",
-     "query": "subscription_name=sweep-sub", "own_gate": None},
+     "query": "subscription_name=sweep-sub", "own_gate": "interactive"},
     {"key": "routers/subscriptions.py::delete_subscription", "method": "DELETE", "own_gate": "admin"},
     {"key": "routers/agent_config.py::set_agent_capability_grant", "method": "PUT",
      "json": {"granted": True}, "own_gate": "admin"},
@@ -591,8 +591,8 @@ class TestNeverGrantableFamilies:
     def test_with_the_fence_removed_each_family_shows_its_own_layer(self, live):
         """Layer masking, the third direction: the fence call itself removed.
         Admin, PERSON and INTERACTIVE families still refuse with their own gate.
-        The owner-tier families get exactly what an admin's own `user` key gets:
-        the fence is the only layer there, which the PR states as not delivered."""
+        The owner-tier families were fence-only when the fence shipped and are
+        person/interactive-gated since ent#719 pr3 (#4042)."""
         no_fence, user = live["families_no_fence"], live["families_user_key"]
         fence_only = set()
         for fam in FAMILIES:
@@ -607,16 +607,12 @@ class TestNeverGrantableFamilies:
                 assert (got["status"], got["body"]) == (user[k]["status"], user[k]["body"]), (k, got, user[k])
                 assert got["status"] not in (401, 403), (k, got)
                 fence_only.add(fam["key"])
-        assert fence_only == {
-            "routers/mcp_keys.py::revoke_mcp_api_key_endpoint",
-            "routers/mcp_keys.py::delete_mcp_api_key_endpoint",
-            "routers/credentials.py::inject_credentials",
-            "routers/credentials.py::export_credentials",
-            "routers/credentials.py::import_credentials",
-            "routers/subscriptions.py::assign_subscription_to_agent",
-        }
-        # The reach is real, not a status code: the sacrificial keys are gone.
-        assert no_fence["_sacrifice_active"] == {"revoke": False, "delete": False}
+        # ent#719 pr3 put a person/interactive gate on the six owner-tier families
+        # (key revoke/delete, credential inject/export/import, subscription
+        # assignment) that were fence-only when the fence shipped; none is left.
+        assert fence_only == set()
+        # The person gate answers before the handler: the sacrificial keys survive.
+        assert no_fence["_sacrifice_active"] == {"revoke": True, "delete": True}
 
     def test_doors_that_validate_a_key_themselves(self, live):
         """Each door is driven with the `ops_write` key AND with the agent's own
