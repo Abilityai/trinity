@@ -10,6 +10,9 @@ import subprocess
 import tomllib  # py3.11+; agent base image is python 3.13
 from pathlib import Path
 
+from . import gemini_settings
+from .runtime_adapter import GEMINI_RUNTIMES
+
 logger = logging.getLogger(__name__)
 
 # #2392: every Trinity MCP call carries the id of the execution that spawned the
@@ -41,7 +44,9 @@ def inject_trinity_mcp_if_configured() -> bool:
 
     if runtime == "codex":
         return _inject_codex_mcp(trinity_mcp_url, trinity_mcp_api_key)
-    if runtime == "gemini-cli":
+    # trinity-enterprise#986: both spellings. "gemini" used to fall through to
+    # the Claude writer, so such an agent's Gemini settings were never written.
+    if runtime in GEMINI_RUNTIMES:
         return _inject_gemini_mcp(trinity_mcp_url, trinity_mcp_api_key)
     else:
         return _inject_claude_mcp(trinity_mcp_url, trinity_mcp_api_key)
@@ -111,12 +116,11 @@ def _inject_gemini_mcp(trinity_mcp_url: str, trinity_mcp_api_key: str) -> bool:
         # Ensure .gemini directory exists
         gemini_dir.mkdir(parents=True, exist_ok=True)
 
-        # Read existing settings or create new
-        if settings_file.exists():
-            content = settings_file.read_text()
-            settings = json.loads(content) if content.strip() else {}
-        else:
-            settings = {}
+        # Read existing settings (JSONC accepted, as the CLI does) or create new
+        settings = gemini_settings.load_settings(settings_file)
+        if settings is None:
+            logger.warning(f"{settings_file} is not a valid settings object; Trinity MCP not injected")
+            return False
 
         # Ensure mcpServers key exists
         if "mcpServers" not in settings:
@@ -134,8 +138,11 @@ def _inject_gemini_mcp(trinity_mcp_url: str, trinity_mcp_api_key: str) -> bool:
             }
         }
 
-        # Write settings back
-        settings_file.write_text(json.dumps(settings, indent=2))
+        # trinity-enterprise#986: the usage-statistics opt-out rides every write.
+        gemini_settings.apply_privacy_defaults(settings)
+
+        # Write settings back (atomic, owner-only: it carries the bearer token)
+        gemini_settings.write_settings(settings_file, settings)
 
         logger.info(f"Injected Trinity MCP server into {settings_file} (Gemini CLI)")
         return True
@@ -160,7 +167,7 @@ def configure_mcp_servers(mcp_servers: dict) -> bool:
 
     if runtime == "codex":
         return _configure_codex_mcp_servers(mcp_servers)
-    if runtime == "gemini-cli":
+    if runtime in GEMINI_RUNTIMES:
         return _configure_gemini_mcp_servers(mcp_servers)
     else:
         return _configure_claude_mcp_servers(mcp_servers)
