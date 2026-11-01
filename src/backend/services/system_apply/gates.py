@@ -48,6 +48,9 @@ _REACH_NOTES = {
     "not_shared": ("approver_not_shared: the people this approver names can't open the "
                    "agent, so they would never see an approval; share the agent with them"),
 }
+#: #4130: `set_gate` stored the row but could not write the running agent's marker.
+MARKER_NOTE = ("the gate is stored; the running agent's marker could not be written, so the "
+               "hook fails open until the next check heals it")
 
 
 def declared(cfg) -> Dict[str, Dict[str, Any]]:
@@ -169,6 +172,9 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
             out.extra_changes.setdefault(name, []).append(apply_change(
                 STEP, "report", warning, current=result["gate"]["approver"], desired=[skill],
                 note=_REACH_NOTES["not_shared" if warning == "approver_not_shared" else "unfilled"]))
+        elif warning == "marker_not_written":
+            out.extra_changes.setdefault(name, []).append(apply_change(
+                STEP, "report", "gate_marker_not_written", desired=[skill], note=MARKER_NOTE))
 
 
 def _wanted(agent_names: Dict[str, str], agents_config: Dict) -> Dict[str, Dict[str, Dict]]:
@@ -259,4 +265,6 @@ async def deploy(agent_names: Dict[str, str], agents_config: Dict, current_user,
             for w in result.get("warnings") or []:
                 if w in ("approver_unassigned", "approver_not_shared"):
                     warnings.append(f"Gate on '{skill}' for '{name}': {w}.")
+                elif w == "marker_not_written":
+                    warnings.append(f"Gate on '{skill}' for '{name}': marker_not_written — {MARKER_NOTE}.")
     return warnings

@@ -1244,8 +1244,11 @@ async def assign_manifest_skills(
                 warnings.append(f"Skill '{n}' not assigned to '{name}': {verdict[0]}.")
         try:
             if ok:
-                await skill_assignment_service.assign_and_deliver(
-                    name, ok, current_user, acting_agent=acting)
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_and_deliver(
+                        name, ok, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
             for set_name in set_names:
                 verdict = apply_skills.library_verdict_set(set_name)
                 if verdict is not None:
@@ -1257,8 +1260,11 @@ async def assign_manifest_skills(
                     warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
                                     f"{apply_gates.not_written_reason(held_by_set)}.")
                     continue
-                await skill_assignment_service.assign_set_and_deliver(
-                    name, set_name, current_user, acting_agent=acting)
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_set_and_deliver(
+                        name, set_name, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
         except Exception as e:  # noqa: BLE001 — the next member still gets its skills
             reason, _ = _failure_reason(e)
             logger.exception(f"Skill assignment failed for '{name}'")
@@ -2222,6 +2228,13 @@ async def deploy_manifest(
             {s: c for s, c in manifest.agents.items() if c.deploy},
             naming=manifest.naming,
         )
+        if not agent_names:
+            # #4130: every member is `deploy: false` — a property of the
+            # manifest, named before any read (apply reports on them instead).
+            raise HTTPException(status_code=400, detail=(
+                "nothing_to_deploy: every member is declared-only (deploy: false); deploy "
+                "creates nothing. Remove deploy: false from a member, or use apply to "
+                "report on them"))
         all_warnings = validation_warnings + name_warnings
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
@@ -2328,6 +2341,7 @@ async def deploy_manifest(
                 system_name=manifest.name,
                 agents_created=[],
                 agents_to_create=agents_to_create,
+                agents_declared_only=declared_only,
                 prompt_updated=bool(manifest.prompt),
                 warnings=all_warnings,
                 failed=preview_failed,
@@ -2416,6 +2430,7 @@ async def deploy_manifest(
                 status="failed",
                 system_name=manifest.name,
                 agents_created=[],
+                agents_declared_only=declared_only,
                 prompt_updated=False,
                 warnings=all_warnings,
                 failed=failed
@@ -2613,6 +2628,7 @@ async def deploy_manifest(
             status="partial" if failed else "deployed",
             system_name=manifest.name,
             agents_created=created_agents,
+            agents_declared_only=declared_only,
             prompt_updated=prompt_updated,
             permissions_configured=permissions_count,
             schedules_created=schedules_count,

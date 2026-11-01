@@ -300,3 +300,111 @@ class TestDeclaredOnlyIsNotTouched:
         assert res.summary["members"] == {"write": 0, "report": 2, "unobserved": 0}
         assert not [w for w in res.warnings if "could not be re-read" in w]
         assert db.get_agent_tags(f"{SYSTEM}-canon") in (None, [])
+
+
+# ===========================================================================
+# S1 / S2 — deploy: nothing to deploy is a named 400; declared-only is a field
+# ===========================================================================
+
+def _deploy(world, text, *, dry_run):
+    return asyncio.run(system_service.deploy_manifest(
+        text, world.user(W.ALICE), None, dry_run=dry_run, create_agent_fn=world.create))
+
+
+class TestDeployNamesDeclaredOnly:
+    @pytest.mark.parametrize("dry_run", [True, False])
+    def test_every_member_declared_only_is_a_named_400(self, world, dry_run):
+        from fastapi import HTTPException
+        text = _manifest({"canon": {"deploy": False}, "docs": {"deploy": False}})
+        with pytest.raises(HTTPException) as e:
+            _deploy(world, text, dry_run=dry_run)
+        assert e.value.status_code == 400
+        assert e.value.detail.startswith("nothing_to_deploy:")
+        assert world.create_calls == []
+
+    def test_the_declared_only_names_are_a_field_on_both_branches(self, world):
+        text = _manifest({"lead": {}, "canon": {"deploy": False}})
+        dry = _deploy(world, text, dry_run=True)
+        assert dry.status == "valid" and dry.agents_declared_only == [f"{SYSTEM}-canon"]
+        res = _deploy(world, text, dry_run=False)
+        assert res.status == "deployed" and res.agents_declared_only == [f"{SYSTEM}-canon"]
+        assert any("declared-only" in w for w in res.warnings)  # the line stays
+
+    def test_a_manifest_without_declared_only_members_has_an_empty_list(self, world):
+        assert _deploy(world, _manifest({"lead": {}}), dry_run=True).agents_declared_only == []
+
+
+# ===========================================================================
+# S7 / S8 / S9 — skill delivery says what was (not) delivered
+# ===========================================================================
+
+MARKER = "marker_not_written: the package landed but its marker could not be written"
+PARTIAL = {"status": "partial", "reason": "injection_error",
+           "skills": {"research": {"status": "injected"},
+                      "deploy": {"status": "failed", "error": MARKER}}}
+
+
+class TestSkillDeliveryIsNamed:
+    def test_apply_names_a_skill_whose_marker_was_not_written(self, world):
+        world.seed_agent(f"{SYSTEM}-lead")
+        world.delivery = PARTIAL
+        res = _apply(world, _manifest({"lead": {"skills": ["research", "deploy"]}}), dry_run=False)
+        member = _member(res, f"{SYSTEM}-lead")
+        (change,) = [c for c in member.changes if c.code == "skill_delivery"]
+        assert change.current == "partial"
+        assert "deploy: marker_not_written" in change.note
+        assert "research" not in change.note.split("(")[1].split(")")[0]
+        assert member.applied is True  # the row is the write; delivery is best-effort
+
+    def test_a_set_whose_skills_were_already_held_says_unchanged(self, world):
+        lead = f"{SYSTEM}-lead"
+        world.seed_agent(lead)
+        db.assign_skill(lead, "research", W.ALICE)
+        db.assign_skill(lead, "deploy", W.ALICE)
+        res = _apply(world, _manifest({"lead": {"skill_sets": ["ops-core"]}}), dry_run=False)
+        assert res.status == "applied", res.failed
+        assert list(skill_set_service.held_sets(lead)) == ["ops-core"]
+        (change,) = [c for c in _member(res, lead).changes if c.code == "skill_delivery"]
+        assert change.field == "skill_sets"
+        assert change.current == "unchanged" and change.desired == []
+        assert "already held" in change.note
+
+    def test_deploy_warns_when_a_skill_was_not_delivered(self, world):
+        world.delivery = PARTIAL
+        res = _deploy(world, _manifest({"lead": {"skills": ["research", "deploy"]}}), dry_run=False)
+        assert res.status == "deployed"
+        (line,) = [w for w in res.warnings if "not delivered" in w]
+        assert line.startswith(f"Skills assigned to '{SYSTEM}-lead' but not delivered:")
+        assert "deploy: marker_not_written" in line
+
+    def test_deploy_says_nothing_for_the_normal_pending_start(self, world):
+        res = _deploy(world, _manifest({"lead": {"skills": ["research"]}}), dry_run=False)
+        assert res.status == "deployed"
+        assert not [w for w in res.warnings if "not delivered" in w]
+
+
+# ===========================================================================
+# S10 — a gate whose marker was not written is said on both verbs
+# ===========================================================================
+
+class TestGateMarkerIsNamed:
+    @pytest.fixture
+    def marker_refused(self, monkeypatch):
+        async def set_gate(agent_name, skill_name, *, changes, ctx):
+            return {"gate": {"approver": None}, "warnings": ["marker_not_written"]}
+        monkeypatch.setattr(skill_gate_map_service, "set_gate", set_gate)
+
+    def test_apply_reports_it_on_the_member(self, world, marker_refused):
+        world.seed_agent(f"{SYSTEM}-lead")
+        res = _apply(world, _manifest({"lead": {"gates": {"deploy": {}}}}), dry_run=False)
+        member = _member(res, f"{SYSTEM}-lead")
+        (change,) = [c for c in member.changes if c.code == "gate_marker_not_written"]
+        assert change.action == "report" and change.desired == ["deploy"]
+        assert "fails open" in change.note
+        assert member.applied is True
+        assert res.summary["gates"]["write"] == 1
+
+    def test_deploy_warns(self, world, marker_refused):
+        res = _deploy(world, _manifest({"lead": {"gates": {"deploy": {}}}}), dry_run=False)
+        (line,) = [w for w in res.warnings if "marker_not_written" in w]
+        assert "'deploy'" in line and f"'{SYSTEM}-lead'" in line

@@ -1456,6 +1456,9 @@ class SystemDeployResponse(BaseModel):
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
+    # #4130: final names of the `deploy: false` members, skipped and never
+    # created (the `warnings` line stays beside it). Every branch sets it.
+    agents_declared_only: List[str] = []
     prompt_updated: bool
     permissions_configured: int = 0
     schedules_created: int = 0
