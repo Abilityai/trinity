@@ -7660,6 +7660,17 @@
         "security"
       ],
       "description": "trinity-enterprise#1043: a gate write that fails on a skill the member already holds (a service refusal after the plan validated, a database fault, a lost lease), through the real apply route on the real database facade: the skill is still assigned and the admission read shows no gate, and the result says so — the failed[] reason carries the consequence, the member reports skill_runs_ungated (no gate in force) or previous_gate_stands (the stored gate still applies), one top-level warning line per ungated skill, applied false, summary.gates.write 0; a skill held only through a set; the #4125 hold-back of a new assignment in the same run untouched; a landed gate reports nothing new; the dry run predicts no failure."
+    },
+    {
+      "file": "unit/test_4058_loop_stale_run_rows.py",
+      "feature": "#4058",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "reliability",
+        "migrations"
+      ],
+      "description": "#4058: a stale duplicate running loop-run row (pre-#4023) is never the open run: rearm_lost_dispatch returns the real one or re-arms, reconcile advances the real run; the dual-track cleanup closes stale rows abandoned without moving failed_runs, idempotently."
     }
   ]
 }
