@@ -198,6 +198,8 @@ _CLAUDE_RUNTIMES = frozenset({"claude-code", "claude"})
 _GEMINI_RUNTIMES = frozenset({"gemini-cli", "gemini"})
 _CODEX_RUNTIMES = frozenset({"codex"})
 KNOWN_RUNTIMES = _CLAUDE_RUNTIMES | _GEMINI_RUNTIMES | _CODEX_RUNTIMES
+# Every AGENT_RUNTIME spelling that selects Gemini (the backend writes either).
+GEMINI_RUNTIMES = _GEMINI_RUNTIMES
 
 
 def get_runtime() -> AgentRuntime:

@@ -189,7 +189,9 @@ A copy-intent response carries an `import_snapshot` block recording the source r
 create_agent(name="my-agent", template="github:Org/repo@branch", import_intent="copy")
 ```
 
-The MCP tool accepts `copy` and `clone`, and the same optional `kind` (`agent` or `deployment`). Fork stays UI/REST-only because it needs fork parameters.
+The MCP tool accepts `copy`, `clone` and `fork`, and the same optional `kind` (`agent` or `deployment`). A fork takes a `fork_to_own` block with `destination_repo` (`owner/name`) and `private` (default `true`), and never a token: the tool spends your saved personal GitHub token (**Settings → MCP Keys → Personal GitHub Token**), because anything passed as a tool argument stays in the conversation's transcript. A call made with an agent's key, or by someone with no saved token, is refused with `FORK_PAT_REQUIRED`.
+
+`list_agents`, `get_agent` and `get_agent_info` return each agent's create-time `kind` (`agent` or `deployment`). It is `null` when unknown — for example an agent created before the kind was recorded — and never guessed.
 
 ### Fork-to-Own Templates
 

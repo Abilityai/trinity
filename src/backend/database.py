@@ -4161,6 +4161,11 @@ class DatabaseManager:
             disposition=disposition,
         )
 
+    def drop_operator_queue_addressee(self, item_id, email):
+        # trinity-enterprise#981: one person off a row's address; the row stays
+        # for its other addressees. A boolean: did anything change.
+        return self._operator_queue_ops.drop_addressee(item_id, email)
+
     def set_operator_queue_discussion_link(self, item_id, key, chat_id):
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
         return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)

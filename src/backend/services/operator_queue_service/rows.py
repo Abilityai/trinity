@@ -86,6 +86,15 @@ def is_addressee_only(item: dict) -> bool:
     return str(candidate).strip().lower().startswith(_oq.ADDRESSEE_ONLY_ID_PREFIXES)
 
 
+def is_addressee_reach(item: dict) -> bool:
+    """Does this row reach its addressee by address alone
+    (trinity-enterprise#981)? The reserved sub-prefix AND `raised_by == 'gate'`
+    on the column itself. Who the addressee is stays `is_addressed_to`."""
+    candidate = item.get("request_id") or ""
+    return (item.get("raised_by") == "gate"
+            and str(candidate).strip().lower().startswith(_oq.ADDRESSEE_REACH_ID_PREFIXES))
+
+
 def is_addressed_to(item: dict, email: Optional[str]) -> bool:
     """Is `email` this row's addressee — its single `addressed_to_email` or one
     of its `resolved_to` — compared case-insensitively? The Python twin of the

@@ -44,18 +44,6 @@ _PR2 = "follow-up PR 2 of #3246 (the remaining emitters)"
 # ---------------------------------------------------------------------------
 EMITTERS_NOT_YET_ON_SEAM = {
     # -- PR 2 ---------------------------------------------------------------
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_failing_alert"):
-        ("sync-failing-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_sync_diverged_alert"):
-        ("sync-diverged-", _PR2),
-    ("services/sync_health_service.py", "SyncHealthService._emit_git_bloat_alert"):
-        ("git-bloat-", _PR2),
-    ("services/db_backup_service.py", "DBBackupService._emit_alarm"): ("db-backup-", _PR2),
-    ("services/archive_storage.py", "_alarm_unwritable_archive_dir"): ("log-archive-", _PR2),
-    ("services/lease_reaper_service.py", "_create_park_item"): ("poison-", _PR2),
-    ("services/validation_service.py", "ValidationService._notify_operator_on_failure"):
-        ("val_", _PR2),
-    ("client_portal/service.py", "_alert_collided_inbox"): ("portal-inbox-collision-", _PR2),
 }
 
 # Writers that are not platform emitters: the facades, the agent-authored
@@ -279,3 +267,17 @@ def test_only_the_seam_calls_the_platform_accessors():
             if name in _SEAM_ONLY and rel not in _SEAM_ONLY[name]:
                 offenders.append((rel, qual, name, call.lineno))
     assert not offenders, f"platform-alert accessors called outside the seam: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# Must-act kinds (#3254 AC 4)
+# ---------------------------------------------------------------------------
+
+def test_no_clear_site_names_a_person_kind():
+    """A kind a person must act on is never ended by the platform: no
+    `platform_alerts.clear` / `reconcile` call outside the seam names one."""
+    from services import platform_alerts as pa
+    person = {k.name for k in pa.KINDS.values() if k.clears == pa.CLEARS_PERSON}
+    assert {"poison", "portal_inbox_collision"} <= person, "the guard lost its subjects"
+    named = person & _seam_kind_calls()
+    assert not named, f"the platform would end a must-act kind: {sorted(named)}"

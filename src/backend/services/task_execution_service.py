@@ -24,7 +24,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 from types import SimpleNamespace
 
 import httpx
@@ -52,7 +52,8 @@ from services.dispatch_breaker import DispatchBreaker
 from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
-from services import peer_skill_policy, skill_gate_service
+from services import admission_policy, peer_skill_policy, skill_gate_service
+from services.chat_signals import AdmissionRefused, admission_refusal_of
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
@@ -73,9 +74,11 @@ from utils.helpers import utc_now_iso
 # `from services.task_execution_service import TaskExecutionResult`, and a
 # decomposition that renames the import surface is not a pure refactor.
 from services.execution_envelope import (  # noqa: F401  (re-export)
+    ERROR_CODE_VALUES,
     TaskExecutionErrorCode,
     TaskExecutionResult,
     TerminalEnvelope,
+    split_error_code,
 )
 
 from services.platform_prompt_service import (
@@ -1018,20 +1021,10 @@ def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str
 # Values `mark_execution_dispatched` writes into `claude_session_id` before a
 # real session id exists. Never a resumable session.
 _DISPATCH_SESSION_SENTINELS = frozenset({"dispatched", "dispatched_async"})
-_ERROR_CODE_VALUES = {code.value: code for code in TaskExecutionErrorCode}
-
-
-def _split_error_code(
-    error: Optional[str],
-) -> Tuple[Optional[TaskExecutionErrorCode], Optional[str]]:
-    """``(code, text)`` from an error the pull sink stored as ``[code] text``
-    (``apply_task_result``). The prefix is removed only when it names a
-    ``TaskExecutionErrorCode``; channel adapters post ``text`` to people."""
-    if not error or not error.startswith("["):
-        return None, error
-    head, sep, rest = error[1:].partition("]")
-    code = _ERROR_CODE_VALUES.get(head.strip().lower()) if sep else None
-    return (code, rest.strip()) if code else (None, error)
+# Moved to the cycle-free leaf so the completion report can read the same
+# prefix (trinity-enterprise#1059); the old names stay importable from here.
+_ERROR_CODE_VALUES = ERROR_CODE_VALUES
+_split_error_code = split_error_code
 
 
 def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
@@ -1047,6 +1040,13 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
     pull sink writes and the prefix is removed from ``error``,
     compact events ride ``raw_response["metadata"]``, and the dispatch
     sentinels never pass for a session id.
+
+    trinity-enterprise#1059: a row an admission policy closed SKIPPED with its
+    ``[usage_share]`` code comes back carrying ``admission_refusal``, so every
+    caller that reads a turn back from the row (the backlog drain, the paid,
+    channel, public-link, room and Workspace doors) sees the refusal the
+    in-worker result carried — the refusal is a property of the result, not of
+    the worker that produced it.
     """
     execution = db.get_execution(execution_id)
     if execution is None:
@@ -1079,7 +1079,7 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
             subscription_switch = walk_state["summary"]
     except (TypeError, ValueError, AttributeError):
         subscription_switch = None
-    return TaskExecutionResult(
+    result = TaskExecutionResult(
         execution_id=execution_id,
         status=status,
         subscription_switch=subscription_switch,
@@ -1093,6 +1093,9 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         error=error,
         error_code=error_code,
     )
+    result.admission_refusal = admission_refusal_of(
+        result, getattr(execution, "agent_name", None) or "")
+    return result
 
 
 # Strong references to fire-and-forget breaker tasks. asyncio's event loop holds
@@ -1819,6 +1822,19 @@ class TaskExecutionService:
                     ),
                 )
 
+            # ---- 1c. Admission policies (trinity-enterprise#1059) ------------
+            # Every door, including the ones /chat and /task already checked
+            # (a share can run out between their seam and this one). Before
+            # admission, like the gate backstop: no slot, no activity, never
+            # enqueued; the `finally` releases a slot the caller pre-acquired.
+            policy_denied = await self._admission_policy_gate(
+                agent_name=agent_name,
+                triggered_by=triggered_by,
+                execution_id=execution_id,
+            )
+            if policy_denied is not None:
+                return policy_denied
+
             # ---- 2. Acquire capacity slot ------------------------------------
             slot_acquired, admission_denied = await self._admission_gate(
                 agent_name=agent_name,
@@ -2074,6 +2090,50 @@ class TaskExecutionService:
                     agent_name,
                     execution_id or f"temp-{datetime.utcnow().timestamp()}",
                 )
+
+    # -----------------------------------------------------------------------
+    # Admission policies (trinity-enterprise#1059)
+    # -----------------------------------------------------------------------
+
+    async def _admission_policy_gate(self, *, agent_name, triggered_by,
+                                     execution_id) -> Optional[TaskExecutionResult]:
+        """Run the registered admission policies for this turn.
+
+        None admits. A refusal closes the row SKIPPED with the policy's own
+        plain-words message — not FAILED: the agent did nothing wrong, and a
+        FAILED row would count against a schedule's failures and the dispatch
+        breaker — and returns the SKIPPED result carrying the refusal, so a
+        sync caller can answer it and the Workspace can show it.
+        """
+        try:
+            await admission_policy.enforce(
+                agent_name, triggered_by=triggered_by, source="execute_task")
+        except AdmissionRefused as refusal:
+            logger.info(
+                f"[TaskExecService] Admission policy refused {agent_name} "
+                f"({refusal.code}); execution {execution_id} skipped"
+            )
+            if execution_id:
+                # The row stores `[code] message` (the #3114 pull-sink shape) so
+                # a sync /task that reads this terminal back from the row — the
+                # backlog drain on another worker, or a long-poll that timed
+                # out — rebuilds the refusal and answers 429, not a success
+                # shaped from a SKIPPED row. `_split_error_code` strips it for
+                # people; `TaskExecutionResult.error` stays the plain message.
+                code = _ERROR_CODE_VALUES.get(refusal.code)
+                stored = f"[{code.value}] {refusal.message}" if code else refusal.message
+                await _write_terminal_and_gate(
+                    execution_id, None, status=TaskExecutionStatus.SKIPPED,
+                    error=stored, agent_name=agent_name)
+            return TaskExecutionResult(
+                execution_id=execution_id or "",
+                status=TaskExecutionStatus.SKIPPED,
+                response="",
+                error=refusal.message,
+                error_code=_ERROR_CODE_VALUES.get(refusal.code),
+                admission_refusal=refusal,
+            )
+        return None
 
     # -----------------------------------------------------------------------
     # Skill gate backstop (trinity-enterprise#751)

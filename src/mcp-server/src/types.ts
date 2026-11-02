@@ -31,6 +31,9 @@ export interface Agent {
   };
   container_id?: string;
   mcp_exposed?: boolean;  // #846 — exposed as a dedicated chat_with_<slug> MCP tool
+  // trinity-enterprise#1007: create-time kind from the `trinity.kind` label;
+  // null = unknown (never defaulted).
+  kind?: "agent" | "deployment" | null;
   // trinity-enterprise#15: present on the create response for a copy-import
   import_snapshot?: {
     source_repo: string;
@@ -53,9 +56,14 @@ export interface AgentConfig {
   port?: number;  // SSH port - ui_port removed for security
   template?: string;
   source_branch?: string;  // Branch to track (default: main). Can also use github:owner/repo@branch syntax.
-  // trinity-enterprise#15: GitHub-repo import intent. MCP exposes only
-  // "copy" | "clone" — "fork" is web-UI-only (its PAT arg would be audit-logged).
+  // trinity-enterprise#15: GitHub-repo import intent ("copy" | "clone" | "fork").
   import_intent?: string;
+  // trinity-enterprise#93 / #1007: fork-to-own. No github_pat over MCP — tool
+  // args land in transcripts; the backend uses the caller's saved token.
+  fork_to_own?: {
+    destination_repo: string;
+    private?: boolean;
+  };
   // trinity-enterprise#69: ephemeral "ghost" agent budget — at least one of
   // max_executions/ttl_seconds; entitlement-gated at the backend.
   ephemeral?: {
@@ -112,6 +120,8 @@ export interface McpAuthContext extends Record<string, unknown> {
   // tools until verify_login upgrades it (#848),
   // portal_delegate=trusted issuer that exchanges an end-user email for a portal
   // session and nothing else (ent#163).
+  // ops / ops_write=bounded machine credentials for ops tooling (#2323 reads,
+  // #3180 writes); neither is in OPERATOR_SCOPES, so neither gets MCP tools.
   //
   // #1854: `portal_delegate` was missing here, so a fifth live value arrived as
   // a runtime string outside the declared union — the backend column is
@@ -120,7 +130,7 @@ export interface McpAuthContext extends Record<string, unknown> {
   // "user-scoped keys see all accessible agents" branch. Keep this union
   // exhaustive against `mcp_api_keys.scope`; anything not listed must be
   // treated as least-privileged, never as `user`.
-  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops";
+  scope: "user" | "agent" | "system" | "connector" | "portal_delegate" | "anonymous" | "ops" | "ops_write";
   mcpApiKey?: string;    // The actual MCP API key (for user-scoped requests to Trinity backend)
   // #2392: X-Trinity-Execution-Id of THIS request (turn id or "manual"); wins over an agent-supplied execution_id.
   executionId?: string;
@@ -575,7 +585,7 @@ export interface OperatorAskCreate {
   options?: string[];
   context?: Record<string, unknown> | null;
   proposal?: Record<string, unknown> | null;
-  to?: "primary" | "approver" | "viewer" | "operator";
+  to?: "primary" | "approver" | "viewer" | "operator" | `role:${string}`;   // trinity-enterprise#1007: or a canon role id
   expires_at?: string;
   supersedes_expired?: string;
   replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks

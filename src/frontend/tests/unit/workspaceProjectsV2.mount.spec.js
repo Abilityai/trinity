@@ -84,6 +84,128 @@ describe('tasks', () => {
   })
 })
 
+// #867 — a contributor changes a task's owner from the task detail. The owner
+// is free text (≤320, so a later `role:<id>` form is not refused); a blank
+// field clears it; a done task keeps it until reopened; the agent stays read-only.
+describe("#867 — a task's owner is editable by contributors", () => {
+  const OPEN = { ...DONE, status: 'active', owner: 'a@example.com', agent: 'helper' }
+
+  async function openDetail(task, { after, props } = {}) {
+    projects.fetchTasks = vi.fn()
+    projects.tasks = { prj_1: { rows: [task], loaded: true, error: null } }
+    projects.fetchTask = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce(after || task)
+    projects.updateTask = vi.fn().mockResolvedValue({})
+    mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: true, ...props }, attachTo: document.body })
+    await flushPromises()
+    byTestId('project-task-T-001').click()
+    await flushPromises()
+  }
+  async function typeOwner(value) {
+    const input = byTestId('project-task-owner')
+    input.value = value
+    input.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+  async function save() {
+    byTestId('project-task-save').click()
+    await flushPromises()
+  }
+  const dds = () => [...document.querySelectorAll('[data-testid="project-task-detail"] dl > div')]
+    .reduce((m, d) => ({ ...m, [d.querySelector('dt').textContent.trim()]: d.querySelector('dd').textContent.trim() }), {})
+
+  it('T1: changing the owner sends exactly the new owner', async () => {
+    await openDetail(OPEN, { after: { ...OPEN, owner: 'b@example.com' } })
+    expect(byTestId('project-task-owner').value).toBe('a@example.com')
+    await typeOwner('  b@example.com ')
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-001', { owner: 'b@example.com' })
+    expect(byTestId('project-task-owner').value).toBe('b@example.com')
+    expect(byTestId('project-task-save').disabled).toBe(true)
+  })
+
+  it('T2: clearing the owner (blank or whitespace) sends null, and is enough to enable Save', async () => {
+    await openDetail(OPEN, { after: { ...OPEN, owner: null } })
+    await typeOwner('   ')
+    expect(byTestId('project-task-save').disabled).toBe(false)
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-001', { owner: null })
+    expect(byTestId('project-task-owner').value).toBe('')
+  })
+
+  it('T3: a non-email owner such as role:ops is sent as typed, with no field error', async () => {
+    await openDetail(OPEN, { after: { ...OPEN, owner: 'role:ops' } })
+    await typeOwner('role:ops')
+    expect(byTestId('project-task-owner').type).toBe('text')
+    expect(byTestId('project-task-owner').getAttribute('aria-invalid')).toBeNull()
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-001', { owner: 'role:ops' })
+  })
+
+  it('T4: a status-only edit sends no owner key', async () => {
+    await openDetail(OPEN)
+    const select = document.getElementById('task-status')
+    select.value = 'blocked'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledTimes(1)
+    expect(projects.updateTask.mock.calls[0][2]).not.toHaveProperty('owner')
+  })
+
+  it('T5: a done task shows the owner field disabled with the reopen hint, and reopening sends status only', async () => {
+    await openDetail({ ...DONE, owner: 'a@example.com' })
+    const input = byTestId('project-task-owner')
+    expect(input.disabled).toBe(true)
+    expect(document.getElementById('task-owner-edit-help').textContent).toContain('Reopen the task to change its owner.')
+    const select = document.getElementById('task-status')
+    select.value = 'active'
+    select.dispatchEvent(new Event('change'))
+    await flushPromises()
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-001', { status: 'active' })
+  })
+
+  it.each([
+    ['a non-contributor', { canContribute: false }],
+    ['an archived project', { archived: true }],
+  ])('T6: %s gets no owner field, only the read-only owner', async (_, props) => {
+    await openDetail(OPEN, { props })
+    expect(byTestId('project-task-owner')).toBeNull()
+    expect(dds().Owner).toBe('a@example.com')
+  })
+
+  it('T7: the agent stays read-only and is never sent', async () => {
+    await openDetail(OPEN, { after: { ...OPEN, owner: 'b@example.com' } })
+    expect(dds().Agent).toBe('helper')
+    const labels = [...document.querySelectorAll('[data-testid="project-task-detail"] form label')].map((l) => l.textContent.trim())
+    expect(labels).toContain('Owner')
+    expect(labels.some((l) => /agent/i.test(l))).toBe(false)
+    await typeOwner('b@example.com')
+    await save()
+    expect(projects.updateTask.mock.calls[0][2]).not.toHaveProperty('agent')
+  })
+
+  it('T8: a server refusal shows its message and keeps the typed owner', async () => {
+    await openDetail(OPEN)
+    projects.updateTask = vi.fn().mockRejectedValue({ response: { status: 409, data: { detail: { code: 'archived', message: 'archived' } } } })
+    await typeOwner('b@example.com')
+    await save()
+    expect(byTestId('inline-error').textContent).toContain('This project is archived. Restore it to add to it.')
+    expect(byTestId('project-task-owner').value).toBe('b@example.com')
+  })
+
+  it('T9: the field is capped at the server limit of 320 characters', async () => {
+    await openDetail(OPEN)
+    expect(byTestId('project-task-owner').getAttribute('maxlength')).toBe('320')
+  })
+
+  it('T10: a task with no owner and a blank field is not dirty', async () => {
+    await openDetail({ ...OPEN, owner: null })
+    expect(byTestId('project-task-owner').value).toBe('')
+    expect(byTestId('project-task-save').disabled).toBe(true)
+  })
+})
+
 describe('log', () => {
   it('the add form is absent for a non-contributor', async () => {
     projects.fetchLog = vi.fn()

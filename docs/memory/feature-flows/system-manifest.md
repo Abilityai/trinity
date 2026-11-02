@@ -141,7 +141,14 @@ permissions:
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
   persons only. See "Phase 4: Apply" below
-- **Management**: `GET /api/systems` - List all deployed systems
+- **Management**: `GET /api/systems` - List deployed systems by their system tag (#4129): one
+  entry per tag on the caller's accessible agents that has evidence of being a system (its
+  auto-created system view, a `system_apply` audit row, or a carrier named `<tag>-*`), with
+  the roster agents carrying it; names are never split, a plain tag is not listed, and
+  unreadable tags are a 503. Known gap: a bare-named system created by `POST /deploy` with
+  no `system_view` and never applied leaves no such evidence, so it is not listed until
+  deploy records that its tag is a system (follow-up); likewise a bare system whose only
+  evidence is a `system_apply` audit row leaves the list once audit retention prunes that row
 - **Details**: `GET /api/systems/{name}` - Get system details
 - **Restart**: `POST /api/systems/{name}/restart` - Restart all system agents
 - **Export**: `GET /api/systems/{name}/manifest` - Export system as YAML
@@ -184,7 +191,9 @@ permissions:
 - **Where**: the `#systems` section of the Library page (`/library#systems`). `/templates` redirects, hash preserved.
 - **Not built**: a browser for *already-deployed* systems (see Frontend Layer below) —
   which is also why the teardown panel takes a **typed** system name or one handed over
-  from a deploy result, and never a name from `GET /api/systems`
+  from a deploy result, never a name read off `GET /api/systems` without confirming it (that
+  list names systems by their tag since #4129, but not one deployed bare with no view and
+  never applied)
 
 ## Frontend Layer
 
@@ -478,6 +487,8 @@ resolve_agent_names("my-system", {"worker": ...})
 #          ["Agent 'my-system-worker' already exists, will create 'my-system-worker_2'"])
 ```
 
+**Naming (trinity-enterprise#1030)**: `resolve_agent_names(system_name, agents, naming=)` names each member through `_member_name` — the one rule (`member_name(manifest, short)` / `declared_names(manifest)` are the manifest-level entry points that apply's snapshot and plan and the bundled catalog call). `naming: bare` makes the key the full name (`scout-lead`, not `my-system-scout-lead`); the `_N` suffix on a taken name is unchanged in both modes.
+
 #### configure_permissions() (Lines 215-293)
 ```python
 async def configure_permissions(
@@ -648,6 +659,8 @@ a template resource that overrides a declared one) are resolved after the create
 read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
 and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
 
+**Bare adoption (trinity-enterprise#1030)**: `read_apply_snapshot` marks a bare, managed, tag-less member `ApplyMemberState.untagged` instead of gating it `member_claimed_by_another_system`; `_plan_existing_member` turns that into a `member_adopted` change plus a `tag` op for the system tag; `resolve_apply_plan` collects `ApplyPlan.adopted` and the restart/teardown warning (`ApplyPlan.adoption_warning`, built by `_adoption_line`); `_apply_report` copies it to `SystemApplyResponse.adopted` on a dry run (valid or invalid), empties it and drops the line on a refused run, and on a real run keeps only members whose system tag landed (`ApplyOutcome.tags_landed`, per (name, tag)) with the line in the past tense (#4130).
+
 #### export_manifest() (Lines 414-551)
 ```python
 def export_manifest(system_name: str, agents: List[Dict]) -> str:
@@ -682,14 +695,45 @@ saves to its default branch, while the heartbeat refuses to push there).
 Rejecting that toggle for non-fork source-mode agents needs a persisted fork
 marker, which `agent_git_config` does not have yet.
 
-**Permission Detection Logic**:
-- Check first agent's permissions
-- If matches full-mesh pattern (can call all other agents), verify all agents
-- If full-mesh verified, use `preset: full-mesh`
-- Otherwise, export explicit permission matrix
+**Permission Detection Logic** (#4128): one pass over every member, through
+`db.get_permitted_agents` (the read apply's snapshot makes). Each member with a
+manifest key gets its edge targets filtered to members first — an edge leaving
+the system cannot be represented — and mapped to short names. Then:
+- `preset: full-mesh` when at least two keyed members exist and every keyed
+  member reaches every other keyed member. Tag-only members (no manifest key,
+  named in the `# unobserved: members omitted` header) are outside that universe.
+- Otherwise `explicit`, listing only members with at least one in-system edge.
+- No in-system edge at all: no `permissions` block (apply reads an absent block
+  as "no desired edges").
+The block no longer depends on roster order: it used to probe `agents[0]` only,
+so a system whose first member had no outgoing edge exported none. Any failed
+edge read drops the whole block and names `permissions` in the
+`# unobserved: could not be read` header.
+
+**Folders on export** (#4128): `db.get_shared_folder_config(member)`, a pydantic
+row read by attribute; `folders:` is emitted only when `expose` or `consume` is
+on. A failed read names `folders of <member>` in the `# unobserved:` header, so an
+absent key never reads as "both off". (Until #4128 the read called a facade
+method that does not exist, so no export carried `folders`.)
 
 **Bug Fix (2025-12-18)**:
 - Line 542: Changed `db.get_setting()` → `db.get_setting_value()` to avoid Python object serialization in YAML
+
+**Naming on export (trinity-enterprise#1030)**: `export_manifest(system_name, agents, *, naming=None)` — `naming` overrides (the route's `?naming=`); None infers `bare` when `_member_short_name` finds no prefixed member, else `prefixed`. `_member_short_name(full, system, naming)` returns the full name under `bare`, so the agents loop and both permission loops key members through the one helper. Omitted members put a leading `# unobserved:` comment line on the YAML.
+
+**Round trip (#4132)**: export → `POST /api/systems/apply` with `dry_run: true` on the same system is `valid`, every member `unchanged`, no write and no drift (`tests/unit/test_4132_export_round_trip.py`, the real exporter and the real route function). Three rules hold it. (1) Order: `export_manifest` sorts the members by name at entry, each member's tags, its schedules by name and its resource keys, so two exports are byte-identical; `sort_keys=False` stays, because key order inside a block is fixed by construction. (2) Held values: `skills.plan`, `grants.plan` and `gates.plan` run the library, catalog or `validate_gate_changes` verdict only on a value apply would write; a declared gate is in sync against a stored `set` row with an equal approver and an omitted or equal deadline (a `library_default` row is still a write). (3) Unobserved: `seats.export_member` raises `SeatUnobserved` when `resolve_seat` answers `no_answer` (named `seat of <member>`), `seats.read_member` turns it into case `unobserved` and `plan` reports `seat_unobserved` with the no-answer note; every exported member, whatever the caller can read, is listed in the `# unobserved: person seats are not exported …` line (the seam answers per seat, no listing hook), so declared `person_seats:` dry-run as `seat_unobserved` reports. The template is the `trinity.template` label verbatim, the same label apply compares, so it round-trips with no `template_differs`.
+
+**Skills (trinity-enterprise#1030)**: `services/system_apply/skills.py` owns `skills:` / `skill_sets:` — `read_library` (one verdict per declared name, into `ApplySnapshot.skill_verdicts` / `skill_set_verdicts`), `read_member` (individual rows + `skill_set_service.held_sets`, into `ApplyMemberState.skills` / `skill_sets`), `plan` (called from `resolve_apply_plan` via `_plan_skills` for created and managed members), `run` (`_run_op` kinds `skill_assign` / `skill_set_assign`, last in `_APPLY_OP_PHASES`). Writes call `skill_assignment_service.assign_and_deliver` / `assign_set_and_deliver`, the sequence the skills router's assign route now also calls. Deploy: `assign_manifest_skills` (step 10b). Export: per member after tags. Assigning a set goes through `skill_set_service.assign`, which may drop set-derived rows of another held set whose source drifted — the same as the set route; individual rows are never touched. The `skill_delivery` report change's note lists every per-skill `failed` / `conflict` entry of the delivery report (`delivery_failures`, e.g. `marker_not_written`); a landed set write whose skills were all held already records `current="unchanged"`; deploy adds one warning per member whose delivery names a failed skill (`deploy_delivery_warning`; `pending_start` is not a line) (#4130).
+
+**Grants (trinity-enterprise#1030 CP2)**: `services/system_apply/grants.py` owns `grants:` — `read_member` (`db.list_agent_capabilities`, into `ApplyMemberState.grants`), `plan` (via `_plan_grants`; a write only when `ApplySnapshot.grant_writer`, i.e. `dependencies.is_interactive_admin(current_user)`, else the `grant_requires_interactive_admin` report), `summarize` (`ApplyPlan.summary["grants"]` → `SystemApplyResponse.summary` plus the one warning line), `run` (`_run_op` kind `grant`, last in `_APPLY_OP_PHASES`; `capability_grant_service.set_grant(name, cap, True, actor)` then the shared `audit_grant_change`), `deploy` / `deploy_hold_back_warning` (deploy step 10c and the dry-run preview). The gate itself is `dependencies.assert_interactive_admin`, which the two capability-grant routes (`routers/agent_config.py`, `routers/skills.py`) also call after `Depends(require_admin)`. Export: per member after skills.
+
+**Gates (trinity-enterprise#1030 CP3)**: `services/system_apply/gates.py` owns `gates:` — `read_member` (`db.list_agent_skill_gates`, every row, into `ApplyMemberState.gates`), `plan` (via `_plan_gates` for created and managed members; each declared gate through `skill_gate_map_service.validate_gate_changes`, the public validator `set_gate` itself calls, so a refusal is the same blocker code the write would give; `gate_missing` / `gate_differs` writes with ent#881's `approver_reason` as the `note`; `gate_undeclared` report, never a clear), `summarize` (`ApplyPlan.summary["gates"]`), `run` (`_run_op` kind `gate_set`, step `gates`, BEFORE `skill_assign` in `_APPLY_OP_PHASES`; `skill_gate_map_service.set_gate(..., ctx=gate_context(user, trigger="apply"))`; a reachability warning from the write becomes a per-member report, and `marker_not_written` the `gate_marker_not_written` report — the deploy loop warns for it too, #4130), `export_member` (`set` rows only), `deploy` / `deploy_hold_back_warning` (deploy step 10a, before the skills step 10b, and the dry-run preview; `dependencies.capability_refusal(skills.manage)` is the T8 gate). Export: per member after grants. A `role:` approver on a member created in the same run is refused (`unknown_role` / `approver_unavailable`): the member has no roster yet, and person seats are report-only, so nothing in the run can seed one. trinity-enterprise#1043: `read_held_skills` (`db.get_agent_skill_names`, casefolded, into `ApplyMemberState.skill_names`, read beside the gates) lets `plan` stamp each `gate_set` op with `held` and the gate in force (`live`, the `_public` shape); when `attempt` returns False on a held op, `run` → `_held_skill_not_gated` appends the consequence to `out.failed[-1].reason` (the `<code>:` prefix stays), adds the per-member report `skill_runs_ungated` (`live` None) or `previous_gate_stands` (`current` = the live gate) to `out.extra_changes`, and for an ungated skill appends one line to `out.warnings`, which `_apply_report` merges after the plan's held-back grant and seat lines. trinity-enterprise#1068: `read_apply_snapshot` reads the ops setting `apply_unassign_on_failed_gate` (default true) once into `ApplyPlan.unassign_on_failed_gate`, and `read_held_via_sets` (`skill_set_service.via_sets_map`) beside the held skills; `plan` stamps each `gate_set` op with `unassign` and `held_via_sets` and joins the consequence to the change's `note` (`_consequence_note`). On a failed held op, `run` → `_unassign_held_skill` first: switch off or `live` set → the ent#1043 report; held through a set → the report `skill_held_via_set` plus the ent#1043 report (**a set-held skill stays report-only**); else it re-reads the gate row under the lease (`_gate_row_stored`: stored → nothing unassigned, the reason says so; unreadable → report) and makes a second `attempt(..., "skills", unassign, key=skill)` through `skill_assignment_service.unassign_and_remove(keep_set_held=True)` — the unassign route's own sequence (retained-via-set check, row delete, `_remove_unassigned_skills`, broadcast, `sync_gates`). Landed → the failure's reason names the unassign, the member gets the `write` change `skill_unassigned_gate_failed` (field `skills`), one warning line says unassigned, and `summary.build(extra_changes=...)` counts it in `skills.write` by the landed-key rule. Removal not `completed` → the reason says the package removal is pending and the `skill_runs_ungated` report and warning line stay. Refused → its own `failed[]` row and the ent#1043 report. No gate is cleared on any path (the ent#1030 never-clear pin).
+
+**Seats (trinity-enterprise#1030 CP4)**: `services/system_apply/seats.py` owns `seat:` and `person_seats:` — `parse_seat` / `parse_person_seats` (called from `parse_manifest`; shapes and email-shaped values refused by name, never echoed), `read_member` (into `ApplyMemberState.seat` / `.person_seats`; a provider error raises, so the snapshot blocks the member retryably), `plan` (via `_plan_seats(mp, state, snapshot)`; `seat_missing` / `seat_differs` writes only when `assignment_provider.seat_writer_installed()` AND the caller passes the grant gate (`seat_writer=snapshot.grant_writer`, i.e. `dependencies.is_interactive_admin`) — a writer but any other caller is the report `seat_requires_interactive_admin` — else `seat_unobserved`; person seats `seat_filled` / `seat_vacant` / `seat_unobserved` reports only — `seat_unobserved` with a "does not exist yet" note on a member apply will create, since nothing was read), `summarize` (`summary.roles.held_back` and its one warning line, appended in `resolve_apply_plan` beside the grants one), `run` (`_run_op` kind `seat_set`, last in `_APPLY_OP_PHASES`; `assignment_provider.write_seat`), `export_member` (`seat:` from `resolve_seat` when it says `holds`; with no provider, or one without `seat_for`, it raises `SeatUnobserved` and the export names `seat of <member>` in its `# unobserved:` line, as a failed read does), `deploy` / `deploy_hold_back_warning` (deploy step 10d and the dry-run preview; behind the grant phase's gate, `dependencies.is_interactive_admin` — any other caller, an agent key included, is held back with `seats_require_interactive_admin` and nothing is written). The core judges the principal before `write_seat`; the `created_by` it passes is the username, attribution only, and a provider never re-judges from it. The provider hooks are `set_seat` and `person_seat_status` on `services/assignment_provider.py`, read through `getattr` (`seat_writer_installed`, `person_seat_reader_installed`, `write_seat`, `resolve_person_seat`).
+
+**Declared-only members (trinity-enterprise#1030 CP5)**: `SystemAgentConfig.deploy` (`parse_manifest` refuses a non-boolean). `validate_manifest` refuses explicit edges and `folders:` naming one, warns for presets, and adds one warning per declared-only member naming every other key it carries (`_DECLARED_ONLY_IGNORED_KEYS`) — parsed, never applied or reported. `read_apply_snapshot` classifies a `deploy: false` member before any gate: `ApplyMemberState.declared_only`, `.live` (the same global `taken` predicate) and `.template_in_catalog` (`_template_in_catalog`), then nothing else. `resolve_apply_plan` → `_plan_declared_only` (verdict `declared_only`, reports only, no op) and `_desired_edges` over deployed members only; the executor's `exists` set leaves declared-only members out. `deploy_manifest` resolves names over deployed members only and adds one `warnings` line listing the skipped names, plus `SystemDeployResponse.agents_declared_only` on every branch; when every member is declared-only it raises the named 400 `nothing_to_deploy` (dry run and real) after name resolution (#4130). The executor's step 5 (`restart_required` re-read) skips declared-only members, and `_apply_report` gives them `applied: None` (#4130). `export_manifest` always prepends `DECLARED_ONLY_EXPORT_HEADER`.
+
+**Summary and `unobserved` (trinity-enterprise#1030 CP6)**: `services/system_apply/summary.py` — `GROUP_FIELDS` (group → change fields), `member_unobserved(mp)` (into `ApplyMemberPlan.unobserved` → `SystemApplyMember.unobserved`) and `build(members, extras=…, landed=…)` (into `ApplyPlan.summary`, called at the end of `resolve_apply_plan`; `_apply_report` rebuilds it on a real run with `landed=ApplyOutcome.landed` — `(member, step, key)` of each write `attempt()` saw land, `key` being what the write wrote (the skill, set, gate's skill, capability, seat, edge target, tag) — so `write` counts a change only when a write of its own key landed (two sets on one member with one held count 1); the same key names the write in `failed[].key`, and with `landed=set()` on a refused run; `report` / `unobserved` stay plan counts (#4130); `grants.held_back` comes from `apply_grants.summarize`, which still owns the held-back warning line). Deploy's dry run adds `_configured_preview(cfg)` counts to each `agents_to_create` entry that declares a group; `src/frontend/src/components/systems/ManifestPreview.vue` → `configuredLine` renders them as one line (`data-testid="manifest-configured-line"`), pinned by `src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js`.
 
 ### Router Layer (`src/backend/routers/systems.py`)
 
@@ -861,27 +905,23 @@ async def apply_system(body: SystemApplyRequest, request: Request,
   reaches permission grants, other agents' schedules and the platform prompt).
 - A refused run writes no audit row (nothing changed).
 
-#### GET /api/systems (Lines 199-244)
+#### GET /api/systems (#4129)
 ```python
 @router.get("")
 async def list_systems(current_user: User = Depends(get_current_user)):
     """
-    List all systems (agents grouped by prefix).
-
-    Groups agents by system prefix (before last '-').
-    Example: "my-system-abc-worker1" -> system "my-system-abc"
-
-    Returns system summaries with agent counts and details.
+    List deployed systems (#4129): one entry per system tag carried by an
+    agent the caller can access, with the agents that carry it.
     """
 ```
 
-**Response**:
+**Response** (shape unchanged; `created_at` is now populated):
 ```json
 {
   "systems": [
     {
       "name": "content-production",
-      "agent_count": 3,
+      "agent_count": 2,
       "agents": [
         {
           "name": "content-production-orchestrator",
@@ -900,13 +940,30 @@ async def list_systems(current_user: User = Depends(get_current_user)):
 }
 ```
 
-**Implementation**:
-- Line 212: Get all agents via `get_accessible_agents(current_user)`
-- Lines 214-234: Group by prefix (all parts except last after splitting on '-')
-- Lines 237-238: Sort by created_at (newest first)
+**Implementation** (the evidence rule; a name is never split at a hyphen):
+- **Roster**: `get_accessible_agents(current_user)` — every name that can appear comes from it.
+- **Tag read over the roster**: `db.get_tags_for_agents(names)` for the roster names only. A
+  failure is a named **503** ("agent tags could not be read. Retry."), never an empty list.
+- **Candidates**: every tag a roster agent carries; the tag's **members are the roster agents
+  carrying it** (members ⊆ roster), so the global reads below can promote a tag the caller
+  already sees but never add a name.
+- **Evidence** — a candidate is listed only if one of these holds, cheapest first:
+  1. a carrier is named `<tag>-*` (the `naming: prefixed` shape);
+  2. `db.list_all_system_views()` holds the view deploy/apply auto-create for it (its
+     `filter_tags` contain the tag and its description is
+     `SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=tag)`);
+  3. `db.get_audit_entries(event_type=CONFIGURATION, target_type="system", target_id=tag)`,
+     paged by 100, holds a `system_apply` row.
 
-**Bug Fix (2025-12-18)**:
-- Line 221: Changed from `parts[0]` to `'-'.join(parts[:-1])` to handle hyphenated system names
+  A plain tag (`prod`, a manifest's `default_tags`) has none of the three and is not listed.
+  A failure of the view or audit read is a second named **503** ("system views or the audit
+  log could not be read. Retry."). Both 503s pass through the outer `except HTTPException`;
+  anything else is the generic 500.
+- **`created_at`**: the earliest member `created`, normalised to UTC ISO-Z
+  (`parse_iso_timestamp` → `to_utc_iso`); `null` when no member has one.
+- **Order**: newest `created_at` first, name order on a tie.
+- **Cost**: tags without a carrier or view cost one audit query each per call (trinity#4143,
+  a durable deploy/apply record, is the follow-up that removes it).
 
 #### GET /api/systems/{system_name} (Lines 247-319)
 ```python
@@ -958,9 +1015,10 @@ async def get_system(
 - Lines 264-268: Filter agents by `{system_name}-` prefix
 - Lines 270-274: Return 404 if no agents found
 - Lines 277-307: Enrich each agent with permissions, folders, schedules from database
-- Lines 289-290: Get permissions via `db.get_agent_permissions()`
-- Lines 293-298: Get folders via `db.get_agent_folder_config()`
-- Lines 301-302: Get schedules via `db.get_agent_schedules()`
+- Each of the three keys below is read in its own `try` (#4128): a failed read logs a warning and omits only that key, never the other two
+- Permissions via `db.get_permitted_agents()`, narrowed to the caller's accessible agents and sorted — the same targets `GET /api/agents/{name}/permissions` shows that caller
+- Folders via `db.get_shared_folder_config()`, a model read by attribute (`expose_enabled` / `consume_enabled` → `{expose, consume}`); omitted when the agent has no row
+- Schedules via `db.list_agent_schedules()`, each projected through `ScheduleResponse` so webhook credentials never reach the response
 
 #### POST /api/systems/{system_name}/restart (Lines 322-384)
 ```python
@@ -1854,28 +1912,9 @@ the recovery story: remove them by hand once the original is reconciled.
 
 ### System Grouping
 
-**List Systems Endpoint**:
-- Splits agent name on `-`
-- Takes all parts except last as system prefix
-- Groups agents by prefix
-
-**Examples**:
-```
-Agent: content-production-orchestrator
-Split: ["content", "production", "orchestrator"]
-Prefix: "content-production" (all except last)
-System: content-production
-
-Agent: my-research-team-analyst
-Split: ["my", "research", "team", "analyst"]
-Prefix: "my-research-team"
-System: my-research-team
-
-Agent: test-list-abc123-worker1
-Split: ["test", "list", "abc123", "worker1"]
-Prefix: "test-list-abc123"
-System: test-list-abc123
-```
+**List Systems Endpoint** (#4129): grouped by system **tag**, never by splitting the agent
+name — see "GET /api/systems" under Router Layer for the evidence rule. A `naming: bare`
+system lists under its own name, and `content-writer` alone does not make a `content` system.
 
 ## Error Handling
 
@@ -2383,8 +2422,9 @@ lifespan (safety-net, gated on `setup_completed`, strong task ref) both call
    - Honest status: partial / failed / seed-path error (e.g. parse-broken
      override) / unreadable-override / crash-interrupted partial fleet (the
      converge backstop finding only SOME names reserved) each raise ONE
-     operator-queue alert (direct DB create on `trinity-system`,
-     deterministic `system-seed-<kind>` id — a #1632 reserved prefix, so an
+     operator-queue alert (`platform_alerts.observe` on `trinity-system`,
+     subject `system_seed:<kind>`, ended by the platform when a later seed
+     succeeds; the id carries the #1632 reserved prefix `system-seed-`, so an
      agent cannot pre-create-and-silence it; best-effort).
 
 **Manifest resolution**: `TRINITY_DEFAULT_SYSTEM_MANIFEST` env, read at call
@@ -2457,6 +2497,16 @@ One honest asymmetry, found by Hypothesis and kept: an empty roster or empty sys
 is answered from the inputs and never reaches the tag read, so it reports
 `tags_readable: True`. A destructive caller refuses on `False`, and refusing a teardown
 of a system with no members would be a 503 where 404 is the truth.
+
+### Naming-aware membership and the bare edge cases (#4131)
+
+`system_membership(system, roster, naming=None)` takes the manifest's naming. Apply (`read_apply_snapshot`, the only caller that passes it, pinned by an AST test) passes `manifest.naming`: under `bare` membership is the tag only — the tag read still runs, so an outage still reports `tags_readable=False` and apply refuses. With `naming=None` (`get_system`, `restart_system`, `get_system_manifest`, teardown: nothing stores the naming) bare is inferred the way `export_manifest` infers it — tags readable and every tagged member unprefixed — and the prefix step is dropped; a prefixed system (any tagged member carries `<system>-`), a system with no tagged member and the unreadable-tag path keep the #2373 union and the raw-prefix fallback untouched. So apply, list, get, restart and export agree that an untagged `<system>-x` beside a bare system is not a member. Accepted residual: a prefixed system whose every tagged member was renamed off the prefix while another member lost its tag is read as bare, and restart under-restarts that one member. The other direction is a residual too: a bare system with any tagged member whose name starts with `<system>-` (an adopted prefix-shaped name, say) is read as prefixed by restart, get, export and teardown, so an untagged `<system>-x` lookalike is reached by name while apply under `naming: bare` says it is not a member; the adoption warning says so.
+
+Under `naming: bare` a declared untagged name is adopted whatever its shape; an undeclared untagged `<system>-x` is neither member, drift nor blocker. When an adopted name starts with `<system>-`, the adoption warning names the explicit `?naming=bare` export, because a default export then infers `prefixed`.
+
+Manifest keys accept the create route's charset (`MANIFEST_KEY_RE`, `[a-z0-9_.-]`, no leading `_`/`.`/`-`, no trailing `-`) in both modes, so a member the platform suffixed (`writer_2`, chained `writer_2_2`) exports under a key that parses again; the drift note recognises chained suffixes.
+
+`deploy: false` governs apply only. `read_apply_snapshot` sets `ApplyMemberState.tagged_by_system` when a declared-only name is a roster member by tag, and `_plan_declared_only` adds the report `declared_only_member_tagged` (`_DECLARED_ONLY_TAGGED_NOTE`: restart restarts it, teardown removes it, remove the tag by hand to keep it out). In a prefixed system an untagged declared-only name that is a member by the prefix alone sets `prefixed_by_system` instead, and the report is `declared_only_member_prefixed` (`_DECLARED_ONLY_PREFIXED_NOTE`: restart and teardown reach it by name, rename it to keep it out). Both are reports; nothing is written. Declared-only names are excluded from the prefix-only evidence gate in both modes.
 
 ### The auto-view description is one constant
 

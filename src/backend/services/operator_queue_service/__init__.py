@@ -348,6 +348,19 @@ OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
 # can decide it. Under `gate-`, so it stays about-a-person and reserved.
 ADDRESSEE_ONLY_ID_PREFIXES = ("gate-addressee-only-",)
 
+# trinity-enterprise#981: the one sub-family of addressee-only rows that reaches
+# its addressee BY ADDRESS in the Workspace, with no roster check. The platform
+# chose this row's addressee; the roster was never its fence — such a row is
+# raised under a platform agent nobody is shared with, about the person it is
+# addressed to. Deliberately narrower than `ADDRESSEE_ONLY_ID_PREFIXES`: the
+# wider family (a proposal to a project's creator) keeps its roster fence, so a
+# share revoked afterwards still stops showing it. Inside that family, so the
+# Operating Room's addressee-only listing applies unchanged; under `gate-`, so
+# no agent can mint one. `is_addressee_reach` is the Python twin of the SQL
+# branch in `db/operator_queue._list_conditions`; both also require the row's
+# own `raised_by` column to say `gate` — the prefix alone is never the key.
+ADDRESSEE_REACH_ID_PREFIXES = ("gate-addressee-only-reach-",)
+
 
 # ============================================================================
 # trinity-enterprise#815 — a broad listing is complete before the limit
@@ -710,10 +723,18 @@ _WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
 # Separate from the two keys above on purpose: discussing an ask moves neither
 # where it was raised nor where a background ask's reply goes.
 _WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
+# trinity-enterprise#981: the project attachment of a row the platform raised
+# about a person — which project, which task, which event. Written only through
+# `ask_service.raise_ask(platform_context=...)` on a gate raise; read by
+# `client_portal/asks/service.py::_project` as the client-facing `project`.
+_WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
+_WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
+_WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
+    _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
 })
 
 
@@ -1502,6 +1523,7 @@ from .rows import (  # noqa: E402,F401
     is_about_a_person,
     is_addressed_to,
     is_addressee_only,
+    is_addressee_reach,
     is_aged,
     is_owner_only,
     is_person_tag,
