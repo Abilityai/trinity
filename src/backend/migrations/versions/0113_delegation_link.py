@@ -10,14 +10,14 @@ child's authenticated source agent. ``agent_evaluations`` gains
 per-caller index. All nullable with no default, so every existing row reads as
 "not delegated" and nothing is backfilled.
 
-Revision ID: 0111_delegation_link
-Revises: 0110_agent_memory_provenance
+Revision ID: 0113_delegation_link
+Revises: 0112_loop_runs_stale_duplicates
 """
 from alembic import op
 
 
-revision = "0111_delegation_link"
-down_revision = "0110_agent_memory_provenance"
+revision = "0113_delegation_link"
+down_revision = "0112_loop_runs_stale_duplicates"
 branch_labels = None
 depends_on = None
 

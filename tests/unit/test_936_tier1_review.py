@@ -239,7 +239,7 @@ def test_both_migration_tracks_run_the_same_dedupe():
     import importlib.util
     import types
     from db.migrations import TIER1_DEDUPE_SQL
-    path = _BACKEND / "migrations" / "versions" / "0113_tier1_one_per_run.py"
+    path = _BACKEND / "migrations" / "versions" / "0115_tier1_one_per_run.py"
     saved = sys.modules.get("alembic")
     sys.modules["alembic"] = types.SimpleNamespace(op=None)
     try:
@@ -252,4 +252,4 @@ def test_both_migration_tracks_run_the_same_dedupe():
         else:
             sys.modules["alembic"] = saved
     assert mod.TIER1_DEDUPE_SQL == TIER1_DEDUPE_SQL
-    assert mod.down_revision == "0112_execution_parent_index"
+    assert mod.down_revision == "0114_execution_parent_index"

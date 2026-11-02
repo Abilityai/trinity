@@ -5478,7 +5478,7 @@ def _migrate_delegation_link(cursor, conn):
     Idempotent. Each table's half is applied on its own: a database holding
     only one of the two tables still gets that one's columns, so the index
     ``init_schema`` creates over ``caller_agent`` never meets a table without it.
-    Mirrored by Alembic 0111_delegation_link.
+    Mirrored by Alembic 0113_delegation_link.
     """
     cursor.execute(
         "SELECT name FROM sqlite_master WHERE type = 'table' "
@@ -5515,7 +5515,7 @@ def _migrate_execution_parent_index(cursor, conn):
     ``schedule_executions``. Index only — no column, no backfill. A database
     without the table (or the column) is left alone: ``init_schema`` creates
     the index with the table on a fresh build. Idempotent. Mirrored by Alembic
-    0112_execution_parent_index.
+    0114_execution_parent_index.
     """
     cursor.execute("PRAGMA table_info(schedule_executions)")
     if "parent_execution_id" not in {row[1] for row in cursor.fetchall()}:
@@ -5538,7 +5538,7 @@ def _migrate_tier1_one_per_run(cursor, conn):
     the loser. A run that already holds more than one such row keeps the
     finished one over a claim, then the newest. A database without the table
     is left alone (``init_schema`` creates the index with it). Idempotent.
-    Mirrored by Alembic 0113_tier1_one_per_run.
+    Mirrored by Alembic 0115_tier1_one_per_run.
     """
     cursor.execute("PRAGMA table_info(agent_evaluations)")
     if not cursor.fetchall():
