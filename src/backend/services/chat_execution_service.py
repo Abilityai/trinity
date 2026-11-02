@@ -564,6 +564,8 @@ async def _finalize_chat_success(
                 # #2958 AC3: a chat turn that auto-compacted is attributed on the
                 # row, as the task path already does (the column is on both tracks).
                 compact_metadata=_compact_metadata_json(metadata),
+                # ent#936: the model that answered, for a row dispatched without one.
+                model_used=metadata.get("model_name"),
             ),
         )
         _spawn_chat_terminal_report(

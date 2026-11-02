@@ -524,6 +524,12 @@ class ScheduleExecutionsMixin:
             # and on every terminal writer that doesn't derive it.
             if r.turn_integrity is not None:
                 values["turn_integrity"] = r.turn_integrity
+            # abilityai/trinity-enterprise#936: the model the runtime reported
+            # fills an EMPTY column only — a schedule or delegated run with no
+            # override recorded nothing at dispatch, and the judge reads the
+            # column to tell the run's family. A requested model is kept.
+            if r.model_used:
+                values["model_used"] = func.coalesce(schedule_executions.c.model_used, r.model_used)
 
             if status == TaskExecutionStatus.SUCCESS:
                 # Agent's own completion result wins over everything except a

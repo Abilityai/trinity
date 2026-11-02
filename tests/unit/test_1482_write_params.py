@@ -218,7 +218,7 @@ class TestUpdateExecutionStatus:
             "response": "done", "error": None, "context_used": 1200, "context_max": 200000,
             "cost": 0.42, "tool_calls": "[]", "execution_log": "[{}]",
             "claude_session_id": "sess-1", "compact_metadata": "{}", "retry_count": 1,
-            "turn_integrity": "complete",
+            "turn_integrity": "complete", "model_used": "claude-sonnet-4-6",
             # #3589: a datetime in, the Z-suffixed ISO string out (to_utc_iso).
             # In-window (after the row's own started_at): a past instant below
             # it is floored since trinity-enterprise#882 — floor behaviour is
@@ -242,6 +242,27 @@ class TestUpdateExecutionStatus:
         assert schedule_ops.update_execution_status(eid, "failed", ExecutionResult(error="boom")) is True
         row = _row(eid)
         assert (row["retry_count"], row["turn_integrity"], row["error"]) == (2, "partial", "boom")
+
+    def test_model_used_fills_an_empty_column_and_never_replaces_a_request(self, schedule_ops):
+        """abilityai/trinity-enterprise#936: the runtime's reported model reaches
+        the row when dispatch recorded none (a schedule or delegated run with no
+        override), so the judge can tell the run's family. A model requested at
+        dispatch stays what it was; None leaves the column alone."""
+        from db.write_params import ExecutionResult
+        eid = self._fresh(schedule_ops)
+        assert _row(eid)["model_used"] is None
+        assert schedule_ops.update_execution_status(
+            eid, "success", ExecutionResult(response="ok", model_used="claude-sonnet-4-6")) is True
+        assert _row(eid)["model_used"] == "claude-sonnet-4-6"
+        eid2 = self._fresh(schedule_ops)
+        _hrun("UPDATE schedule_executions SET model_used = 'opus' WHERE id = :i", i=eid2)
+        assert schedule_ops.update_execution_status(
+            eid2, "success", ExecutionResult(response="ok", model_used="claude-opus-4-6")) is True
+        assert _row(eid2)["model_used"] == "opus"
+        eid3 = self._fresh(schedule_ops)
+        _hrun("UPDATE schedule_executions SET model_used = 'haiku' WHERE id = :i", i=eid3)
+        assert schedule_ops.update_execution_status(eid3, "failed", ExecutionResult(error="x")) is True
+        assert _row(eid3)["model_used"] == "haiku"
 
     def test_no_result_is_a_bare_status_write(self, schedule_ops):
         eid = self._fresh(schedule_ops)

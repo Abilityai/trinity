@@ -65,9 +65,13 @@ class ExecutionResult:
     value is the instant the PRODUCER says the turn ended — the #2944 watchdog
     claim passes the agent's `retained_at`, minutes before the write. The
     writer normalizes it (`utils.helpers.terminal_completed_at`: naive → UTC,
-    never in the future) and measures `duration_ms` to it. The lease
-    `claim_token` is deliberately NOT here: it is a CAS precondition on the
-    write, not a value the write records.
+    never in the future) and measures `duration_ms` to it; and EXCEPT
+    `model_used` (abilityai/trinity-enterprise#936): the model the runtime
+    REPORTED answering (`metadata.model_name`, #678), which fills the column
+    only when dispatch recorded none — a model requested at dispatch stays
+    what it was, and `None` leaves the column alone. The lease `claim_token`
+    is deliberately NOT here: it is a CAS precondition on the write, not a
+    value the write records.
     """
     response: Optional[str] = None
     error: Optional[str] = None
@@ -81,6 +85,7 @@ class ExecutionResult:
     retry_count: Optional[int] = None
     turn_integrity: Optional[str] = None
     completed_at: Optional[datetime] = None
+    model_used: Optional[str] = None
 
 
 @dataclass(frozen=True, kw_only=True)

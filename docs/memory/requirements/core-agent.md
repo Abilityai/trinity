@@ -3300,7 +3300,14 @@ to localStorage in the clear.
   turn; a cold retry (`session_turn_service`) creates a second row and stamps it
   from the same forwarded value, so the two rows agree. **Deferral, stated:**
   `model_used` records the model *requested at dispatch*, not one reconciled with
-  what the agent actually ran — matching `execute_task`'s own semantics. The last
+  what the agent actually ran — matching `execute_task`'s own semantics. **Since
+  abilityai/trinity-enterprise#936 the one gap in that rule is closed:** a row
+  dispatched with NO model (a schedule or delegated run without an override —
+  every such row read NULL) is filled at its terminal write with the model the
+  runtime reported answering (`metadata.model_name`, #678), through
+  `ExecutionResult.model_used`, which the writer applies as `COALESCE(existing,
+  reported)` — a requested model is never replaced. The judge reads the column to
+  tell the run's family, and skipped every such run as `model_unknown`. The last
   rung reads `settings_service.get_platform_default_model()`, the same function
   `execute_task` calls, so the row and the turn hold one opinion rather than two;
   stopping at `None` (the shape reviewed out) recorded NULL for the default state

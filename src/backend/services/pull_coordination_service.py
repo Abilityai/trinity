@@ -827,6 +827,8 @@ def apply_task_result(
                 tool_calls=log_json,
                 claude_session_id=session_id,
                 compact_metadata=compact_json,
+                # ent#936: the model that answered, for a row dispatched without one.
+                model_used=metadata.get("model_name"),
             ),
             claim_token=claim_token,
         )
