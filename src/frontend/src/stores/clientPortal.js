@@ -19,6 +19,7 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
+import { notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -250,6 +251,14 @@ function installRotationInterceptor() {
         } catch {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
+        }
+      } else if (error?.response?.status === 403) {
+        // trinity-enterprise#1054: the terms gate refuses a Workspace-only
+        // PLATFORM account, never a client's portal session — same local gate.
+        try {
+          if (useClientPortalStore().isPlatformSession) notifyTermsRefusal(error)
+        } catch {
+          // Pinia not active: no session, nothing to send anywhere.
         }
       }
       return Promise.reject(error)
