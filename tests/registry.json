@@ -7799,6 +7799,17 @@
       "description": "trinity#4165: a tag accepted by the parser survives the three ref-existence checks — provisioning.check_remote_branch_exists, ref_probes (anonymous and tokened), and the REST branch check with its tag fallback — driven through _validate_github_access on all three paths against a fake ls-remote that filters like git; the ref is always a value after the URL; a branch wins over a same-named tag; an annotated tag peels to its commit."
     },
     {
+      "file": "unit/test_4165_ref_probes_real_git.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: ref_probes against a REAL bare git remote over file:// (no fake ls-remote) holding a lightweight tag, an annotated tag and a branch sharing a name with an annotated tag: an annotated tag resolves to its commit, never the tag object (the probe asks for refs/tags/<r>^{} by name); a branch wins over the same-named tag; anonymous and tokened probes agree."
+    },
+    {
       "file": "unit/test_ent1055_purge_agent_now.py",
       "feature": "trinity-enterprise#1055",
       "added": "2026-11-02",

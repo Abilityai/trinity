@@ -150,12 +150,14 @@ class TestProbeAnonymousRef:
 
     def test_a_ref_is_asked_for_by_its_full_branch_and_tag_refs(self):
         # trinity#4165: `@ref` may be a tag, so both forms are asked for (the
-        # branch first — it wins over a same-named tag); never a bare name,
-        # so a same-named ref elsewhere (`refs/pull/…`) cannot answer.
+        # branch first — it wins over a same-named tag), plus the peeled tag
+        # line, which git lists only when asked for by name; never a bare
+        # name, so a same-named ref elsewhere (`refs/pull/…`) cannot answer.
         proc = _FakeProc(0, f"{SHA}\trefs/heads/feature/x\n".encode())
         with _spawn(proc) as spawn:
             assert asyncio.run(gs.probe_anonymous_ref("o/r", "feature/x")) == ("ok", SHA)
-        assert spawn.await_args.args[3:] == ("refs/heads/feature/x", "refs/tags/feature/x")
+        assert spawn.await_args.args[3:] == (
+            "refs/heads/feature/x", "refs/tags/feature/x", "refs/tags/feature/x^{}")
 
     def test_a_same_named_tag_answers_only_when_no_branch_does(self):
         # The clone (`git clone -b main`) checks out the tag when no branch
@@ -229,7 +231,7 @@ class TestProbeTokenedRepoAccess:
                 gs.probe_tokened_repo_access("o/r", USER_PAT, "main")) == ("ok", SHA)
         argv = spawn.await_args.args
         assert all(USER_PAT not in a for a in argv), argv
-        assert argv[-2:] == ("refs/heads/main", "refs/tags/main")  # trinity#4165
+        assert argv[-3:] == ("refs/heads/main", "refs/tags/main", "refs/tags/main^{}")  # trinity#4165
         env = spawn.await_args.kwargs["env"]
         import base64
         token_b64 = base64.b64encode(f"x-access-token:{USER_PAT}".encode()).decode()

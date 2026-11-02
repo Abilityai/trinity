@@ -60,10 +60,13 @@ class _FakeProc:
 
 def _remote(owner, refs):
     """A fake `git ls-remote` on the module that owns the probe, answering
-    from `refs` ({refname: sha}) the way git does: only the refs the argv
-    asks for are listed (`--heads` narrows to `refs/heads/`), and with
-    `--exit-code` an empty answer exits 2. So a check that asks for
-    `refs/heads/<ref>` only cannot see a tag, whatever the remote holds."""
+    from `refs` ({refname: sha}) the way git does: a ref is listed only when
+    a pattern names it — the peeled `refs/tags/<r>^{}` line included, which
+    git does NOT list for a bare `refs/tags/<r>` pattern (pinned against a
+    real remote in `test_4165_ref_probes_real_git.py`) — `--heads` narrows to
+    `refs/heads/`, and with `--exit-code` an empty answer exits 2. So a check
+    that asks for `refs/heads/<ref>` only cannot see a tag, whatever the
+    remote holds."""
     async def spawn(*argv, **kw):
         assert argv[:2] == ("git", "ls-remote")
         opts = [a for a in argv[2:] if a.startswith("--")]
@@ -72,10 +75,9 @@ def _remote(owner, refs):
         assert url == URL
         lines = []
         for name, sha in refs.items():
-            base = name[:-3] if name.endswith("^{}") else name
-            if "--heads" in opts and not base.startswith("refs/heads/"):
+            if "--heads" in opts and not name.startswith("refs/heads/"):
                 continue
-            if not patterns or base in patterns or (patterns == ["HEAD"] and base == "HEAD"):
+            if not patterns or name in patterns:
                 lines.append(f"{sha}\t{name}\n")
         if not lines and "--exit-code" in opts:
             return _FakeProc(2, b"")
@@ -118,7 +120,7 @@ class TestRefProbesAcceptATag:
             assert asyncio.run(gs.probe_anonymous_ref(REPO, "v1.2.0")) == ("ok", PEELED)
         argv = spawn.await_args.args
         assert argv[:3] == ("git", "ls-remote", URL)
-        assert argv[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0")
+        assert argv[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0", "refs/tags/v1.2.0^{}")
 
     def test_a_lightweight_tag_resolves_to_the_commit_it_names(self):
         with _remote(gs.ref_probes, {"refs/tags/v1.2.0": SHA}):
@@ -132,7 +134,7 @@ class TestRefProbesAcceptATag:
         monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
         with _remote(gs.ref_probes, {"refs/tags/v1.2.0": SHA}) as spawn:
             assert asyncio.run(gs.probe_tokened_repo_access(REPO, PAT, "v1.2.0")) == ("ok", SHA)
-        assert spawn.await_args.args[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0")
+        assert spawn.await_args.args[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0", "refs/tags/v1.2.0^{}")
         assert PAT not in spawn.await_args.args  # the token rides the env, never argv
 
     def test_head_is_unchanged(self):
@@ -223,4 +225,4 @@ class TestValidateGithubAccessWithATag:
         monkeypatch.delenv("GIT_CONFIG_COUNT", raising=False)
         with _remote(gs.ref_probes, {"refs/heads/main": SHA, "refs/tags/v1.2.0": SHA}) as spawn:
             assert _validate("v1.2.0", PAT) is None
-        assert spawn.await_args.args[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0")
+        assert spawn.await_args.args[3:] == ("refs/heads/v1.2.0", "refs/tags/v1.2.0", "refs/tags/v1.2.0^{}")

@@ -45,10 +45,19 @@ def _ref_args(ref: Optional[str]) -> Tuple[str, ...]:
     return (f"refs/heads/{ref}", f"refs/tags/{ref}")
 
 
+def _query_args(wanted: Tuple[str, ...]) -> Tuple[str, ...]:
+    """The patterns handed to ``ls-remote``: the wanted refs plus the peeled
+    ``refs/tags/<r>^{}``. git lists a ref only when a pattern matches its own
+    name, and the peeled line's name ends in ``^{}`` — ask for the tag alone
+    and an annotated tag answers with the tag object, not its commit."""
+    return wanted + tuple(f"{w}^{{}}" for w in wanted if w.startswith("refs/tags/"))
+
+
 def _pick_ref(listing: dict, wanted: Tuple[str, ...]) -> Optional[str]:
     """The object id the clone would check out: the first wanted ref the
     remote listed; for an annotated tag the peeled ``^{}`` commit (the raw
-    read and a clone both land on the commit, not the tag object)."""
+    read and a clone both land on the commit, not the tag object), which
+    ``_query_args`` asked for."""
     for name in wanted:
         if name in listing:
             return listing.get(f"{name}^{{}}", listing[name])
@@ -64,7 +73,7 @@ async def _ls_remote_ref(
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "ls-remote", remote_url, *wanted,
+            "git", "ls-remote", remote_url, *_query_args(wanted),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
