@@ -7799,6 +7799,17 @@
       "description": "trinity#4165: a tag accepted by the parser survives the three ref-existence checks — provisioning.check_remote_branch_exists, ref_probes (anonymous and tokened), and the REST branch check with its tag fallback — driven through _validate_github_access on all three paths against a fake ls-remote that filters like git; the ref is always a value after the URL; a branch wins over a same-named tag; an annotated tag peels to its commit."
     },
     {
+      "file": "unit/test_4165_pull_cycle_pinned_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4165: an agent cloned -b <tag> (detached HEAD) runs the real pull cycle as a named skip every cycle, never a failure streak, and stays on the tag while origin moves on; a detached HEAD from a rebase stopped part-way is still a failure."
+    },
+    {
       "file": "unit/test_4165_ref_probes_real_git.py",
       "feature": "trinity#4165",
       "added": "2026-11-02",
