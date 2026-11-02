@@ -57,7 +57,8 @@ def write_keys(change) -> List[Any]:
 
 
 def build(members: Dict, *, extras: Dict[str, Dict],
-          landed: Optional[Set[Tuple[str, str, Any]]] = None) -> Dict[str, Dict]:
+          landed: Optional[Set[Tuple[str, str, Any]]] = None,
+          extra_changes: Optional[Dict[str, List]] = None) -> Dict[str, Dict]:
     """The summary over every member's plan. `extras` adds group-specific
     keys (`grants.held_back`, `roles.held_back`) beside the three counts.
 
@@ -66,7 +67,11 @@ def build(members: Dict, *, extras: Dict[str, Dict],
     landed for that member (a group field IS the executor's step name), so two
     sets or two gates on one member with one failure count 1; a created or
     updated member counts only when any of its writes landed. None (a dry
-    run) counts the plan. `report` and `unobserved` are plan counts always."""
+    run) counts the plan. `report` and `unobserved` are plan counts always.
+
+    `extra_changes` is a real run's own changes per member: a `write` among
+    them counts by the same landed-key rule — today only the unassign a failed
+    gate leads to (trinity-enterprise#1068), a write the plan could not list."""
     landed_members = None if landed is None else {entry[0] for entry in landed}
     out = {g: {"write": 0, "report": 0, "unobserved": 0} for g in GROUP_FIELDS}
     out["members"] = {"write": 0, "report": 0, "unobserved": 0}
@@ -92,6 +97,13 @@ def build(members: Dict, *, extras: Dict[str, Dict],
                 out[group]["unobserved"] += 1
             else:
                 out[group]["report"] += 1
+    if landed is not None:
+        for member, changes in (extra_changes or {}).items():
+            for c in changes:
+                group = _group_of(c.field)
+                if (group is not None and c.action == "write"
+                        and any((member, c.field, k) in landed for k in write_keys(c))):
+                    out[group]["write"] += 1
     for group, keys in extras.items():
         out[group].update(keys)
     return out

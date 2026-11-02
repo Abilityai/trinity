@@ -22,6 +22,7 @@ from typing import Optional
 from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
+from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
 from utils.helpers import utc_now_iso
 from utils.skill_invocation import find_gated_invocations
@@ -1801,6 +1802,16 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     status = getattr(result, "status", None)
     status = str(getattr(status, "value", status) or "").strip().lower()
     reply = (getattr(result, "response", "") or "").strip()
+
+    refusal = admission_refusal_of(result, agent_name)
+    if refusal is not None:
+        # trinity-enterprise#1059 (review C2): an admission policy stopped the
+        # turn before it ran. The room gets the policy's own sentence, not
+        # "could not respond"; the resume handle is kept (nothing says it is
+        # dead) and the cursor is left alone so the delta is re-delivered once
+        # the share is raised or the window frees.
+        _post_system(room_id, refusal.message)
+        return
 
     # #2795: the RETURNED status is not always the one that stands.
     #

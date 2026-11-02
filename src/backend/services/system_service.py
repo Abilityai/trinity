@@ -2794,6 +2794,10 @@ class ApplyMemberState:
     # derived included), read with the gates, so the plan knows which declared
     # gate sits on a skill that keeps running if its write fails.
     skill_names: Set[str] = field(default_factory=set)
+    # trinity-enterprise#1068: the held skills an assigned set names
+    # (casefolded) — an unassign cannot take one without its siblings, so a
+    # failed gate on it stays report-only (`skill_held_via_set`).
+    skill_via_sets: Set[str] = field(default_factory=set)
     # trinity-enterprise#1030 CP4: the seat the member holds (None = not
     # observed on this install) and each declared person seat's status.
     seat: Optional[Dict[str, object]] = None
@@ -2839,6 +2843,9 @@ class ApplySnapshot:
     # (`dependencies.is_interactive_admin`)? Decides write vs. held-back report
     # for every `grants:` and `seat:` entry; never a blocker.
     grant_writer: bool = False
+    # trinity-enterprise#1068: `apply_unassign_on_failed_gate`, read once here
+    # so the dry run and the run decide the same consequence.
+    unassign_on_failed_gate: bool = True
 
 
 def _member_container(name: str):
@@ -3144,6 +3151,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                 from services.system_apply import gates as apply_gates
                 state.gates = apply_gates.read_member(name)
                 state.skill_names = apply_gates.read_held_skills(name)  # trinity-enterprise#1043
+                state.skill_via_sets = apply_gates.read_held_via_sets(name)  # trinity-enterprise#1068
             from services.system_apply import seats as apply_seats
             if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
                 state.seat, state.person_seats = apply_seats.read_member(
@@ -3203,6 +3211,15 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             snapshot.default_resources = dict(_manifest_default_resources())
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(None, "the default agent resources", e))
+
+    # trinity-enterprise#1068: the per-install switch, once per apply.
+    if any(cfg.gates for cfg in manifest.agents.values()):
+        try:
+            from services.settings_service import get_ops_setting
+            snapshot.unassign_on_failed_gate = bool(
+                get_ops_setting("apply_unassign_on_failed_gate", as_type=bool))
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the apply_unassign_on_failed_gate setting", e))
 
     # 5. The platform prompt and the system view (only when the manifest asks).
     if manifest.prompt:
@@ -3479,6 +3496,9 @@ class ApplyPlan:
     adoption_warning: Optional[str] = None
     # trinity-enterprise#1030: `SystemApplyResponse.summary`, per config group.
     summary: Dict[str, Dict] = field(default_factory=dict)
+    # trinity-enterprise#1068: the snapshot's switch, stamped on each held
+    # skill's `gate_set` op.
+    unassign_on_failed_gate: bool = True
 
 
 def _apply_change(field_name: str, action: str, code: str, *, current=None,
@@ -3864,14 +3884,17 @@ def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
         make_op=ApplyOp)
 
 
-def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers: List) -> None:
+def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers: List,
+                unassign_on_failure: bool = True) -> None:
     """trinity-enterprise#1030 CP3: `gates:`, validated through the gate
     map's own public validator."""
     from services.system_apply import gates as apply_gates
     apply_gates.plan(
         mp, stored=None if state is None else state.gates, blockers=blockers,
         apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp,
-        skill_names=None if state is None else state.skill_names)
+        skill_names=None if state is None else state.skill_names,
+        via_sets=None if state is None else state.skill_via_sets,
+        unassign_on_failure=unassign_on_failure)
 
 
 _DECLARED_ONLY_LIVE_NOTE = (
@@ -3993,7 +4016,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         elif state.status == "managed" and not state.blocked:
             _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
                                   declared_final, normalized_resources, blockers)
-            _plan_gates(mp, state, blockers)
+            _plan_gates(mp, state, blockers, snapshot.unassign_on_failed_gate)
             _plan_skills(mp, state, snapshot, blockers)
             _plan_grants(mp, state, snapshot, blockers)
             _plan_seats(mp, state, snapshot)
@@ -4125,6 +4148,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
         adopted=adopted, adoption_warning=adoption_warning, summary=summary,
+        unassign_on_failed_gate=snapshot.unassign_on_failed_gate,
     )
 
 
@@ -4619,6 +4643,7 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         from services.system_apply import summary as apply_summary
         summary = apply_summary.build(
             plan.members, landed=landed,
+            extra_changes=outcome.extra_changes if outcome is not None else None,
             extras={g: {k: v for k, v in counts.items()
                         if k not in ("write", "report", "unobserved")}
                     for g, counts in plan.summary.items()})

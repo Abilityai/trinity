@@ -74,6 +74,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "ops_log_retention_days": "Number of days to retain container logs (default: 7)",
     "ops_health_check_interval": "Seconds between automated health checks (default: 60)",
     "ssh_access_enabled": "Enable ephemeral SSH access to agent containers via MCP tool (default: false)",
+    "apply_unassign_on_failed_gate": "When a system apply cannot write the gate a manifest declares on a skill the agent already holds, unassign that skill instead of leaving it running with no approval gate (default: true)",
     "execution_log_retention_days": "Days to retain the JSONL transcript on schedule_executions (default: 30, 0 = disabled, #772)",
     "execution_row_retention_days": "Days to retain finished schedule_execution rows; rows older than this are deleted (default: 90, 0 = disabled, #772)",
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",

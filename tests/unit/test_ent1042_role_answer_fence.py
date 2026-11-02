@@ -9,8 +9,9 @@ reaches it — and refuses with 403 `not_addressee` and a remedy that names the
 role's label, never a person.
 
 Rulings pinned here: an admin without the seat may cancel the ask, never answer
-it; cancel is NOT narrowed; `to: approver` and the other kinds are unchanged;
-an empty snapshot fails closed.
+it; cancel is NOT narrowed; the other kinds are unchanged (`to: approver` is
+fenced by ent#1053, `test_ent1053_approver_answer_fence.py`); an empty snapshot
+fails closed.
 
 Harness: the unit island's per-process SQLite, the real sink, the REAL
 operator-queue router; rows are raised through the sink with a fake assignments
@@ -216,10 +217,11 @@ class TestMayEnd:
         assert may_end(row, _actor(people["alice"])) is False
         assert may_end(row, _actor(people["alice"], role="admin")) is False
 
-    @pytest.mark.parametrize("kind_to", ["approver", "primary", "viewer"])
+    @pytest.mark.parametrize("kind_to", ["primary", "viewer"])
     def test_the_four_kinds_are_unchanged(self, agent, people, kind_to):
-        """`approver` is deferred to a follow-up; the other kinds were never
-        fenced. Anyone the caller let through may answer, as before."""
+        """The other kinds were never fenced: anyone the caller let through may
+        answer, as before. `approver` left this list when ent#1053 fenced it to
+        its seat (pinned in test_ent1053_approver_answer_fence.py)."""
         from services.ask_service import may_end
         _provide(kinds={kind_to: [people["alice"]]})
         row = _raise(agent, to=kind_to)
@@ -363,7 +365,8 @@ class TestRoute:
         assert res.status_code == 200, res.text
         assert routes.db.get_operator_queue_item(two)["disposition"] == "cancelled"
 
-    @pytest.mark.parametrize("kind_to", ["approver", "primary"])
+    # `approver` dropped: fenced to its seat by ent#1053.
+    @pytest.mark.parametrize("kind_to", ["primary"])
     def test_kind_addressed_asks_stay_open_to_anyone_shared(self, routes, agent, people, kind_to):
         _provide(kinds={kind_to: [people["alice"]]})
         uid = _raise(agent, to=kind_to)["id"]
@@ -461,7 +464,8 @@ class TestProjection:
         item = {i["id"]: i for i in res.json()["items"]}[uid]
         assert item["addressed"]["can_decide"] is False
 
-    @pytest.mark.parametrize("kind_to", ["approver", "primary"])
+    # `approver` dropped: a seated approver ask carries the view (ent#1053).
+    @pytest.mark.parametrize("kind_to", ["primary"])
     def test_kind_addressed_asks_carry_none(self, routes, agent, people, kind_to):
         _provide(kinds={kind_to: [people["alice"]]})
         uid = _raise(agent, to=kind_to)["id"]

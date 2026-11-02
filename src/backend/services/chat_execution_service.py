@@ -89,6 +89,7 @@ from services.event_dispatch_service import (
 )
 from services import idempotency_service
 from services import channel_completion_report
+from services import admission_policy
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
@@ -102,8 +103,10 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from services.chat_signals import (
+    AdmissionRefused,
     ChatExecutionContext,
     ChatDispatchError,
+    admission_refusal_of,
     chat_trigger,
 )
 from utils.credential_sanitizer import (
@@ -2517,6 +2520,13 @@ def _map_task_failure(name, result, *, idem):
     third call site be added later that silently reintroduces the wedge, and the
     wedge is invisible until someone retries a full day later.
     """
+    refusal = getattr(result, "admission_refusal", None)
+    if isinstance(refusal, AdmissionRefused):
+        # trinity-enterprise#1059: an admission policy stopped the turn inside
+        # execute_task (the condition arrived after the /task seam admitted it).
+        # Nothing ran: release the claim and answer the seam's own refusal.
+        idempotency_service.fail(idem)
+        raise refusal
     if result.status in ("failed", "cancelled"):
         # #2889: the producer-side code. The backlog-reconstruct path reads it
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
@@ -2756,6 +2766,12 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "claude_session_id": row.claude_session_id,
             },
         )
+        # trinity-enterprise#1059: a share that ran out while this task waited
+        # in the backlog. The drain closed the row SKIPPED with `[usage_share]`
+        # (`_admission_policy_gate`); read back here the refusal must answer
+        # the seam's 429, not a success shaped from the row. One rebuild rule
+        # for every row reader (`chat_signals.admission_refusal_of`).
+        result.admission_refusal = admission_refusal_of(result, name)
         # #2329: the pull sink signals `result=None` with the session it saved
         # the turn to; the DB-poll wake (another worker) carries none.
         sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
@@ -3001,6 +3017,11 @@ async def dispatch_parallel_task(
                 name, request, held, current_user.id,
                 current_user.email or current_user.username)
         raise
+
+    # trinity-enterprise#1059: a registered admission policy, at the /chat
+    # seam's point — before the claim, the uploads, the row and the acquire.
+    # Raises AdmissionRefused (the router maps it to a named 429).
+    await admission_policy.enforce(name, triggered_by=derivation.triggered_by, source="task")
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(
