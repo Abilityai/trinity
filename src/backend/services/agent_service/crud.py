@@ -527,21 +527,37 @@ async def _guard_leftover_workspace_volume(
 # GitHub's own owner/repo charset is a subset of this.
 _GITHUB_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# trinity#4165: the ref after `@` is a branch OR a tag, taken whole. It is
+# interpolated into the same eval-built clone command, so the charset stays a
+# shell-safety barrier; `.` is allowed (a release tag such as `v1.2.0`) minus
+# the git ref-format shapes a dotted ref cannot take: `..`, a component that
+# starts with `.`, a trailing `.` or `.lock`.
+_GITHUB_REF_RE = re.compile(r"^(?!.*\.\.)(?!\.)(?!.*/\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9_./-]+$")
+
 
 def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
-    """GIT-002: parse `github:owner/repo[@branch]` into `(template_lookup,
-    repo_path, url_branch)`. Mutates `config.source_branch` when a valid branch
-    is present in the URL."""
+    """GIT-002: parse `github:owner/repo[@ref]` into `(template_lookup,
+    repo_path, url_branch)`. Mutates `config.source_branch` when a ref (a
+    branch or a tag) is present in the URL; an unusable ref is a 400, never a
+    silent fall-back to the default branch (trinity#4165)."""
     template_str = config.template[7:]  # Remove "github:" prefix
     url_branch = None
     if "@" in template_str:
         template_str, url_branch = template_str.rsplit("@", 1)
-        # Validate branch name (alphanumeric plus - _ /)
-        if url_branch and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
+        if not url_branch:
+            url_branch = None  # `repo@` with nothing after it: no ref given
+        elif _GITHUB_REF_RE.match(url_branch):
             config.source_branch = url_branch
             logger.info(f"GIT-002: Parsed branch from URL: {url_branch}")
         else:
-            url_branch = None  # Invalid branch, ignore
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid ref in github:owner/repo@ref. Use a branch or tag "
+                    "name with letters, digits, '.', '_', '-' or '/' (no '..', "
+                    "no component starting with '.', no trailing '.' or '.lock')."
+                ),
+            )
 
     if "/" in template_str and not _GITHUB_REPO_PATH_RE.match(template_str):
         raise HTTPException(
