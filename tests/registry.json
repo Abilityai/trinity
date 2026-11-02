@@ -7697,6 +7697,17 @@
       "description": "trinity-enterprise#1043: a gate write that fails on a skill the member already holds (a service refusal after the plan validated, a database fault, a lost lease), through the real apply route on the real database facade: the skill is still assigned and the admission read shows no gate, and the result says so — the failed[] reason carries the consequence, the member reports skill_runs_ungated (no gate in force) or previous_gate_stands (the stored gate still applies), one top-level warning line per ungated skill, applied false, summary.gates.write 0; a skill held only through a set; the #4125 hold-back of a new assignment in the same run untouched; a landed gate reports nothing new; the dry run predicts no failure."
     },
     {
+      "file": "unit/test_ent1068_unassign_on_failed_gate.py",
+      "feature": "trinity-enterprise#1068",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1068: a held skill whose declared gate cannot be written (a service refusal after validation, a database fault) is unassigned and its package removed when apply_unassign_on_failed_gate is on (the default), through the real apply route on the real database facade, and the result names it (failed[] reason, skill_unassigned_gate_failed write change, one warning line, summary.skills.write); the switch off keeps the ent#1043 report; a lost lease refuses the unassign; a deferred removal keeps the ungated line; a gate row stored despite the raise unassigns nothing; previous_gate_stands and a set-held skill (skill_held_via_set) stay report-only; several failing gates each unassign their own skill; the dry run's note follows the switch; the unassign route delegates to the same writer and keeps its 409."
+    },
+    {
       "file": "unit/test_4058_loop_stale_run_rows.py",
       "feature": "#4058",
       "added": "2026-10-29",
