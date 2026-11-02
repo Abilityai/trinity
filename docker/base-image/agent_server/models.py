@@ -67,6 +67,9 @@ class ChatRequest(BaseModel):
     isolated_session: bool = False
     # #3470: per-spawn credential for a SUB-003 re-issue. Ignored by old images.
     auth_override: Optional[AuthOverride] = None
+    # #4156: the turn serves someone other than the owner — spawn with Claude
+    # Code's shared auto-memory off. An older backend never sends it (False).
+    disable_auto_memory: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -298,6 +301,8 @@ class ParallelTaskRequest(BaseModel):
     async_result: Optional[bool] = False
     # #3470: per-spawn credential for a SUB-003 re-issue (see AuthOverride).
     auth_override: Optional[AuthOverride] = None
+    # #4156: see ChatRequest.disable_auto_memory.
+    disable_auto_memory: bool = False
 
 
 class ParallelTaskResponse(BaseModel):

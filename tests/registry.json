@@ -1,6 +1,28 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4156_auto_memory_person_turns.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "#4156: which turns spawn with Claude Code's shared auto-memory off. `memory_subject.keeps_shared_auto_memory` keeps it on only for the agent's own scope (a headless run, or the owner's turn); a non-owner person, an anonymous visitor, a channel group, a seat run for someone else and any trigger off the allowlist get it off. The flag `disable_auto_memory` reaches the push /api/task payload, the /api/chat payload and the pull claim envelope for a non-owner turn and is absent for the owner's; an unreadable row fails closed (off)."
+    },
+    {
+      "file": "unit/test_4156_agent_auto_memory_spawn.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
+      "categories": [
+        "agent",
+        "unit",
+        "security"
+      ],
+      "description": "#4156: a turn the backend marked `disable_auto_memory` spawns `claude` with CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on both spawn paths (headless /api/task and /api/chat), measured at the Popen env; the owner's spawn is unchanged; a falsy value in `.env` cannot turn it back on; only a runtime with the switch (Claude) gets the keyword; /api/chat, /api/task, the #1083 async path and the pull worker all forward it."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",

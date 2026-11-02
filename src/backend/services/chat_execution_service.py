@@ -388,6 +388,12 @@ def build_chat_payload(
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:
         payload["execution_id"] = task_execution_id
+    # #4156: a turn serving someone other than the owner (a user the agent is
+    # shared with) spawns with Claude Code's shared auto-memory off.
+    from services.task_execution_service import auto_memory_off_for
+
+    if auto_memory_off_for(name, task_execution_id):
+        payload["disable_auto_memory"] = True
 
     # Mark execution dispatched BEFORE calling agent so the cleanup-service
     # no-session sweep doesn't falsely fail long-running executions

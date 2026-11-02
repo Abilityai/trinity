@@ -112,3 +112,28 @@ def resolve(execution: Any) -> MemorySubject:
         return MemorySubject(AGENT, None, REASON_HEADLESS, triggered_by)
 
     return MemorySubject(SKIP, None, REASON_TRIGGER_NOT_ALLOWED, triggered_by)
+
+
+def keeps_shared_auto_memory(execution: Any, owner_email: Optional[str]) -> bool:
+    """Whether the runtime may keep Claude Code's auto-memory on for this turn
+    (#4156). Accepts the row ``db.get_execution`` returns or a pull claim's dict.
+
+    Auto-memory is ONE directory per agent, read and written by every turn, and
+    its harness prompt says to save there when someone asks to be remembered.
+    So it stays on only for the agent's own scope — the scope
+    ``memory_service.scope_for`` folds the owner into: a headless run, or a turn
+    whose person is the owner. Everyone else (another person, an anonymous
+    visitor, a group, a trigger off the allowlist) gets it off, and their
+    "remember this" has one place to go: ``write_user_memory``.
+    """
+    if isinstance(execution, dict):
+        from types import SimpleNamespace
+
+        execution = SimpleNamespace(**execution)
+    subject = resolve(execution)
+    if subject.kind == AGENT:
+        return True
+    if subject.kind == PERSON:
+        owner = (owner_email or "").strip().lower()
+        return bool(owner) and subject.user_email == owner
+    return False

@@ -400,6 +400,7 @@ async def _run_and_report(
     ``session_id`` IS present the worker resumes it (``resume_session_id`` +
     ``persist_session``), matching the SESSION_TAB ``--resume`` convention — the
     minimal reversible reading of the schema's "presence ⇒ persist/resume"."""
+    from ..services.execution_env import auto_memory_spawn_kwargs
     from ..services.runtime_adapter import get_runtime
     from .process_registry import get_process_registry
 
@@ -441,7 +442,8 @@ async def _run_and_report(
             execution_id, timeout_seconds=turn_timeout, metadata={"type": "pull"},
         )
         agent_state.record_task_start()
-        spawn_kwargs: Dict[str, Any] = {}
+        # #4156: a turn serving someone other than the owner (Claude only).
+        spawn_kwargs: Dict[str, Any] = dict(auto_memory_spawn_kwargs(runtime, payload.get("disable_auto_memory")))
         if override is not None:
             spawn_kwargs["auth_override"] = override
         try:
