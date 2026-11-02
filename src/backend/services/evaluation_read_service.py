@@ -24,13 +24,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from db.evaluations import (
+    JUDGE_FINDINGS_CAP,
     TIER0_EVALUATOR, TIER0_PAIR_EVALUATOR, TIER1_EVALUATOR_PREFIX, tier0_gate_outcome,
 )
 
 TIER1_KIND = "platform:tier1"
 MAX_WINDOW_DAYS = 92
 FAILED_LIMIT = 50
-FINDINGS_CAP = 32
+FINDINGS_CAP = JUDGE_FINDINGS_CAP  # one cap for the writer and the projection
 
 # Known non-person evaluator names: shown as stored. Everything else is
 # reduced to its kind — a fourth kind is anonymised on the day it appears.

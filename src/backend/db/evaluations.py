@@ -96,7 +96,23 @@ JUDGE_SKIP_REASONS = frozenset({
 })
 # The claim marker as `json.dumps` serialises it (default separators). The
 # finish writer's compare-and-set keys on it in SQL, so it is pinned here, once.
+# A finished document may never contain it anywhere, or the substring match
+# would treat a verdict as a live claim (`validate_judge_json`).
 _CLAIMED_MARKER = '"state": "claimed"'
+# The top-level keys a finished judge document may carry. An allowlist, so an
+# operator read never returns a key nothing checked.
+JUDGE_DOC_KEYS = frozenset({
+    "schema", "state", "evaluator", "model", "credential", "skip", "verdict",
+    "quality", "dimensions", "findings", "sampled_because", "sampling", "context",
+    "tier0_updated_at", "claimed_at", "decided_at", "judged_at", "finished_at",
+    "call_id",
+})
+# `findings` is what an agent principal reads: closed tokens, a null reason,
+# at most this many. The read projection uses the same cap.
+JUDGE_FINDINGS_CAP = 32
+# Every string leaf outside `dimensions[].reason` (ids, timestamps, sampling
+# evidence): structural values, never prose.
+JUDGE_STRING_MAX_CHARS = 200
 
 
 def tier1_evaluator(model: str) -> str:
@@ -116,13 +132,44 @@ class JudgeJsonError(ValueError):
         self.code = code
 
 
+def _check_string_leaves(value: Any, path: str) -> None:
+    """Every string anywhere under `value` is at most JUDGE_STRING_MAX_CHARS."""
+    if isinstance(value, str):
+        if len(value) > JUDGE_STRING_MAX_CHARS:
+            raise JudgeJsonError("judge_string_too_long", path)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            _check_string_leaves(k, path)
+            _check_string_leaves(v, f"{path}.{k}")
+    elif isinstance(value, list):
+        for v in value:
+            _check_string_leaves(v, f"{path}[]")
+
+
+def _check_findings(findings: Any) -> list:
+    if not isinstance(findings, list):
+        raise JudgeJsonError("judge_findings_invalid")
+    if len(findings) > JUDGE_FINDINGS_CAP:
+        raise JudgeJsonError("judge_findings_too_many", str(len(findings)))
+    for f in findings:
+        if not isinstance(f, dict) or set(f) != {"dimension", "verdict", "reason"} \
+                or f["dimension"] not in JUDGE_DIMENSIONS \
+                or f["verdict"] not in JUDGE_DIMENSION_VERDICTS or f["reason"] is not None:
+            raise JudgeJsonError("judge_finding_invalid")
+    return [dict(f) for f in findings]
+
+
 def validate_judge_json(judge: Any) -> dict:
-    """The structural guard on a finished judge document. Structural fields
-    ONLY: schema, state, the dimension/verdict enums, the reason cap and the
-    no-quotation-mark rule, the quality range, the skip enum. Whether
-    `quality` agrees with the dimensions is the rubric's job, not this
-    layer's. An omitted dimension is `n/a`. Returns the normalised document;
-    raises `JudgeJsonError` with a named code otherwise."""
+    """The structural guard on a finished judge document, over the WHOLE
+    document: the top-level keys are an allowlist (`JUDGE_DOC_KEYS`); schema,
+    state, the dimension/verdict enums, the reason cap and the
+    no-quotation-mark rule, the quality range, the skip enum; `findings` is
+    closed tokens with a null reason, at most `JUDGE_FINDINGS_CAP`; every other
+    string leaf is at most `JUDGE_STRING_MAX_CHARS`; and the claim marker
+    appears nowhere, so the finish/reclaim compare-and-set cannot match a
+    verdict. Whether `quality` agrees with the dimensions is the rubric's job,
+    not this layer's. An omitted dimension is `n/a`. Returns the normalised
+    document; raises `JudgeJsonError` with a named code otherwise."""
     if not isinstance(judge, dict):
         raise JudgeJsonError("judge_json_not_object")
     if judge.get("schema") != JUDGE_SCHEMA:
@@ -130,7 +177,15 @@ def validate_judge_json(judge: Any) -> dict:
     state = judge.get("state")
     if state not in JUDGE_FINAL_STATES:
         raise JudgeJsonError("judge_state_invalid", str(state))
+    unknown_keys = set(judge) - JUDGE_DOC_KEYS
+    if unknown_keys:
+        raise JudgeJsonError("judge_key_unknown", ",".join(sorted(map(str, unknown_keys))))
+    if _CLAIMED_MARKER in json.dumps(judge, default=str):
+        raise JudgeJsonError("judge_claim_marker")
     out = dict(judge)
+    if "findings" in judge:
+        out["findings"] = _check_findings(judge["findings"])
+    _check_string_leaves({k: v for k, v in judge.items() if k != "dimensions"}, "judge")
     if state == "skipped":
         if judge.get("skip") not in JUDGE_SKIP_REASONS:
             raise JudgeJsonError("judge_skip_unknown", str(judge.get("skip")))
@@ -666,24 +721,29 @@ class EvaluationOperations:
     # ------------------------------------------------------------------
 
     def _tier1_row_for(self, conn, execution_id: str) -> Optional[dict]:
-        """The run's Tier-1 row under ANY model, or None."""
+        """The run's Tier-1 row under ANY model, or None. The index allows one;
+        newest first anyway, so the read never rests on the backend's order."""
         row = conn.execute(select(agent_evaluations).where(and_(
             agent_evaluations.c.evaluator.like(f"{TIER1_EVALUATOR_PREFIX}%"),
             agent_evaluations.c.target_kind == TIER0_TARGET_KIND,
             agent_evaluations.c.target_id == execution_id,
-        )).limit(1)).mappings().first()
+        )).order_by(agent_evaluations.c.created_at.desc(), agent_evaluations.c.id.desc())
+            .limit(1)).mappings().first()
         return self._row_to_dict(row) if row else None
 
     def claim_tier1_row(self, execution_id: str, *, model: str) -> Optional[dict]:
         """INSERT the run's Tier-1 row in state `claimed`; None if it cannot.
 
         The compare-and-set that makes the judge's provider call happen at most
-        once per run: the row is keyed `platform:tier1:<model>` on the one-row
-        index, so two claims on one execution — two sweep leaders, the lease
-        failing open — race to one INSERT and the loser's `IntegrityError` is
-        its answer (`None`: no call, no spend). The existence check before it
-        covers a claim under a DIFFERENT model id (a changed primary), which the
-        index alone would admit; both run in one write transaction. A run
+        once per run. Two claims on one execution — two sweep leaders, the lease
+        failing open, two workers resolving different credentials — race to one
+        INSERT, and the loser's `IntegrityError` is its answer (`None`: no call,
+        no spend). The rule is `idx_agent_evaluations_tier1_target`, one
+        Tier-1 row per `(target_kind, target_id)` whatever the model; the
+        rating-target index alone keys on the evaluator, which embeds the model,
+        so it would admit a second claim under a different model id. The
+        existence check before the INSERT is only the cheap early answer;
+        it is not serialised with the INSERT and is not what holds. A run
         without a Tier-0 row is not claimable: the judge grades on top of Tier-0
         evidence, and the row copies the Tier-0 row's agent, archetype and
         delegation link — nothing is passed in. There is NO update fallback: a

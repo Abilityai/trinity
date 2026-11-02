@@ -5527,6 +5527,44 @@ def _migrate_execution_parent_index(cursor, conn):
     conn.commit()
 
 
+def _migrate_tier1_one_per_run(cursor, conn):
+    """ent#936 — one judge (Tier-1) row per run, whatever the model.
+
+    ``claim_tier1_row`` checks for any Tier-1 row and then inserts, and the
+    two steps are not serialised; the rating-target index keys on the
+    evaluator, which embeds the model, so two claimers under different model
+    ids could both insert. A partial unique index over ``(target_kind,
+    target_id)`` for ``platform:tier1:%`` evaluators makes the second INSERT
+    the loser. A run that already holds more than one such row keeps the
+    finished one over a claim, then the newest. A database without the table
+    is left alone (``init_schema`` creates the index with it). Idempotent.
+    Mirrored by Alembic 0113_tier1_one_per_run.
+    """
+    cursor.execute("PRAGMA table_info(agent_evaluations)")
+    if not cursor.fetchall():
+        return
+    cursor.execute(TIER1_DEDUPE_SQL)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_evaluations_tier1_target "
+        "ON agent_evaluations(target_kind, target_id) WHERE evaluator LIKE 'platform:tier1:%'"
+    )
+    conn.commit()
+
+
+# Shared with Alembic 0113 (same text on both backends): keep one Tier-1 row
+# per run — a finished row over a claim, then the newest.
+TIER1_DEDUPE_SQL = (
+    "DELETE FROM agent_evaluations WHERE evaluator LIKE 'platform:tier1:%' "
+    "AND target_id IS NOT NULL AND id NOT IN ("
+    "SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
+    "PARTITION BY target_kind, target_id ORDER BY "
+    "CASE WHEN judge_json LIKE '%\"state\": \"claimed\"%' THEN 1 ELSE 0 END, "
+    "updated_at DESC, id DESC) AS rn FROM agent_evaluations "
+    "WHERE evaluator LIKE 'platform:tier1:%' AND target_id IS NOT NULL) ranked "
+    "WHERE rn = 1)"
+)
+
+
 def _migrate_supersede_queue_flood_backlog(cursor, conn):
     """#3130: collapse the flood-alert backlog to one pending alert per agent.
 
@@ -6260,4 +6298,5 @@ MIGRATIONS = [
     ("loop_runs_stale_duplicates", _migrate_loop_runs_stale_duplicates),
     ("delegation_link", _migrate_delegation_link),
     ("execution_parent_index", _migrate_execution_parent_index),
+    ("tier1_one_per_run", _migrate_tier1_one_per_run),
 ]

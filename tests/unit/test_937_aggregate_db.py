@@ -190,9 +190,10 @@ class TestPairs:
 
 
 class TestTier1Join:
-    def test_tier1_row_is_joined_one_per_execution_newest_wins(self, db_backend):
+    def test_tier1_row_is_joined_one_per_execution(self, db_backend):
+        """One Tier-1 row per run is a rule of the table
+        (`idx_agent_evaluations_tier1_target`, test_936_tier1_review.py)."""
         seed_exec("e1"); grade("e1")
-        tier1("e1", model="old", quality=0.2, minutes_ago=8)
         tier1("e1", model="new", quality=0.9, minutes_ago=2)
         seed_exec("e2"); grade("e2")
         rows, _ = window()

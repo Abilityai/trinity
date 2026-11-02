@@ -1098,9 +1098,13 @@ prompts or calls a model.
   execution (ent#937 owns that read and its agent projection).
 - **FR-16 — Claim, then finish; a skip is final**: `claim_tier1_row(execution_id,
   model)` INSERTs the row in state `claimed` only if the run has a Tier-0 row and no
-  Tier-1 row under *any* model; a racing second claim (two sweep leaders) loses on the
+  Tier-1 row under *any* model; a racing second claim (two sweep leaders, or two
+  workers that resolved different credentials and so different models) loses on the
   index and gets `None` — no provider call, no spend — so the call that follows a claim
-  happens at most once per run. `finish_tier1_row(eval_id, judge)` writes the verdict or
+  happens at most once per run. The rule is the partial unique index
+  `idx_agent_evaluations_tier1_target` — one row per `(target_kind, target_id)` where
+  `evaluator LIKE 'platform:tier1:%'`, both tracks; the existence check before the
+  INSERT is only the cheap early answer. `finish_tier1_row(eval_id, judge)` writes the verdict or
   the skip onto a row that is still `claimed` and nothing else: a Tier-0 row's id, a
   judged row, a skipped row all write nothing (`None`). A `skip` is final per run. A
   claim older than `TIER1_CLAIM_STALE_SECONDS` (10 min, a worker that died mid-call) is
@@ -1108,7 +1112,8 @@ prompts or calls a model.
   returns Tier-0 rows (the sampler needs their checks) whose run has no Tier-1 row in any
   state, within a lookback, bounded, oldest first.
 - **FR-17 — The schema guard**: `validate_judge_json` admits a finished document on
-  structural grounds only — `schema: 1`; `state ∈ {judged, skipped}`; a judged document
+  structural grounds only, over the whole document — the top-level keys are an
+  allowlist (`JUDGE_DOC_KEYS`), `schema: 1`; `state ∈ {judged, skipped}`; a judged document
   names its `model`, a `verdict ∈ {graded, indeterminate}`, `quality` in 0–1 or null, and
   `dimensions` from the closed set `scope_fidelity / escalation_correctness /
   intent_alignment / helpfulness`, each `pass | fail | n/a` (an omitted dimension is
@@ -1118,9 +1123,12 @@ prompts or calls a model.
   reason enum. Each defect is a named `JudgeJsonError.code` (`judge_reason_too_long`,
   `judge_skip_unknown`, …) and the row is never written. Whether `quality` agrees with
   the dimensions is the rubric's, not the guard's. A judged document also carries
-  `findings` — `[{dimension, verdict, reason}]`, `reason` null — the list FR-12's
-  machine projection hands the graded agent as `judge_findings`; `dimensions` (with
-  the prose reasons) is for operators only. Extra keys pass the guard unchanged.
+  `findings` — `[{dimension, verdict, reason}]`, `reason` null, closed tokens, at most
+  `JUDGE_FINDINGS_CAP` (32, the projection's cap too) — the list FR-12's machine
+  projection hands the graded agent as `judge_findings`; `dimensions` (with the prose
+  reasons) is for operators only. Every other string leaf is at most 200 characters,
+  and no part of a finished document may contain the claim marker `"state": "claimed"`,
+  which the finish/reclaim compare-and-set matches as a substring.
 - **FR-18 — The fence, extended**: the three Tier-1 writers are reached from the
   `database.py` facade only — no router, no service, no MCP tool — and take ids and
   column values, never a principal. The admin write still files under `admin:<user>`

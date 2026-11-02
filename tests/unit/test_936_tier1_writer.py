@@ -12,7 +12,9 @@ claim rule lives in exists):
 1. **The claim is a compare-and-set.** `claim_tier1_row` INSERTs the run's
    Tier-1 row only if the run has none — any model, any state — and the index
    makes a racing duplicate a loser (`None`), never a second row. Two
-   concurrent claims on one execution yield exactly one row and one claim.
+   concurrent claims on one execution yield exactly one row and one claim,
+   under the same model or different ones (`idx_agent_evaluations_tier1_target`,
+   test_936_tier1_review.py).
 2. **A verdict lands once.** `finish_tier1_row` writes a verdict or a skip
    onto a row that is still `claimed`; a finished row is final (a skip is
    final per run, TD-10), and an invalid judge_json never reaches the table.

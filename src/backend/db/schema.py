@@ -2348,6 +2348,11 @@ INDEXES = [
     "ON agent_evaluations(evaluator, target_kind, target_id) WHERE target_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_target "
     "ON agent_evaluations(agent_name, target_kind, target_id)",
+    # ent#936 — one judge (Tier-1) row per run, whatever the model. The
+    # evaluator key embeds the model, so the rating-target index alone admits
+    # two judge rows for a run claimed under two model ids.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_evaluations_tier1_target "
+    "ON agent_evaluations(target_kind, target_id) WHERE evaluator LIKE 'platform:tier1:%'",
     # ent#935 — "how did the runs this caller delegated go", per callee.
     "CREATE INDEX IF NOT EXISTS idx_agent_evaluations_caller "
     "ON agent_evaluations(caller_agent, agent_name, created_at)",

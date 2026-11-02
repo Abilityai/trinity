@@ -71,7 +71,7 @@ def _judge(exec_id):
         "quality": 0.4,
         "dimensions": {"scope_fidelity": {"verdict": "fail", "reason": "edited a file outside the brief"},
                        "helpfulness": {"verdict": "pass"}},
-        "findings": [{"dimension": "scope_fidelity", "verdict": "fail", "reason": "out_of_scope_edit"}],
+        "findings": [{"dimension": "scope_fidelity", "verdict": "fail", "reason": None}],
     })
 
 
@@ -172,7 +172,7 @@ def test_the_graded_agent_reads_findings_never_the_score_and_no_pair_evidence(cl
     body = r.json()
     assert body["judge"]["quality"] is None and body["judge"]["judge"] is None
     assert body["judge"]["judge_findings"] == [
-        {"dimension": "scope_fidelity", "verdict": "fail", "reason": "out_of_scope_edit"}]
+        {"dimension": "scope_fidelity", "verdict": "fail", "reason": None}]
     pair_checks = body["pair"]["checks"]
     assert "metrics" not in pair_checks
     assert all("evidence" not in c for c in pair_checks["checks"])

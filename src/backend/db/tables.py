@@ -781,6 +781,15 @@ agent_evaluations = Table(
         sqlite_where=text("target_id IS NOT NULL"),
         postgresql_where=text("target_id IS NOT NULL"),
     ),
+    # ent#936: one judge (Tier-1) row per run, whatever the model — a rule,
+    # so it is declared here for the same reason as the index above.
+    Index(
+        "idx_agent_evaluations_tier1_target",
+        "target_kind", "target_id",
+        unique=True,
+        sqlite_where=text("evaluator LIKE 'platform:tier1:%'"),
+        postgresql_where=text("evaluator LIKE 'platform:tier1:%'"),
+    ),
 )
 
 agent_notifications = Table(

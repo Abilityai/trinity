@@ -224,7 +224,8 @@ addendum B](../requirements/lifecycle-observability.md)):
  tier1_candidates(limit, lookback_hours)   Tier-0 rows whose run has no Tier-1 row
         ▼
  claim_tier1_row(execution_id, model)      INSERT platform:tier1:<model> in state
-   compare-and-set on the one-row index      `claimed`; loser → None (no call, no spend)
+   compare-and-set: one Tier-1 row per run   `claimed`; loser → None (no call, no spend)
+   whatever the model (tier1_target index)
         ▼  (the judge's provider call — enterprise, not here)
  finish_tier1_row(eval_id, judge)          validate_judge_json → verdict or skip,
    only onto a row still `claimed`           final per run; Tier-0 row untouched
@@ -234,7 +235,8 @@ addendum B](../requirements/lifecycle-observability.md)):
 A second row, never the Tier-0 row (a Tier-0 re-grade would clobber `quality`
 in place). Reached from the `database.py` facade only; the write fence holds
 (`tests/unit/test_935_write_fence.py`, ent#936 section). The agent-facing
-read of a judge row is ent#937's. Tests: `tests/unit/test_936_tier1_writer.py`.
+read of a judge row is ent#937's. Tests: `tests/unit/test_936_tier1_writer.py`,
+`tests/unit/test_936_tier1_review.py` (the index on both tracks, the whole-document guard).
 ## Read API — aggregates, failures, trend, chain (ent#937)
 
 Five GET routes, declared before `/evaluations/{eval_id}` (Invariant #4), all over

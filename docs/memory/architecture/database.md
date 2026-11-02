@@ -1149,6 +1149,10 @@ CREATE TABLE agent_evaluations (
 );
 CREATE INDEX idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC);
 CREATE INDEX idx_agent_evaluations_execution ON agent_evaluations(execution_id);
+-- ent#936: one judge row per run whatever the model (the evaluator key embeds it).
+-- SQLite tier1_one_per_run + Alembic 0113_tier1_one_per_run.
+CREATE UNIQUE INDEX idx_agent_evaluations_tier1_target ON agent_evaluations(target_kind, target_id)
+  WHERE evaluator LIKE 'platform:tier1:%';
 ```
 
 **skill_sources** (ent#237 — the multi-source skills library). **Replaces** the single
