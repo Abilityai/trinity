@@ -190,7 +190,7 @@
       </div>
 
       <!-- Health Tab (admin-only — fleet monitoring) -->
-      <div v-if="activeTab === 'health' && isAdmin">
+      <div v-if="activeTab === 'health' && tabAllowed('health')">
         <MonitoringPanel />
       </div>
 
@@ -203,7 +203,7 @@
            admin-only: the API refuses role `user` on every read it issues
            (test_938_tab_guard.py); this render gate mirrors that, it is not
            the guard. -->
-      <div v-if="activeTab === 'evaluations' && atOperatorFloor">
+      <div v-if="activeTab === 'evaluations' && tabAllowed('evaluations')">
         <EvaluationsPanel />
       </div>
 

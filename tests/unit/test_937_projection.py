@@ -163,6 +163,25 @@ def test_an_agent_reads_judge_findings_never_the_verdict(reader):
         assert leak not in dumped, leak
 
 
+def test_a_shared_non_owner_person_reads_findings_never_the_verdict():
+    """Review of #3790: a person the agent is merely shared with is not an
+    operator; the judge's words and score are withheld from them exactly as
+    the comment is (routers/evaluations.py), with the token findings in place."""
+    from models import User
+    from routers import evaluations
+    peer = User(id=9, username="peer", role="user")
+    out = evaluations._to_response(_tier1_row(), peer, frozenset())
+    body = out.model_dump()
+    assert body["quality"] is None
+    assert body["judge"] is None
+    assert body["evaluator"] == "platform:tier1"
+    assert body["judge_findings"][0] == {
+        "dimension": "followed_instructions", "verdict": "fail", "reason": "missed_subrequest"}
+    dumped = out.model_dump_json()
+    for leak in ("judge-model-x", "0.42", "IGNORE ME", "prose", "rationale", "0.9"):
+        assert leak not in dumped, leak
+
+
 def test_an_operator_reads_the_tier1_row_in_full():
     from models import User
     from routers import evaluations

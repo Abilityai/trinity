@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from database import db
-from db.evaluations import TIER0_PAIR_EVALUATOR
+from db.evaluations import CALLER_ENDED_STATUSES, TIER0_PAIR_EVALUATOR
 from services.tier0_evaluator import (
     BASELINE_MIN_RUNS, EVALUATION_CONCURRENCY, EVALUATION_TIMEOUT_SECONDS, MAX_SCAN_CHARS,
     SWEEP_LIMIT, SWEEP_LOOKBACK_HOURS, Check, _fail, _pass, _percentile, _skip, headline,
@@ -52,7 +52,9 @@ DUPLICATE_JACCARD = 0.9
 # The caller's reply is scanned (bounded) for execution ids it names — the
 # secondary claim source behind its own activity rows.
 MAX_CLAIMED_TOKENS = 20
-TERMINAL = ("success", "failed", "cancelled")
+# One definition with the re-pick query (`unevaluated_pair_execution_ids`):
+# a caller that ended `skipped` has ended.
+TERMINAL = CALLER_ENDED_STATUSES
 # The activity `details.action` a first read of a delegated result writes
 # (TD-1, CP-D). Before the first such row exists anywhere the relay checks
 # cannot grade — `skip: no_readback_record`, never a fail.
@@ -508,6 +510,10 @@ def _refusal_ids(callee: Dict[str, Any]) -> List[Any]:
     `authorization/peer_skill_refused` row carrying the execution id)."""
     rows = db.get_audit_entries(event_type="authorization", target_type="agent",
                                 target_id=callee["agent_name"], limit=200)
+    if len(rows) >= 200:
+        # One page; full means this run's row may lie past it. Unreadable, so
+        # the check skips — never a pass on evidence that was not read.
+        return None
     out = []
     for r in rows:
         details = r.get("details") if isinstance(r.get("details"), dict) else {}

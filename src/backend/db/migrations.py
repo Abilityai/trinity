@@ -5559,7 +5559,7 @@ TIER1_DEDUPE_SQL = (
     "SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
     "PARTITION BY target_kind, target_id ORDER BY "
     "CASE WHEN judge_json LIKE '%\"state\": \"claimed\"%' THEN 1 ELSE 0 END, "
-    "updated_at DESC, id DESC) AS rn FROM agent_evaluations "
+    "COALESCE(updated_at, '') DESC, id DESC) AS rn FROM agent_evaluations "
     "WHERE evaluator LIKE 'platform:tier1:%' AND target_id IS NOT NULL) ranked "
     "WHERE rn = 1)"
 )

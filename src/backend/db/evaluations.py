@@ -39,6 +39,11 @@ TIER0_TRIGGERS = ("schedule", "agent")
 # reminder an agent set up for itself or a person started is not an edge.
 TIER0_DELEGATED_TRIGGERS = ("fan_out", "loop", "reminder")
 TIER0_TERMINAL_STATUSES = ("success", "failed", "cancelled")
+# A caller run has ENDED in any terminal state, `skipped` (capacity overflow)
+# included: nothing more will happen to it, so a callee's provisional pair row
+# must not wait on it (ent#940; review of #3790). Tier-0 grades only the
+# three states above — a skipped run did no work to grade.
+CALLER_ENDED_STATUSES = TIER0_TERMINAL_STATUSES + ("skipped",)
 # ent#940 — the pair (caller→callee edge) evaluator. Its row hangs off the
 # callee run under the same one-row key, so it needs no migration either. The
 # id shares the `platform:tier0` stem but every Tier-0 reader matches the bare
@@ -895,7 +900,7 @@ class EvaluationOperations:
         ))
         caller_ended = select(se.c.id).where(and_(
             se.c.id == pr.c.parent_execution_id,
-            se.c.status.in_(TIER0_TERMINAL_STATUSES),
+            se.c.status.in_(CALLER_ENDED_STATUSES),
         ))
         provisional = paired.where(or_(
             and_(pr.c.checks_json.like('%"caller_running"%'), caller_ended.exists()),

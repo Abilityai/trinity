@@ -102,12 +102,14 @@ def test_evaluator_output_contract(stored, shown, reader):
     assert row == before                             # the stored row is never rewritten
     machine = _CONTRACT_READERS[reader].get("mcp_scope") is not None
     for key, value in _NEUTRAL.items():
-        if key == "judge" and machine:
+        if key == "judge":
             # ent#936 TD-8: a machine never reads a judge document — it gets the
             # structural findings in its place (none here: the document has none).
+            # Nor does a person who is not an operator of the agent (#3790 review):
+            # every reader here is called with an empty operator set.
             assert out["judge"] is None and out["judge_findings"] == [], key
             continue
-        if key == "quality" and machine and str(stored).startswith("platform:tier1:"):
+        if key == "quality" and str(stored).startswith("platform:tier1:"):
             assert out["quality"] is None, key       # nor a Tier-1 score (TD-8)
             continue
         if key == "checks" and machine and stored == "platform:tier0:pair":

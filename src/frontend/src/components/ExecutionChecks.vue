@@ -272,7 +272,7 @@ async function load() {
   error.value = null
   try {
     const { data } = await api.get(
-      `/api/agents/${props.agentName}/executions/${props.executionId}/evaluations`
+      `/api/agents/${encodeURIComponent(props.agentName)}/executions/${encodeURIComponent(props.executionId)}/evaluations`
     )
     rows.value = data
     hasLoaded.value = true

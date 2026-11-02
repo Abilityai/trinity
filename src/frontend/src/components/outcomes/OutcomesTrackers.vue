@@ -24,7 +24,7 @@
       retryable
       data-testid="outcomes-trackers-failed"
       @retry="store.loadTrackers()"
-      @dismiss="store.loadTrackers()"
+      @dismiss="store.clearTrackersError()"
     />
     <div v-else-if="!store.trackers" class="mt-2" aria-busy="true">
       <SkeletonLoader variant="rows" :count="1" height="1.25rem" />

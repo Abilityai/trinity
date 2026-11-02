@@ -113,6 +113,9 @@ export const useEvalJudgeStore = defineStore('evalJudge', () => {
       return true
     } catch (e) {
       saveError.value = refusalMessage(e)
+      // A refused save is not saved: the marker from an earlier success must
+      // not outlive it, or dismissing the error reads as "saved".
+      savedAt.value = null
       return false
     } finally {
       saving.value = false
@@ -137,8 +140,15 @@ export const useEvalJudgeStore = defineStore('evalJudge', () => {
       if (ratingKey.value !== key) return
       rating.value = r.data
       ratingAvailable.value = true
-    } catch {
-      if (ratingKey.value === key) ratingAvailable.value = false
+    } catch (e) {
+      if (ratingKey.value !== key) return
+      const status = e?.response?.status
+      if (status === 403 || status === 404) {
+        ratingAvailable.value = false
+      } else {
+        // Anything else is a failed read, not "not yours": say so.
+        ratingError.value = apiErrorMessage(e, "Couldn't load the rating")
+      }
     }
   }
 

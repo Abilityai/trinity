@@ -192,5 +192,6 @@ export const useOutcomesStore = defineStore('outcomes', () => {
     load, setStatus, setOwner, decide, markShipped, loadTrackers, saveTrackers, resetTrackers,
     clearActionError: () => { actionError.value = null },
     clearTrackersSaveError: () => { trackersSaveError.value = null },
+    clearTrackersError: () => { trackersError.value = null },
   }
 })

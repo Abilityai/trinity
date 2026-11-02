@@ -93,6 +93,28 @@ describe('EvalJudgePanel', () => {
     expect(w.text()).toContain('Judge model on the platform key')
   })
 
+  it('a refused save clears the earlier Saved marker, so a dismissed error never reads as saved', async () => {
+    let fail = false
+    const w = mountPanel({
+      put: async () => {
+        if (fail) throw { response: { status: 422, data: { detail: { code: 'judge_models_same_family', message: 'x' } } } }
+        return { data: { platform: POLICY } }
+      },
+    })
+    await flush()
+    await w.find('form').trigger('submit')
+    await flush()
+    expect(w.find('[data-testid="eval-judge-saved"]').exists()).toBe(true)
+    fail = true
+    await w.find('form').trigger('submit')
+    await flush()
+    expect(w.find('[data-testid="eval-judge-saved"]').exists()).toBe(false)
+    await w.find('[data-testid="eval-judge-save-error"] button').trigger('click')
+    await flush()
+    expect(w.find('[data-testid="eval-judge-save-error"]').exists()).toBe(false)
+    expect(w.find('[data-testid="eval-judge-saved"]').exists()).toBe(false)
+  })
+
   it('a failed first load is LoadFailed, not an empty form', async () => {
     const w = mountPanel({ get: async () => { throw new Error('boom') } })
     await flush()

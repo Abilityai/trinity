@@ -353,19 +353,20 @@ def project_row(row: dict, *, machine: bool, operator: bool) -> dict:
     """One evaluation row for one reader; never mutates `row`.
 
     An operator (owner/admin, a person) reads the row as stored. Anyone else
-    reads the grader's kind only. A machine never reads a judge document —
-    on any row: an `admin:` row's `judge` is a person's free-form words, held
-    back like the comment — and gets `judge_findings` in its place; on a
-    Tier-1 row it also loses `quality`. The one read guard for the judge's
-    verdict (ent#936 TD-8). On a pair row a machine reads check ids and
-    reason codes only (`pair_checks_for_machine`)."""
+    reads the grader's kind only, and never a judge document — on any row:
+    an `admin:` row's `judge` is a person's free-form words, held back like
+    the comment, and a shared non-owner is another client, not an operator
+    (review of #3790) — getting `judge_findings` in its place; on a Tier-1
+    row the non-operator also loses `quality`. The one read guard for the
+    judge's verdict (ent#936 TD-8). On a pair row a machine reads check ids
+    and reason codes only (`pair_checks_for_machine`)."""
     if operator and not machine:
         return row
     out = dict(row)
     out["evaluator"] = redact_evaluator(row.get("evaluator"))
     if machine and row.get("evaluator") == TIER0_PAIR_EVALUATOR:
         out["checks"] = pair_checks_for_machine(row.get("checks"))
-    if machine and (is_tier1(row) or row.get("judge") is not None):
+    if is_tier1(row) or row.get("judge") is not None:
         if is_tier1(row):
             out["quality"] = None
         out["judge"] = None

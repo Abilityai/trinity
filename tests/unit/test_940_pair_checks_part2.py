@@ -98,6 +98,22 @@ def test_a_caller_running_pair_row_is_re_picked_once_the_caller_ends(pe):
         _check(row, "duplicate_dispatch")["reason"] != "caller_running"
     # graded with the caller ended: final, never re-picked again
     assert db.unevaluated_pair_execution_ids() == []
+
+
+def test_a_skipped_caller_has_ended_too(pe):
+    """Review of #3790: `skipped` (capacity overflow) is a terminal the caller
+    test and the re-pick query both missed, so the callee's provisional row
+    stayed `caller_running` for good."""
+    from database import db
+    _caller(status="running")
+    _child(CHILD)
+    _activity(CHILD)
+    assert _check(pe.evaluate_pair(CHILD), "duplicate_dispatch")["reason"] == "caller_running"
+    _set(CALLER_RUN, status="skipped", completed_at=_ago(5))
+    assert db.unevaluated_pair_execution_ids() == [CHILD]
+    row = pe.evaluate_pair(CHILD)
+    assert _check(row, "duplicate_dispatch")["reason"] != "caller_running"
+    assert db.unevaluated_pair_execution_ids() == []
     assert count("agent_evaluations", "evaluator = :e", e=PAIR) == 1
 
 

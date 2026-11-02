@@ -378,6 +378,18 @@ def test_wrong_route_passes_a_resolved_playbook_and_skips_prose(pe):
     assert (c["status"], c["reason"]) == ("skip", "not_a_playbook")
 
 
+def test_a_full_refusal_page_is_unreadable_not_a_pass(pe, monkeypatch):
+    """Review of #3790: the refusal read is one 200-row page; a page that is
+    full may have pushed this run's row out, so it is not evidence of no refusal."""
+    from database import db
+    _caller()
+    _child("ChildRun00000000000001")
+    page = [{"event_action": "other", "details": {}, "event_id": i} for i in range(200)]
+    monkeypatch.setattr(db, "get_audit_entries", lambda **kw: page)
+    c = _check(pe.evaluate_pair("ChildRun00000000000001"), "wrong_route")
+    assert (c["status"], c["reason"]) == ("skip", "refusals_unreadable")
+
+
 def test_an_unreadable_audit_log_skips_wrong_route(pe, monkeypatch):
     from database import db
     _caller()
