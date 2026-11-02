@@ -220,8 +220,8 @@ async def test_undeliverable_images_are_not_a_silent_text_turn(monkeypatch, tmp_
     cmd = seen[0]
     assert "-f" not in cmd
     # The model is told rather than left to improvise about an unseen image.
-    assert "could not be delivered to you" in cmd[-1]
-    assert cmd[-1].endswith("describe the image")
+    assert "could not be delivered to you" in seen.stdin()
+    assert seen.stdin().endswith("describe the image")
     assert len(metadata.warnings) == 1
     assert "OPENCODE_PROVIDER_OLLAMA_IMAGES=true" in metadata.warnings[0]
     assert response.startswith(metadata.warnings[0])

@@ -1334,6 +1334,19 @@ class OpenCodeRuntime(AgentRuntime):
             execution_id, system_prompt, model, env=env, commands=commands
         )
         env["XDG_CONFIG_HOME"] = turn_dir
+        # B1 (review of the first OpenCode PR): the per-turn global config is
+        # the LOWEST-precedence layer — a workspace `opencode.json` or
+        # `.opencode/opencode.json` merges over it. Two settings are therefore
+        # also delivered through env, which OpenCode applies after every file:
+        # the share kill switch (no session upload, whatever any config says)
+        # and, in read-only mode, the deny set as `OPENCODE_PERMISSION`.
+        env["OPENCODE_DISABLE_SHARE"] = "1"
+        if _is_read_only():
+            env["OPENCODE_PERMISSION"] = json.dumps(
+                {tool_id: "deny" for tool_id in _READ_ONLY_PERMISSION_DENIES}
+            )
+        else:
+            env.pop("OPENCODE_PERMISSION", None)
         try:
             with open(
                 os.path.join(turn_dir, "opencode", "opencode.json"), "r", encoding="utf-8"
@@ -1364,16 +1377,16 @@ class OpenCodeRuntime(AgentRuntime):
             model=model, session_id=session_id, directory=_AGENT_HOME,
             command=command_name, files=image_paths,
         )
-        # End-of-options separator, VERIFIED against v1.18.32 rather than
-        # assumed: `opencode run -- "Reply with exactly the word ZEBRA."`
-        # returned `ZEBRA`, so the text after `--` reaches the message and is
-        # not diverted into yargs' `argv['--']`. Without it a prompt that
-        # happens to begin with '-' ("-v, what changed?") is parsed as a flag
-        # and the turn either errors or silently runs on an empty message.
-        # A `--command` with no args sends no message at all.
+        # The message goes on STDIN, never argv (#3838, the same fix dev made
+        # for Claude, Gemini and Codex): Linux refuses one argv element over
+        # 131,072 bytes (MAX_ARG_STRLEN), so a room transcript or a long 1:1
+        # message would make Popen raise E2BIG. `opencode run` reads piped
+        # stdin when it is not a TTY. The end-of-options separator is kept so
+        # nothing after the flags can ever be parsed as one. A `--command` with
+        # no args sends no message at all (stdin is closed empty).
+        stdin_text = prompt if (prompt or not command_name) else ""
         if prompt or not command_name:
             cmd.append("--")
-            cmd.append(prompt)
 
         metadata = ExecutionMetadata()
         metadata.context_window = (
@@ -1391,12 +1404,13 @@ class OpenCodeRuntime(AgentRuntime):
             model or "(default)", bool(session_id), _is_read_only(), execution_id,
         )
 
-        # stdin=DEVNULL: the prompt is a positional arg, so OpenCode must never
-        # block on stdin. start_new_session isolates the process group so
-        # cleanup signals only our descendants, never a sibling execution.
+        # stdin=PIPE: the message is written there and stdin is closed, so
+        # OpenCode reads to EOF (#3838). start_new_session isolates the process
+        # group so cleanup signals only our descendants, never a sibling
+        # execution.
         process = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -1408,6 +1422,21 @@ class OpenCodeRuntime(AgentRuntime):
         registry.register(
             execution_id, process, metadata={"type": "opencode", "pgid": process_pgid}
         )
+        # The write precedes the try/finally that unregisters, so a failed
+        # handoff (BrokenPipeError: the child died at startup) must end the
+        # child and drop the registry entry itself before re-raising.
+        try:
+            process.stdin.write(stdin_text)
+            process.stdin.close()
+        except BaseException:
+            try:
+                _terminate_process_group(
+                    process, graceful_timeout=0, pgid=process_pgid,
+                    execution_tag=execution_id,
+                )
+            finally:
+                registry.unregister(execution_id)
+            raise
 
         import threading
 

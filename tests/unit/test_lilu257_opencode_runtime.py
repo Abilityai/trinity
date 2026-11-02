@@ -541,6 +541,21 @@ def test_execution_id_cannot_escape_the_turn_root(monkeypatch, tmp_path):
 # test helper: a fake subprocess
 # ---------------------------------------------------------------------------
 
+class _FakeStdin:
+    """Records what the runtime hands the child on stdin (#3838)."""
+
+    def __init__(self):
+        self.text = ""
+        self.closed = False
+
+    def write(self, data):
+        self.text += data
+        return len(data)
+
+    def close(self):
+        self.closed = True
+
+
 def _install_fake_subprocess(monkeypatch, *, stdout_lines, return_code=0, stderr=""):
     """Replace ``subprocess.Popen`` in the runtime module with a stub that
     replays ``stdout_lines``. The real binary is never invoked in CI."""
@@ -548,6 +563,7 @@ def _install_fake_subprocess(monkeypatch, *, stdout_lines, return_code=0, stderr
 
     class _FakeProcess:
         def __init__(self):
+            self.stdin = _FakeStdin()
             self.stdout = io.StringIO("".join(l + "\n" for l in stdout_lines))
             self.stderr = io.StringIO(stderr)
             self.pid = 4242
@@ -908,6 +924,7 @@ class _SlowProcess:
 
     def __init__(self, lines):
         import io
+        self.stdin = _FakeStdin()
         self.stdout = io.StringIO("".join(l + "\n" for l in lines))
         self.stderr = io.StringIO("")
         self.pid = 4242
@@ -1312,6 +1329,17 @@ def test_turn_config_carries_the_command_map(monkeypatch, tmp_path):
     assert config["command"]["deploy"] == {"template": "operator's own"}
 
 
+class _Seen(list):
+    """argv per spawn, plus the fake processes (their ``stdin.text``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.procs = []
+
+    def stdin(self, i=0):
+        return self.procs[i].stdin.text
+
+
 def _spawn_capture(monkeypatch, tmp_path, stream):
     """Fake subprocess + a skill tree; returns the list every argv lands in."""
     _write_skill_tree(tmp_path)
@@ -1320,12 +1348,14 @@ def _spawn_capture(monkeypatch, tmp_path, stream):
     monkeypatch.setattr(opencode_runtime, "refresh_agents_md", lambda: None)
     monkeypatch.setattr(opencode_runtime, "apply_mcp_config", lambda config: None)
     _install_fake_subprocess(monkeypatch, stdout_lines=stream, return_code=0)
-    seen = []
+    seen = _Seen()
     fake_popen = opencode_runtime.subprocess.Popen
 
     def _popen(cmd, *a, **k):
         seen.append(list(cmd))
-        return fake_popen(cmd, *a, **k)
+        proc = fake_popen(cmd, *a, **k)
+        seen.procs.append(proc)
+        return proc
 
     monkeypatch.setattr(opencode_runtime.subprocess, "Popen", _popen)
     runtime = OpenCodeRuntime()
@@ -1342,7 +1372,9 @@ async def test_playbook_runs_as_a_command_with_args(monkeypatch, tmp_path):
     assert response == "done"
     cmd = seen[0]
     assert cmd[cmd.index("--command") + 1] == "with-args"
-    assert cmd[-2:] == ["--", "alpha beta"]
+    assert cmd[-1] == "--"
+    assert "alpha beta" not in cmd  # the args travel on stdin (#3838)
+    assert seen.stdin() == "alpha beta"
 
 
 @pytest.mark.asyncio
@@ -1352,6 +1384,7 @@ async def test_argless_playbook_sends_no_message(monkeypatch, tmp_path):
     cmd = seen[0]
     assert cmd[-2:] == ["--command", "self-diagnostic"]
     assert "--" not in cmd
+    assert seen.stdin() == ""
 
 
 @pytest.mark.asyncio
@@ -1376,7 +1409,88 @@ async def test_a_path_is_a_message_not_a_command(monkeypatch, tmp_path):
         "/home/developer/notes.md what is this?", model="anthropic/claude-sonnet-5"
     )
     assert "--command" not in seen[0]
-    assert seen[0][-1] == "/home/developer/notes.md what is this?"
+    assert seen.stdin() == "/home/developer/notes.md what is this?"
+
+
+@pytest.mark.asyncio
+async def test_a_prompt_over_the_argv_limit_goes_on_stdin(monkeypatch, tmp_path):
+    """#3838 class (review B2): a 200 KiB message — over Linux's 131,072-byte
+    MAX_ARG_STRLEN — must never be an argv element, or Popen raises E2BIG."""
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("ok"))
+    big = "x" * (200 * 1024)
+    await runtime.execute_headless(big, model="anthropic/claude-sonnet-5")
+    assert all(len(arg) < 131072 for arg in seen[0])
+    assert seen[0][-1] == "--"
+    assert seen.stdin() == big
+    assert seen.procs[0].stdin.closed
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stdin_handoff_ends_the_child_and_unregisters(monkeypatch, tmp_path):
+    """A child that dies at startup breaks the pipe; the write raises before the
+    try/finally that unregisters, so the handoff path must clean up itself."""
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("ok"))
+    killed, unregistered = [], []
+
+    class _Registry:
+        def register(self, *a, **k):
+            pass
+
+        def unregister(self, execution_id, *a, **k):
+            unregistered.append(execution_id)
+
+        def publish_log_entry(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(opencode_runtime, "get_process_registry", lambda: _Registry())
+    monkeypatch.setattr(
+        opencode_runtime, "_terminate_process_group", lambda *a, **k: killed.append(1)
+    )
+
+    def _broken(_data):
+        raise BrokenPipeError("child exited")
+
+    real_popen = opencode_runtime.subprocess.Popen
+
+    def _popen(cmd, *a, **k):
+        proc = real_popen(cmd, *a, **k)
+        proc.stdin.write = _broken
+        return proc
+
+    monkeypatch.setattr(opencode_runtime.subprocess, "Popen", _popen)
+    # The runtime maps the error at its boundary; what matters here is that it
+    # surfaces as a failure, not a hang, and that the child and entry are gone.
+    with pytest.raises(Exception):
+        await runtime.execute_headless("hi", model="anthropic/claude-sonnet-5",
+                                       execution_id="exec-b2")
+    assert killed and "exec-b2" in unregistered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_share_kill_switch_and_read_only_deny_ride_the_env(
+    monkeypatch, tmp_path, read_only
+):
+    """Review B1: a workspace `opencode.json` merges OVER the per-turn global
+    config, so the share kill switch and the read-only deny set are also
+    delivered through env, which OpenCode applies after every config file."""
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("ok"))
+    envs = []
+    inner = opencode_runtime.subprocess.Popen
+
+    def _popen(cmd, *a, **k):
+        envs.append(dict(k.get("env") or {}))
+        return inner(cmd, *a, **k)
+
+    monkeypatch.setattr(opencode_runtime.subprocess, "Popen", _popen)
+    monkeypatch.setattr(opencode_runtime, "_is_read_only", lambda: read_only)
+    await runtime.execute_headless("hi", model="anthropic/claude-sonnet-5")
+    env = envs[0]
+    assert env["OPENCODE_DISABLE_SHARE"] == "1"
+    if read_only:
+        assert json.loads(env["OPENCODE_PERMISSION"]) == {"edit": "deny", "bash": "deny"}
+    else:
+        assert "OPENCODE_PERMISSION" not in env
 
 
 def test_input_tokens_is_the_last_steps_input_not_the_sum():
