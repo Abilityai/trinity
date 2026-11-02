@@ -134,6 +134,26 @@ def _receipts():
             if r["details"] and json.loads(r["details"]).get("action") == "read_result"]
 
 
+def _break_receipt_writes(monkeypatch):
+    """Make the receipt writer raise on every `db` a loaded activity service reads.
+
+    Other tests evict `database` / `services.activity_service` from sys.modules,
+    which can leave a router bound to an older module whose `db` is not today's
+    `database.db`; patching only that one lets the real write through."""
+    def boom(*a, **kw):
+        raise RuntimeError("db down")
+    from database import db
+    targets = {id(db): db}
+    for mod in list(sys.modules.values()):
+        svc = getattr(mod, "activity_service", None)
+        fn = getattr(type(svc), "record_first_reads", None)
+        seen = getattr(fn, "__globals__", {}).get("db")
+        if seen is not None:
+            targets[id(seen)] = seen
+    for d in targets.values():
+        monkeypatch.setattr(d, "insert_read_receipt_if_absent", boom)
+
+
 # --- the execution-result read ----------------------------------------------
 
 def test_an_agent_reading_a_finished_run_leaves_one_receipt(client):
@@ -195,11 +215,7 @@ def test_a_receipt_write_that_raises_changes_nothing_in_the_response(client, mon
     client.as_user(HUMAN)
     baseline = _get(client)                         # no receipt path at all
     client.as_user(AGENT_KEY)
-    from database import db
-
-    def boom(*a, **kw):
-        raise RuntimeError("db down")
-    monkeypatch.setattr(db, "insert_read_receipt_if_absent", boom)
+    _break_receipt_writes(monkeypatch)
     r = _get(client)
     assert (r.status_code, r.content, r.headers.get("content-type")) == (
         baseline.status_code, baseline.content, baseline.headers.get("content-type"))
@@ -455,11 +471,7 @@ def test_an_inline_receipt_write_that_raises_changes_nothing(inline, monkeypatch
     inline.as_user(HUMAN)
     base_chat, base_task = _chat(inline), _task(inline)
     inline.as_user(AGENT_KEY)
-    from database import db
-
-    def boom(*a, **kw):
-        raise RuntimeError("db down")
-    monkeypatch.setattr(db, "insert_read_receipt_if_absent", boom)
+    _break_receipt_writes(monkeypatch)
     for base, r in ((base_chat, _chat(inline)), (base_task, _task(inline))):
         assert (r.status_code, r.content, r.headers.get("content-type")) == (
             base.status_code, base.content, base.headers.get("content-type"))
