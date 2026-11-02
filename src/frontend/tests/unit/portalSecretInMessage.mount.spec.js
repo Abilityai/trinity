@@ -88,6 +88,21 @@ describe('a secret pasted as a plain message', () => {
     expect(JSON.stringify({ ...localStorage })).not.toContain('ghp_')
   })
 
+  it('the same text left as a draft in ANOTHER thread is cleared too', async () => {
+    // The person pasted the message into another conversation first and left
+    // it there, then pasted it here and sent it. The composer watch only
+    // clears THIS thread's draft; "keeps no copy" covers the other one, which
+    // sits in local storage.
+    const drafts = usePortalDraftsStore()
+    drafts.set('scout::other-thread', SECRET)
+    drafts.set('scout::unrelated', 'a draft about something else')
+    expect(JSON.stringify({ ...localStorage })).toContain('ghp_')
+    await pasteAndSend()
+    expect(drafts.get('scout::other-thread')).toBeFalsy()
+    expect(drafts.get('scout::unrelated')).toBe('a draft about something else')
+    expect(JSON.stringify({ ...localStorage })).not.toContain('ghp_')
+  })
+
   it('the synchronous fallback’s refusal is handled the same way', async () => {
     store.startPortalChat = vi.fn().mockRejectedValue({ response: { status: 404 } })
     store.sendPortalChat = vi.fn().mockRejectedValue({
