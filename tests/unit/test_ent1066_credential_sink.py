@@ -475,14 +475,88 @@ class TestStagingFailsClosed:
         _refused(uid, 503, "scrub_unavailable")
         assert world.agent.calls == []
 
-    def test_the_stage_happens_before_the_agent_is_consulted(self, world):
-        """Stage FIRST: a stopped agent is refused after the value is staged,
-        so even a refusal leaves the scrub armed for that value."""
-        world.status["status"] = "stopped"
+    def test_the_stage_happens_before_the_agent_is_consulted(self, world, monkeypatch):
+        """Stage FIRST: by the time the agent's state is read, the scrub
+        already holds the value."""
+        seen = []
+        real_state = world.sink._running_state
+
+        def state(agent_name):
+            seen.append(VALUE in world.scrub.get_staged_values())
+            return real_state(agent_name)
+        monkeypatch.setattr(world.sink, "_running_state", state)
         uid = _pending(world.db, "st-order")
+        _provide(uid)
+        assert seen == [True]
+
+
+class TestARefusedWriteLeavesNothingStaged:
+    """"Nothing was stored" is true of the scrub too: a refusal that left the
+    agent's file untouched removes the value this call staged. Only the inject
+    leg — where the agent may have written before failing — keeps it staged,
+    and says so."""
+
+    @pytest.mark.parametrize("arm,status,code", [
+        ("stopped", 409, "agent_not_running"),
+        ("busy", 409, "env_busy"),
+        ("lock_store", 503, "scrub_unavailable"),
+        ("read_unreachable", 503, "agent_unreachable"),
+        ("read_refused", 503, "agent_unreachable"),
+        ("unconfirmed", 409, "env_unreadable"),
+        ("too_large", 422, "env_too_large"),
+    ])
+    def test_every_refusal_before_the_inject_unstages_the_value(self, world, monkeypatch,
+                                                                 arm, status, code):
+        if arm == "stopped":
+            world.status["status"] = "stopped"
+        elif arm == "busy":
+            world.fake.set(f"credential_sink:lock:{AGENT}", "someone-else", ex=30)
+        elif arm == "lock_store":
+            real_set = world.fake.set
+
+            def flaky(key, *a, **k):
+                if key.startswith("credential_sink:lock:"):
+                    raise RuntimeError("redis exploded")
+                return real_set(key, *a, **k)
+            monkeypatch.setattr(world.fake, "set", flaky)
+        elif arm == "read_unreachable":
+            world.agent.read_error = httpx.ConnectError("boom")
+        elif arm == "read_refused":
+            world.agent.read_status = 500
+        elif arm == "unconfirmed":
+            world.agent.env_text = None
+            world.agent.legacy_read = True
+        elif arm == "too_large":
+            world.agent.env_text = 'X="' + "y" * (256 * 1024) + '"\n'
+        uid = _pending(world.db, f"un-{arm}")
+        err = _refused(uid, status, code)
+        assert "nothing was stored" in err.detail.lower()
+        assert VALUE not in world.scrub.get_staged_values()
+        assert _staged(world) == 0
+        assert not [c for c in world.agent.calls if c[0] == "POST"]
+
+    @pytest.mark.parametrize("arm", ["inject_unreachable", "inject_refused"])
+    def test_an_inject_that_failed_keeps_the_value_staged_and_does_not_say_nothing_was_stored(
+            self, world, arm):
+        if arm == "inject_unreachable":
+            async def boom(url, json=None, **kw):
+                raise httpx.ReadTimeout("the agent may have written before timing out")
+            world.agent.post = boom
+        else:
+            world.agent.inject_status = 500
+        uid = _pending(world.db, f"un-{arm}")
+        err = _refused(uid, 503, "agent_unreachable")
+        assert "nothing was stored" not in err.detail.lower()
+        assert VALUE in world.scrub.get_staged_values()
+
+    def test_a_value_already_staged_by_someone_else_stays_staged(self, world):
+        """Removal is of what THIS call added: the same value staged earlier
+        (a successful write, a vault fetch) keeps its protection."""
+        world.scrub.stage_secret(AGENT, VALUE)
+        world.status["status"] = "stopped"
+        uid = _pending(world.db, "un-already")
         _refused(uid, 409, "agent_not_running")
         assert VALUE in world.scrub.get_staged_values()
-        assert world.agent.calls == []
 
 
 class TestAgentState:
@@ -617,10 +691,11 @@ class TestTheAskSide:
 
 
 # Measuring a value (its type, length, line structure, bytes) and handing it to
-# the scrub, the file patcher or the sink's own checker are the only moves the
-# module may make with it.
+# the scrub (stage / unstage), the file patcher, the sink's own checker or its
+# delivery step are the only moves the module may make with it.
 _ALLOWED_VALUE_CALLEES = {"len", "isinstance", "strip", "encode", "splitlines",
-                          "stage_secret", "set_keys", "_check_value", "set_env_value"}
+                          "stage_secret", "unstage_secret", "set_keys", "_check_value",
+                          "_deliver", "set_env_value"}
 
 
 def test_the_sink_module_never_interpolates_the_value():
