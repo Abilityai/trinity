@@ -1313,9 +1313,9 @@ _marker_locks: Dict[Tuple[int, str], Any] = {}
 
 def spawn_gate_marker_sync(agent_name: str, *, only_if_gated: bool = True) -> bool:
     """Fire-and-forget `sync_gate_marker`; True when a sync was scheduled.
-    `only_if_gated` (start and recreate) skips the exec for an agent with no
-    gates, and for an unreadable map, so an agent start costs nothing while
-    the gate is unused. A heal passes False. Never raises."""
+    `only_if_gated` (a recreate, whose fresh layer has no marker to remove)
+    skips the exec for an agent with no gates, and for an unreadable map. A
+    start and a heal pass False. Never raises."""
     import asyncio
 
     if only_if_gated:
