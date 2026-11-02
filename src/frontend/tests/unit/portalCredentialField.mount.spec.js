@@ -105,6 +105,32 @@ describe('PortalAsks renders a credential ask as the secret field', () => {
     expect(tid(w, 'portal-ask-discuss-c1').exists()).toBe(false)
   })
 
+  it('names the asking agent and quotes its reason as its own words, wherever the card is drawn', () => {
+    // A credential can be asked from any turn (a schedule reaches the owner's
+    // Inbox), so the card itself says WHO asks — not only when the surface
+    // happens to show agent names — and the reason reads as the agent's
+    // claim, never as the platform's.
+    store.agents = [{ name: 'scout', display_label: 'Scout Bot' }]
+    const w = mountAsks()
+    const asker = tid(w, 'portal-ask-asker-c1')
+    expect(asker.exists()).toBe(true)
+    expect(asker.text()).toContain('Scout Bot')
+    expect(asker.text()).toContain('OP_SERVICE_ACCOUNT_TOKEN')
+    const why = tid(w, 'portal-ask-why-c1')
+    expect(why.element.tagName).toBe('BLOCKQUOTE')
+    expect(why.text()).toBe('To open your vault.')
+    expect(tid(w, 'portal-ask-why-by-c1').text()).toContain('Scout Bot')
+    // the reason is drawn once, attributed — not also as the card's own body
+    expect(tid(w, 'portal-ask-question-c1').exists()).toBe(false)
+  })
+
+  it('falls back to the agent’s name, and says so when it gave no reason', () => {
+    const w = mountAsks([credentialAsk({ question: null })])
+    expect(tid(w, 'portal-ask-asker-c1').text()).toContain('scout')
+    expect(tid(w, 'portal-ask-why-c1').exists()).toBe(false)
+    expect(tid(w, 'portal-ask-asker-c1').text()).toContain('gave no reason')
+  })
+
   it('the show/hide control reveals and re-masks the value', async () => {
     const w = mountAsks()
     const toggle = tid(w, 'portal-credential-toggle-c1')
