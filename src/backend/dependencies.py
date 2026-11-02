@@ -2641,8 +2641,7 @@ async def _audit_capability_use(
 ) -> None:
     """`capability_used`, once per capability and target per request. A metric
     declaration write passes the route fence and then the Files write it
-    delegates to, both on `instructions.manage`: one call, one row. The memo is
-    on the request, because a principal can outlive one."""
+    delegates to, both on `instructions.manage`: one call, one row."""
     state = getattr(request, "state", None)
     used = getattr(state, "capability_used", None)
     if not isinstance(used, set):

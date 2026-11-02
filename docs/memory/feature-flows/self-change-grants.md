@@ -133,13 +133,14 @@ Each row is `event_type=authorization`. The agent is the actor, the owner rides 
 
 **`capability_used` means the grant cleared the call, not that the change landed.**
 A handler can still refuse afterwards: deleting a sibling the agent did not spawn
-writes `capability_used` and answers 403, a malformed body answers 422, and a
-dry-run deploy changes nothing. Schedule writes, the timeout `PUT` and the files
-`PUT` have no outcome row for any caller (item 3 of the issue, out of scope), so
-for those the use row is the only trace and says nothing about the result. The
-agent `delete` row carries `request_id`, which joins it to the use row. A join
-is only as good as that value: `X-Request-ID` is honoured from the caller, and an
-agent can call the backend directly.
+writes `capability_used` and answers 403, a body that fails validation answers
+422, and a dry-run deploy changes nothing. Schedule writes and the timeout `PUT`
+have no outcome row for any caller (item 3 of the issue, out of scope), so for
+those the use row is the only trace and says nothing about the result. A files
+write does: `file_write`, `file_delete` and `file_mkdir` (trinity-enterprise#820)
+name the path and share `request_id` with the use row, as the agent `delete` row
+now does. A join is only as good as that value: `X-Request-ID` is honoured from
+the caller, and an agent can call the backend directly.
 
 **Reads.** A fenced route writes a row whatever its method. A question answered by
 a predicate writes none: `can_manage_agent_skills`, `person_or_capability_admits`,
@@ -195,7 +196,7 @@ The fence covers the platform routes listed above, and nothing else:
 
 ## Tests
 
-- `tests/unit/test_ent871_capability_used_audit.py`: every audit-trail row above, with real keys through the real routers, read back from `audit_log`. `projects.manage` is exercised by a direct `enforce_agent_capability` call.
+- `tests/unit/test_ent871_capability_used_audit.py`: every audit-trail row above. The route rows go through the real routers with real keys and are read back from `audit_log`; `projects.manage` is a direct `enforce_agent_capability` call, and the manifest deploy records the audit sink.
 - `tests/unit/test_ent164_self_change_grants.py`: the fences, read off FastAPI's dependant graph; behavior for each capability class; the ghost and own-schedule exemptions; the calibrating refusal.
 - `tests/unit/test_2996_owner_config_person_only.py`: real keys against the real grant table, plus the grant route.
 - `tests/unit/test_2996_human_only_routes.py`: the `person_or_grant` census class.

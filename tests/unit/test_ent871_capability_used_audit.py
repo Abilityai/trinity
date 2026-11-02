@@ -12,11 +12,12 @@ Everything else stays out of that row: a refusal writes only
 grant decided their call, and an exemption writes nothing because no grant was
 used.
 
-Rows are read back from the real `audit_log`. The route tests go through the
-real routers with real keys presented as bearers, because the decorators and
-`get_current_user` are the wiring under test (`test_2996_owner_config_person_only.py`
-is the same harness). `projects.manage` is covered by a direct call to
-`enforce_agent_capability`.
+The route tests go through the real routers with real keys presented as
+bearers, and read rows back from the real `audit_log`, because the decorators
+and `get_current_user` are the wiring under test
+(`test_2996_owner_config_person_only.py` is the same harness). `projects.manage`
+is covered by a direct call to `enforce_agent_capability`, and `TestManifestDeploy`
+records the audit sink, as the other suites over that world do.
 
 Related: docs/memory/requirements/auth.md §2.9, feature-flows/self-change-grants.md.
 """
