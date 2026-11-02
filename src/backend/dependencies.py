@@ -2745,9 +2745,12 @@ def _path_agent(request: Request) -> Optional[str]:
 
 def owner_owns_agent(current_user, target: str) -> bool:
     """`owner_username` equality: the bound every capability holder meets. Never
-    the admin short-circuit an agent key's owner role carries."""
+    the admin short-circuit an agent key's owner role carries, and never the
+    system agent: an admin owns it, and what lands there runs under a key that
+    bypasses every permission check, so one narrow grant would be all of them."""
     owner = db.get_agent_owner(target) or {}
-    return bool(owner) and owner.get("owner_username") == current_user.username
+    return (bool(owner) and not owner.get("is_system")
+            and owner.get("owner_username") == current_user.username)
 
 
 def capability_fence(capability: str, *, own_agent_exempt: bool = False,

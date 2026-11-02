@@ -76,7 +76,8 @@ OTHER = "ent871-other"
 ORCH = "ent871-orch"      # the agent making the calls
 AGENT = "ent871-agent"    # a sibling its owner owns
 FOREIGN = "ent871-foreign"  # an agent another user owns
-SYSTEM = "ent871-system"
+SYSTEM = "ent871-system"   # the agent the `system`-scoped key is minted for
+SYSTEM_AGENT = "trinity-system"
 NOWHERE = "ent871-no-such-agent"
 
 USED = "capability_used"
@@ -243,6 +244,22 @@ def test_a_holder_call_writes_one_row_naming_agent_key_capability_and_target(
     assert row["endpoint"] == url.split("?")[0]
     assert row["request_id"] == "ent871-request"
     assert _rows(REFUSED) == []
+
+
+@pytest.mark.parametrize("raw,slug", [
+    pytest.param("Prod Bot!!", "prod-bot", id="spaces-and-punctuation"),
+    pytest.param("=HYPERLINK(1)", "hyperlink-1", id="spreadsheet-formula"),
+    pytest.param("bot\x00", "bot", id="nul-that-postgres-cannot-store"),
+])
+@pytest.mark.parametrize("held", [True, False], ids=["holder", "non-holder"])
+def test_a_create_row_names_the_agent_that_would_exist(world, fake_create, raw, slug, held):
+    """Not the raw body: the slug is what `create_agent_internal` will use. A
+    value the row cannot store would lose the row and still create the agent."""
+    if held:
+        _grant("agents.manage")
+    res = world.client.post("/api/agents", json={"name": raw}, headers=world.headers)
+    assert res.status_code == (200 if held else 403), res.text
+    assert [r["target_id"] for r in _rows(USED if held else REFUSED)] == [slug]
 
 
 def test_a_call_that_names_no_target_writes_a_row_with_none(world, monkeypatch):
@@ -419,6 +436,126 @@ def test_a_holder_on_itself_on_a_self_person_only_route_writes_nothing(world):
     res = world.client.put(f"/api/agents/{ORCH}/read-only", json={"enabled": True}, headers=world.headers)
     assert res.status_code == 403, res.text
     assert res.json()["detail"]["code"] == "person_required"
+    assert _rows(USED) == [] and _rows(REFUSED) == []
+
+
+# --------------------------------------------------------------------------- #
+# The owner bound holds on every way in
+# --------------------------------------------------------------------------- #
+
+
+FILE_CALLS = {
+    "write-instructions": ("instructions.manage", "PUT", {"params": {"path": "CLAUDE.md"}, "json": {"content": "x"}}, ""),
+    "write-skill": ("skills.manage", "PUT", {"params": {"path": ".claude/skills/x/SKILL.md"}, "json": {"content": "x"}}, ""),
+    "delete-skill": ("skills.manage", "DELETE", {"params": {"path": ".claude/skills/x"}}, ""),
+    "mkdir-skill": ("skills.manage", "POST", {"json": {"path": ".claude/skills/x"}}, "/mkdir"),
+}
+
+
+@pytest.fixture
+def proxied(monkeypatch):
+    """A running container whose file API records each call that reaches it."""
+    running = SimpleNamespace(status="running", attrs={"Config": {"Labels": {}}})
+    monkeypatch.setattr(files_svc, "get_agent_container", lambda _n: running)
+    monkeypatch.setattr(files_svc, "container_reload", AsyncMock())
+    monkeypatch.setattr(files_svc, "_refuse_share_write_on_unverified_image", AsyncMock(return_value=True))
+    http = AsyncMock(return_value=SimpleNamespace(status_code=200, json=lambda: {"success": True}, headers={}))
+    monkeypatch.setattr(files_svc, "agent_http_request", http)
+    return http
+
+
+def _file_call(world, name: str, agent: str):
+    _, method, kwargs, suffix = FILE_CALLS[name]
+    return world.client.request(method, f"/api/agents/{agent}/files{suffix}", headers=world.headers, **kwargs)
+
+
+def _assert_bound_refused(res, proxied, target: str, capability: str) -> None:
+    assert res.status_code == 404, res.text
+    assert res.json() == {"detail": "Agent not found"}
+    assert proxied.await_count == 0
+    assert _rows(USED) == []
+    assert [(r["target_id"], r["details"]["capability"], r["details"]["code"]) for r in _rows(REFUSED)] == [
+        (target, capability, NOT_OWNED)]
+
+
+@pytest.mark.parametrize("call", list(FILE_CALLS))
+def test_an_edge_to_another_users_agent_is_no_way_past_the_owner_bound(world, proxied, call):
+    """An edge means may call, never may manage. Reach through an edge returns
+    before the file route's own owner check, so the bound has to be in the
+    capability gate. The owner here may access the target, as an admin or a
+    person it is shared with can."""
+    _grant(FILE_CALLS[call][0])
+    db.add_agent_permission(ORCH, FOREIGN, OWNER)
+    _assert_bound_refused(_file_call(world, call, FOREIGN), proxied, FOREIGN, FILE_CALLS[call][0])
+
+
+def test_an_edge_to_a_sibling_still_writes(world, proxied):
+    """The control for the test above: the same call on an agent the owner owns
+    reaches the container, so a zero there is the bound and not the stub."""
+    _grant("instructions.manage")
+    db.add_agent_permission(ORCH, AGENT, OWNER)
+    res = _file_call(world, "write-instructions", AGENT)
+    assert res.status_code == 200, res.text
+    assert proxied.await_count == 1
+    assert [r["target_id"] for r in _rows(USED)] == [AGENT]
+
+
+@pytest.fixture
+def system_agent(world, proxied):
+    db.register_agent_owner(SYSTEM_AGENT, OWNER, is_system=True)
+    assert db.is_system_agent(SYSTEM_AGENT)
+
+
+NEW_SCHEDULE = {"name": "n", "cron_expression": "0 3 * * *", "message": "do it", "enabled": True}
+
+
+@pytest.mark.parametrize("call", list(FILE_CALLS))
+def test_a_grant_never_writes_into_the_system_agent(world, proxied, system_agent, call):
+    """It is owned by the admin, so owner equality alone admits every holder an
+    admin owns, and what lands there runs under a key that bypasses every
+    permission check. One narrow grant would be all of them. With no edge the
+    route's access check answers first, as it does for any agent out of reach."""
+    _grant(FILE_CALLS[call][0])
+    res = _file_call(world, call, SYSTEM_AGENT)
+    assert res.status_code == 403, res.text
+    assert proxied.await_count == 0
+    assert _rows(USED) == [] and _rows(REFUSED) == []
+
+
+@pytest.mark.parametrize("call", list(FILE_CALLS))
+def test_an_edge_to_the_system_agent_gives_a_grant_no_write(world, proxied, system_agent, call):
+    _grant(FILE_CALLS[call][0])
+    db.add_agent_permission(ORCH, SYSTEM_AGENT, OWNER)
+    _assert_bound_refused(_file_call(world, call, SYSTEM_AGENT), proxied, SYSTEM_AGENT, FILE_CALLS[call][0])
+
+
+@pytest.mark.parametrize("capability,method,suffix,kwargs", [
+    pytest.param("schedules.manage", "POST", "/schedules", {"json": NEW_SCHEDULE}, id="capability-fence"),
+    pytest.param("agents.manage", "PUT", "/timeout", {"json": {"execution_timeout_seconds": 1800}}, id="person-or-grant"),
+    pytest.param("skills.manage", "PUT", "/skills", {"json": {"skills": []}}, id="skills-fence"),
+])
+def test_no_fence_admits_a_holder_to_the_system_agent(world, proxied, system_agent, capability, method, suffix, kwargs):
+    _grant(capability)
+    res = world.client.request(method, f"/api/agents/{SYSTEM_AGENT}{suffix}", headers=world.headers, **kwargs)
+    _assert_bound_refused(res, proxied, SYSTEM_AGENT, capability)
+    assert db.list_agent_schedules(SYSTEM_AGENT) == []
+
+
+def test_the_predicates_give_the_fences_answer_on_the_system_agent(world, proxied, system_agent):
+    _grant("skills.manage", "schedules.manage", "instructions.manage")
+    user = _agent_principal()
+    assert deps("can_manage_agent_skills")(user, SYSTEM_AGENT) is False
+    assert deps("person_or_capability_admits")(user, "schedules.manage", SYSTEM_AGENT) is False
+    assert files_svc._may_reach_for_path(user, SYSTEM_AGENT, "CLAUDE.md") is False
+
+
+@pytest.mark.parametrize("headers", [
+    pytest.param(lambda: _jwt(), id="signed-in-person"),
+    pytest.param(lambda: _system_key(), id="system-key"),
+])
+def test_people_and_the_system_key_keep_the_system_agent(world, proxied, system_agent, headers):
+    res = world.client.post(f"/api/agents/{SYSTEM_AGENT}/schedules", json=NEW_SCHEDULE, headers=headers())
+    assert res.status_code == 201, res.text
     assert _rows(USED) == [] and _rows(REFUSED) == []
 
 

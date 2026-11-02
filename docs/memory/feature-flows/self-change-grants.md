@@ -43,7 +43,12 @@ Bounds on a holder:
   which admit any admin, and an agent key carries its owner's role — so without
   this bound one grant on an admin-owned install reached every agent on the
   instance. Not-owned answers 404, like nonexistent; a non-holder's 403 comes
-  first, so the 404 is never an existence oracle.
+  first, so the 404 is never an existence oracle. The file routes apply the
+  same bound, so an edge to another user's agent gives no write to its
+  instructions or skills (trinity-enterprise#871): an edge means may call.
+- **Never the system agent** (every capability, trinity-enterprise#871): it
+  answers the same 404. An admin owns it, and what lands there runs under a key
+  that bypasses every permission check, so one narrow grant would be all of them.
 - **Self**: a holder cannot change its **own** `read-only` mode or `guardrails`
   — those stay person-only when target == caller.
 - **Delete** is still limited by `enforce_agent_spawn_scope` to agents the
@@ -121,13 +126,14 @@ Each row is `event_type=authorization`. The agent is the actor, the owner rides 
 | Call | Rows |
 |---|---|
 | A holder clears the fence | `capability_used` |
-| A holder aims outside its owner's agents | `capability_refused`, code `capability_target_not_owned`, and the same 404 |
+| A holder aims outside its owner's agents, or at the system agent | `capability_refused`, code `capability_target_not_owned`, and the same 404. On a file route with no edge, the route's access check answers first: a plain 403 and no row |
 | A key without the grant | `capability_refused` |
 | A key holding one of two capabilities a path needs | `capability_refused` only |
 | A person, a `user` key, the system key, an event-loopback token | none: no grant decided the call |
 | An agent on its own schedules, or discarding a ghost | none: no grant was used |
 | One request passing the same capability twice (a metric declaration write) | one row |
 | One file path needing two capabilities, both held | one row each |
+| An agent create | `target_id` is the slug the agent would get, not the raw name in the body |
 | A manifest deploy | `agents.manage` with no target, plus `skills.manage` per created member with gates, skills or sets |
 | `GET .../skill-sets?probe=true`, when a holder's probe is honoured | `capability_used`: the probe runs inside the target |
 

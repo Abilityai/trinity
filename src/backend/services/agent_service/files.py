@@ -479,7 +479,9 @@ def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=Fal
     the target without a permission edge. Every file class the path touches
     needs its capability, and the target must be one the key's owner OWNS — the
     bound the route-level capability fences apply (`owner_owns_agent`). The
-    capability gate below still decides the write and audits a refusal."""
+    capability gate below still decides the write, audits a refusal and, for
+    reach an edge gave (an edge means may call, never may manage), applies the
+    owner bound."""
     if agent_may_reach(current_user, agent_name):
         return True
     needed = _capabilities_for_path(path, include_ancestors=include_ancestors)
@@ -521,7 +523,8 @@ async def _require_skill_capability(path, current_user, request, agent_name, *, 
     # use of the other one (trinity-enterprise#871).
     needed.sort(key=lambda cap: capability_refusal(current_user, cap) is None)
     for capability in needed:
-        await enforce_agent_capability(request, current_user, capability, target=agent_name)
+        await enforce_agent_capability(request, current_user, capability, target=agent_name,
+                                       owner_bound=True)
 
 
 # trinity-enterprise#820: a hard link to a credential file (made by the agent

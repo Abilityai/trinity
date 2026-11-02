@@ -60,7 +60,7 @@ The owner and admins see the card; anyone else does not. Only an instance admin,
 
 Read the five permissions over MCP with `get_agent_capability_grants` (an agent key reads itself or an agent it spawned; a person key reads as the agent's owner or an admin). Granting stays on this card.
 
-The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
+The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools. A permission reaches only agents the same owner owns, and never the system agent.
 
 ### Parallel Capacity
 
