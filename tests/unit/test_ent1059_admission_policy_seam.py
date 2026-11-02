@@ -239,7 +239,11 @@ def test_a_door_through_execute_task_refused_closes_the_row_skipped(world, regis
     assert result.admission_refusal is not None and result.admission_refusal.message == STOP
     after = db.get_execution(row.id)
     assert after.status == TaskExecutionStatus.SKIPPED
-    assert after.error == STOP
+    # (B) the row stores the #3114 `[code] text` shape, so a reconstruct from the
+    # row can tell a share stop from any other SKIPPED; the text stays the message.
+    assert after.error == f"[usage_share] {STOP}"
+    from services.task_execution_service import _split_error_code
+    assert _split_error_code(after.error) == (TaskExecutionErrorCode.USAGE_SHARE, STOP)
     world.capacity.acquire.assert_not_called()
     world.capacity.release.assert_called_once()        # the caller's held slot is given back
     assert _count("agent_activities", "agent_name = :a", a=W.FIN) == 0
@@ -358,3 +362,44 @@ def test_a_broken_notice_leaves_the_prompt_intact(registry):
     text = _prompt()
     assert "**Usage**" not in text
     assert "## Execution Context" in text
+
+
+# ---------------------------------------------------------------------------
+# (B) The sync backlog long-poll reads the terminal back from the row
+# ---------------------------------------------------------------------------
+
+def _drain_env(monkeypatch, row):
+    """`_dispatch_sync_backlog` with the wake carrying no result (another
+    worker drained it) and the row as the authority."""
+    monkeypatch.setattr(_CE, "wait_for_sync_terminal", AsyncMock(return_value={"result": None}))
+    monkeypatch.setattr(_CE.db, "get_execution", lambda eid: row)
+    failed, completed = [], []
+    monkeypatch.setattr(_CE.idempotency_service, "fail", lambda i: failed.append(i))
+    monkeypatch.setattr(_CE.idempotency_service, "complete",
+                        lambda i, eid, payload: completed.append(payload))
+    return failed, completed
+
+
+def _row(status, error):
+    return SimpleNamespace(status=status, error=error, response="", cost=None, context_used=None,
+                           context_max=None, claude_session_id=None)
+
+
+def test_a_share_that_ran_out_in_the_backlog_still_answers_the_refusal(monkeypatch):
+    """The drain closed the row SKIPPED `[usage_share] …` on another worker;
+    the long-poll rebuilds the refusal from the row and releases the claim."""
+    idem = object()
+    failed, completed = _drain_env(monkeypatch, _row("skipped", f"[usage_share] {STOP}"))
+    with pytest.raises(AdmissionRefused) as info:
+        asyncio.run(_CE._dispatch_sync_backlog(
+            name="a1", execution_id="e1", sync_effective_timeout=1, idem=idem))
+    assert info.value.code == "usage_share" and info.value.message == STOP
+    assert failed == [idem] and completed == []
+
+
+def test_a_skipped_row_without_the_code_is_not_a_share_refusal(monkeypatch):
+    """Characterisation: any other SKIPPED terminal keeps its shape."""
+    failed, completed = _drain_env(monkeypatch, _row("skipped", "no schedule fired"))
+    out = asyncio.run(_CE._dispatch_sync_backlog(
+        name="a1", execution_id="e1", sync_effective_timeout=1, idem=object()))
+    assert out["task_execution_id"] == "e1" and failed == [] and len(completed) == 1

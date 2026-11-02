@@ -2112,9 +2112,17 @@ class TaskExecutionService:
                 f"({refusal.code}); execution {execution_id} skipped"
             )
             if execution_id:
+                # The row stores `[code] message` (the #3114 pull-sink shape) so
+                # a sync /task that reads this terminal back from the row — the
+                # backlog drain on another worker, or a long-poll that timed
+                # out — rebuilds the refusal and answers 429, not a success
+                # shaped from a SKIPPED row. `_split_error_code` strips it for
+                # people; `TaskExecutionResult.error` stays the plain message.
+                code = _ERROR_CODE_VALUES.get(refusal.code)
+                stored = f"[{code.value}] {refusal.message}" if code else refusal.message
                 await _write_terminal_and_gate(
                     execution_id, None, status=TaskExecutionStatus.SKIPPED,
-                    error=refusal.message, agent_name=agent_name)
+                    error=stored, agent_name=agent_name)
             return TaskExecutionResult(
                 execution_id=execution_id or "",
                 status=TaskExecutionStatus.SKIPPED,
