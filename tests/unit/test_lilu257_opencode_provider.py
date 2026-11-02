@@ -477,7 +477,9 @@ def test_prompt_is_passed_after_an_end_of_options_separator():
         body = fh.read()
     # The separator is appended by `_execute_opencode`, immediately before the
     # prompt — assert the adjacency, not just that '--' appears somewhere.
-    assert 'cmd.append("--")\n        cmd.append(prompt)' in body
+    # Abilityai/lilu#655: the pair is skipped only for an argument-less
+    # `--command`, which sends no message at all.
+    assert 'cmd.append("--")\n            cmd.append(prompt)' in body
 
 
 # ---------------------------------------------------------------------------
@@ -769,7 +771,7 @@ async def test_the_runtime_builds_the_spawn_env_before_the_provider_block(monkey
     class _Stop(Exception):
         pass
 
-    def _capture(execution_id, system_prompt, model=None, env=None):
+    def _capture(execution_id, system_prompt, model=None, env=None, **_kw):
         seen["env"] = env
         raise _Stop()
 

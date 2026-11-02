@@ -73,6 +73,8 @@ so a cold turn still never reaches the npm registry (finding 2).
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -113,6 +115,7 @@ from .opencode_mcp import apply_mcp_config
 from .opencode_provider import (
     OpenCodeProviderConfigError,
     apply_provider_config,
+    provider_env_name,
     require_ollama_base_url,
     require_openrouter_key,
 )
@@ -372,6 +375,7 @@ def _prepare_turn_config(
     model: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
     disallowed_tools: Optional[List[str]] = None,
+    commands: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
@@ -439,6 +443,13 @@ def _prepare_turn_config(
     # persistent store that can disagree with `.mcp.json`.
     apply_mcp_config(config)
 
+    # Skills/commands as OpenCode commands (Abilityai/lilu#655). Additive: an
+    # operator's own `command:` entry keeps its name.
+    if commands:
+        existing_commands = config.get("command")
+        existing_commands = dict(existing_commands) if isinstance(existing_commands, dict) else {}
+        config["command"] = {**commands, **existing_commands}
+
     # Read-only mode and the guardrail deny-list (Abilityai/lilu#654), applied
     # LAST so neither the shared config nor a provider block can re-open a
     # denied tool for this turn. The deny-list is the same GUARD-003 ∪
@@ -459,6 +470,170 @@ def _prepare_turn_config(
     except OSError as exc:  # pragma: no cover — defensive
         logger.warning("[OpenCode] could not chmod turn config: %s", exc)
     return turn_dir
+
+
+# Abilityai/lilu#655: Trinity `/playbook args` messages run DETERMINISTICALLY
+# through `opencode run --command <name>` (measured on 1.18.32: "the command to
+# run, use message for args"), with the body carried by the per-turn config's
+# `command.<name>.template`. The bodies are mirrored from the same files Claude
+# Code resolves — `.claude/skills/<name>/SKILL.md` and `.claude/commands/<name>.md`
+# — so one skill tree serves both runtimes, re-read every turn.
+_COMMAND_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+_DESCRIPTION_RE = re.compile(r"^description:[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _command_entry(path: str) -> Optional[Dict[str, str]]:
+    """``{template, description}`` for one skill/command file, or None.
+
+    Frontmatter is stripped from the template (it is Claude Code metadata, not
+    prompt). A body with no ``$ARGUMENTS`` gets it appended, so the caller's
+    args always reach the model whatever the CLI does with an argument-less
+    template — the Claude convention is that args follow the skill body.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except (OSError, UnicodeDecodeError):
+        return None
+    description = ""
+    match = _FRONTMATTER_RE.match(text)
+    if match:
+        desc = _DESCRIPTION_RE.search(match.group(1))
+        if desc:
+            description = desc.group(1).strip().strip("'\"")
+        text = text[match.end():]
+    body = text.strip()
+    if not body:
+        return None
+    if "$ARGUMENTS" not in body:
+        body += "\n\n$ARGUMENTS"
+    entry = {"template": body}
+    if description:
+        entry["description"] = description
+    return entry
+
+
+def load_workspace_commands(home: Optional[str] = None) -> Dict[str, Dict[str, str]]:
+    """The agent's skills and commands as an OpenCode ``command`` map.
+
+    ``.claude/commands/<name>.md`` first, then ``.claude/skills/<name>/SKILL.md``
+    over it — the skill wins a name clash, matching the platform's skill
+    library being the managed source. Names that are not a plain command token
+    are skipped rather than sanitised, so a resolved name is always exactly
+    what the operator typed.
+    """
+    base = os.path.join(home or _AGENT_HOME, ".claude")
+    commands: Dict[str, Dict[str, str]] = {}
+    commands_dir = os.path.join(base, "commands")
+    skills_dir = os.path.join(base, "skills")
+    try:
+        command_files = sorted(os.listdir(commands_dir))
+    except OSError:
+        command_files = []
+    for filename in command_files:
+        name, ext = os.path.splitext(filename)
+        if ext != ".md" or not _COMMAND_NAME_RE.match(name):
+            continue
+        entry = _command_entry(os.path.join(commands_dir, filename))
+        if entry:
+            commands[name] = entry
+    try:
+        skill_names = sorted(os.listdir(skills_dir))
+    except OSError:
+        skill_names = []
+    for name in skill_names:
+        if not _COMMAND_NAME_RE.match(name):
+            continue
+        entry = _command_entry(os.path.join(skills_dir, name, "SKILL.md"))
+        if entry:
+            commands[name] = entry
+    return commands
+
+
+def split_slash_command(prompt: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``("name", "args")`` when *prompt* is a ``/name args`` invocation.
+
+    The leading token must be a plain command token, so an absolute path
+    (``/home/developer/x.md what is this?``) is a message, not a command.
+    """
+    stripped = (prompt or "").lstrip()
+    if not stripped.startswith("/"):
+        return None
+    head, _, rest = stripped[1:].partition(" ")
+    head, nl, tail = head.partition("\n")
+    if not _COMMAND_NAME_RE.match(head):
+        return None
+    args = (tail + (" " + rest if rest else "")) if nl else rest
+    return head, args.strip()
+
+
+def resolve_context_window_hint(
+    model: Optional[str],
+    config: Optional[Dict[str, object]],
+    env: Optional[Dict[str, str]],
+) -> Optional[int]:
+    """The operator-declared window for a provider/model id, or None.
+
+    ``provider.<pid>.models.<mid>.limit.context`` (OpenCode's own schema) wins,
+    then ``OPENCODE_PROVIDER_<PID>_CONTEXT``. Without one, a local id such as
+    ``ollama/gemma4:12b`` falls to the catalog's 200K floor — a denominator
+    that is wrong for every small local model (Abilityai/lilu#655).
+    """
+    if not model or "/" not in model:
+        return None
+    provider_id, model_id = model.split("/", 1)
+    providers = (config or {}).get("provider")
+    if isinstance(providers, dict):
+        block = providers.get(provider_id)
+        models = block.get("models") if isinstance(block, dict) else None
+        entry = models.get(model_id) if isinstance(models, dict) else None
+        limit = entry.get("limit") if isinstance(entry, dict) else None
+        value = _as_int(limit.get("context")) if isinstance(limit, dict) else 0
+        if value > 0:
+            return value
+    raw = (env if env is not None else os.environ).get(
+        provider_env_name(provider_id, "CONTEXT")
+    )
+    value = _as_int((raw or "").strip())
+    return value if value > 0 else None
+
+
+def _write_image_attachments(turn_dir: str, images: Optional[List[Dict]]) -> List[str]:
+    """Decode ``[{"media_type", "data"}]`` (the #562 shape) into files under the
+    turn dir and return their paths for ``-f``. A malformed entry is skipped
+    with a warning rather than failing the turn."""
+    paths: List[str] = []
+    if not images:
+        return paths
+    attach_dir = os.path.join(turn_dir, "attachments")
+    os.makedirs(attach_dir, exist_ok=True)
+    for index, image in enumerate(images):
+        if not isinstance(image, dict):
+            continue
+        media_type = str(image.get("media_type") or "image/png")
+        ext = _IMAGE_EXTENSIONS.get(media_type.lower())
+        try:
+            data = base64.b64decode(image.get("data") or "", validate=True)
+        except (binascii.Error, ValueError, TypeError):
+            data = b""
+        if not ext or not data:
+            logger.warning("[OpenCode] skipping unusable image attachment %d (%s)", index, media_type)
+            continue
+        path = os.path.join(attach_dir, f"image-{index}{ext}")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        paths.append(path)
+    return paths
+
+
+_IMAGE_EXTENSIONS = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+}
 
 
 def _safe_token(execution_id: str) -> str:
@@ -590,6 +765,7 @@ class _OpenCodeParseState:
     seen_tool_ids: set = field(default_factory=set)
     reasoning_tokens: int = 0
     cache_write_tokens: int = 0
+    input_tokens_total: int = 0
     # Abilityai/lilu#654: one OpenCode `step_start` is one model call — the
     # unit `max_turns` caps — and the structured fields of an `error` event.
     step_count: int = 0
@@ -695,8 +871,12 @@ def _record_tool(state: _OpenCodeParseState, event: dict) -> None:
 def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     """Fold one ``step_finish`` payload into the running totals.
 
-    Tokens and cost are SUMMED across steps: each ``step_finish`` reports its
-    own step. If a future OpenCode makes them cumulative this over-reports —
+    Output tokens and cost are SUMMED across steps: each ``step_finish``
+    reports its own step. ``input_tokens`` is NOT: every step re-sends the
+    whole session, so the LAST step's input is the context the session now
+    occupies, and the sum over-counts it once per step (Abilityai/lilu#655 —
+    a 3-step turn on a 30K context reported ~90K). The sum is kept on
+    ``input_tokens_total`` for the log line. If a future OpenCode makes them cumulative this over-reports —
     chosen deliberately, because cost feeds `max_cost_usd` loop budgets and a
     budget is a spend control, so the safe failure direction is over- not
     under-reporting.
@@ -710,7 +890,10 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
         tokens = (event.get("usage") or {}) if isinstance(event.get("usage"), dict) else {}
     cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
 
-    state.metadata.input_tokens += _as_int(tokens.get("input"))
+    step_input = _as_int(tokens.get("input"))
+    state.input_tokens_total += step_input
+    if step_input:
+        state.metadata.input_tokens = step_input
     state.metadata.output_tokens += _as_int(tokens.get("output"))
     state.metadata.cache_read_tokens += _as_int(cache.get("read"))
     state.cache_write_tokens += _as_int(cache.get("write"))
@@ -942,9 +1125,10 @@ class OpenCodeRuntime(AgentRuntime):
     def capabilities(cls) -> RuntimeCapabilities:
         return RuntimeCapabilities(
             chat_continuity=True,       # opencode run --session <id>
-            session_tab_resume=False,   # no cached-UUID --resume machinery
+            session_tab_resume=True,    # resume_session_id -> --session <id> (#655)
             mcp_support=True,           # MCP servers via opencode.json
             cost_reporting="native",    # step_finish carries a real cost
+            async_dispatch=True,        # #1083 202 + callback (#655)
         )
 
     def is_available(self) -> bool:
@@ -998,6 +1182,8 @@ class OpenCodeRuntime(AgentRuntime):
         model: Optional[str],
         session_id: Optional[str],
         directory: Optional[str],
+        command: Optional[str] = None,
+        files: Optional[List[str]] = None,
     ) -> List[str]:
         cmd = ["opencode", "run", "--format", "json", "--auto"]
         if model:
@@ -1006,6 +1192,10 @@ class OpenCodeRuntime(AgentRuntime):
             cmd += ["--session", session_id]
         if directory:
             cmd += ["--dir", directory]
+        if command:
+            cmd += ["--command", command]
+        for path in files or ():
+            cmd += ["-f", path]
         return cmd
 
     # -- core subprocess execution (stubbed in unit tests) -------------------
@@ -1020,6 +1210,7 @@ class OpenCodeRuntime(AgentRuntime):
         execution_id: Optional[str],
         concurrent_reader: bool = False,
         max_turns: Optional[int] = None,
+        images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
         model = validate_provider_model(model)
@@ -1055,11 +1246,40 @@ class OpenCodeRuntime(AgentRuntime):
             auth_path=os.path.join(_shared_config_dir(), "auth.json"),
         )
 
+        # `/name args` -> `--command name` (Abilityai/lilu#655). An unknown
+        # name answers exactly as Claude Code does, WITHOUT spawning a model
+        # that would improvise a reply: the backend's #1410 detector keys on
+        # this text and records SKILL_NOT_FOUND instead of a $0 success.
+        commands = load_workspace_commands()
+        slash = split_slash_command(prompt)
+        command_name: Optional[str] = None
+        if slash:
+            if slash[0] not in commands:
+                logger.warning("[OpenCode] unresolved command /%s (execution_id=%s)", slash[0], execution_id)
+                metadata = ExecutionMetadata()
+                metadata.context_window = self.get_context_window(model)
+                metadata.execution_id = execution_id
+                metadata.session_id = session_id
+                metadata.status = "success"
+                return f"Unknown command: /{slash[0]}", [], metadata, [], session_id
+            command_name, prompt = slash
+
         refresh_agents_md()  # Abilityai/lilu#627: identity tracks CLAUDE.md per turn
-        turn_dir = _prepare_turn_config(execution_id, system_prompt, model, env=env)
+        turn_dir = _prepare_turn_config(
+            execution_id, system_prompt, model, env=env, commands=commands
+        )
         env["XDG_CONFIG_HOME"] = turn_dir
+        try:
+            with open(
+                os.path.join(turn_dir, "opencode", "opencode.json"), "r", encoding="utf-8"
+            ) as fh:
+                turn_config = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            turn_config = None
+        image_paths = _write_image_attachments(turn_dir, images)
         cmd = self._build_command(
-            model=model, session_id=session_id, directory=_AGENT_HOME
+            model=model, session_id=session_id, directory=_AGENT_HOME,
+            command=command_name, files=image_paths,
         )
         # End-of-options separator, VERIFIED against v1.18.32 rather than
         # assumed: `opencode run -- "Reply with exactly the word ZEBRA."`
@@ -1067,11 +1287,16 @@ class OpenCodeRuntime(AgentRuntime):
         # not diverted into yargs' `argv['--']`. Without it a prompt that
         # happens to begin with '-' ("-v, what changed?") is parsed as a flag
         # and the turn either errors or silently runs on an empty message.
-        cmd.append("--")
-        cmd.append(prompt)
+        # A `--command` with no args sends no message at all.
+        if prompt or not command_name:
+            cmd.append("--")
+            cmd.append(prompt)
 
         metadata = ExecutionMetadata()
-        metadata.context_window = self.get_context_window(model)
+        metadata.context_window = (
+            resolve_context_window_hint(model, turn_config, env)
+            or self.get_context_window(model)
+        )
         metadata.execution_id = execution_id
         state = _OpenCodeParseState(execution_log=[], metadata=metadata, model=model)
         raw_messages: List[Dict] = []
@@ -1319,9 +1544,9 @@ class OpenCodeRuntime(AgentRuntime):
             metadata.status = "success"
             logger.info(
                 "[OpenCode] done execution_id=%s outcome=%s cost=$%s tokens=%s/%s "
-                "(reasoning=%s ⊂ output, cache r/w=%s/%s) tools=%s",
+                "(input summed over steps=%s, reasoning=%s ⊂ output, cache r/w=%s/%s) tools=%s",
                 execution_id, outcome, metadata.cost_usd, metadata.input_tokens,
-                metadata.output_tokens, state.reasoning_tokens,
+                metadata.output_tokens, state.input_tokens_total, state.reasoning_tokens,
                 metadata.cache_read_tokens, state.cache_write_tokens,
                 metadata.tool_count,
             )
@@ -1574,8 +1799,6 @@ class OpenCodeRuntime(AgentRuntime):
                 status_code=503,
                 detail="OpenCode CLI is not available in this container",
             )
-        if images:
-            logger.warning("[OpenCode] images are not supported — ignoring")
         if allowed_tools:
             logger.info(
                 "[OpenCode] allowed_tools=%s requested; per-tool gating lands in "
@@ -1599,6 +1822,7 @@ class OpenCodeRuntime(AgentRuntime):
                 execution_id=execution_id,
                 concurrent_reader=True,
                 max_turns=max_turns,
+                images=images,
             )
         except OpenCodeModelShapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))

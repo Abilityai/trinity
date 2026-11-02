@@ -53,9 +53,10 @@ def test_codex_matches_gemini_shape_for_resume_and_cost():
 def test_opencode_has_continuity_and_native_cost():
     caps = OpenCodeRuntime.capabilities()
     assert caps.chat_continuity is True
-    assert caps.session_tab_resume is False
+    assert caps.session_tab_resume is True    # --session <id> (Abilityai/lilu#655)
     assert caps.mcp_support is True
     assert caps.cost_reporting == "native"
+    assert caps.async_dispatch is True        # #1083 202 + callback (#655)
 
 
 def test_capabilities_to_dict_is_serializable_for_callers():
@@ -68,6 +69,7 @@ def test_capabilities_to_dict_is_serializable_for_callers():
         "session_tab_resume": False,
         "mcp_support": True,
         "cost_reporting": "estimated",
+        "async_dispatch": False,
     }
 
 
