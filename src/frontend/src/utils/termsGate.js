@@ -7,9 +7,9 @@
  * helpers only decide where the SPA goes around that wall.
  */
 import { safeRedirect } from './safeRedirect'
-import { landingAfterSignIn } from './workspaceOnly'
+import { isTermsPath, landingAfterSignIn, TERMS_PATH } from './workspaceOnly'
 
-export const TERMS_PATH = '/terms'
+export { isTermsPath, TERMS_PATH }
 
 /** `terms_required`: accept to continue. The other two: the invitation that
  *  opened the account is no longer live, so there is nothing to accept. */
@@ -19,10 +19,6 @@ const CLOSED_MESSAGES = Object.freeze({
   invite_expired: 'This invitation has expired.',
   invite_revoked: 'This invitation was withdrawn.',
 })
-
-export function isTermsPath(path) {
-  return (path || '').split(/[?#]/)[0] === TERMS_PATH
-}
 
 /** What the terms page says instead of the text, or null while the door is open. */
 export function closedInviteMessage(code) {
