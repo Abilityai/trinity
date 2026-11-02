@@ -29,13 +29,12 @@ const decisions = createDecisionTools(fake, false);
 const voice = createVoiceReplyTools(fake, false);
 
 // Every tool whose route is in AGENT_CALLABLE_SELF (tests/unit/_route_census.py)
-// and still takes `agent_name` — kept by hand; the other self-fenced tools take
+// and still takes `agent_name`, except the memory tools, which have their own
+// block below — kept by hand; the other self-fenced tools take
 // the agent from the key. (`call_a2a_agent`, `get_a2a_task` and `get_agent_spending`
 // REQUIRE the name, so it is not an override; each says an agent key may only pass
 // its own.)
 const SELF_FENCED: Tool[] = [
-  memory.writeUserMemory,
-  memory.searchMemory,
   reminders.setReminder,
   reminders.listReminders,
   reminders.cancelReminder,
@@ -43,6 +42,19 @@ const SELF_FENCED: Tool[] = [
   decisions.listSeatDecisions,
   voice.sendVoiceReply,
 ] as unknown as Tool[];
+
+// The memory doors refuse every human, a user-scoped key included (#4121,
+// trinity-enterprise#1028), so `agent_name` has no user-key path to describe.
+describe("the agents-only memory tools tell the caller to leave agent_name out", () => {
+  for (const tool of [memory.writeUserMemory, memory.searchMemory] as unknown as Tool[]) {
+    it(tool.name, () => {
+      const description = tool.parameters.shape.agent_name?.description ?? "";
+      assert.match(description, /leave this out/i, `${tool.name}: ${description}`);
+      assert.match(description, /naming another is refused/i, `${tool.name}: ${description}`);
+      assert.doesNotMatch(description, /user-scoped key/i, `${tool.name}: ${description}`);
+    });
+  }
+});
 
 describe("self-fenced tools describe agent_name as user-key-only", () => {
   for (const tool of SELF_FENCED) {

@@ -161,6 +161,12 @@ complete updated notes, not just the new part. Every write is recorded, and the
 person can see what the agent changed and undo the latest write in their
 Workspace. Another agent cannot write through this agent's run.
 
+The platform refuses the write while another turn that serves someone else is
+running on the same agent, because it cannot tell the two turns apart. So if one
+agent briefs several people, give each schedule its own time: a brief cannot save
+its notes while another brief runs, and the agent is told to say the note was not
+saved.
+
 ### Held until a companion is marked ready
 
 An agent whose template declares a role is a **companion**. While its owner has
