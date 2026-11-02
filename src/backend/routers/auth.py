@@ -643,7 +643,9 @@ async def request_email_login_code(request: Request):
 
 def _require_email_login_open() -> None:
     """The door gates every platform email-login redeemer applies before it
-    reads the body: setup done, email login on, the login policy allows codes."""
+    reads the body: setup done, email login on. Each redeemer then asks the
+    login policy itself, in its own body, so the ent#849 per-function guard
+    (`test_every_login_code_caller_asks_the_gate`) sees the call."""
     # Block if setup is not completed
     if not is_setup_completed():
         raise HTTPException(
@@ -659,14 +661,15 @@ def _require_email_login_open() -> None:
             detail="Email authentication is disabled"
         )
 
-    # ent#849: a registered login policy can turn email-code sign-in off.
-    # Checked before the body is read, so the refusal is identical for every
-    # address and spends no rate-limit budget. `/token` never asks this gate.
-    if not login_policy_gate.email_code_allowed():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="email_code_disabled"
-        )
+
+def _email_code_disabled() -> HTTPException:
+    """ent#849: the refusal when a registered login policy turns email-code
+    sign-in off. Asked before the body is read, so the refusal is identical for
+    every address and spends no rate-limit budget. `/token` never asks it."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="email_code_disabled"
+    )
 
 
 def _email_allow_listed(email: str) -> bool:
@@ -787,6 +790,8 @@ async def verify_email_login_code(request: Request):
     from database import EmailLoginVerify
 
     _require_email_login_open()
+    if not login_policy_gate.email_code_allowed():
+        raise _email_code_disabled()
 
     # Get client IP for rate limiting
     client_ip = request.client.host if request.client else "unknown"
@@ -858,6 +863,8 @@ async def redeem_email_login_handoff(request: Request):
     from services import login_handoff_service
 
     _require_email_login_open()
+    if not login_policy_gate.email_code_allowed():
+        raise _email_code_disabled()
 
     client_ip = request.client.host if request.client else "unknown"
     try:

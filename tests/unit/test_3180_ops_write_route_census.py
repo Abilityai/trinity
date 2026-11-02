@@ -333,6 +333,7 @@ NO_TRINITY_CREDENTIAL = {
     "routers/auth.py::validate_token": OTHER_CREDENTIAL + " (a JWT only; an MCP key fails jwt.decode)",
     "routers/auth.py::request_email_login_code": UNAUTHENTICATED,
     "routers/auth.py::verify_email_login_code": OTHER_CREDENTIAL + " (emailed code)",
+    "routers/auth.py::redeem_email_login_handoff": OTHER_CREDENTIAL + " (one-time Workspace hand-off, #4157)",
     "routers/auth.py::request_access": UNAUTHENTICATED,
     "routers/agents.py::agent_heartbeat": OWN_VALIDATOR,
     "routers/agents.py::agent_execution_result": OWN_VALIDATOR,
