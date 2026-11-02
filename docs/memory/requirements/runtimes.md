@@ -20,7 +20,14 @@
 ### 14.3 Runtime Configuration
 - **Status**: ✅ Implemented (2025-12-28)
 - **Description**: Runtime selection via `template.yaml` `runtime:` field
-- **Schema**: `runtime: {type: claude-code|gemini-cli, model: string}`
+- **Schema**: `runtime: {type: claude-code|gemini-cli|codex|opencode, model: string}` — an `opencode` model is `provider/model`, shape-checked at create and at dispatch (400 with a named reason)
+
+### 14.4 OpenCode Runtime (#2981)
+- **Status**: ✅ Implemented (base image with the pinned CLI not yet published)
+- **Description**: `opencode run --format json --auto`, CLI pinned to v1.18.32; one runtime reaches OpenRouter, a local Ollama, or any OpenAI-compatible endpoint by the `provider/` prefix of the model id. Detail: [RT-OPENCODE](#rt-opencode--opencode-as-a-fourth-runtime-abilityaililu257-steps-01) below, flow [opencode-runtime.md](../feature-flows/opencode-runtime.md)
+- **Model sources**: `OPENCODE_PROVIDER_<ID>_{BASE_URL,API_KEY,MODELS,NPM,IMAGES}` in the agent `.env`; platform settings `openrouter_api_key` (encrypted, injected as `OPENROUTER_API_KEY` into `runtime == opencode` agents only), `opencode_default_provider_base_url` (Ollama fallback), `platform_default_model_opencode` (the model a turn with none runs on — never the Claude fleet default). An `openrouter/…` turn with no key anywhere is refused with a named 400 before the subprocess starts
+- **Env-delivered controls (B1)**: the per-turn config is OpenCode's lowest-precedence layer, so a workspace `opencode.json` could override it. The share kill switch (`OPENCODE_DISABLE_SHARE=1`, every spawn) and the read-only deny set (`OPENCODE_PERMISSION`, read-only mode only) are therefore delivered through env, which OpenCode applies after every config file. Guardrail `disallowed_tools` remain config-only
+- **Prompt on stdin (B2)**: the message is written to stdin and stdin closed, never an argv element (the #3838 class), so a >128 KiB message cannot fail `Popen` with `E2BIG`; a failed handoff ends and unregisters the child
 
 ---
 
