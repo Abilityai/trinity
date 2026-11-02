@@ -60,8 +60,10 @@ def test_opencode_is_not_claude():
 
 # --- Session-tab gate ------------------------------------------------------
 
-def test_opencode_has_no_session_tab_resume():
-    assert "opencode" in RUNTIMES_WITHOUT_SESSION_TAB_RESUME
+def test_opencode_has_session_tab_resume():
+    """Abilityai/lilu#655: `resume_session_id` reaches `--session <id>`, so the
+    Session tab resumes an OpenCode conversation instead of a stateless turn."""
+    assert "opencode" not in RUNTIMES_WITHOUT_SESSION_TAB_RESUME
     # ...and the existing members are unchanged.
     assert "codex" in RUNTIMES_WITHOUT_SESSION_TAB_RESUME
     assert "claude-code" not in RUNTIMES_WITHOUT_SESSION_TAB_RESUME
@@ -78,7 +80,7 @@ def test_session_tab_gate_matches_the_agent_side_capability():
     sys.path.insert(0, str(root))
     try:
         from agent_server.services.opencode_runtime import OpenCodeRuntime
-        assert OpenCodeRuntime.capabilities().session_tab_resume is False
+        assert OpenCodeRuntime.capabilities().session_tab_resume is True
     finally:
         if str(root) in sys.path:
             sys.path.remove(str(root))

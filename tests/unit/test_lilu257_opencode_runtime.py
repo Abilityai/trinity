@@ -361,9 +361,10 @@ def test_capabilities():
     caps = OpenCodeRuntime.capabilities()
     assert isinstance(caps, RuntimeCapabilities)
     assert caps.chat_continuity is True
-    assert caps.session_tab_resume is False
+    assert caps.session_tab_resume is True
     assert caps.mcp_support is True
     assert caps.cost_reporting == "native"
+    assert caps.async_dispatch is True
 
 
 def test_configure_mcp_persists_into_the_single_store(monkeypatch):
@@ -1228,3 +1229,234 @@ async def test_real_binary_unknown_model_is_400(monkeypatch, tmp_path, real_runt
         await runtime.execute_headless("t", model="fake/m", timeout_seconds=60)
     assert exc.value.status_code == 400
     assert exc.value.detail["error_code"] == "model_unsupported"
+
+
+# ---------------------------------------------------------------------------
+# Abilityai/lilu#655 — full platform citizen
+# ---------------------------------------------------------------------------
+
+from agent_server.services.opencode_runtime import (  # noqa: E402
+    load_workspace_commands,
+    resolve_context_window_hint,
+    split_slash_command,
+)
+
+
+def _write_skill_tree(home):
+    skills = home / ".claude" / "skills"
+    (skills / "self-diagnostic").mkdir(parents=True)
+    (skills / "self-diagnostic" / "SKILL.md").write_text(
+        "---\nname: self-diagnostic\ndescription: Check yourself\n---\n\nRun the checks.\n"
+    )
+    (skills / "with-args").mkdir()
+    (skills / "with-args" / "SKILL.md").write_text("Target: $ARGUMENTS\n")
+    (skills / "bad name").mkdir()
+    (skills / "bad name" / "SKILL.md").write_text("never")
+    (skills / "empty").mkdir()
+    (skills / "empty" / "SKILL.md").write_text("---\ndescription: x\n---\n")
+    commands = home / ".claude" / "commands"
+    commands.mkdir()
+    (commands / "deploy.md").write_text("Deploy it.")
+    (commands / "with-args.md").write_text("the command copy loses to the skill")
+    (commands / "notes.txt").write_text("not a command")
+
+
+def test_workspace_commands_mirror_skills_and_commands(tmp_path):
+    _write_skill_tree(tmp_path)
+    commands = load_workspace_commands(str(tmp_path))
+    assert set(commands) == {"self-diagnostic", "with-args", "deploy"}
+    # Frontmatter is metadata, not prompt; the description is carried over.
+    diag = commands["self-diagnostic"]
+    assert diag["description"] == "Check yourself"
+    assert "---" not in diag["template"]
+    # A body without $ARGUMENTS gets it appended, so args always reach the model.
+    assert diag["template"] == "Run the checks.\n\n$ARGUMENTS"
+    # An explicit placeholder is left where the author put it; the skill wins
+    # a name clash with a command.
+    assert commands["with-args"]["template"] == "Target: $ARGUMENTS"
+    assert commands["deploy"]["template"] == "Deploy it.\n\n$ARGUMENTS"
+
+
+@pytest.mark.parametrize(
+    "prompt,expected",
+    [
+        ("/self-diagnostic", ("self-diagnostic", "")),
+        ("  /with-args alpha beta ", ("with-args", "alpha beta")),
+        ("/plugin:skill x", ("plugin:skill", "x")),
+        ("/deploy\nline two", ("deploy", "line two")),
+        ("/home/developer/notes.md what is this?", None),
+        ("plain message", None),
+        ("/", None),
+        ("", None),
+    ],
+)
+def test_split_slash_command(prompt, expected):
+    assert split_slash_command(prompt) == expected
+
+
+def test_turn_config_carries_the_command_map(monkeypatch, tmp_path):
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path / "oc"))
+    monkeypatch.setattr(
+        opencode_runtime, "_load_shared_config",
+        lambda: {"command": {"deploy": {"template": "operator's own"}}},
+    )
+    monkeypatch.setattr(opencode_runtime, "apply_mcp_config", lambda config: None)
+    turn_dir = opencode_runtime._prepare_turn_config(
+        "e-cmd", None, None,
+        commands={"deploy": {"template": "mirrored"}, "self-diagnostic": {"template": "x"}},
+    )
+    with open(f"{turn_dir}/opencode/opencode.json") as fh:
+        config = json.load(fh)
+    assert config["command"]["self-diagnostic"] == {"template": "x"}
+    # Additive: the operator's declared command keeps its name.
+    assert config["command"]["deploy"] == {"template": "operator's own"}
+
+
+def _spawn_capture(monkeypatch, tmp_path, stream):
+    """Fake subprocess + a skill tree; returns the list every argv lands in."""
+    _write_skill_tree(tmp_path)
+    monkeypatch.setattr(opencode_runtime, "_AGENT_HOME", str(tmp_path))
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path / "oc"))
+    monkeypatch.setattr(opencode_runtime, "refresh_agents_md", lambda: None)
+    monkeypatch.setattr(opencode_runtime, "apply_mcp_config", lambda config: None)
+    _install_fake_subprocess(monkeypatch, stdout_lines=stream, return_code=0)
+    seen = []
+    fake_popen = opencode_runtime.subprocess.Popen
+
+    def _popen(cmd, *a, **k):
+        seen.append(list(cmd))
+        return fake_popen(cmd, *a, **k)
+
+    monkeypatch.setattr(opencode_runtime.subprocess, "Popen", _popen)
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    return runtime, seen
+
+
+@pytest.mark.asyncio
+async def test_playbook_runs_as_a_command_with_args(monkeypatch, tmp_path):
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("done"))
+    response, *_ = await runtime.execute_headless(
+        "/with-args alpha beta", model="anthropic/claude-sonnet-5"
+    )
+    assert response == "done"
+    cmd = seen[0]
+    assert cmd[cmd.index("--command") + 1] == "with-args"
+    assert cmd[-2:] == ["--", "alpha beta"]
+
+
+@pytest.mark.asyncio
+async def test_argless_playbook_sends_no_message(monkeypatch, tmp_path):
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("ok"))
+    await runtime.execute_headless("/self-diagnostic", model="anthropic/claude-sonnet-5")
+    cmd = seen[0]
+    assert cmd[-2:] == ["--command", "self-diagnostic"]
+    assert "--" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_unknown_playbook_answers_like_claude_without_spawning(monkeypatch, tmp_path):
+    """The backend's #1410 detector keys on this exact reply, so a missing
+    skill on an OpenCode agent records SKILL_NOT_FOUND instead of letting a
+    model improvise an answer that reads as success."""
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("should not run"))
+    response, log, metadata, _session = await runtime.execute_headless(
+        "/nope now", model="anthropic/claude-sonnet-5"
+    )
+    assert response == "Unknown command: /nope"
+    assert seen == []
+    assert log == []
+    assert metadata.cost_usd is None
+
+
+@pytest.mark.asyncio
+async def test_a_path_is_a_message_not_a_command(monkeypatch, tmp_path):
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("it is a file"))
+    await runtime.execute_headless(
+        "/home/developer/notes.md what is this?", model="anthropic/claude-sonnet-5"
+    )
+    assert "--command" not in seen[0]
+    assert seen[0][-1] == "/home/developer/notes.md what is this?"
+
+
+def test_input_tokens_is_the_last_steps_input_not_the_sum():
+    """Every step re-sends the session, so the sum counts the context once per
+    step. 3 steps of 1000/1200/1500 occupy 1500, not 3700."""
+    lines = (
+        _step("a", tokens={"input": 1000, "output": 10})
+        + _step("b", tokens={"input": 1200, "output": 20})
+        + _step("c", tokens={"input": 1500, "output": 30}, cost=0.01)
+    )
+    _text, _log, metadata, _raw, _outcome = parse_opencode_jsonl(lines)
+    assert metadata.input_tokens == 1500
+    assert metadata.input_tokens < 1000 + 1200 + 1500
+    assert metadata.output_tokens == 60  # output still sums
+
+
+def test_a_step_without_usage_does_not_zero_the_input():
+    lines = _step("a", tokens={"input": 900, "output": 1}) + _step("b")
+    _text, _log, metadata, _raw, _outcome = parse_opencode_jsonl(lines)
+    assert metadata.input_tokens == 900
+
+
+def test_context_window_hint_from_provider_config_then_env():
+    config = {"provider": {"ollama": {"models": {"gemma4:12b": {"limit": {"context": 32768}}}}}}
+    assert resolve_context_window_hint("ollama/gemma4:12b", config, {}) == 32768
+    env = {"OPENCODE_PROVIDER_OLLAMA_CONTEXT": "8192"}
+    assert resolve_context_window_hint("ollama/qwen3:8b", config, env) == 8192
+    # Config beats env for the model it names.
+    assert resolve_context_window_hint("ollama/gemma4:12b", config, env) == 32768
+    # Nothing declared -> None, so the caller keeps the catalog value.
+    assert resolve_context_window_hint("ollama/qwen3:8b", {}, {}) is None
+    assert resolve_context_window_hint("anthropic/claude-sonnet-5", None, {}) is None
+    assert resolve_context_window_hint(None, config, env) is None
+    assert resolve_context_window_hint("ollama/x", {}, {"OPENCODE_PROVIDER_OLLAMA_CONTEXT": "lots"}) is None
+
+
+@pytest.mark.asyncio
+async def test_declared_context_reaches_metadata(monkeypatch, tmp_path):
+    runtime, _seen = _spawn_capture(monkeypatch, tmp_path, _step("hi"))
+    # The hint is read from the turn's SPAWN env (the layers the child gets).
+    spawn_env = {
+        "OPENCODE_PROVIDER_OLLAMA_BASE_URL": "http://127.0.0.1:11434",
+        "OPENCODE_PROVIDER_OLLAMA_CONTEXT": "16384",
+    }
+    monkeypatch.setattr(
+        opencode_runtime, "build_execution_env",
+        lambda extra=None, **kw: {**spawn_env, **(extra or {})},
+    )
+    _r, _l, metadata, _s = await runtime.execute_headless("hi", model="ollama/gemma4:12b")
+    assert metadata.context_window == 16384
+
+
+@pytest.mark.asyncio
+async def test_images_are_attached_with_dash_f(monkeypatch, tmp_path):
+    import base64
+
+    png = b"\x89PNG\r\n\x1a\nfake"
+    runtime, seen = _spawn_capture(monkeypatch, tmp_path, _step("a red square"))
+    captured = {}
+    real_cleanup = opencode_runtime._cleanup_turn_dir
+
+    def _keep(turn_dir):
+        cmd = seen[0]
+        path = cmd[cmd.index("-f") + 1]
+        with open(path, "rb") as fh:
+            captured["bytes"] = fh.read()
+        real_cleanup(turn_dir)
+
+    monkeypatch.setattr(opencode_runtime, "_cleanup_turn_dir", _keep)
+    response, *_ = await runtime.execute_headless(
+        "describe the image", model="anthropic/claude-sonnet-5",
+        images=[
+            {"media_type": "image/png", "data": base64.b64encode(png).decode()},
+            {"media_type": "image/png", "data": "!!not base64!!"},
+            {"media_type": "application/pdf", "data": base64.b64encode(b"x").decode()},
+        ],
+    )
+    assert response == "a red square"
+    cmd = seen[0]
+    assert cmd.count("-f") == 1  # the two unusable entries are skipped
+    assert cmd[cmd.index("-f") + 1].endswith(".png")
+    assert cmd.index("-f") < cmd.index("--")  # flags before the separator
+    assert captured["bytes"] == png

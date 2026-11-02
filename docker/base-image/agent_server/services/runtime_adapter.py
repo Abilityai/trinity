@@ -39,6 +39,11 @@ class RuntimeCapabilities:
     session_tab_resume: bool = False
     mcp_support: bool = False
     cost_reporting: str = "estimated"  # "native" | "estimated"
+    # #1083 async 202 + result callback: the runtime's `execute_headless` can
+    # run detached and its result fits the runtime-agnostic terminal envelope.
+    # Claude is gated by name (`result_callback.is_claude_runtime`), so it does
+    # not need to set this; OpenCode opts in (Abilityai/lilu#655).
+    async_dispatch: bool = False
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
