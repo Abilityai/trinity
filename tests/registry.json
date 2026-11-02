@@ -7775,6 +7775,29 @@
         "channels"
       ],
       "description": "trinity-enterprise#1059 (re-review N1): a refused turn's completion report (Workspace, Slack, Telegram) shows the policy's sentence without the stored [usage_share] code; an unknown [...] and every success report are left as the agent wrote them."
+    },
+    {
+      "file": "unit/test_ent1054_terms_gate.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054: the terms-acceptance gate seam (services/terms_gate.py) consulted once in resolve_platform_user_unfloored. Real routed requests through the real resolver: a Workspace-only person is refused 403 terms_required on a @workspace_route route, the portal door, the rooms door and their own user-scoped key while a provider says so; operator+ never consulted; a raising or empty provider fails closed for a user; @terms_route exempts a route (logout and /api/users/me pinned); an agent key is untouched; the suspension check stays first. No Docker."
+    },
+    {
+      "file": "unit/test_ent1054_email_html_shell.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "email",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
     }
   ]
 }
