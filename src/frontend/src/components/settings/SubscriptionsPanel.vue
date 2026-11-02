@@ -310,7 +310,7 @@
                               <div v-if="subsStore.breakdownLoading[sub.id]" class="text-xs text-gray-400">Loading…</div>
                               <div v-else-if="!breakdownFor(sub.id) || breakdownFor(sub.id).error" class="text-xs text-gray-500 dark:text-gray-400">
                                 Breakdown unavailable —
-                                <button class="underline" @click.stop="subsStore.fetchBreakdown(sub.id)">retry</button>
+                                <button class="underline" @click.stop="loadBreakdown(sub.id)">retry</button>
                               </div>
                               <table v-else-if="(breakdownFor(sub.id).window_7d || []).length" class="w-full text-xs">
                                 <thead>
@@ -320,6 +320,7 @@
                                     <th class="text-right font-medium py-1">Out tokens</th>
                                     <th class="text-right font-medium py-1">Messages</th>
                                     <th class="text-right font-medium py-1">5h cost</th>
+                                    <th v-if="shareEntitled" class="text-right font-medium py-1" title="How much of its own usage share each agent has used, over the last 7 days and 5 hours (all subscriptions it ran on)">Share used (7d · 5h)</th>
                                   </tr>
                                 </thead>
                                 <tbody class="text-gray-800 dark:text-gray-200">
@@ -329,6 +330,12 @@
                                     <td class="text-right">{{ formatTokens(row.output_tokens) }}</td>
                                     <td class="text-right">{{ row.message_count }}</td>
                                     <td class="text-right text-gray-500 dark:text-gray-400">≈{{ formatCost(breakdown5hCost(sub.id, row.agent_name)) }}</td>
+                                    <td
+                                      v-if="shareEntitled"
+                                      class="text-right tabular-nums"
+                                      :class="shareTone(row.agent_name)"
+                                      :data-testid="`share-used-${row.agent_name}`"
+                                    >{{ shareUsedLabel(row.agent_name) }}</td>
                                   </tr>
                                 </tbody>
                               </table>
@@ -585,6 +592,7 @@ import axios from 'axios'
 import { useAuthStore } from '../../stores/auth'
 import { useAgentsStore } from '../../stores/agents'
 import { useSubscriptionsStore } from '../../stores/subscriptions'
+import { useEnterpriseStore } from '../../stores/enterprise'
 import BaseInput from '../base/BaseInput.vue'
 import BaseButton from '../base/BaseButton.vue'
 import InlineError from '../InlineError.vue'
@@ -606,6 +614,7 @@ import {
 const authStore = useAuthStore()
 const agentsStore = useAgentsStore()
 const subsStore = useSubscriptionsStore()
+const enterprise = useEnterpriseStore()
 
 // ── ent#434: weekly-limit alert threshold ────────────────────────────────────
 // Decidable rules live in utils/headroomAlertSettings.js — vitest runs
@@ -708,6 +717,38 @@ function breakdownFor(subId) { return subsStore.breakdownBySub[subId] }
 function breakdown5hCost(subId, agentName) {
   const rows = breakdownFor(subId)?.window_5h || []
   return rows.find((r) => r.agent_name === agentName)?.cost_usd || 0
+}
+
+// trinity-enterprise#1059 — "share used" on the breakdown, entitled builds only.
+// Each agent's share is its own budget, so the column reads that agent's
+// 7-day and 5-hour percent; a share the reader cannot see renders a dash.
+const shareEntitled = computed(() => enterprise.isEntitled('usage_share'))
+
+async function loadBreakdown(subId) {
+  const data = await subsStore.fetchBreakdown(subId)
+  if (data && shareEntitled.value) {
+    subsStore.fetchAgentShares((data.window_7d || []).map((r) => r.agent_name))
+  }
+}
+
+function shareFor(agentName) {
+  const v = subsStore.shareByAgent[agentName]
+  return v && !v.error ? v : null
+}
+
+function shareUsedLabel(agentName) {
+  const v = shareFor(agentName)
+  if (!v) return '—'
+  return `${v.window_7d?.pct ?? 0}% · ${v.window_5h?.pct ?? 0}%`
+}
+
+function shareTone(agentName) {
+  const v = shareFor(agentName)
+  if (!v) return ''
+  const wins = [v.window_7d || {}, v.window_5h || {}]
+  if (wins.some((w) => w.at_budget)) return 'text-status-danger-700 dark:text-status-danger-400'
+  if (wins.some((w) => (w.pct ?? 0) >= v.warn_pct)) return 'text-status-warning-700 dark:text-status-warning-400'
+  return ''
 }
 
 function formatTokens(n) {
@@ -815,7 +856,7 @@ function toggleBreakdown(subId) {
     showBreakdown.value.delete(subId)
   } else {
     showBreakdown.value.add(subId)
-    if (!breakdownFor(subId)) subsStore.fetchBreakdown(subId)
+    if (!breakdownFor(subId)) loadBreakdown(subId)
   }
   showBreakdown.value = new Set(showBreakdown.value)
 }
@@ -946,5 +987,6 @@ onMounted(() => {
   loadAutoSwitchSetting()
   subsStore.fetchHeadroomAutoRefresh()
   subsStore.fetchApiKeyFallback()
+  enterprise.loadFeatureFlags()
 })
 </script>

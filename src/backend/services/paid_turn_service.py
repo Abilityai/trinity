@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Optional, Union
 
 # A leaf module of exception types — not a collaborator (decision 20 is about
 # what a test must be able to patch; nothing patches an exception class).
+from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 
 logger = logging.getLogger(__name__)
@@ -386,6 +387,27 @@ async def run_paid_turn(
                 "payment": {"settled": False, "reason": "Execution failed — no charge"},
             },
             verify=verify_result,
+        )
+
+    refusal = admission_refusal_of(exec_result, agent_name)
+    if refusal is not None:
+        # trinity-enterprise#1059 (review C2): an admission policy stopped the
+        # turn before it ran — a SKIPPED row, not a failure and not a success.
+        # Nothing to charge for: the claim is released so a retry after the
+        # window frees re-executes, the execution is never attached to the
+        # claim and never settled. The policy's plain-words sentence is the
+        # payer's answer, in the no-charge shape the failed branch uses.
+        idem.fail(decision)
+        return PaidTurnOutcome(
+            kind=EXECUTION_FAILED,
+            payload={
+                "execution_id": exec_result.execution_id,
+                "status": "skipped",
+                "error_code": refusal.code,
+                "payment": {"settled": False, "reason": refusal.message},
+            },
+            verify=verify_result,
+            execution_id=exec_result.execution_id,
         )
 
     if exec_result.status in ("failed", "cancelled"):

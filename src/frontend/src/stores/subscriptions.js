@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import api from '../api'
+import { useAgentsStore } from './agents'
 
 // #471 — subscription usage observability reads (SUB-004 extension).
 //
@@ -13,12 +14,17 @@ import api from '../api'
 //     rate_limited_now, source: "anthropic"|"observed", headroom|null }
 // A failed per-subscription fetch stores { error: true } — a failed fetch is
 // never rendered as "no usage" (honest status).
+const SHARE_FETCH_CONCURRENCY = 6
+
 export const useSubscriptionsStore = defineStore('subscriptions', {
   state: () => ({
     usageBySub: {},        // subscription_id -> usage payload | { error: true }
     usageLoading: {},      // subscription_id -> bool
     breakdownBySub: {},    // subscription_id -> breakdown payload | { error: true }
     breakdownLoading: {},  // subscription_id -> bool
+    // trinity-enterprise#1059 — agent -> its usage-share view | { error: true }
+    // (entitled builds only; a share the reader cannot see is an error, never 0%)
+    shareByAgent: {},
     refreshingHeadroom: {},// subscription_id -> bool (click probe in flight)
     headroomAutoRefresh: { enabled: true, refresh_seconds: 900, loaded: false },
     // #2638 — the API-key fallback. `enabled` mirrors the backend default (ON),
@@ -111,6 +117,31 @@ export const useSubscriptionsStore = defineStore('subscriptions', {
       } finally {
         this.breakdownLoading = { ...this.breakdownLoading, [subscriptionId]: false }
       }
+    },
+
+    // trinity-enterprise#1059 — each breakdown agent's share of its
+    // subscription, read through the agents store's enterprise action. Called
+    // only on an entitled build; per-agent isolation, so one 404 (an agent the
+    // reader cannot see) never blanks the others.
+    // At most SHARE_FETCH_CONCURRENCY reads in flight: one GET per agent, so a
+    // subscription with many agents must not open them all at once.
+    async fetchAgentShares(agentNames) {
+      const agents = useAgentsStore()
+      const queue = [...agentNames]
+      const worker = async () => {
+        while (queue.length) {
+          const name = queue.shift()
+          let value
+          try {
+            value = await agents.getUsageShare(name)
+          } catch (e) {
+            value = { error: true }
+          }
+          this.shareByAgent = { ...this.shareByAgent, [name]: value }
+        }
+      }
+      const lanes = Math.min(SHARE_FETCH_CONCURRENCY, queue.length)
+      await Promise.allSettled(Array.from({ length: lanes }, worker))
     },
 
     // Click-to-refresh: ONE probe (server floors re-clicks at 60s and then

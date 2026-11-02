@@ -62,6 +62,15 @@
       </SettingRow>
     </SettingsSection>
 
+    <!-- trinity-enterprise#1059: the agent's share of its subscription's usage. -->
+    <SettingsSection
+      v-if="usageShareEntitled"
+      title="Usage share"
+      description="How much of its subscription this agent may use. Past the warning line it is told each turn; at a budget it is stopped until the share is raised or the window frees."
+    >
+      <UsageShareCard :agent-name="agentName" :notify="notify" />
+    </SettingsSection>
+
     <SettingsSection
       v-if="!isSystem"
       title="Unprompted work"
@@ -129,6 +138,7 @@ import GuardrailsPanel from '../GuardrailsPanel.vue'
 import SelfChangePermissionsPanel from '../settings/SelfChangePermissionsPanel.vue'
 import CrossModelValidationPanel from '../CrossModelValidationPanel.vue'
 import ReliabilityPanel from '../ReliabilityPanel.vue'
+import UsageShareCard from './UsageShareCard.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -145,6 +155,7 @@ const enterprise = useEnterpriseStore()
 const restartStore = useAgentRestartStore()
 
 const crossModelEntitled = computed(() => enterprise.isEntitled('cross_model_validation'))
+const usageShareEntitled = computed(() => enterprise.isEntitled('usage_share'))
 
 // ---- guardrail rules summary ------------------------------------------------
 const rulesOpen = ref(false)
@@ -187,6 +198,10 @@ function loadAll() {
   loadRules()
   loadGates()
 }
-onMounted(loadAll)
+onMounted(() => {
+  loadAll()
+  // The usage share card is entitlement-gated; read the flags once (no-op when loaded).
+  enterprise.loadFeatureFlags()
+})
 watch(() => props.agentName, loadAll)
 </script>
