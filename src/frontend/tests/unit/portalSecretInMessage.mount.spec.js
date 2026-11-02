@@ -39,7 +39,9 @@ globalThis.ResizeObserver = globalThis.ResizeObserver || class {
   disconnect() {}
 }
 
-const SECRET = 'here it is: ghp_abcdefghijklmnopqrstuvwxyz0123456789'
+// Built at run time, like the backend guard's fixtures: no token-shaped literal in the tree.
+const TOKEN = 'ghp_' + 'b'.repeat(36)
+const SECRET = `here it is: ${TOKEN}`
 const POINTER = 'That looks like a secret. Nothing was stored. Ask the agent for the credential and use the secret field it opens.'
 
 let wrapper
@@ -77,7 +79,7 @@ describe('a secret pasted as a plain message', () => {
     expect(store.startPortalChat).toHaveBeenCalledTimes(1)
     expect(wrapper.find('[data-testid="portal-secret-refused"]').text()).toContain(POINTER)
     // Not in the thread (no failed bubble), not in the composer, no Retry.
-    expect(wrapper.html()).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+    expect(wrapper.html()).not.toContain(TOKEN)
     expect(wrapper.find('textarea').element.value).toBe('')
     expect(wrapper.findAll('button').some((b) => b.text().includes('Retry'))).toBe(false)
     // No draft, in memory or in storage.
@@ -93,7 +95,7 @@ describe('a secret pasted as a plain message', () => {
     })
     await pasteAndSend()
     expect(store.sendPortalChat).toHaveBeenCalledTimes(1)
-    expect(wrapper.html()).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789')
+    expect(wrapper.html()).not.toContain(TOKEN)
     expect(wrapper.find('[data-testid="portal-secret-refused"]').text()).toContain(POINTER)
   })
 

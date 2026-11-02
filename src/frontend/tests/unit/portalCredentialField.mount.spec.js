@@ -43,7 +43,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import PortalAsks from '@/components/portal/PortalAsks.vue'
 import PortalCredentialField from '@/components/portal/PortalCredentialField.vue'
 
-const SECRET = 'ops_eyJhbGciOiJIUzI1NiJ9-very-secret-value'
+const SECRET = 'ops_' + 'g'.repeat(40)
 
 const credentialAsk = (over = {}) => ({
   id: 'c1', agent_name: 'scout', kind: 'credential', priority: 'medium',
