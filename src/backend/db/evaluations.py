@@ -26,6 +26,22 @@ from db.tables import agent_evaluations, schedule_executions
 from utils.helpers import iso_cutoff, utc_now_iso
 
 
+
+def _own_rows(user_id: Optional[int], exempt: Optional[list[str]]):
+    """trinity-enterprise#875 on a list of `agent_evaluations` rows, or None
+    (full view). On every agent outside `exempt` (the caller's own), a row that
+    grades an execution is kept only when `user_id` started that execution; a
+    row naming no execution (a rating of a message) is not a run and stays."""
+    if user_id is None:
+        return None
+    ev = agent_evaluations.c
+    se = schedule_executions.c
+    mine = select(se.id).where(and_(se.id == ev.execution_id, se.source_user_id == user_id)).exists()
+    keep = [ev.execution_id.is_(None), mine]
+    if exempt:
+        keep.append(ev.agent_name.in_(list(exempt)))
+    return or_(*keep)
+
 # ent#935 — the deterministic (Tier-0) evaluator's identity and its one-row rule.
 # A Tier-0 row is keyed `(evaluator, target_kind='execution', target_id=<id>)`,
 # which `idx_agent_evaluations_rating_target` makes unique: one grade per run,
@@ -928,11 +944,17 @@ class EvaluationOperations:
             return self._row_to_dict(row) if row else None
 
     def list_evaluations_for_agent(self, agent_name: str, limit: int = 50, *,
-                                   caller: Optional[str] = None) -> list[dict]:
-        """`caller` keeps the runs that agent delegated to this one (ent#937)."""
+                                   caller: Optional[str] = None,
+                                   own_rows_user_id: Optional[int] = None,
+                                   own_rows_exempt_agents: Optional[list[str]] = None) -> list[dict]:
+        """`caller` keeps the runs that agent delegated to this one (ent#937);
+        `own_rows_*` is the trinity-enterprise#875 narrowing (`_own_rows`)."""
         stmt = select(agent_evaluations).where(agent_evaluations.c.agent_name == agent_name)
         if caller is not None:
             stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
+        mine = _own_rows(own_rows_user_id, own_rows_exempt_agents)
+        if mine is not None:
+            stmt = stmt.where(mine)
         stmt = stmt.order_by(agent_evaluations.c.created_at.desc()).limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]
@@ -940,10 +962,14 @@ class EvaluationOperations:
     def list_evaluations_for_agents(self, agent_names: Optional[list[str]],
                                     limit: int = 100, *,
                                     callers: Optional[list[str]] = None,
-                                    caller: Optional[str] = None) -> list[dict]:
+                                    caller: Optional[str] = None,
+                                    own_rows_user_id: Optional[int] = None,
+                                    own_rows_exempt_agents: Optional[list[str]] = None,
+                                    ) -> list[dict]:
         """Fleet read. `agent_names=None` (admin) → all; a list → that set;
         empty list → none (the accessible-set tri-state). `callers` (same
-        tri-state) and `caller` filter on the delegating agent (ent#937)."""
+        tri-state) and `caller` filter on the delegating agent (ent#937);
+        `own_rows_*` is the trinity-enterprise#875 narrowing (`_own_rows`)."""
         stmt = select(agent_evaluations).order_by(agent_evaluations.c.created_at.desc())
         for names, col in ((agent_names, agent_evaluations.c.agent_name),
                            (callers, agent_evaluations.c.caller_agent)):
@@ -953,6 +979,9 @@ class EvaluationOperations:
                 stmt = stmt.where(col.in_(list(names)))
         if caller is not None:
             stmt = stmt.where(agent_evaluations.c.caller_agent == caller)
+        mine = _own_rows(own_rows_user_id, own_rows_exempt_agents)
+        if mine is not None:
+            stmt = stmt.where(mine)
         stmt = stmt.limit(limit)
         with get_engine().connect() as conn:
             return [self._row_to_dict(r) for r in conn.execute(stmt).mappings()]

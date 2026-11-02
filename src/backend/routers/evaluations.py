@@ -237,12 +237,23 @@ async def list_agent_evaluations(
     # applied inside `_to_response`, so every read path below inherits it.
     # ent#937: an agent key reads a sibling's rows only for the pairs it is a
     # side of, even where a permission edge lets it past the path gate.
-    empty, caller = _scope(current_user).caller_for(agent_name, caller)
+    scope = _scope(current_user)
+    empty, caller = scope.caller_for(agent_name, caller)
     if empty:
         return []
-    rows = db.list_agent_evaluations(agent_name, limit, caller=caller)
+    rows = db.list_agent_evaluations(agent_name, limit, caller=caller, **scope.own_rows())
     operator_agents = _operator_for(rows, current_user)
     return [_to_response(r, current_user, operator_agents) for r in rows]
+
+
+def _sees_graded_run(scope: evaluation_read_service.ReadScope, row: dict) -> bool:
+    """Whether the run an evaluation row grades is the caller's to read
+    (trinity-enterprise#875). A row naming no execution is not a run."""
+    if scope.full_view_of(row.get("agent_name")) or not row.get("execution_id"):
+        return True
+    run = db.get_execution(row["execution_id"])
+    return run is not None and scope.sees_run(row.get("agent_name"),
+                                              getattr(run, "source_user_id", None))
 
 
 def _scope(current_user: User) -> evaluation_read_service.ReadScope:
@@ -274,7 +285,7 @@ async def list_fleet_evaluations(
         names = (evaluation_read_service.narrow(scope, callee) if names is None
                  else names & {callee})
     rows = db.list_fleet_evaluations(None if names is None else sorted(names), limit,
-                                     caller=caller)
+                                     caller=caller, **scope.own_rows())
     operator_agents = _operator_for(rows, current_user)
     return [_to_response(r, current_user, operator_agents) for r in rows]
 
@@ -364,9 +375,12 @@ async def evaluation_trend(
         dims, absent = {"caller": caller, "callee": callee}, ["agent"]
         visible = ((scope.self_agent in (caller, callee)) if scope.self_agent
                    else scope.sees(caller) and scope.sees(callee))
+        visible = visible and scope.full_view_of(caller) and scope.full_view_of(callee)
     elif agent:
         dims, absent = {"agent": agent}, ["caller", "callee"]
-        visible = scope.sees(agent)
+        # The stored points fold every user's runs and cannot be split by
+        # user, so a caller narrowed to their own runs (ent#875) reads none.
+        visible = scope.sees(agent) and scope.full_view_of(agent)
     else:
         # The fleet total folds every agent's runs, so it is never handed to a
         # reader scoped to fewer (a cross-tenant count) nor to an agent key
@@ -398,12 +412,14 @@ async def evaluation_chain(execution_id: str, current_user: User = Depends(get_c
     reaches one stops there and says `access`, without naming it."""
     scope = _scope(current_user)
     root = db.execution_chain_node(execution_id)
-    if not root or not scope.sees(root.get("agent_name")):
+    if (not root or not scope.sees(root.get("agent_name"))
+            or not scope.sees_run(root.get("agent_name"), root.get("source_user_id"))):
         raise HTTPException(status_code=404, detail="not_found")
     depth = evaluation_read_service.chain_max_depth()
-    up, up_stop = db.execution_chain_ancestors(execution_id, max_depth=depth, visible=scope.names)
+    up, up_stop = db.execution_chain_ancestors(execution_id, max_depth=depth, visible=scope.names,
+                                               **scope.own_rows())
     down, down_stop = db.execution_chain_descendants(execution_id, max_depth=depth,
-                                                     visible=scope.names)
+                                                     visible=scope.names, **scope.own_rows())
     served = {n["id"] for n in [root, *up, *down]}
 
     def _view(node):
@@ -437,7 +453,8 @@ async def agent_evaluation_summary(
     lo, hi = _window(period, since, until)
     scope = _scope(current_user)
     names = evaluation_read_service.narrow(scope, agent_name)
-    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents=names, caller=caller)
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents=names, caller=caller,
+                                                **scope.own_rows())
     labels = db.evaluation_human_labels([r["execution_id"] for r in rows]) if rows else {}
     folded = evaluation_read_service.fold(rows, labels)
     failed = folded.pop("failed")
@@ -506,12 +523,13 @@ async def agent_indicators_read(
         raise HTTPException(status_code=422, detail={
             "code": "invalid_window", "message": "days must be 7, 14 or 30"})
     prior_lo, lo, hi = _indicator_window(days)
-    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name})
-    prior, _ = db.evaluation_window_rows(since=prior_lo, until=lo, agents={agent_name})
+    own = _scope(current_user).own_rows()
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name}, **own)
+    prior, _ = db.evaluation_window_rows(since=prior_lo, until=lo, agents={agent_name}, **own)
     labels = db.evaluation_human_labels([r["execution_id"] for r in rows]) if rows else {}
     base_lo = (datetime.fromisoformat(lo.replace("Z", "+00:00"))
                - timedelta(days=agent_indicators.BASELINE_DAYS)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-    costs = db.evaluation_agent_costs(agent_name, since=base_lo, until=lo)
+    costs = db.evaluation_agent_costs(agent_name, since=base_lo, until=lo, **own)
     min_runs = _indicator_min_runs()
     out = agent_indicators.compute(rows, prior, labels, costs, min_runs=min_runs)
     _label_sources(agent_name, [p["source"] for p in out["fix_paths"]])
@@ -536,7 +554,8 @@ async def agent_indicator_runs(
         raise HTTPException(status_code=422, detail={
             "code": "invalid_window", "message": "days must be 7, 14 or 30"})
     _, lo, hi = _indicator_window(days)
-    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name})
+    rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents={agent_name},
+                                                **_scope(current_user).own_rows())
     try:
         groups = agent_indicators.failing_runs(rows, indicator, check=check)
     except agent_indicators.IndicatorError as exc:
@@ -553,7 +572,8 @@ async def get_evaluation(eval_id: str, current_user: User = Depends(get_current_
         raise HTTPException(status_code=404, detail="Evaluation not found")
     # tenant boundary: non-admin may only see an evaluation of an accessible
     # agent; an agent key only its own (ent#937 T1)
-    if not _scope(current_user).sees(row["agent_name"]):
+    if not _scope(current_user).sees(row["agent_name"]) or not _sees_graded_run(
+            _scope(current_user), row):
         raise HTTPException(status_code=404, detail="Evaluation not found")
     return _to_response(row, current_user, _operator_for([row], current_user))
 
@@ -574,8 +594,9 @@ async def get_execution_evaluation(
     the Tier-0 writer is the sweep, reachable by no route.
     """
     row = db.latest_tier0_for_execution(execution_id)
+    scope = _scope(current_user)
     if (not row or row.get("agent_name") != agent_name
-            or not _scope(current_user).sees_row(row)):
+            or not scope.sees_row(row) or not _sees_graded_run(scope, row)):
         raise HTTPException(status_code=404, detail="not_evaluated")
     return _to_response(row, current_user, _operator_for([row], current_user))
 
@@ -594,8 +615,9 @@ async def get_execution_evaluations(
     through the one projection, so an agent key reads findings and reason
     codes here exactly as it does there."""
     tier0 = db.latest_tier0_for_execution(execution_id)
+    scope = _scope(current_user)
     if (not tier0 or tier0.get("agent_name") != agent_name
-            or not _scope(current_user).sees_row(tier0)):
+            or not scope.sees_row(tier0) or not _sees_graded_run(scope, tier0)):
         raise HTTPException(status_code=404, detail="not_evaluated")
     judge = db.latest_tier1_for_execution(execution_id)
     pair = db.latest_tier0_for_execution(execution_id, evaluator=TIER0_PAIR_EVALUATOR)

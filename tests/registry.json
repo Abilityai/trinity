@@ -8229,6 +8229,17 @@
         "migrations"
       ],
       "description": "Review fixes on the Tier-1 row: one judge row per run whatever the model (partial unique index on both migration tracks, a run already holding two keeps the finished one); the judge_json guard over the whole document (top-level allowlist, findings as closed tokens with a null reason and a shared cap, other string leaves capped); a finished document may not carry the claim marker the finish/reclaim compare-and-set matches."
+    },
+    {
+      "file": "unit/test_936_share_holder_own_runs.py",
+      "feature": "abilityai/trinity-enterprise#936",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "Evaluation reads hold a person an agent is only shared with to the runs they started (the trinity-enterprise#875 rule): both evaluation lists, summary, failed, aggregate, indicators and their drilldown, the per-execution reads, by-id and the chain; the stored trend reads empty for them. The owner reads every run on each route as the control."
     }
   ]
 }

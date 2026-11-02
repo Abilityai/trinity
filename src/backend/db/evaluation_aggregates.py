@@ -47,6 +47,7 @@ _NODE_COLUMNS = (
     schedule_executions.c.chain_depth,
     schedule_executions.c.started_at,
     schedule_executions.c.completed_at,
+    schedule_executions.c.source_user_id,
 )
 
 
@@ -60,6 +61,29 @@ def _json(raw):
 def _chunks(ids: list, size: int = _IN_CHUNK):
     for i in range(0, len(ids), size):
         yield ids[i:i + size]
+
+
+def own_rows(agent_col, user_col, user_id: Optional[int], exempt: Optional[Iterable[str]]):
+    """The trinity-enterprise#875 narrowing as one condition, or None (full
+    view): the runs `user_id` started, on every agent except `exempt` (the
+    ones the caller owns). An exemption list, so an agent missing from it is
+    narrowed, never shown in full; a NULL starter never matches."""
+    if user_id is None:
+        return None
+    mine = user_col == user_id
+    exempt = list(exempt or ())
+    return or_(agent_col.in_(exempt), mine) if exempt else mine
+
+
+def _hidden(node: dict, visible: Optional[set], user_id: Optional[int],
+            exempt: Optional[Iterable[str]]) -> bool:
+    """A chain node the caller may not read: its agent is out of `visible`, or
+    it is another user's run under the `own_rows` narrowing."""
+    if visible is not None and node["agent_name"] not in visible:
+        return True
+    if user_id is None or node["agent_name"] in set(exempt or ()):
+        return False
+    return node.get("source_user_id") != user_id
 
 
 class EvaluationAggregateOperations:
@@ -77,6 +101,8 @@ class EvaluationAggregateOperations:
         callee: Optional[str] = None,
         schedule_id: Optional[str] = None,
         delegated_only: bool = False,
+        own_rows_user_id: Optional[int] = None,
+        own_rows_exempt_agents: Optional[Iterable[str]] = None,
         cap: int = AGG_ROW_CAP,
     ) -> tuple[list[dict], bool]:
         """Tier-0-graded runs that completed in `[since, until)`, newest first.
@@ -92,6 +118,7 @@ class EvaluationAggregateOperations:
           agent OR the caller.
 
         `delegated_only` keeps rows with a `caller_agent` (the `by=pair` set).
+        `own_rows_*` is the trinity-enterprise#875 narrowing (`own_rows`).
         """
         se = schedule_executions.c
         ev = agent_evaluations.alias("ev")
@@ -143,6 +170,9 @@ class EvaluationAggregateOperations:
             conds.append(se.schedule_id == schedule_id)
         if delegated_only:
             conds.append(ev.c.caller_agent.isnot(None))
+        mine = own_rows(se.agent_name, se.source_user_id, own_rows_user_id, own_rows_exempt_agents)
+        if mine is not None:
+            conds.append(mine)
 
         cap = max(0, int(cap))
         stmt = (
@@ -205,17 +235,22 @@ class EvaluationAggregateOperations:
             return [r[0] for r in conn.execute(stmt).all()]
 
     def agent_costs(self, agent_name: str, *, since: str, until: str,
+                    own_rows_user_id: Optional[int] = None,
+                    own_rows_exempt_agents: Optional[Iterable[str]] = None,
                     cap: int = AGG_ROW_CAP) -> list[float]:
         """The recorded cost of each of `agent_name`'s successful runs that
         completed in `[since, until)` — the cost baseline for ent#939's
         cost-vs-baseline indicator. Graded or not: the baseline is what the
         agent spends, not what was evaluated."""
         se = schedule_executions.c
+        conds = [se.agent_name == agent_name, se.status == "success",
+                 se.completed_at >= since, se.completed_at < until, se.cost.isnot(None)]
+        mine = own_rows(se.agent_name, se.source_user_id, own_rows_user_id, own_rows_exempt_agents)
+        if mine is not None:
+            conds.append(mine)
         stmt = (
             select(se.cost)
-            .where(and_(se.agent_name == agent_name, se.status == "success",
-                        se.completed_at >= since, se.completed_at < until,
-                        se.cost.isnot(None)))
+            .where(and_(*conds))
             .order_by(se.completed_at.desc())
             .limit(max(0, int(cap)))
         )
@@ -254,7 +289,10 @@ class EvaluationAggregateOperations:
         return rows[0] if rows else None
 
     def chain_ancestors(self, execution_id: str, *, max_depth: int,
-                        visible: Optional[set] = None) -> tuple[list[dict], Optional[str]]:
+                        visible: Optional[set] = None,
+                        own_rows_user_id: Optional[int] = None,
+                        own_rows_exempt_agents: Optional[Iterable[str]] = None,
+                        ) -> tuple[list[dict], Optional[str]]:
         """Parents of `execution_id`, nearest first, and why the walk stopped
         early (`depth` | `access` | `missing`; None = reached the root).
 
@@ -275,7 +313,7 @@ class EvaluationAggregateOperations:
                 if not rows:
                     return out, "missing"
                 node = rows[0]
-                if visible is not None and node["agent_name"] not in visible:
+                if _hidden(node, visible, own_rows_user_id, own_rows_exempt_agents):
                     return out, "access"
                 seen.add(parent)
                 out.append(node)
@@ -284,7 +322,10 @@ class EvaluationAggregateOperations:
 
     def chain_descendants(self, execution_id: str, *, max_depth: int,
                           node_cap: int = CHAIN_NODE_CAP,
-                          visible: Optional[set] = None) -> tuple[list[dict], Optional[str]]:
+                          visible: Optional[set] = None,
+                          own_rows_user_id: Optional[int] = None,
+                          own_rows_exempt_agents: Optional[Iterable[str]] = None,
+                          ) -> tuple[list[dict], Optional[str]]:
         """Runs delegated from `execution_id`, breadth first, bounded by
         `max_depth` levels and `node_cap` nodes. A child whose agent is not in
         `visible` is dropped with its subtree (reason `access`); the stop
@@ -309,7 +350,7 @@ class EvaluationAggregateOperations:
                 nxt = []
                 for c in children:
                     seen.add(c["id"])
-                    if visible is not None and c["agent_name"] not in visible:
+                    if _hidden(c, visible, own_rows_user_id, own_rows_exempt_agents):
                         stop = stop or "access"
                         continue
                     if len(out) >= node_cap:

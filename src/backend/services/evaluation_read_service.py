@@ -394,17 +394,45 @@ class ReadScope:
     `names` is the accessible-set tri-state (None = every agent, an empty set =
     none). `self_agent` is set for an agent-scoped key: it reads its OWN rows
     and the pairs it is a side of — never its owner's other agents, which is
-    what `accessible_agent_names` alone would hand it (ent#629 class)."""
+    what `accessible_agent_names` alone would hand it (ent#629 class).
 
-    __slots__ = ("names", "self_agent", "machine")
+    `own_uid` / `own_exempt` are `viewer_own_rows` (trinity-enterprise#875):
+    on every agent outside `own_exempt` (the ones the caller owns) a person
+    reads only the runs they started. Every row here is one execution's grade,
+    so a share holder reading the evaluations of runs `GET /executions/{id}`
+    hides from them would undo that rule. `own_uid` None is the full view."""
 
-    def __init__(self, names: Optional[set], self_agent: Optional[str], machine: bool):
+    __slots__ = ("names", "self_agent", "machine", "own_uid", "own_exempt")
+
+    def __init__(self, names: Optional[set], self_agent: Optional[str], machine: bool,
+                 own_uid: Optional[int] = None, own_exempt: Optional[list] = None):
         self.names = names
         self.self_agent = self_agent
         self.machine = machine
+        self.own_uid = own_uid
+        self.own_exempt = frozenset(own_exempt or ())
 
     def sees(self, agent: Optional[str]) -> bool:
         return self.names is None or agent in self.names
+
+    def full_view_of(self, agent: Optional[str]) -> bool:
+        """Whether every user's runs of `agent` are this caller's to read."""
+        return self.own_uid is None or agent in self.own_exempt
+
+    def sees_run(self, agent: Optional[str], source_user_id) -> bool:
+        """One run of a visible agent: the full view, or a run the caller
+        started. A run with no starter never matches (fail closed)."""
+        if self.full_view_of(agent):
+            return True
+        from dependencies import row_is_viewers
+        return row_is_viewers(self.own_uid, source_user_id)
+
+    def own_rows(self) -> dict:
+        """The `own_rows_*` keyword filters for the db reads (empty = full view)."""
+        if self.own_uid is None:
+            return {}
+        return {"own_rows_user_id": self.own_uid,
+                "own_rows_exempt_agents": sorted(self.own_exempt)}
 
     def sees_row(self, row: dict) -> bool:
         """One row on a per-agent read the path gate already let through. A
@@ -427,12 +455,13 @@ class ReadScope:
 
 def scope_for(current_user, *, machine: bool) -> ReadScope:
     """The one scope helper every evaluation read goes through."""
+    from services.agent_service import helpers
+    own_uid, own_exempt = helpers.viewer_own_rows(current_user)
     agent = getattr(current_user, "agent_name", None)
     if agent:
-        return ReadScope({agent}, agent, machine)
-    from services.agent_service.helpers import accessible_agent_names
-    names = accessible_agent_names(current_user)
-    return ReadScope(None if names is None else set(names), None, machine)
+        return ReadScope({agent}, agent, machine, own_uid, own_exempt)
+    names = helpers.accessible_agent_names(current_user)
+    return ReadScope(None if names is None else set(names), None, machine, own_uid, own_exempt)
 
 
 def narrow(scope: ReadScope, agent: Optional[str]) -> Optional[set]:
@@ -450,7 +479,8 @@ def window_filters(scope: ReadScope, *, by: str, agent: Optional[str] = None,
 
     A person reads a pair only when BOTH sides are visible; an agent key reads
     its own runs, and with `by=pair` the pairs it is caller or callee of."""
-    kw: dict = {"caller": caller, "callee": callee, "schedule_id": schedule_id}
+    kw: dict = {"caller": caller, "callee": callee, "schedule_id": schedule_id,
+                **scope.own_rows()}
     if by != "pair":
         kw["agents"] = narrow(scope, agent)
         return kw
@@ -469,7 +499,7 @@ def caller_side_filters(scope: ReadScope, names: Optional[set]) -> dict:
     visible to a person; an agent key reads every pair it is the caller of —
     `sees_row`'s rule — and `names` is empty for any agent but itself."""
     return {"callers": names, "delegated_only": True,
-            "agents": None if scope.self_agent else scope.names}
+            "agents": None if scope.self_agent else scope.names, **scope.own_rows()}
 
 
 def pair_failures(rows: list[dict], *, limit: int = FAILED_LIMIT) -> list[dict]:

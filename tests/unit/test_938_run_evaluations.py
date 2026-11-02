@@ -100,6 +100,7 @@ def _user(username, *, role="user", agent_name=None, mcp_scope=None):
 def client(db_backend, monkeypatch):
     from database import db
     from routers import evaluations
+    from services.agent_service import helpers
 
     principal = {"user": _user(OWNER)}
     app = FastAPI()
@@ -111,6 +112,10 @@ def client(db_backend, monkeypatch):
     # The operator test behind the projection (`_operator_for`): owner or admin.
     monkeypatch.setattr(db, "can_user_share_agent",
                         lambda user, name: name in AGENTS and (AGENTS[name] == user or user == ADMIN))
+    # ent#875 narrows a share holder to their own runs from the roster
+    # (`viewer_own_rows`): answer it from AGENTS so an owner reads as one.
+    monkeypatch.setattr(helpers, "get_accessible_agents", lambda u: [
+        {"name": n, "is_owner": True} for n, o in AGENTS.items() if o == u.username])
     tc = TestClient(app)
     tc.as_user = lambda u: principal.__setitem__("user", u)
     return tc
