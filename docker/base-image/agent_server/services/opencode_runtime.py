@@ -794,9 +794,7 @@ class OpenCodeRuntime(AgentRuntime):
     """OpenCode CLI implementation of :class:`AgentRuntime`."""
 
     def __init__(self) -> None:
-        # Session id for the interactive chat session (continuity). The
-        # singleton persists across /api/chat calls within a container.
-        self._chat_session_id: Optional[str] = None
+        pass
 
     @classmethod
     def capabilities(cls) -> RuntimeCapabilities:
@@ -1235,6 +1233,7 @@ class OpenCodeRuntime(AgentRuntime):
         stream: bool = False,
         system_prompt: Optional[str] = None,
         execution_id: Optional[str] = None,
+        isolated_session: bool = False,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict]]:
         if not self.is_available():
             raise HTTPException(
@@ -1242,22 +1241,74 @@ class OpenCodeRuntime(AgentRuntime):
                 detail="OpenCode CLI is not available in this container",
             )
 
-        resume_session_id: Optional[str] = None
-        if continue_session and agent_state.session_started and self._chat_session_id:
-            resume_session_id = self._chat_session_id
-        else:
-            agent_state.session_started = True
-            self._chat_session_id = None
-
         guardrails = _load_guardrails()
         timeout_seconds = int(
             guardrails.get("execution_timeout_sec") or _DEFAULT_EXECUTION_TIMEOUT_SEC
         )
 
+        if isolated_session:
+            # Fresh session per claude_code.py:779-787 pattern
+            # (trinity-enterprise#752). No capture, no shared-model or stat
+            # change — the next caller resumes the chat's own session untouched.
+            turn_model = model or agent_state.current_model
+            try:
+                response, log, metadata, raw, _session_id = await self._execute_with_stall_retry(
+                    prompt=prompt,
+                    model=turn_model,
+                    system_prompt=system_prompt,
+                    session_id=None,
+                    timeout_seconds=timeout_seconds,
+                    execution_id=execution_id,
+                    concurrent_reader=False,
+                )
+            except OpenCodeModelShapeError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except OpenCodeProviderConfigError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            except HTTPException:
+                raise
+            except TimeoutError as exc:
+                raise HTTPException(status_code=504, detail=str(exc))
+            except (BrokenPipeError, ConnectionResetError) as pipe_err:
+                logger.info("[OpenCode] subprocess pipe closed before completion: %s", pipe_err)
+                raise HTTPException(
+                    status_code=502,
+                    detail="Agent subprocess closed before the chat could complete",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[OpenCode] execution error: %s", exc)
+                raise HTTPException(status_code=500, detail=f"Execution error: {exc}")
+            return response, log, metadata, raw
+
+        # -- continuity hygiene (claude_code.py:796-814 pattern) --
+        if model:
+            agent_state.current_model = model
+        effective_model = agent_state.current_model
+
+        resume_session_id: Optional[str] = None
+        if (
+            continue_session
+            and agent_state.session_started
+            and agent_state.opencode_chat_session_id
+        ):
+            if agent_state.opencode_chat_session_model != effective_model:
+                logger.info(
+                    "event=opencode_session_model_change old=%s new=%s",
+                    agent_state.opencode_chat_session_model, effective_model,
+                )
+                agent_state.opencode_chat_session_id = None
+                agent_state.opencode_chat_session_model = None
+            else:
+                resume_session_id = agent_state.opencode_chat_session_id
+        else:
+            agent_state.session_started = True
+            agent_state.opencode_chat_session_id = None
+            agent_state.opencode_chat_session_model = None
+
         try:
             response, log, metadata, raw, session_id = await self._execute_with_stall_retry(
                 prompt=prompt,
-                model=model,
+                model=effective_model,
                 system_prompt=system_prompt,
                 session_id=resume_session_id,
                 timeout_seconds=timeout_seconds,
@@ -1285,7 +1336,8 @@ class OpenCodeRuntime(AgentRuntime):
             raise HTTPException(status_code=500, detail=f"Execution error: {exc}")
 
         if session_id:
-            self._chat_session_id = session_id
+            agent_state.opencode_chat_session_id = session_id
+            agent_state.opencode_chat_session_model = effective_model
             agent_state.session_started = True
 
         if metadata.cost_usd:

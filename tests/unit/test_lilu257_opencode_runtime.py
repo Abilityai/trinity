@@ -584,3 +584,166 @@ def _install_fake_subprocess(monkeypatch, *, stdout_lines, return_code=0, stderr
     monkeypatch.setattr(
         opencode_runtime, "_terminate_process_group", lambda *a, **k: None
     )
+
+
+# ---------------------------------------------------------------------------
+# isolated_session, continuity hygiene, reset_session (Abilityai/lilu#651)
+# ---------------------------------------------------------------------------
+
+def _stub_stall_retry(monkeypatch, runtime, *, session_id="ses_stub"):
+    """Replace _execute_with_stall_retry with a stub returning a canned 5-tuple."""
+    from agent_server.models import ExecutionMetadata, ExecutionLogEntry
+
+    async def _stub(**_kwargs):
+        return ("response", [], ExecutionMetadata(), [], session_id)
+
+    monkeypatch.setattr(runtime, "_execute_with_stall_retry", _stub)
+
+
+@pytest.mark.asyncio
+async def test_isolated_session_does_not_capture_session_id(monkeypatch):
+    """isolated_session=True must NOT store the session id on agent_state —
+    the next non-isolated turn should be unaffected."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    _stub_stall_retry(monkeypatch, runtime, session_id="ses_iso")
+
+    # Ensure we start clean
+    agent_state.opencode_chat_session_id = None
+    agent_state.opencode_chat_session_model = None
+
+    await runtime.execute("prompt", model="anthropic/x", isolated_session=True)
+
+    assert agent_state.opencode_chat_session_id is None, (
+        "isolated turn must not capture session id into shared state"
+    )
+    assert agent_state.opencode_chat_session_model is None
+
+
+@pytest.mark.asyncio
+async def test_isolated_session_does_not_change_current_model(monkeypatch):
+    """isolated_session=True must not overwrite agent_state.current_model."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    _stub_stall_retry(monkeypatch, runtime)
+
+    agent_state.current_model = "anthropic/original"
+
+    await runtime.execute("prompt", model="anthropic/override", isolated_session=True)
+
+    assert agent_state.current_model == "anthropic/original", (
+        "isolated turn must not update the shared current_model"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_isolated_execute_persists_model(monkeypatch):
+    """A non-isolated turn must save the model to agent_state.current_model."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    _stub_stall_retry(monkeypatch, runtime, session_id="ses_1")
+
+    agent_state.current_model = None
+    agent_state.session_started = False
+    agent_state.opencode_chat_session_id = None
+    agent_state.opencode_chat_session_model = None
+
+    await runtime.execute("prompt", model="anthropic/claude-sonnet-5")
+
+    assert agent_state.current_model == "anthropic/claude-sonnet-5"
+
+
+@pytest.mark.asyncio
+async def test_session_is_captured_after_non_isolated_execute(monkeypatch):
+    """After a non-isolated turn the session id must be stored so the next
+    continue_session=True turn can resume it."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    _stub_stall_retry(monkeypatch, runtime, session_id="ses_saved")
+
+    agent_state.session_started = False
+    agent_state.opencode_chat_session_id = None
+    agent_state.opencode_chat_session_model = None
+
+    await runtime.execute("prompt", model="anthropic/x", continue_session=False)
+
+    assert agent_state.opencode_chat_session_id == "ses_saved"
+
+
+@pytest.mark.asyncio
+async def test_model_change_starts_fresh_session(monkeypatch):
+    """If the model changes between turns the old session must be dropped so the
+    next call doesn't try to resume a session from a different model."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    _stub_stall_retry(monkeypatch, runtime, session_id="ses_new")
+
+    agent_state.session_started = True
+    agent_state.opencode_chat_session_id = "ses_old"
+    agent_state.opencode_chat_session_model = "anthropic/old-model"
+    agent_state.current_model = "anthropic/old-model"
+
+    # New turn with a DIFFERENT model and continue_session=True — the old
+    # session should be discarded, not resumed.
+    await runtime.execute(
+        "prompt", model="anthropic/new-model", continue_session=True
+    )
+
+    # The stub always returns "ses_new", so the new session id is stored.
+    # The key invariant is that we did NOT pass the old session id to the stub.
+    assert agent_state.opencode_chat_session_id == "ses_new"
+    assert agent_state.opencode_chat_session_model == "anthropic/new-model"
+
+
+@pytest.mark.asyncio
+async def test_model_change_passes_none_session_id_to_stall_retry(monkeypatch):
+    """When the model changes the stall-retry helper must receive session_id=None
+    (fresh start), not the old id."""
+    from agent_server.state import agent_state
+
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+
+    seen_session_id = []
+
+    async def _spy(**kwargs):
+        from agent_server.models import ExecutionMetadata
+        seen_session_id.append(kwargs.get("session_id"))
+        return ("response", [], ExecutionMetadata(), [], "ses_new")
+
+    monkeypatch.setattr(runtime, "_execute_with_stall_retry", _spy)
+
+    agent_state.session_started = True
+    agent_state.opencode_chat_session_id = "ses_old"
+    agent_state.opencode_chat_session_model = "anthropic/old"
+    agent_state.current_model = "anthropic/old"
+
+    await runtime.execute("prompt", model="anthropic/new", continue_session=True)
+
+    assert seen_session_id == [None], (
+        "model change must pass session_id=None, not the stale session id"
+    )
+
+
+def test_reset_session_clears_opencode_fields():
+    """DELETE /api/chat/history (reset_session) must clear opencode session
+    fields so the next turn does NOT silently resume the 'cleared' conversation."""
+    from agent_server.state import agent_state
+
+    agent_state.opencode_chat_session_id = "ses_to_clear"
+    agent_state.opencode_chat_session_model = "anthropic/x"
+
+    agent_state.reset_session()
+
+    assert agent_state.opencode_chat_session_id is None
+    assert agent_state.opencode_chat_session_model is None
