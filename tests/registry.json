@@ -7761,7 +7761,7 @@
         "backend",
         "agents"
       ],
-      "description": "trinity#4165: github:owner/repo@ref takes a dotted tag whole (v1.2.0, releases/v1.2.0) and pins the clone; branch names parse unchanged; '..', a leading-dot component, a trailing '.' or '.lock', whitespace and shell metacharacters are a named 400 instead of a silent fall-back to main."
+      "description": "trinity#4165: github:owner/repo@ref takes a dotted tag whole (v1.2.0, releases/v1.2.0) and pins the clone; branch names parse unchanged; '..', a leading-dot component, a trailing '.' or '.lock', a leading '-', whitespace and shell metacharacters are a named 400 instead of a silent fall-back to main."
     },
     {
       "file": "unit/test_4165_ref_existence_checks.py",

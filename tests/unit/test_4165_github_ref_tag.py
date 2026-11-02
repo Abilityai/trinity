@@ -186,6 +186,7 @@ class TestRefRefused:
         "releases/.v1",
         "v1.",              # nor end with `.`
         "v1.lock",          # nor `.lock`
+        "-foo",             # a leading `-` reads as an option to `git checkout` (review I5)
         "re lease",         # whitespace
         "v1;id",            # shell metacharacters (eval-built clone command)
         "$(id)",

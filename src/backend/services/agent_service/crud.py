@@ -531,8 +531,10 @@ _GITHUB_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 # interpolated into the same eval-built clone command, so the charset stays a
 # shell-safety barrier; `.` is allowed (a release tag such as `v1.2.0`) minus
 # the git ref-format shapes a dotted ref cannot take: `..`, a component that
-# starts with `.`, a trailing `.` or `.lock`.
-_GITHUB_REF_RE = re.compile(r"^(?!.*\.\.)(?!\.)(?!.*/\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9_./-]+$")
+# starts with `.`, a trailing `.` or `.lock` — and a leading `-`, which every
+# live site passes as a value today but `git checkout "<ref>"` would read as
+# an option (review I5: one shell edit away from an option injection).
+_GITHUB_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!\.)(?!.*/\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9_./-]+$")
 
 
 def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
@@ -555,7 +557,8 @@ def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
                 detail=(
                     "Invalid ref in github:owner/repo@ref. Use a branch or tag "
                     "name with letters, digits, '.', '_', '-' or '/' (no '..', "
-                    "no component starting with '.', no trailing '.' or '.lock')."
+                    "no component starting with '.', no trailing '.' or '.lock', "
+                    "no leading '-')."
                 ),
             )
 
