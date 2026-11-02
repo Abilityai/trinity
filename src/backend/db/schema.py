@@ -2037,6 +2037,23 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Channel client blocks (trinity-enterprise#21)
+    # -------------------------------------------------------------------------
+    "channel_client_blocks": """
+        CREATE TABLE IF NOT EXISTS channel_client_blocks (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id INTEGER,
+            blocked_by_email TEXT,
+            reason TEXT,
+            UNIQUE(agent_name, channel, client_id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Platform Audit Log (SEC-001 / Issue #20) — Phase 1
     # -------------------------------------------------------------------------
     # Cross-cutting append-only audit trail for agent lifecycle, auth, MCP,

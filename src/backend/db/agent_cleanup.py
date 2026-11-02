@@ -306,6 +306,10 @@ AGENT_REFS: List[AgentRef] = [
     # deliberately not registered (the `assigned_by_agent` precedent).
     AgentRef("agent_skill_gates",            "agent_name",        Policy.CASCADE),
     AgentRef("access_requests",              "agent_name",        Policy.CASCADE),
+    # trinity-enterprise#21 — the owner's blocks on this agent's channel
+    # clients: re-keyed on rename, gone on purge (a new same-name agent must
+    # not inherit another owner's blocklist).
+    AgentRef("channel_client_blocks",        "agent_name",        Policy.CASCADE),
 
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
     AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,

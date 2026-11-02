@@ -6012,6 +6012,27 @@ def _migrate_platform_alert_subjects_resweep(cursor, conn):
         logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
 
 
+def _migrate_channel_client_blocks(cursor, conn):
+    """trinity-enterprise#21 — an owner's per-agent block on one external
+    channel client, checked by the channel access gate on every message.
+    Schema is also in db/schema.py for fresh installs; mirrored by Alembic
+    revision 0113_channel_client_blocks.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channel_client_blocks (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id INTEGER,
+            blocked_by_email TEXT,
+            reason TEXT,
+            UNIQUE(agent_name, channel, client_id)
+        )
+    """)
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6194,4 +6215,5 @@ MIGRATIONS = [
     ("agent_memory_provenance", _migrate_agent_memory_provenance),
     ("platform_alert_subjects_resweep", _migrate_platform_alert_subjects_resweep),
     ("loop_runs_stale_duplicates", _migrate_loop_runs_stale_duplicates),
+    ("channel_client_blocks", _migrate_channel_client_blocks),
 ]

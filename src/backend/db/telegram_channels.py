@@ -397,6 +397,7 @@ class TelegramChannelOperations:
             clients.append({
                 "channel": "telegram",
                 "identity": identity,
+                "client_id": str(row["telegram_user_id"]),
                 "display_name": username or None,
                 "verified_email": row["verified_email"] or None,
                 "message_count": row["message_count"] or 0,

@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent21_channel_client_controls.py",
+      "feature": "trinity-enterprise#21",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "channels"
+      ],
+      "description": "Per-client controls on the Sharing-tab roster against a real DB: each row's client_id and access state (blocked/granted/pending with request id/none); block is per agent and channel, idempotent, keeps the share, unblock restores it; revoke removes the share (works on a blocked client, 409 with nothing to revoke); every control 404s on a client that never reached this agent; routes are owner + require_person and audited."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",

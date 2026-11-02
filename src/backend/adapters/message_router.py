@@ -466,6 +466,16 @@ class ChannelMessageRouter:
             return
         agent_name, bot_token = resolved
 
+        # 2'. trinity-enterprise#21 — a client the owner blocked on this agent
+        # is dropped here, before any rate-limit charge, typing indicator,
+        # reply or access-policy prompt: no response at all, so the block is
+        # not a conversation. Keyed on the channel-native sender id, so it
+        # holds whether or not they ever verified an email, in a DM or a group.
+        # A read failure propagates to handle_message, which drops the turn.
+        if message.sender_id and db.is_channel_client_blocked(agent_name, channel, message.sender_id):
+            logger.info(f"[ROUTER:{channel}] Dropped: sender blocked on agent={agent_name}")
+            return
+
         # 2-. ent#600: an executed un-tagged turn (all / observe modes) is the
         # same proof as an observed one that the bot sees this group's
         # un-tagged messages. Best-effort bookkeeping — never blocks the turn.

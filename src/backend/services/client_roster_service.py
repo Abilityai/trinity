@@ -2,8 +2,11 @@
 
 Surfaces the external channel users (no Trinity account) who have messaged an
 agent, aggregated across channels into one roster. This is the read surface for
-the reframed Sharing tab; per-client controls (block/revoke/approve) are a
-separate follow-up (#21).
+the reframed Sharing tab. Each row also carries its access state, and this
+module owns the per-client controls that act on it (trinity-enterprise#21):
+block / unblock (``channel_client_blocks``, enforced by the channel access gate)
+and revoke (the client's share on this agent). Approve is the existing
+access-request decision; the row carries the request id it needs.
 
 Roster v1 covers the channels that record the full
 ``(verified_email, message_count, last_active)`` triple per user — Telegram and
@@ -19,7 +22,7 @@ router stays thin.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from database import db
 
@@ -49,8 +52,78 @@ def get_client_roster(agent_name: str) -> List[dict]:
                 channel, agent_name, e,
             )
 
+    _annotate_access(agent_name, roster)
+
     # ISO-Z timestamps sort lexicographically. With reverse=True the newest
     # timestamp comes first and the "" fallback (never-active, last_active=None)
     # sorts last — exactly the ordering we want.
     roster.sort(key=lambda c: c.get("last_active") or "", reverse=True)
     return roster
+
+
+def _annotate_access(agent_name: str, roster: List[dict]) -> None:
+    """Stamp each row's access state (trinity-enterprise#21). Block wins over
+    everything; a share on this agent is `granted`; a pending access request
+    is `pending`; otherwise the agent's policy decides (`none`)."""
+    blocks = {(b["channel"], b["client_id"]): b for b in db.list_channel_client_blocks(agent_name)}
+    shared = {(s.shared_with_email or "").lower() for s in db.get_agent_shares(agent_name)}
+    pending = {(r["email"] or "").lower(): r["id"] for r in db.list_access_requests(agent_name, "pending")}
+    for row in roster:
+        email = (row.get("verified_email") or "").lower()
+        block = blocks.get((row["channel"], row.get("client_id") or ""))
+        row.update(access="none", access_request_id=None, blocked_at=None,
+                   blocked_by_email=None, block_reason=None)
+        if block:
+            row.update(access="blocked", blocked_at=block["blocked_at"],
+                       blocked_by_email=block["blocked_by_email"], block_reason=block["reason"])
+        elif email and email in shared:
+            row["access"] = "granted"
+        elif email and email in pending:
+            row.update(access="pending", access_request_id=pending[email])
+
+
+class ClientControlError(Exception):
+    """A refused per-client control, with the HTTP status the router answers."""
+
+    def __init__(self, status_code: int, detail: str):
+        super().__init__(detail)
+        self.status_code, self.detail = status_code, detail
+
+
+def _find_client(agent_name: str, channel: str, client_id: str) -> dict:
+    """The roster row for this client on this agent, or 404. The controls act
+    only on a client that has reached this agent, never on an arbitrary id."""
+    for row in get_client_roster(agent_name):
+        if row["channel"] == channel and row.get("client_id") == client_id:
+            return row
+    raise ClientControlError(404, "Client not found on this agent")
+
+
+def block_client(agent_name: str, channel: str, client_id: str, *,
+                 actor_id: Optional[int], actor_email: Optional[str],
+                 reason: Optional[str] = None) -> dict:
+    """Stop this client reaching this agent on this channel. Idempotent. Their
+    share (if any) is kept: unblocking restores exactly what they had."""
+    _find_client(agent_name, channel, client_id)
+    reason = (reason or "").strip() or None
+    return db.block_channel_client(agent_name, channel, client_id, actor_id, actor_email, reason)
+
+
+def unblock_client(agent_name: str, channel: str, client_id: str) -> dict:
+    _find_client(agent_name, channel, client_id)
+    if not db.unblock_channel_client(agent_name, channel, client_id):
+        raise ClientControlError(409, "This client is not blocked")
+    return {"agent_name": agent_name, "channel": channel, "client_id": client_id}
+
+
+def revoke_client(agent_name: str, channel: str, client_id: str, *, actor_username: str) -> dict:
+    """Remove a granted client's share on this agent. Under a restricted policy
+    their next message files a fresh access request; under open access the
+    policy still admits them — blocking is the control that always holds."""
+    row = _find_client(agent_name, channel, client_id)
+    email = (row.get("verified_email") or "").lower()
+    # The share itself, not the displayed state: a blocked client can still
+    # hold one, and revoking it is how an owner makes the block permanent.
+    if not email or not db.unshare_agent(agent_name, actor_username, email):
+        raise ClientControlError(409, "This client has no access on this agent to revoke")
+    return {"agent_name": agent_name, "channel": channel, "client_id": client_id, "email": email}

@@ -302,6 +302,7 @@ class WhatsAppChannelOperations:
             clients.append({
                 "channel": "whatsapp",
                 "identity": row["wa_user_phone"],
+                "client_id": row["wa_user_phone"],
                 "display_name": row["wa_user_name"] or None,
                 "verified_email": row["verified_email"] or None,
                 "message_count": row["message_count"] or 0,

@@ -1781,6 +1781,23 @@ access_requests = Table(
     Column("decided_at", Text),
 )
 
+# trinity-enterprise#21 — an owner's per-agent block on one external channel
+# client. `client_id` is the channel-native sender id the gate sees
+# (Telegram user id, WhatsApp `whatsapp:+…` phone, Slack user id).
+channel_client_blocks = Table(
+    "channel_client_blocks",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("channel", Text, nullable=False),
+    Column("client_id", Text, nullable=False),
+    Column("blocked_at", Text, nullable=False),
+    Column("blocked_by_id", Integer),
+    Column("blocked_by_email", Text),
+    Column("reason", Text),
+    UniqueConstraint("agent_name", "channel", "client_id"),
+)
+
 audit_log = Table(
     "audit_log",
     metadata,
