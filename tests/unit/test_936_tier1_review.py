@@ -52,7 +52,9 @@ def _tier1_rows(exec_id: str) -> int:
 def test_racing_claims_under_different_models_leave_one_row(db_backend, monkeypatch):
     """Both claimers pass the existence check (forced here); the index decides."""
     from database import db
-    from db.evaluations import EvaluationOperations
+    # Patch the class the facade actually holds: another file may have
+    # reloaded `db.evaluations`, and the facade keeps the module it was built with.
+    EvaluationOperations = type(db._evaluation_ops)
     seed_exec("e-race")
     tier0("e-race")
     monkeypatch.setattr(EvaluationOperations, "_tier1_row_for", lambda self, conn, eid: None)
@@ -223,7 +225,8 @@ def test_a_finished_verdict_survives_a_stale_reclaim(db_backend):
     """The reported path: a verdict whose document names the marker was
     deleted by the reclaim. It can no longer be written at all."""
     from database import db
-    from db.evaluations import JudgeJsonError
+    # The class the facade's own module raises (see above).
+    JudgeJsonError = type(db._evaluation_ops).finish_tier1_row.__globals__["JudgeJsonError"]
     seed_exec("e-mark")
     tier0("e-mark")
     claim = db.claim_tier1_row("e-mark", model="claude-sonnet-5")
@@ -235,21 +238,14 @@ def test_a_finished_verdict_survives_a_stale_reclaim(db_backend):
     assert _tier1_rows("e-mark") == 1
 
 
-def test_both_migration_tracks_run_the_same_dedupe():
+def test_both_migration_tracks_run_the_same_dedupe(monkeypatch):
     import importlib.util
     import types
     from db.migrations import TIER1_DEDUPE_SQL
     path = _BACKEND / "migrations" / "versions" / "0115_tier1_one_per_run.py"
-    saved = sys.modules.get("alembic")
-    sys.modules["alembic"] = types.SimpleNamespace(op=None)
-    try:
-        spec = importlib.util.spec_from_file_location("rev_0113", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-    finally:
-        if saved is None:
-            sys.modules.pop("alembic", None)
-        else:
-            sys.modules["alembic"] = saved
+    monkeypatch.setitem(sys.modules, "alembic", types.SimpleNamespace(op=None))
+    spec = importlib.util.spec_from_file_location("rev_0115", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
     assert mod.TIER1_DEDUPE_SQL == TIER1_DEDUPE_SQL
     assert mod.down_revision == "0114_execution_parent_index"
