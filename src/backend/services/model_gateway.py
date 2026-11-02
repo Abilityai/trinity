@@ -304,23 +304,23 @@ async def request(purpose: str, *, agent_name: Optional[str] = None, credential:
                              tool_choice=tool_choice, output_schema=output_schema, one_shot=one_shot)
             response = await send(cred, body, timeout=timeout)
     if response is None:
-        _note(report, cred, answered=False, status=None, reason="request failed")
+        _note(report, cred, answered=False, status=None, reason="request failed", model=body.get("model"))
         return None
     if response.status_code != 200:
         # The body is scrubbed first: an upstream error that echoes the
         # credential must not reach the log (the module's promise).
         logger.error("[model] %s via %s: API %s: %s", purpose, cred.kind, response.status_code,
                      sanitize_text(response.text or "")[:200])
-        _note(report, cred, answered=False, status=response.status_code, reason=f"API {response.status_code}")
+        _note(report, cred, answered=False, status=response.status_code, reason=f"API {response.status_code}", model=body.get("model"))
         return None
     try:
         data = response.json()
     except Exception as e:  # noqa: BLE001
         logger.error("[model] %s: response unreadable: %s", purpose, type(e).__name__)
-        _note(report, cred, answered=False, status=200, reason="response unreadable")
+        _note(report, cred, answered=False, status=200, reason="response unreadable", model=body.get("model"))
         return None
     if not isinstance(data, dict):
-        _note(report, cred, answered=False, status=200, reason="response unreadable")
+        _note(report, cred, answered=False, status=200, reason="response unreadable", model=body.get("model"))
         return None
     log_usage(purpose, cred, data, started)
     _note(report, cred, answered=True, status=200, model=body.get("model"))

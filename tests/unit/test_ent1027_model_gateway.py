@@ -382,6 +382,16 @@ class TestRequest:
         assert transport.calls[1]["body"]["output_config"]["format"]["schema"] == schema
         assert "thinking" not in transport.calls[1]["body"]
 
+    def test_a_failed_call_reports_the_model_it_asked_for(self, transport, key):
+        """A caller's model on the key is what was sent, answered or not; the
+        report must not name the credential's default instead."""
+        transport.script.append((400, {"error": "bad"}))
+        report = {}
+        assert run(gw.request("judge", credential=gw.resolve(None), prompt="P",
+                              model="claude-sonnet-5", one_shot=False, report=report)) is None
+        assert transport.calls[0]["body"]["model"] == "claude-sonnet-5"
+        assert report["model"] == "claude-sonnet-5" and report["answered"] is False
+
 
 # --------------------------------------------------------------------------- #
 # 3. The callers go through the door
