@@ -7,12 +7,14 @@
     Own skills — the agent's `.claude/skills/`, live; when the agent is stopped,
     its last-known list (never an empty tab), with Run disabled.
     Shared skills — the platform library's assignments and sets.
+    trinity#3448: both scroll in one bounded box, so this root is a link in the
+    0px-basis chain from AgentDetail (BOUNDED_TABS) down to BoundedRegion.
 
     Rules live in utils/skillCards.js; data in stores/skills.js and
     stores/skillGates.js. Everyone with access sees and runs; the owner or an
     admin also sees the approval row and the assignment controls.
   -->
-  <div class="space-y-6" data-testid="skills-tab">
+  <div class="flex grow basis-0 flex-col gap-6" data-testid="skills-tab">
     <header>
       <div class="flex flex-wrap items-start justify-between gap-4">
         <div class="min-w-0">
@@ -20,6 +22,9 @@
           <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">
             Everything this agent can do: its own skills and the ones it uses from the shared library.
           </p>
+          <!-- The stated total (principle 28): the section counts scroll with
+               the box, this does not. Reserved, so a read landing moves nothing. -->
+          <p class="mt-1 h-5 text-[12.5px] leading-5 tabular-nums text-gray-500 dark:text-gray-400" data-testid="skills-tab-total">{{ totalLine }}</p>
         </div>
         <BaseInput
           v-model="filter"
@@ -56,215 +61,238 @@
       </p>
     </header>
 
-    <!-- ===================== Own skills ===================== -->
-    <section data-testid="skills-own">
-      <div class="flex items-baseline gap-2">
-        <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Own skills</h4>
-        <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400" data-testid="skills-own-count">{{ ownCount }}</span>
-      </div>
-      <p class="mt-0.5 h-5 flex items-center gap-2 min-w-0 text-[12.5px] leading-5" data-testid="skills-own-meta">
-        <span
-          class="truncate"
-          :class="ownBanner.tone === 'warn' ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-gray-500 dark:text-gray-400'"
-          :title="ownBanner.title || undefined"
-        >{{ ownBanner.text }}</span>
-        <button
-          v-if="ownView.stale"
-          type="button"
-          class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
-          :class="TEXT_LINK_FOCUS"
-          data-testid="skills-own-refresh"
-          @click="store.loadAgentList()"
-        >Retry</button>
-      </p>
-
-      <div class="mt-3">
-        <SkeletonLoader v-if="ownView.state === 'loading'" :count="2" height="200px" gap="14px" />
-        <LoadFailed
-          v-else-if="ownView.state === 'failed'"
-          title="Couldn't load this agent's skills"
-          :message="store.agentListError || 'The request failed. Try again.'"
-          @retry="store.loadAgentList()"
-        />
-        <p
-          v-else-if="ownView.state === 'empty'"
-          class="text-[12.5px] text-gray-600 dark:text-gray-300"
-          data-testid="skills-own-empty"
-        >
-          {{ ownEmptyText }}
-          <!-- A running agent can answer a moment later: nothing else re-asks
-               (no poll, no event), so the next step is offered here. -->
-          <button
-            v-if="store.agentListState === 'none' && running"
-            type="button"
-            class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
-            :class="TEXT_LINK_FOCUS"
-            data-testid="skills-own-retry"
-            @click="store.loadAgentList()"
-          >Check again</button>
-        </p>
-        <div v-else class="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-          <SkillCard
-            v-for="card in ownCards"
-            :key="card.id"
-            :card="card"
-            :show-owner-row="showOwnerRow"
-            :approvers="gatesStore.approvers"
-            :busy="!!(card.gateKey && gatesStore.busy[card.gateKey]) || (card.missing && !!gatesStore.busy[gateKeyOf(card)])"
-            :running="runningId === card.id"
-            :error="cardError(card)"
-            @run="onRun(card)"
-            @edit-run="onEditRun(card)"
-            @set-gate="(kind) => onSetGate(card, kind)"
-            @clear-gate="onClearGate(card)"
-            @dismiss-error="dismissCardError(card)"
-          />
-        </div>
-      </div>
-    </section>
-
-    <!-- ===================== Shared skills ===================== -->
-    <section data-testid="skills-shared">
-      <div class="flex flex-wrap items-center justify-between gap-2" :class="showManage ? 'min-h-[28px]' : ''">
-        <div class="flex items-baseline gap-2">
-          <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Shared skills</h4>
-          <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ store.assigned.length }}</span>
-        </div>
-        <!-- Only once this agent's assignments are known: a draft built from
-             an unanswered (or failed) read would save over the real list. -->
-        <div v-if="showManage && store.sharedLoaded && store.libraryStatus?.configured" class="flex items-center gap-1.5">
-          <BaseButton size="sm" data-testid="skills-assign-open" @click="assignOpen = true">Assign skills</BaseButton>
-          <BaseButton size="sm" variant="secondary" data-testid="skills-sets-open" @click="setsOpen = true">Manage sets</BaseButton>
-          <BaseButton
-            size="sm"
-            :variant="syncNeedsAttention ? 'primary' : 'secondary'"
-            :disabled="!running"
-            :loading="store.injecting"
-            loading-label="Syncing…"
-            :title="running ? 'Re-copy every assigned skill into the agent' : 'The agent is stopped — start it to sync skills'"
-            data-testid="skills-sync"
-            @click="onSync"
-          >Sync now</BaseButton>
-        </div>
-      </div>
-
-      <!-- Sets, one line: what the agent holds as a family, each coloured by
-           its honest status; the details and the set verbs are in the dialog. -->
-      <div v-if="store.sets.length || store.setsError" class="mt-1 h-6 flex items-center gap-1.5 overflow-hidden" data-testid="skills-set-chips">
-        <span class="flex-none text-[12.5px] text-gray-500 dark:text-gray-400">Sets</span>
-        <!-- A failed read is named here, with its retry — the line must not
-             simply vanish for a viewer who can't open the sets dialog's error. -->
-        <template v-if="store.setsError">
-          <span class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400" :title="store.setsError" data-testid="skills-sets-error">Couldn't read this agent's sets</span>
-          <button
-            type="button"
-            class="flex-none text-[12.5px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
-            :class="TEXT_LINK_FOCUS"
-            data-testid="skills-sets-retry"
-            @click="store.loadSets()"
-          >Retry</button>
-        </template>
-        <template v-else>
-        <button
-          v-for="set in visibleSets"
-          :key="set.name"
-          type="button"
-          class="flex-none rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
-          :title="setTitle(set)"
-          @click="setsOpen = true"
-        >
-          <BaseBadge :variant="setVariant(set)" :dot="setVariant(set) !== 'purple'">{{ set.name }}</BaseBadge>
-        </button>
-        <button
-          v-if="hiddenSetCount"
-          type="button"
-          class="flex-none text-[12.5px] text-gray-600 dark:text-gray-300 hover:underline"
-          :class="TEXT_LINK_FOCUS"
-          @click="setsOpen = true"
-        >+{{ hiddenSetCount }} more</button>
-        <span
-          v-if="setsNeedCredentials"
-          class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
-          data-testid="skills-sets-credentials"
-        >Some sets need credentials</span>
-        </template>
-      </div>
-
-      <!-- One line: the last verb's outcome, else when skills were last synced. -->
-      <p class="mt-0.5 h-5 text-[12.5px] leading-5 truncate" :title="sharedLineTitle || undefined">
-        <template v-if="notice && notice.text">
-          <span data-testid="skills-saved-note" :data-tone="notice.tone" :class="noticeClass(notice.tone)">{{ notice.text }}</span>
-          <span
-            v-if="notice.deprecation"
-            data-testid="skills-saved-deprecation"
-            class="ml-2 text-status-warning-700 dark:text-status-warning-400"
-          >{{ notice.deprecation }}</span>
-        </template>
-        <span v-else class="text-gray-500 dark:text-gray-400" data-testid="skills-sync-meta">{{ syncMeta }}</span>
-      </p>
-
-      <div class="mt-3">
-        <SkeletonLoader v-if="sharedView.state === 'loading'" :count="1" height="240px" />
-        <LoadFailed
-          v-else-if="sharedView.state === 'failed'"
-          title="Couldn't load the shared skills"
-          :message="store.error || 'The request failed. Try again.'"
-          @retry="store.load(agentName)"
-        />
-        <!-- Each empty state says what is wrong AND what to do next. -->
-        <div
-          v-else-if="store.emptyReason === 'library_unconfigured'"
-          class="rounded-lg border border-gray-200 dark:border-gray-750 p-5 text-[12.5px]"
-          data-testid="skills-library-unconfigured"
-        >
-          <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">No skills library is configured</p>
-          <p class="mt-1 text-gray-600 dark:text-gray-300">
-            Skills come from a git repository shared across the fleet. Once it's configured,
-            every agent can be assigned skills from it.
+    <!-- trinity#3448: Own and Shared scroll together in one box that fills the
+         window, and the header above stays in view. The scroll padding keeps
+         a card reached by Tab clear of the sticky headings. -->
+    <BoundedRegion
+      ref="region"
+      label="Skills"
+      class="-mx-1 px-1 pb-1 scroll-pt-14 sm:scroll-pb-20"
+      data-testid="skills-region"
+    >
+      <!-- ===================== Own skills ===================== -->
+      <section data-testid="skills-own">
+        <div class="sticky top-0 z-10 -mx-1 bg-white px-1 pb-1 dark:bg-gray-800">
+          <div class="flex items-baseline gap-2">
+            <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Own skills</h4>
+            <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400" data-testid="skills-own-count">{{ ownCount }}</span>
+          </div>
+          <p class="mt-0.5 h-5 flex items-center gap-2 min-w-0 text-[12.5px] leading-5" data-testid="skills-own-meta">
+            <span
+              class="truncate"
+              :class="ownBanner.tone === 'warn' ? 'text-status-warning-700 dark:text-status-warning-400' : 'text-gray-500 dark:text-gray-400'"
+              :title="ownBanner.title || undefined"
+            >{{ ownBanner.text }}</span>
+            <button
+              v-if="ownView.stale"
+              type="button"
+              class="flex-none text-action-primary-600 dark:text-action-primary-400 hover:underline"
+              :class="TEXT_LINK_FOCUS"
+              data-testid="skills-own-refresh"
+              @click="store.loadAgentList()"
+            >Retry</button>
           </p>
-          <router-link v-if="isAdmin" to="/settings?tab=agents" class="mt-3 inline-block text-action-primary-600 dark:text-action-primary-400 hover:underline" :class="TEXT_LINK_FOCUS">
-            Configure the library
-          </router-link>
-          <p v-else class="mt-3 text-gray-600 dark:text-gray-300">Ask an admin to configure it in Settings.</p>
         </div>
-        <div
-          v-else-if="store.emptyReason === 'library_empty'"
-          class="rounded-lg border border-gray-200 dark:border-gray-750 p-5 text-[12.5px]"
-        >
-          <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">The library is configured but has no skills yet</p>
-          <p class="mt-1 text-gray-600 dark:text-gray-300">Add a skill directory to the repository, then re-sync the library.</p>
-        </div>
-        <p
-          v-else-if="store.emptyReason === 'none_assigned'"
-          class="text-[12.5px] text-gray-600 dark:text-gray-300"
-          data-testid="skills-shared-empty"
-        >
-          No shared skills yet.
-          <template v-if="showManage">Use <span class="font-[550]">Assign skills</span> to pick some from the library.</template>
-          <template v-else>The agent's owner can assign them from the library.</template>
-        </p>
-        <p v-else-if="!sharedCards.length" class="text-[12.5px] text-gray-600 dark:text-gray-300">No shared skill matches the filter.</p>
-        <div v-else class="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
-          <SkillCard
-            v-for="card in sharedCards"
-            :key="card.id"
-            :card="card"
-            :show-owner-row="showOwnerRow"
-            :approvers="gatesStore.approvers"
-            :busy="!!(card.gateKey && gatesStore.busy[card.gateKey]) || store.saving"
-            :running="runningId === card.id"
-            :error="cardError(card)"
-            @run="onRun(card)"
-            @edit-run="onEditRun(card)"
-            @set-gate="(kind) => onSetGate(card, kind)"
-            @clear-gate="onClearGate(card)"
-            @unassign="unassignCard = card"
-            @details="detailsCard = card"
-            @dismiss-error="dismissCardError(card)"
+
+        <div class="mt-3">
+          <SkeletonLoader v-if="ownView.state === 'loading'" :count="2" height="200px" gap="14px" />
+          <LoadFailed
+            v-else-if="ownView.state === 'failed'"
+            title="Couldn't load this agent's skills"
+            :message="store.agentListError || 'The request failed. Try again.'"
+            @retry="store.loadAgentList()"
           />
+          <p
+            v-else-if="ownView.state === 'empty'"
+            class="text-[12.5px] text-gray-600 dark:text-gray-300"
+            data-testid="skills-own-empty"
+          >
+            {{ ownEmptyText }}
+            <!-- A running agent can answer a moment later: nothing else re-asks
+                 (no poll, no event), so the next step is offered here. -->
+            <button
+              v-if="store.agentListState === 'none' && running"
+              type="button"
+              class="ml-1 text-action-primary-600 dark:text-action-primary-400 hover:underline"
+              :class="TEXT_LINK_FOCUS"
+              data-testid="skills-own-retry"
+              @click="store.loadAgentList()"
+            >Check again</button>
+          </p>
+          <div v-else class="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+            <SkillCard
+              v-for="card in ownCards"
+              :key="card.id"
+              :card="card"
+              :show-owner-row="showOwnerRow"
+              :approvers="gatesStore.approvers"
+              :busy="!!(card.gateKey && gatesStore.busy[card.gateKey]) || (card.missing && !!gatesStore.busy[gateKeyOf(card)])"
+              :running="runningId === card.id"
+              :error="cardError(card)"
+              @run="onRun(card)"
+              @edit-run="onEditRun(card)"
+              @set-gate="(kind) => onSetGate(card, kind)"
+              @clear-gate="onClearGate(card)"
+              @dismiss-error="dismissCardError(card)"
+            />
+          </div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      <!-- ===================== Shared skills ===================== -->
+      <section class="contents" data-testid="skills-shared">
+        <!-- From 640 px up this block is docked to the box: at the bottom edge
+             while the reader is in Own, at the top once they reach Shared, so
+             the assignment verbs, the count and the outcome stay in view with a
+             long Own list. That needs the box as its containing block, hence
+             `contents` on the section. Below 640 px the buttons wrap and a dock
+             would take a third of the box, so it only sticks at the top. -->
+        <div
+          class="sticky top-0 z-20 -mx-1 mt-6 border-y border-gray-200 bg-white px-1 py-1.5 sm:bottom-0 dark:border-gray-750 dark:bg-gray-800"
+          data-testid="skills-shared-head"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-2" :class="showManage ? 'min-h-[28px]' : ''">
+            <div class="flex items-baseline gap-2">
+              <h4 class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">Shared skills</h4>
+              <span class="text-[12.5px] tabular-nums text-gray-500 dark:text-gray-400">{{ store.assigned.length }}</span>
+            </div>
+            <!-- Only once this agent's assignments are known: a draft built from
+                 an unanswered (or failed) read would save over the real list. -->
+            <div v-if="showManage && store.sharedLoaded && store.libraryStatus?.configured" class="flex flex-wrap items-center gap-1.5">
+              <BaseButton size="sm" data-testid="skills-assign-open" @click="assignOpen = true">Assign skills</BaseButton>
+              <BaseButton size="sm" variant="secondary" data-testid="skills-sets-open" @click="setsOpen = true">Manage sets</BaseButton>
+              <BaseButton
+                size="sm"
+                :variant="syncNeedsAttention ? 'primary' : 'secondary'"
+                :disabled="!running"
+                :loading="store.injecting"
+                loading-label="Syncing…"
+                :title="running ? 'Re-copy every assigned skill into the agent' : 'The agent is stopped — start it to sync skills'"
+                data-testid="skills-sync"
+                @click="onSync"
+              >Sync now</BaseButton>
+            </div>
+          </div>
+
+          <!-- One line: the last verb's outcome, else when skills were last synced. -->
+          <p class="mt-0.5 h-5 text-[12.5px] leading-5 truncate" :title="sharedLineTitle || undefined">
+            <template v-if="notice && notice.text">
+              <span data-testid="skills-saved-note" :data-tone="notice.tone" :class="noticeClass(notice.tone)">{{ notice.text }}</span>
+              <span
+                v-if="notice.deprecation"
+                data-testid="skills-saved-deprecation"
+                class="ml-2 text-status-warning-700 dark:text-status-warning-400"
+              >{{ notice.deprecation }}</span>
+            </template>
+            <span v-else class="text-gray-500 dark:text-gray-400" data-testid="skills-sync-meta">{{ syncMeta }}</span>
+          </p>
+        </div>
+
+        <!-- Sets, one line: what the agent holds as a family, each coloured by
+             its honest status; the details and the set verbs are in the dialog. -->
+        <div v-if="store.sets.length || store.setsError" class="mt-1 h-6 flex items-center gap-1.5 overflow-hidden" data-testid="skills-set-chips">
+          <span class="flex-none text-[12.5px] text-gray-500 dark:text-gray-400">Sets</span>
+          <!-- A failed read is named here, with its retry — the line must not
+               simply vanish for a viewer who can't open the sets dialog's error. -->
+          <template v-if="store.setsError">
+            <span class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400" :title="store.setsError" data-testid="skills-sets-error">Couldn't read this agent's sets</span>
+            <button
+              type="button"
+              class="flex-none text-[12.5px] text-action-primary-600 dark:text-action-primary-400 hover:underline"
+              :class="TEXT_LINK_FOCUS"
+              data-testid="skills-sets-retry"
+              @click="store.loadSets()"
+            >Retry</button>
+          </template>
+          <template v-else>
+          <button
+            v-for="set in visibleSets"
+            :key="set.name"
+            type="button"
+            class="flex-none rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+            :title="setTitle(set)"
+            @click="setsOpen = true"
+          >
+            <BaseBadge :variant="setVariant(set)" :dot="setVariant(set) !== 'purple'">{{ set.name }}</BaseBadge>
+          </button>
+          <button
+            v-if="hiddenSetCount"
+            type="button"
+            class="flex-none text-[12.5px] text-gray-600 dark:text-gray-300 hover:underline"
+            :class="TEXT_LINK_FOCUS"
+            @click="setsOpen = true"
+          >+{{ hiddenSetCount }} more</button>
+          <span
+            v-if="setsNeedCredentials"
+            class="truncate text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+            data-testid="skills-sets-credentials"
+          >Some sets need credentials</span>
+          </template>
+        </div>
+
+        <div class="mt-3">
+          <SkeletonLoader v-if="sharedView.state === 'loading'" :count="1" height="240px" />
+          <LoadFailed
+            v-else-if="sharedView.state === 'failed'"
+            title="Couldn't load the shared skills"
+            :message="store.error || 'The request failed. Try again.'"
+            @retry="store.load(agentName)"
+          />
+          <!-- Each empty state says what is wrong AND what to do next. -->
+          <div
+            v-else-if="store.emptyReason === 'library_unconfigured'"
+            class="rounded-lg border border-gray-200 dark:border-gray-750 p-5 text-[12.5px]"
+            data-testid="skills-library-unconfigured"
+          >
+            <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">No skills library is configured</p>
+            <p class="mt-1 text-gray-600 dark:text-gray-300">
+              Skills come from a git repository shared across the fleet. Once it's configured,
+              every agent can be assigned skills from it.
+            </p>
+            <router-link v-if="isAdmin" to="/settings?tab=agents" class="mt-3 inline-block text-action-primary-600 dark:text-action-primary-400 hover:underline" :class="TEXT_LINK_FOCUS">
+              Configure the library
+            </router-link>
+            <p v-else class="mt-3 text-gray-600 dark:text-gray-300">Ask an admin to configure it in Settings.</p>
+          </div>
+          <div
+            v-else-if="store.emptyReason === 'library_empty'"
+            class="rounded-lg border border-gray-200 dark:border-gray-750 p-5 text-[12.5px]"
+          >
+            <p class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">The library is configured but has no skills yet</p>
+            <p class="mt-1 text-gray-600 dark:text-gray-300">Add a skill directory to the repository, then re-sync the library.</p>
+          </div>
+          <p
+            v-else-if="store.emptyReason === 'none_assigned'"
+            class="text-[12.5px] text-gray-600 dark:text-gray-300"
+            data-testid="skills-shared-empty"
+          >
+            No shared skills yet.
+            <template v-if="showManage">Use <span class="font-[550]">Assign skills</span> to pick some from the library.</template>
+            <template v-else>The agent's owner can assign them from the library.</template>
+          </p>
+          <p v-else-if="!sharedCards.length" class="text-[12.5px] text-gray-600 dark:text-gray-300">No shared skill matches the filter.</p>
+          <div v-else class="grid gap-3.5 grid-cols-1 md:grid-cols-2 xl:grid-cols-3">
+            <SkillCard
+              v-for="card in sharedCards"
+              :key="card.id"
+              :card="card"
+              :show-owner-row="showOwnerRow"
+              :approvers="gatesStore.approvers"
+              :busy="!!(card.gateKey && gatesStore.busy[card.gateKey]) || store.saving"
+              :running="runningId === card.id"
+              :error="cardError(card)"
+              @run="onRun(card)"
+              @edit-run="onEditRun(card)"
+              @set-gate="(kind) => onSetGate(card, kind)"
+              @clear-gate="onClearGate(card)"
+              @unassign="unassignCard = card"
+              @details="detailsCard = card"
+              @dismiss-error="dismissCardError(card)"
+            />
+          </div>
+        </div>
+      </section>
+    </BoundedRegion>
 
     <SkillAssignModal v-model="assignOpen" :notice="notice" @saved="onSaved" />
 
@@ -300,6 +328,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import BoundedRegion from '../BoundedRegion.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseInput from '../base/BaseInput.vue'
@@ -315,6 +344,7 @@ import { useSkillsStore } from '../../stores/skills'
 import { useSkillGatesStore } from '../../stores/skillGates'
 import { useRole } from '../../composables/useRole'
 import { buildSkillCards } from '../../utils/skillCards'
+import { matchesQuery } from '../../utils/skillFilter'
 import { staleBannerMessage, viewState } from '../../utils/loadingState'
 import { apiErrorMessage } from '../../utils/apiError'
 import { isGateRefusal, PENDING_NOTICE_TOAST } from '../../utils/skillGate'
@@ -338,6 +368,7 @@ const gatesStore = useSkillGatesStore()
 const { isAdmin } = useRole()
 
 const filter = ref('')
+const region = ref(null)          // the one box Own and Shared scroll in
 const runningId = ref(null)
 const cardErrors = ref({})
 const notice = ref(null)          // {text, tone, deprecation} — the last verb's outcome
@@ -370,16 +401,26 @@ const cards = computed(() => buildSkillCards({
   gatesKnown: gatesStore.hasLoaded,
 }))
 
-function matches(card) {
-  const q = filter.value.trim().toLowerCase()
-  if (!q) return true
-  return card.name.toLowerCase().includes(q) || String(card.description || '').toLowerCase().includes(q)
-}
+const matches = (card) => matchesQuery(card, filter.value)
 
 const ownCards = computed(() => [...cards.value.own, ...cards.value.unmatchedGates].filter(matches))
 const sharedCards = computed(() => cards.value.shared.filter(matches))
 // What the section lists: own skills, and gates kept for skills no longer listed.
 const ownCount = computed(() => cards.value.own.length + cards.value.unmatchedGates.length)
+
+// "12 own · 5 shared", plus what is shown while the filter is on. A part waits
+// for its read, and a stopped agent with no kept list has no own part: a known
+// state with nothing to count, not a zero.
+const totalLine = computed(() => {
+  const parts = []
+  if (store.agentListLoaded && store.agentListState !== 'none') parts.push(`${ownCount.value} own`)
+  if (store.sharedLoaded) parts.push(`${store.assigned.length} shared`)
+  if (parts.length && filter.value.trim()) parts.push(`${ownCards.value.length + sharedCards.value.length} shown`)
+  return parts.join(' · ')
+})
+
+// A new query starts at the first card.
+watch(filter, () => region.value?.scrollToTop())
 
 // A section draws once every read it is built from has answered — or failed,
 // which is a known state too. Own needs the assignments (which skills Shared
@@ -616,9 +657,10 @@ function loadAll() {
 // The tab outlives an agent switch (AgentDetail is KeepAlive'd and Skills is
 // open to everyone), so nothing from the previous agent's verbs carries over:
 // its outcome line, card errors, a pending sync, an open dialog, a run still
-// starting, the filter.
+// starting, the filter, the scroll.
 function resetView() {
   filter.value = ''
+  region.value?.scrollToTop()
   runningId.value = null
   cardErrors.value = {}
   notice.value = null
