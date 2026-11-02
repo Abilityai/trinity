@@ -715,6 +715,7 @@ READ_SITES = {
     ("routers/agent_memory.py", "search_retrieval_memory_agent_endpoint"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule); the row only names whose memory, none of it is returned",
     ("routers/public_memory.py", "write_user_memory"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule, #4121); the row names whose notes are written, and only that address comes back",
     ("routers/seat_decisions.py", "_seat_for"): "reads the row to find the seat a decision belongs to",
+    ("routers/evaluations.py", "_sees_graded_run"): "IS the viewer decision for an evaluation read: compares the run's starter with the caller's viewer_own_rows scope (ReadScope.sees_run); nothing from the row is returned",
 }
 
 

@@ -107,6 +107,16 @@
         Waiting on <span class="font-semibold">{{ addressedWaiting }}</span>.
         Only they can decide this, from their Workspace Inbox.
       </p>
+      <!-- An anomaly alarm's evidence (recent runs, trend, excerpt) lives on the
+           agent's Schedules tab, not here — send the operator there in one click. -->
+      <div v-if="item.context?.kind === 'schedule_anomaly'" class="px-4 pb-3">
+        <router-link
+          :to="{ path: `/agents/${item.agent_name}`, query: { tab: 'schedules' } }"
+          class="text-xs text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          data-testid="queue-anomaly-link"
+          @click.stop
+        >Open the schedule and its incident →</router-link>
+      </div>
 
       <!-- Context (collapsible) -->
       <div v-if="item.context && Object.keys(item.context).length > 0" class="px-4 pb-4">

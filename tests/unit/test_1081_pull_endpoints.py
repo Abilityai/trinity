@@ -519,6 +519,31 @@ class TestServiceResult:
         assert row.response == "all done"
         assert row.cost == pytest.approx(0.012)
 
+    def test_the_reported_model_fills_a_row_dispatched_without_one(self, seed_agent, enqueue):
+        """abilityai/trinity-enterprise#936: the runtime's `model_name` reaches
+        `model_used` when dispatch recorded none; a requested model is kept."""
+        seed_agent("alpha")
+        enqueue("alpha")
+        eid, token = self._claim()
+        from services import pull_coordination_service as pcs
+        from database import db
+        assert db.get_execution(eid).model_used is None
+        pcs.apply_task_result(eid, token, status="success", content="done",
+                              metadata={"model_name": "claude-sonnet-4-6"})
+        assert db.get_execution(eid).model_used == "claude-sonnet-4-6"
+
+        enqueue("alpha")
+        eid2, token2 = self._claim()
+        from sqlalchemy import update
+        from db.engine import get_engine
+        from db.tables import schedule_executions
+        with get_engine().begin() as conn:
+            conn.execute(update(schedule_executions).where(schedule_executions.c.id == eid2)
+                         .values(model_used="opus"))
+        pcs.apply_task_result(eid2, token2, status="success", content="done",
+                              metadata={"model_name": "claude-opus-4-6"})
+        assert db.get_execution(eid2).model_used == "opus"
+
     def test_duplicate_is_replayed_not_double_applied(self, seed_agent, enqueue):
         seed_agent("alpha")
         enqueue("alpha")

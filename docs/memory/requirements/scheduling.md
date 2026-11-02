@@ -365,7 +365,7 @@
 ### 10.5 Model Selection for Tasks & Schedules (MODEL-001)
 - **Status**: ✅ Implemented (2026-03-02)
 - **Description**: Select which Claude model to use for task execution and scheduled runs
-- **Key Features**: ModelSelector combobox with presets (Opus 4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5), custom model input, localStorage persistence, model_used audit trail in execution records
+- **Key Features**: ModelSelector combobox with presets (Opus 4.5/4.6, Sonnet 4.5/4.6, Haiku 4.5), custom model input, localStorage persistence, model_used audit trail in execution records (a row dispatched without a model is filled at its terminal write with the model the runtime reported — abilityai/trinity-enterprise#936, rule in `core-agent.md` AC-7)
 - **Requirements**: `docs/requirements/MODEL_SELECTION_TASKS_SCHEDULES.md`
 
 ### 10.6 Scheduler Async Fire-and-Forget (SCHED-ASYNC-001)

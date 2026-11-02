@@ -43,8 +43,9 @@ def ops(tmp_path, monkeypatch):
     conn = sqlite3.connect(str(db_path))
     from sqlalchemy.schema import CreateTable
     from sqlalchemy.dialects import sqlite as sqlite_dialect
-    from db.tables import schedule_executions, agent_schedules
-    for t in (schedule_executions, agent_schedules):
+    # ent#935: the analytics accessor also joins the Tier-0 rows.
+    from db.tables import schedule_executions, agent_schedules, agent_evaluations
+    for t in (schedule_executions, agent_schedules, agent_evaluations):
         conn.execute(str(CreateTable(t).compile(dialect=sqlite_dialect.dialect())))
     conn.commit()
     conn.close()

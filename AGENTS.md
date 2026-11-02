@@ -117,7 +117,7 @@ Get an MCP API key (Settings → MCP Keys in the UI; `/trinity:connect` and `tri
 }
 ```
 
-176 tools: agent lifecycle, chat, schedules, executions, skills, tags, monitoring, loops, system deployment. Catalog: [docs/user-docs/integrations/mcp-server.md](docs/user-docs/integrations/mcp-server.md).
+177 tools: agent lifecycle, chat, schedules, executions, skills, tags, monitoring, loops, system deployment. Catalog: [docs/user-docs/integrations/mcp-server.md](docs/user-docs/integrations/mcp-server.md).
 
 Caveats that matter to agents:
 

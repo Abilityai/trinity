@@ -219,6 +219,8 @@ CREATE TABLE schedule_executions (
                                                  -- background_tasks_pending_at_exit), derived backend-side at terminal write;
                                                  -- NULL = no evidence, never "verified healthy"
     chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
+    parent_execution_id TEXT,                    -- ent#935 (delegation_link / 0113): the caller turn that asked for this run,
+                                                 -- stamped at admission only when that row belongs to the authenticated source agent.
                                                  -- Stamped 1 + MAX(caller's running depths) on agent-principal children
     chat_session_id TEXT,                        -- #3380: the /chat thread this turn answers (NULL = not a /chat turn);
                                                  -- read by the #2944 watchdog claim to write the recovered reply
@@ -230,6 +232,7 @@ CREATE INDEX idx_executions_queued ON schedule_executions(agent_name, queued_at)
     WHERE status = 'queued';
 -- #740: partial index for joining executions back to their parent loop
 CREATE INDEX idx_executions_loop ON schedule_executions(loop_id)
+CREATE INDEX idx_executions_parent ON schedule_executions(parent_execution_id)  -- ent#937 (execution_parent_index / 0114): the chain read walks descendants
     WHERE loop_id IS NOT NULL;
 ```
 
@@ -1143,12 +1146,24 @@ CREATE TABLE agent_evaluations (
     quality REAL,                        -- the graded axis (nullable, independent)
     checks_json TEXT,                    -- Tier-0 deterministic check results
     judge_json TEXT,                     -- Tier-1 judge output (enterprise layer)
-    evaluator TEXT NOT NULL,             -- 'tier0' | judge id | admin username
+    evaluator TEXT NOT NULL,             -- 'platform:tier0' | 'admin:<user>' | 'workspace:<email>' | judge id
     created_at TEXT NOT NULL,
+    -- ent#935 (SQLite delegation_link + Alembic 0113_delegation_link): the delegation
+    -- the graded run came from, read off the execution row, never passed by a caller.
+    -- NULL = not delegated; delegation_mode is sync|async|fan_out|reminder|loop.
+    caller_agent TEXT,
+    parent_execution_id TEXT,
+    delegation_mode TEXT,
     FOREIGN KEY (execution_id) REFERENCES schedule_executions(id)
 );
 CREATE INDEX idx_agent_evaluations_agent ON agent_evaluations(agent_name, created_at DESC);
+-- ent#935: "how did the runs this caller delegated go", per callee.
+CREATE INDEX idx_agent_evaluations_caller ON agent_evaluations(caller_agent, agent_name, created_at);
 CREATE INDEX idx_agent_evaluations_execution ON agent_evaluations(execution_id);
+-- ent#936: one judge row per run whatever the model (the evaluator key embeds it).
+-- SQLite tier1_one_per_run + Alembic 0115_tier1_one_per_run.
+CREATE UNIQUE INDEX idx_agent_evaluations_tier1_target ON agent_evaluations(target_kind, target_id)
+  WHERE evaluator LIKE 'platform:tier1:%';
 ```
 
 **skill_sources** (ent#237 — the multi-source skills library). **Replaces** the single

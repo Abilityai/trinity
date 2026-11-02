@@ -3479,6 +3479,9 @@ class TaskExecutionService:
                         # #3589: the producer's terminal instant (the watchdog
                         # claim's `retained_at`); None = the writer stamps now.
                         completed_at=envelope.completed_at,
+                        # ent#936: the model that answered, for a row dispatched
+                        # without one (the writer keeps a requested model).
+                        model_used=metadata.get("model_name"),
                     ),
                 )
                 if not won:

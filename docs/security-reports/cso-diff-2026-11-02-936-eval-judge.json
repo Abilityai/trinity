@@ -1,0 +1,76 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-02",
+  "mode": "diff-daily",
+  "scope": "feature/936-eval-judge vs origin/dev (merge-base 0e54bc269) — the agent-behavioral-evaluation epic (abilityai/trinity-enterprise#205)",
+  "phases_run": [0, 1, 2, 6, 7, 8, 9, 10, 12, 13, 14],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 9,
+    "new_endpoints_methods": "GET only",
+    "new_ingress": 1,
+    "new_ingress_note": "agent-authored execution transcripts reach a judge model (private module; framing, caps and output validation verified, see coverage note)",
+    "new_mcp_tools": 1
+  },
+  "findings": [
+    {
+      "id": 1,
+      "severity": "medium",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "phase": 9,
+      "category": "broken-access-control-share-tier",
+      "owasp_2025": "A01",
+      "asi": "ASI03",
+      "llm": null,
+      "title": "Evaluation reads gave a share holder every user's runs of a shared agent",
+      "file": "src/backend/routers/evaluations.py",
+      "line": 440,
+      "quote": "rows, truncated = db.evaluation_window_rows(since=lo, until=hi, agents=names, caller=caller)",
+      "description": "trinity-enterprise#875 narrows a person an agent is only shared with to the executions they started (viewer_own_rows / viewer_row_scope). The evaluation reads scope by accessible_agent_names alone, and every row this epic writes grades one execution.",
+      "exploit": "User B is shared agent X by its owner A. B calls GET /api/agents/X/evaluations/indicators/checks_passed/runs (or the MCP get_evaluation_summary tool, or /evaluations/failed). The response lists execution ids, schedule ids, delegating agents, failure reason codes and costs of A's runs; GET /api/agents/X/executions/{id} 404s the same ids for B.",
+      "impact": "Run metadata (not content) of other users' runs disclosed across the share boundary ent#875 closed.",
+      "recommendation": "Carry viewer_own_rows through the evaluation ReadScope and apply it on every read.",
+      "resolution": "Fixed on the branch: f193da467. ReadScope carries viewer_own_rows; window, cost and list queries take one SQL condition; per-execution and by-id reads check the run's starter; the chain stops at another user's run; the stored trend reads empty for a narrowed caller. Pinned by tests/unit/test_936_share_holder_own_runs.py (red before the fix on every route).",
+      "verifier": "independent agent (security-analyzer, fresh context) found it; re-derived in context from dependencies.py:3188 and routers/evaluations.py"
+    }
+  ],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "Phases 3-5 not run: no dependency, lockfile, Dockerfile, compose or workflow change in the diff",
+    "Docker pass not run (no image change); counts_as_full_run false",
+    "The private enterprise submodule range was reviewed by an independent agent; its results are recorded in the private repository, not here (trinity-enterprise#45)",
+    "The stored eval trend points fold every user's runs and cannot be narrowed per user; a narrowed caller now reads them empty rather than split"
+  ],
+  "low_confidence": [
+    "Portal behavior tones are computed over every client's runs of the agent (aggregate tone only, no ids or numbers) — by design",
+    "checks_passed_rate on the schedule analytics aggregates inherits the pre-existing unnarrowed counts on those routes (not a regression of this diff)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency change)"
+  },
+  "filter_stats": {
+    "candidates": 5,
+    "dropped": 4,
+    "dropped_reasons": [
+      "caller_agent on evaluation rows: already disclosed by source_agent_name on the execution reads (schedules.py:635)",
+      "f-string op.execute in Alembic 0113 downgrade: interpolates a constant tuple",
+      "innerHTML in a frontend test: test-only",
+      "model_gateway failure reasons: static strings, no response body or exception text"
+    ]
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0
+  },
+  "trend": {
+    "prior": "cso-diff-2026-11-01-4121-write-door-live-turn",
+    "resolved": 0,
+    "persistent": 0,
+    "new": 1
+  },
+  "counts_as_full_run": false
+}

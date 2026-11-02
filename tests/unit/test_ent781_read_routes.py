@@ -100,7 +100,23 @@ def test_evaluator_output_contract(stored, shown, reader):
                                                   frozenset())
     assert out["evaluator"] == shown
     assert row == before                             # the stored row is never rewritten
+    machine = _CONTRACT_READERS[reader].get("mcp_scope") is not None
     for key, value in _NEUTRAL.items():
+        if key == "judge":
+            # ent#936 TD-8: a machine never reads a judge document — it gets the
+            # structural findings in its place (none here: the document has none).
+            # Nor does a person who is not an operator of the agent (#3790 review):
+            # every reader here is called with an empty operator set.
+            assert out["judge"] is None and out["judge_findings"] == [], key
+            continue
+        if key == "quality" and str(stored).startswith("platform:tier1:"):
+            assert out["quality"] is None, key       # nor a Tier-1 score (TD-8)
+            continue
+        if key == "checks" and machine and stored == "platform:tier0:pair":
+            # ent#940: a pair row reaches a machine as check ids and reason codes only.
+            from services.evaluation_read_service import pair_checks_for_machine
+            assert out["checks"] == pair_checks_for_machine(value), key
+            continue
         assert out[key] == value, key
 
 
@@ -229,10 +245,11 @@ def http_as(monkeypatch):
     from fastapi.testclient import TestClient
     from routers import evaluations
 
-    monkeypatch.setattr(evaluations.db, "list_agent_evaluations", lambda agent, limit: [_row()])
-    monkeypatch.setattr(evaluations.db, "list_fleet_evaluations", lambda names, limit: [_row()])
+    monkeypatch.setattr(evaluations.db, "list_agent_evaluations", lambda agent, limit, **kw: [_row()])
+    monkeypatch.setattr(evaluations.db, "list_fleet_evaluations", lambda names, limit, **kw: [_row()])
     monkeypatch.setattr(evaluations.db, "get_agent_evaluation", lambda eval_id: _row())
-    monkeypatch.setattr(evaluations, "accessible_agent_names", lambda user: [AGENT])
+    # The read scope resolves the accessible set inside evaluation_read_service.scope_for.
+    monkeypatch.setattr("services.agent_service.helpers.accessible_agent_names", lambda user: [AGENT])
     _ownership(monkeypatch, evaluations)
 
     def make(user):

@@ -316,6 +316,8 @@ class ScheduleExecution(BaseModel):
     # ent#862 — verified AAuth peer identity of an inbound A2A caller
     # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
     a2a_caller_identity: Optional[str] = None
+    # ent#935: the caller turn that delegated this one (NULL = not delegated).
+    parent_execution_id: Optional[str] = None
 
 
 # =========================================================================
