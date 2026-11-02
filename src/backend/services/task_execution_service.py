@@ -53,7 +53,7 @@ from services.execution_integrity import derive_turn_integrity
 from services import event_dispatch_service
 from services import channel_completion_report
 from services import admission_policy, peer_skill_policy, skill_gate_service
-from services.chat_signals import AdmissionRefused
+from services.chat_signals import AdmissionRefused, admission_refusal_of
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.platform_audit_service import AuditEventType, platform_audit_service
 # #2048: stdlib-only leaf by construction, so this cannot cycle back through the
@@ -1048,6 +1048,13 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
     pull sink writes and the prefix is removed from ``error``,
     compact events ride ``raw_response["metadata"]``, and the dispatch
     sentinels never pass for a session id.
+
+    trinity-enterprise#1059: a row an admission policy closed SKIPPED with its
+    ``[usage_share]`` code comes back carrying ``admission_refusal``, so every
+    caller that reads a turn back from the row (the backlog drain, the paid,
+    channel, public-link, room and Workspace doors) sees the refusal the
+    in-worker result carried — the refusal is a property of the result, not of
+    the worker that produced it.
     """
     execution = db.get_execution(execution_id)
     if execution is None:
@@ -1080,7 +1087,7 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
             subscription_switch = walk_state["summary"]
     except (TypeError, ValueError, AttributeError):
         subscription_switch = None
-    return TaskExecutionResult(
+    result = TaskExecutionResult(
         execution_id=execution_id,
         status=status,
         subscription_switch=subscription_switch,
@@ -1094,6 +1101,9 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         error=error,
         error_code=error_code,
     )
+    result.admission_refusal = admission_refusal_of(
+        result, getattr(execution, "agent_name", None) or "")
+    return result
 
 
 # Strong references to fire-and-forget breaker tasks. asyncio's event loop holds

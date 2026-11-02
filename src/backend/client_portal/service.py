@@ -47,7 +47,7 @@ from services.chat_title import (
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
-from services.chat_signals import AdmissionRefused
+from services.chat_signals import AdmissionRefused, admission_refusal_of
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
 )
@@ -3359,11 +3359,14 @@ async def portal_chat(agent_name: str, message: str, email: str,
     result = turn.result
 
     status = getattr(result, "status", None)
-    refusal = getattr(result, "admission_refusal", None)
+    # trinity-enterprise#1059: the attribute when the refusal happened in this
+    # worker, the row's `skipped` + `usage_share` shape when the turn was
+    # refused on another one (a drained backlog) — one predicate for both.
+    refusal = admission_refusal_of(result, agent_name)
     if isinstance(refusal, AdmissionRefused):
-        # trinity-enterprise#1059: nothing ran, and the policy's sentence is
-        # written for a person (the budget, when it frees, whether an ask is
-        # pending) — shown as is, never the internal copy.
+        # Nothing ran, and the policy's sentence is written for a person (the
+        # budget, when it frees, whether an ask is pending) — shown as is,
+        # never the internal copy.
         raise ClientPortalError(429, refusal.message, category="limit", retryable=False)
     if status == "cancelled":
         # ent#155 review (NEW-1): a cancellation is not a failure, and saying so

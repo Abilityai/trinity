@@ -42,6 +42,7 @@ from services.upload_service import (
     process_file_uploads,
 )
 from db.write_params import TaskExecutionFields
+from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillGateError
 # The chat-turn rate constants moved here with the accounting that reads them
 # (per-IP and per-token message caps; the connection-level public-link rate
@@ -143,6 +144,16 @@ async def _execute_public_chat_background(
                                                 content=e.message if hasattr(e, "message") else str(e),
                                                 sender_email=verified_email)
             _mark_gate_hold((user_message_id, getattr(notice, "id", None)), e)
+            return
+
+        refusal = admission_refusal_of(result, agent_name)
+        if refusal is not None:
+            # trinity-enterprise#1059 (review C2): nothing ran — the visitor
+            # polls this thread, so the policy's sentence is stored as the
+            # reply (the gate's shape), never an empty assistant turn.
+            logger.info(f"[PublicChatAsync] refused by an admission policy for {agent_name}: {refusal.code}")
+            db.add_public_chat_message(session_id=chat_session_id, role="assistant",
+                                       content=refusal.message, sender_email=verified_email)
             return
 
         if result.status == "success" and result.response:
@@ -422,6 +433,17 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
         result = SimpleNamespace(status="gated", cost=None, response=getattr(e, "message", None) or str(e))
     else:
         gate_stop = None
+
+    refusal = admission_refusal_of(result, agent_name)
+    if refusal is not None:
+        # trinity-enterprise#1059 (review C2): an admission policy stopped the
+        # turn before it ran — the seam's 429 with the policy's own sentence
+        # and code, never a success-shaped empty reply stored in the thread.
+        from services.chat_execution_service import _error_code_headers
+        retry_after = refusal.retry_after_seconds()
+        extra = {"Retry-After": str(retry_after)} if retry_after is not None else None
+        raise PublicChatError(status_code=429, detail=refusal.message,
+                              headers=_error_code_headers(refusal.code, extra))
 
     if result.status in ("failed", "cancelled"):
         # #679: a CANCELLED turn is non-delivery, not a success-like empty

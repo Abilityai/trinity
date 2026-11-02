@@ -189,3 +189,35 @@ class AdmissionRefused(Exception):
             "frees_at": frees_at,
             "retryable": self.retryable,
         }
+
+
+# The codes a terminal row can carry that mean "an admission policy stopped this
+# turn before it ran". A SKIPPED row with one of these is a refusal wherever it
+# is read back, not a success-shaped empty reply.
+ADMISSION_REFUSAL_CODES = (TaskExecutionErrorCode.USAGE_SHARE.value,)
+
+
+def admission_refusal_of(result, agent_name: str) -> Optional[AdmissionRefused]:
+    """The admission-policy refusal a terminal result carries, or None.
+
+    Reads the in-memory ``admission_refusal`` the gate attached when the turn was
+    refused inside this process, and otherwise rebuilds it from the row's shape
+    — ``status == skipped`` with an ``error_code`` in ``ADMISSION_REFUSAL_CODES``
+    — which is what a turn refused on another worker (the backlog drain, a
+    long-poll that read the row back) comes back as. ``frees_at`` is not on the
+    row, so a rebuilt refusal has none; the message itself says when.
+
+    Every ``dispatch_and_await_terminal`` caller that answers a person must ask
+    this before branching on ``failed``/``cancelled`` (trinity-enterprise#1059
+    review C2): a refusal is not a failure and not a success.
+    """
+    refusal = getattr(result, "admission_refusal", None)
+    if isinstance(refusal, AdmissionRefused):
+        return refusal
+    status = getattr(result, "status", None)
+    status = str(getattr(status, "value", status) or "").strip().lower()
+    code = getattr(result, "error_code", None)
+    code = getattr(code, "value", code)
+    if status == "skipped" and code in ADMISSION_REFUSAL_CODES:
+        return AdmissionRefused(code, agent_name, (getattr(result, "error", None) or "").strip())
+    return None

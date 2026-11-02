@@ -7729,6 +7729,17 @@
         "execution"
       ],
       "description": "trinity-enterprise#1059 (A): the pre-admission policy seam. An empty registry admits every door and adds no context line; a refusing policy stops /chat and /task before the idempotency claim and the acquire (no row), closes an execute_task row SKIPPED with the policy's plain-words message and error_code usage_share, answers 429 with X-Trinity-Error-Code and Retry-After on both routes, and reaches the Workspace as category limit, not retryable; a broken policy is ignored; the notice renders as the Usage line."
+    },
+    {
+      "file": "unit/test_ent1059_refusal_doors.py",
+      "feature": "trinity-enterprise#1059",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "execution"
+      ],
+      "description": "trinity-enterprise#1059 (review C2): every door answers an admission-policy refusal. A real SKIPPED [usage_share] row comes back from result_from_execution_row carrying admission_refusal (chat_signals.admission_refusal_of, one rule for the attribute and the row's shape); the paid door releases the claim and never attaches or settles, MCP inline chat answers 429 with the sentence and X-Trinity-Error-Code, a channel sends the sentence and persists no empty assistant turn, the public link answers 429 (sync) or stores the sentence as the reply (async), the Workspace classifies a drained refusal as limit from status + code alone, a room posts the policy's sentence and keeps its resume handle and cursor, A2A reports rejected like the row reader, a refused validation turn is an ERROR verdict."
     }
   ]
 }

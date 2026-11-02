@@ -460,8 +460,10 @@ class ValidationService:
 
         # Check for execution failure. #679: a CANCELLED validation turn never
         # actually validated anything — treat it as a non-success ERROR, not an
-        # empty response to be parsed as a validation verdict.
-        if result.status in ("failed", "cancelled"):
+        # empty response to be parsed as a validation verdict. A SKIPPED one
+        # (held by the gate or stopped by an admission policy,
+        # trinity-enterprise#1059) validated nothing either.
+        if result.status in ("failed", "cancelled", "skipped"):
             return ValidationResult(
                 status=ValidationStatus.ERROR,
                 summary=f"Validation execution {result.status}: {result.error or 'Unknown error'}",

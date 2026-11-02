@@ -106,6 +106,7 @@ from services.chat_signals import (
     AdmissionRefused,
     ChatExecutionContext,
     ChatDispatchError,
+    admission_refusal_of,
     chat_trigger,
 )
 from utils.credential_sanitizer import (
@@ -2768,11 +2769,9 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
         # trinity-enterprise#1059: a share that ran out while this task waited
         # in the backlog. The drain closed the row SKIPPED with `[usage_share]`
         # (`_admission_policy_gate`); read back here the refusal must answer
-        # the seam's 429, not a success shaped from the row. `frees_at` is not
-        # on the row, so no Retry-After — the message itself says when.
-        if (result.status == TaskExecutionStatus.SKIPPED and error_code is not None
-                and error_code.value == TaskExecutionErrorCode.USAGE_SHARE.value):
-            result.admission_refusal = AdmissionRefused(error_code.value, name, error or "")
+        # the seam's 429, not a success shaped from the row. One rebuild rule
+        # for every row reader (`chat_signals.admission_refusal_of`).
+        result.admission_refusal = admission_refusal_of(result, name)
         # #2329: the pull sink signals `result=None` with the session it saved
         # the turn to; the DB-poll wake (another worker) carries none.
         sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
