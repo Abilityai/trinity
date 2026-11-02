@@ -233,7 +233,8 @@ admin, so someone who finds the IP cannot take the instance. Supply
 **Stop/start.** EC2 gives an instance without an Elastic IP a new public IPv4
 after a stop/start. `trinity-ip-refresh.timer` checks the metadata service a
 minute after boot and every five minutes after that. When the address changed it
-rewrites the Caddyfile and the certificate, rewrites `FRONTEND_URL` only if it
+rewrites the Caddyfile (one you edited by hand is left alone, with a warning — keep
+your own sites in `/etc/caddy/Caddyfile.d/*.caddy`) and the certificate, rewrites `FRONTEND_URL` only if it
 still points at the old IP (a domain you set is kept), and recreates the backend
 from the images already on the instance. It never pulls or upgrades Trinity, and
 it logs only when something changed or failed. Allow a few minutes after a start before opening the new address. An

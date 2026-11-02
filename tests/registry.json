@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4149_caddyfile_operator_sites.py",
+      "feature": "#4149",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "deploy"
+      ],
+      "description": "start.sh --hosted never drops an operator's Caddy site: the render imports /etc/caddy/Caddyfile.d/*.caddy; a live Caddyfile edited since Trinity wrote it (recorded checksum) or, pre-checksum, holding a site Trinity never renders is refused with the running config kept, unless --caddy-overwrite (old file kept as a backup); --dry-run prints the render and writes nothing; first boot still replaces the packaged default."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",

@@ -268,7 +268,8 @@ def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
                 + "env_value() { printf '%s' \"$CIDRS\"; }\n"
                 + "systemctl() { :; }\n"
                 + f"caddy() {{ return {validate_rc}; }}\n"
-                + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
+                # A file Trinity never wrote, replaced as first boot does (#4149).
+                + 'provision_caddyfile "203.0.113.10" "do-marketplace" fresh\n'
             )
             proc = subprocess.run(
                 ["bash", "-c", harness],
@@ -305,7 +306,8 @@ def test_the_installed_caddyfile_is_readable_by_the_caddy_user_under_a_strict_um
             + "env_value() { printf '%s' \"$CIDRS\"; }\n"
             + "systemctl() { :; }\n"
             + "caddy() { :; }\n"
-            + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
+                # A file Trinity never wrote, replaced as first boot does (#4149).
+                + 'provision_caddyfile "203.0.113.10" "do-marketplace" fresh\n'
         )
         proc = subprocess.run(
             ["bash", "-c", harness],

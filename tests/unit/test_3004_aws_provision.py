@@ -589,7 +589,9 @@ def _render_twice(tmp_path, active_rc: int) -> list[str]:
         (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
         + "\nenv_value() { :; }\ncaddy() { :; }\n"
         + f'systemctl() {{ echo "$*" >> "{log}"; [ "$1" = is-active ] && return {active_rc}; return 0; }}\n'
-        + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\necho ---- >> "' + str(log) + '"\n'
+        # First boot over the package default (`fresh`, as provision_apply_ip
+        # passes it), then a re-render of the file it wrote (#4149).
+        + 'provision_caddyfile "203.0.113.10" "aws-marketplace" fresh\necho ---- >> "' + str(log) + '"\n'
         + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\n'
     )
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env={"PATH": _SYS_PATH})
