@@ -17,7 +17,8 @@ the thread, the execution log and the agent's next prompt.
 ```
 agent ──ask_for_credential(name, why)──▶ MCP operator_queue.ts
         POST /api/agents/{self}/operator-queue  {type: credential, context.credential_name, to: primary}
-        └─ ask_service.raise_ask → _validated_ask (name policy, no options) → exactly one person (else 422 no_person)
+        └─ ask_service.raise_ask → _validated_ask (name policy, no options, to: primary only) → exactly one person (else 422 no_person)
+file channel ── _clamp_ingested_item: a credential entry not addressed to the agent's primary person is ingested unaddressed
 
 person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
         Send ─▶ store.provideCredential(id, value)
@@ -25,7 +26,9 @@ person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
              └─ asks/service.provide_credential  (_owned_ask, kind, pending, expiry, divergence)
                 └─ services/credential_sink.set_env_value
                      name re-check · value check · stage_secret (fail closed) · agent running
-                     · per-agent lease · read .env · set one line · inject · audit chat_provide
+                     · per-agent lease · read .env (only a file the agent reports `missing` is empty)
+                     · set one line · inject · audit chat_provide
+                     (a refusal before the inject unstages what this call staged)
                 └─ ask_service.answer(response="provided", via_credential_sink=True)
                      └─ wake: "NAME is now set in your environment; never repeat its value"
 thread row: "NAME provided"
@@ -36,16 +39,18 @@ thread row: "NAME provided"
 | Layer | File | Role |
 |---|---|---|
 | MCP | `src/mcp-server/src/tools/operator_queue.ts` → `ask_for_credential` | Self-acting; builds the ask from declared fields only; derives `request_id` from name + turn when left out |
-| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
+| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
+| Backend | `services/operator_queue_service::_clamp_ingested_item` | File channel: a credential entry keeps its addressee only when that is the agent's single primary person |
 | Backend | `services/credential_ask_policy.py` | Name charset, ≤64, reserved names (agent-side mirror, parity-tested) |
 | Backend | `client_portal/asks/router.py` → `POST /{id}/credential` | Person-only door, rate-limited, uniform 404 |
 | Backend | `client_portal/asks/service.py::provide_credential` | Ownership and state checks, sink, then the ask sink |
 | Backend | `services/credential_sink.py` | The one leaf that handles the value |
+| Agent | `agent_server/routers/credentials.py` → `GET /api/credentials/read` | Lists a path in `missing` only when the agent proved it absent; a path in none of `files` / `files_b64` / `missing` was not read |
 | Backend | `services/operator_resume_service.py` | Wake names the variable, never a value |
 | Backend | `client_portal/router.py::_refuse_secret_in_message` | Paste guard on both Workspace chat routes (422 `secret_in_message`) |
-| Backend | `utils/credential_sanitizer.py::secret_shape` | Detector over `SECRET_VALUE_PATTERNS` (+ `ops_`, `dop_v1_`) |
+| Backend | `utils/credential_sanitizer.py::secret_shape` | Detector over `SECRET_VALUE_PATTERNS` (+ `ops_eyJ…`, `dop_v1_`) |
 | Frontend | `components/portal/PortalCredentialField.vue` | Masked field, Show/Hide, one POST, emptied before the request |
-| Frontend | `components/portal/PortalAsks.vue` | Renders the field for the kind; no Discuss |
+| Frontend | `components/portal/PortalAsks.vue` | Renders the field for the kind; always names the asking agent and quotes its reason as its words; no Discuss |
 | Frontend | `utils/operatorQueue.js` | `queueResponseKind` → `credential`; label; "You provided NAME" |
 | Frontend | `components/portal/portalChatAsks.js` | History row "Credential · NAME provided" |
 | Frontend | `components/operator/QueueCard.vue`, `QueueItemDetail.vue`, `views/MobileAdmin.vue` | No respond box for the kind |
@@ -54,7 +59,10 @@ thread row: "NAME provided"
 ## Where the value goes, and where it does not
 
 - **Goes**: the request body of one POST; the runtime identity scrub's staged
-  set (AES-GCM envelope in Redis, 24 h); one line of the agent's `.env`.
+  set (AES-GCM envelope in Redis, 24 h); one line of the agent's `.env`. A
+  refusal before the inject removes the value this call staged, so "nothing was
+  stored" holds for the scrub too; a failed inject keeps it staged (the agent
+  may have written) and says the value may or may not be stored.
 - **Never**: the component's state after Send, a URL, browser storage or the
   drafts, a log line, the audit row, a refusal message, the ask row, its answer,
   the write-back or the agent's wake prompt.
@@ -63,6 +71,7 @@ thread row: "NAME provided"
 
 | Code | Status | Where | Meaning |
 |---|---|---|---|
+| `invalid_to` | 422 | raise | A credential ask is addressed to `primary` only |
 | `no_person` | 422 | raise | No single person to ask |
 | `invalid_credential_name` | 422 | raise / sink | Malformed or reserved name (`reason`) |
 | `invalid_options` | 422 | raise | A credential ask offers no options |
@@ -71,8 +80,9 @@ thread row: "NAME provided"
 | `scrub_unavailable` | 503 | sink | The scrub could not be armed; nothing stored |
 | `agent_not_running` | 409 | sink | Start the agent, then send again |
 | `env_busy` | 409 | sink | Another sink write holds the agent's lease |
+| `env_unreadable` | 409 | sink | The agent did not hand `.env` back as text (`reason`: `not_utf8`, or `unconfirmed` — a read error or an image too old to report `missing`); the file is left as it is |
 | `env_too_large` | 422 | sink | `.env` would exceed 256 KiB |
-| `agent_unreachable` | 503 | sink | The agent's read or inject failed |
+| `agent_unreachable` | 503 | sink | The agent's read (nothing stored) or inject (may or may not be stored) failed |
 | `already_resolved` | 409 / 400 | door | Ended first; `credential_written: true` when the value landed |
 | `secret_in_message` | 422 | Workspace chat | The message looked like a secret; nothing stored |
 
@@ -84,14 +94,17 @@ thread row: "NAME provided"
 - The owner's Credentials-tab inject and the other non-sink `.env` writers are
   whole-file writes that do not take the sink's lease, so they stay
   last-writer-wins against it.
+- A credential ask raised from a schedule or another agent's turn reaches the
+  agent's owner; any variable name the policy allows can be asked for, and the
+  card (who asks, in its own words) is the person's defence.
 - The live stream of a turn is not scrubbed (ent#279), so a model that echoes the
   value shows it once on screen, never in history.
 
 ## Testing
 
-- `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, `no_person`, the answer refusal on both doors, the wake.
-- `tests/unit/test_ent1066_credential_sink.py` — round-trip through the agent's parser, fail-closed staging, stopped agent, lease, CAS after write, value absent from logs, audit and refusals.
+- `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, primary-only on the REST door and the file channel, `no_person`, the answer refusal on both doors, the wake.
+- `tests/unit/test_ent1066_credential_sink.py` — round-trip through the agent's parser, the agent image's real read/inject over a tmp home (non-UTF-8 and unreadable `.env` keep every byte), fail-closed staging and unstaging on refusal, stopped agent, lease, CAS after write, value absent from logs, audit and refusals.
 - `tests/unit/test_ent1066_credential_route_gates.py` — agent, system and connector keys refused; Workspace-only person admitted; stranger 404.
-- `tests/unit/test_ent1066_secret_paste_guard.py` — every shape, both routes, nothing persisted, no echo.
+- `tests/unit/test_ent1066_secret_paste_guard.py` — every shape, both routes, nothing persisted, no echo; `ops_` snake_case identifiers neither refused nor redacted.
 - `src/mcp-server/src/operator_queue.test.ts` — the tool's shape, only declared fields travel, the description.
 - `src/frontend/tests/unit/portalCredentialField.mount.spec.js`, `credentialAskSurfaces.mount.spec.js`, `portalSecretInMessage.mount.spec.js` — mounted.
