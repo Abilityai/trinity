@@ -60,8 +60,7 @@ model can never be missing from a config an operator has customised.
 
 **Any provider is configuration** (Abilityai/lilu#653). The Ollama block above
 is one instance of a general grammar, read from the SAME spawn env the
-``opencode`` child gets (so a ``template.yaml runtime.env`` declaration reaches
-it, not only ``.env``)::
+``opencode`` child gets (the agent's ``.env`` over the container baseline)::
 
     OPENCODE_PROVIDER_<ID>_BASE_URL   absolute http(s) URL of the endpoint
     OPENCODE_PROVIDER_<ID>_API_KEY    -> provider.<id>.options.apiKey
@@ -75,7 +74,7 @@ remain as aliases of ``<ID>=OLLAMA`` (the canonical name wins on a base URL;
 model lists are unioned). For ``ollama`` only, the base URL falls back to
 ``OPENCODE_DEFAULT_PROVIDER_BASE_URL`` — the platform setting the backend
 injects into the container env at create/recreate — and then to the derived
-gateway, so the order is ``runtime.env`` > ``.env`` > platform > gateway.
+gateway, so the order is ``.env`` > platform > gateway.
 
 ``openrouter/…`` needs no block: it is a built-in OpenCode provider and reads
 ``OPENROUTER_API_KEY`` from the child env. A turn on it with no key anywhere is
@@ -488,7 +487,7 @@ def _unresolvable_base_url_reason(route_path: str) -> str:
         f"{provider_env_name(OLLAMA_PROVIDER_ID, 'BASE_URL')}, {ENV_BASE_URL} "
         f"and {ENV_PLATFORM_BASE_URL} are unset and no default gateway could "
         f"be read from {route_path}. Set {ENV_BASE_URL} (e.g. "
-        "'http://10.0.0.5:11434') in the agent's template.yaml runtime.env or "
+        "'http://10.0.0.5:11434') in the agent's "
         ".env, or declare provider.ollama.options.baseURL in opencode.json."
     )
 
@@ -674,7 +673,7 @@ def require_openrouter_key(
     """Raise if this turn is on ``openrouter/…`` and no key exists anywhere.
 
     Sources, any one of which suffices: ``OPENROUTER_API_KEY`` in the spawn env
-    (agent ``runtime.env`` / ``.env`` / the platform ``openrouter_api_key``
+    (agent ``.env`` / the platform ``openrouter_api_key``
     setting injected at create), ``OPENCODE_PROVIDER_OPENROUTER_API_KEY``, an
     operator-declared ``provider.openrouter.options.apiKey``, or an
     ``openrouter`` entry in OpenCode's ``auth.json``. Refused BEFORE the
@@ -705,7 +704,7 @@ def require_openrouter_key(
     raise OpenCodeProviderCredentialError(
         f"OpenCode model {model or source.get(ENV_RUNTIME_MODEL)!r} is on provider "
         f"'openrouter' but no key is configured: {ENV_OPENROUTER_API_KEY} is "
-        "unset in the agent's template.yaml runtime.env and .env, and the "
+        "unset in the agent's .env, and the "
         "platform setting 'openrouter_api_key' is empty. Set one of them; the "
         "turn is refused rather than run on another provider's credentials."
     )

@@ -127,7 +127,6 @@ from .process_registry import get_process_registry
 from .runtime_adapter import (
     AgentRuntime,
     RuntimeCapabilities,
-    resolve_runtime_model_with_source,
 )
 from .subprocess_lifecycle import (
     _capture_pgid,
@@ -436,8 +435,8 @@ def _prepare_turn_config(
     # (the agent's .env is re-read at every spawn, #1999) instead of
     # surviving as a stale value baked at boot. `env` is the turn's SPAWN env
     # (Abilityai/lilu#653): the provider block must read the same layers the
-    # `opencode` child does, or a `template.yaml runtime.env` declaration
-    # reaches the child but not the config that routes its model.
+    # `opencode` child does, or a `.env` declaration reaches the child but
+    # not the config that routes its model.
     apply_provider_config(config, model=model, env=env)
 
     # Trinity MCP (and any template-declared server) — translated from the
@@ -1289,8 +1288,7 @@ class OpenCodeRuntime(AgentRuntime):
         root = _opencode_root()
         # The spawn env is built FIRST (Abilityai/lilu#653) so the provider
         # guards and the provider block read the same layers the child gets —
-        # container baseline (platform settings) < `.env` < `template.yaml`
-        # `runtime.env`. XDG_CONFIG_HOME is set once the turn dir exists.
+        # container baseline (platform settings) < `.env`. XDG_CONFIG_HOME is set once the turn dir exists.
         env = build_execution_env({
             EXECUTION_TAG_NAME: execution_id,
             # Per-turn config carries this turn's `instructions:`; the other
@@ -1872,12 +1870,16 @@ class OpenCodeRuntime(AgentRuntime):
         persist_session: bool = False,
         images: Optional[List[Dict]] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, Optional[str]]:
-        # Abilityai/lilu#11: a caller-less model falls back to the agent's
-        # configured runtime_model rather than the CLI default, and the log
-        # names which resolution level won.
-        model, model_source = resolve_runtime_model_with_source(model)
-        if not model:
-            # Abilityai/lilu#652: same fallback as the chat path.
+        # A caller-less model falls back to the agent's configured
+        # runtime_model (AGENT_RUNTIME_MODEL), then the runtime default — the
+        # same order as the chat path — and the log names the level that won.
+        if model:
+            model_source = "per-call"
+        else:
+            model_source = (
+                "AGENT_RUNTIME_MODEL" if os.environ.get("AGENT_RUNTIME_MODEL")
+                else "runtime-default"
+            )
             model = self.get_default_model()
         logger.info(
             "[Headless Task] Using model: %s (resolved from: %s)",

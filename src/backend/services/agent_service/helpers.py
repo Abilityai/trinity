@@ -6,6 +6,7 @@ Contains functions used across multiple agent operations.
 import fnmatch
 import json
 import logging
+import re
 import asyncio
 from typing import Optional, List, Callable, Any, Literal
 

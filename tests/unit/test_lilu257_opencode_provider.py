@@ -702,7 +702,7 @@ async def test_an_unrunnable_ollama_turn_fails_with_the_env_var_not_an_err_ref(
 # Providers are configuration (Abilityai/lilu#653)
 #
 # Before: only `provider.ollama` was ever generated, from the agent-server's
-# own os.environ — so a `template.yaml runtime.env` declaration reached the
+# own os.environ — so a `.env` declaration reached the
 # `opencode` child but NOT the provider block, and OpenRouter worked only by
 # accident. Now any provider is `OPENCODE_PROVIDER_<ID>_*` in the SPAWN env.
 # No test here touches the network: there is no OpenRouter key in the lab.
@@ -720,27 +720,25 @@ from agent_server.services.opencode_provider import (  # noqa: E402
 )
 
 
-def _template_env(tmp_path, runtime_env: dict, dotenv: str = ""):
-    """The real spawn-env builder over a fixture `.env` + `template.yaml`."""
+def _dotenv_env(tmp_path, provider_env: dict, dotenv: str = ""):
+    """The real spawn-env builder over a fixture `.env` — the agent's own
+    credential file is where per-agent provider configuration lives."""
     env_file = tmp_path / ".env"
-    env_file.write_text(dotenv, encoding="utf-8")
-    lines = ["runtime:", "  type: opencode", "  env:"]
-    lines += [f'    {k}: "{v}"' for k, v in runtime_env.items()]
-    template = tmp_path / "template.yaml"
-    template.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return build_execution_env(env_file=env_file, template_file=template)
+    lines = [f"{k}={v}" for k, v in provider_env.items()]
+    env_file.write_text(dotenv + "\n".join(lines) + "\n", encoding="utf-8")
+    return build_execution_env(env_file=env_file)
 
 
-def test_template_runtime_env_reaches_the_provider_block(tmp_path, monkeypatch):
+def test_dotenv_provider_config_reaches_the_provider_block(tmp_path, monkeypatch):
     """The defect, end to end on disk: a base URL declared ONLY in
-    `template.yaml runtime.env` (nothing in the agent-server's os.environ)
+    the agent's `.env` (nothing in the agent-server's os.environ)
     lands in the turn's opencode.json."""
     for var in (ENV_BASE_URL, "OPENCODE_PROVIDER_OLLAMA_BASE_URL", ENV_PLATFORM_BASE_URL,
                 "AGENT_RUNTIME_MODEL", "OPENCODE_OLLAMA_MODELS"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OPENCODE_ROOT", str(tmp_path / "root"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
-    env = _template_env(tmp_path, {
+    env = _dotenv_env(tmp_path, {
         "OPENCODE_PROVIDER_OLLAMA_BASE_URL": "http://dgx:11434",
         "OPENCODE_PROVIDER_OLLAMA_MODELS": "ministral-3:14b",
     })
@@ -787,10 +785,8 @@ async def test_the_runtime_builds_the_spawn_env_before_the_provider_block(monkey
 def test_openrouter_turn_emits_no_block_but_passes_the_key(tmp_path):
     """Built-in provider: no `provider` key is written, the guard passes, and
     the key is in the env the child is spawned with."""
-    env = _template_env(
-        tmp_path,
-        {ENV_OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"},
-        dotenv="OPENROUTER_API_KEY=placeholder-openrouter-key\n",
+    env = _dotenv_env(
+        tmp_path, {ENV_OPENROUTER_API_KEY: "placeholder-openrouter-key"},
     )
     assert env[ENV_OPENROUTER_API_KEY] == "placeholder-openrouter-key"
     require_openrouter_key("openrouter/z-ai/glm-5", env=env, config=dict(_BASE))
