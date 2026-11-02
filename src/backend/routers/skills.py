@@ -70,70 +70,9 @@ router = APIRouter(prefix="/api", tags=["skills"])
 _BACKGROUND_SWEEPS: set = set()
 
 
-async def _remove_unassigned_skills(
-    agent_name: str,
-    removed_names: List[str],
-    current_user: User,
-    request: Optional[Request] = None,
-) -> Optional[Dict[str, Any]]:
-    """Remove just-unassigned skill packages from the agent (ent#236).
-
-    Best-effort by design, and the ordering is the point: the DB unassign has
-    already committed and is authoritative. A stopped agent, a busy injection
-    lock, or a transport failure must NOT fail the caller's unassign — it
-    degrades to a named `deferred` outcome, and the start-path reconcile
-    (`reconcile_agent_skills`) finishes the job the next time the agent runs.
-
-    Returns the removal report for the response body, or None when nothing was
-    unassigned.
-    """
-    names = [n for n in removed_names if validate_skill_name(n)]
-    if not names:
-        return None
-
-    try:
-        result = await skill_service.remove_skills(agent_name, names)
-    except SkillInjectionBusy:
-        return {
-            "status": "deferred",
-            "reason": "injection_in_progress",
-            "skills": sorted(names),
-        }
-    except Exception as e:  # noqa: BLE001 — never fail a committed unassign
-        logger.warning(f"skill removal failed for {agent_name}: {e}")
-        return {
-            "status": "deferred",
-            "reason": "removal_error",
-            "skills": sorted(names),
-        }
-
-    try:
-        await platform_audit_service.log(
-            event_type=AuditEventType.CONFIGURATION,
-            event_action="skill_removed",
-            source="api",
-            actor_user=current_user,
-            actor_ip=request.client.host if request and request.client else None,
-            endpoint=request.scope["path"] if request else None,
-            request_id=getattr(request.state, "request_id", None) if request else None,
-            target_type="agent",
-            target_id=agent_name,
-            details={
-                "trigger": "unassign",
-                "skills": sorted(names)[:50],
-                "removed": result.get("skills_removed", 0),
-                "failed": result.get("skills_failed", 0),
-            },
-        )
-    except Exception:  # noqa: BLE001
-        pass
-
-    return {
-        "status": "completed" if result.get("success") else "partial",
-        "skills_removed": result.get("skills_removed", 0),
-        "skills_failed": result.get("skills_failed", 0),
-        "results": result.get("results", {}),
-    }
+# ent#236: the removal helper lives with the assignment writer it serves
+# (trinity-enterprise#1068), so a service-side unassign reaches it too.
+_remove_unassigned_skills = skill_assignment_service.remove_unassigned_skills
 
 
 def _merge_gate_reports(*reports: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -671,54 +610,26 @@ async def unassign_skill(
     package removal is best-effort and never fails the unassign; see
     `_remove_unassigned_skills`.
     """
-    from services import skill_set_service
-
-    # ent#530: a skill an assigned set still names stays (as set-derived) — the
-    # set is what brought it. Said, never a silent no-op.
-    retained_via = (await asyncio.to_thread(skill_set_service.via_sets_map, agent_name)).get(skill_name, [])
-    row = next((r for r in db.get_agent_skills(agent_name) if r.skill_name == skill_name), None)
-    if (not retained_via and row is not None and not row.individual
-            and await asyncio.to_thread(skill_set_service.any_unresolved, agent_name)):
-        # A set brought this skill and cannot be read right now. Deleting the row
-        # would be silently undone by the next reconcile once the set resolves
-        # (review finding 7) — say so instead.
-        raise HTTPException(status_code=409, detail={
-            "code": "skill_set_unresolved",
-            "message": f"'{skill_name}' was assigned through a skill set that cannot be read right now; "
-                       "unassign the set, or retry once its source is available.",
-        })
-    if retained_via and db.set_skill_individual(agent_name, skill_name, False):
-        await broadcast_skills_changed(agent_name)
+    try:
+        result = await skill_assignment_service.unassign_and_remove(
+            agent_name, skill_name, current_user, request)
+    except skill_assignment_service.SkillSetUnresolved as e:
+        raise HTTPException(status_code=409, detail={"code": e.code, "message": e.message})
+    if result["retained_via_sets"]:
         return {
             "success": True,
             "removed": False,
             "skill_name": skill_name,
-            "retained_via_sets": retained_via,
-            "message": f"Still assigned through set {', '.join(retained_via)}; unassign the set to remove it.",
+            "retained_via_sets": result["retained_via_sets"],
+            "message": f"Still assigned through set {', '.join(result['retained_via_sets'])}; "
+                       "unassign the set to remove it.",
         }
-
-    conflict = [skill_name] if row is not None and getattr(row, "delivery_status", None) == "conflict" else []
-    removed = db.unassign_skill(agent_name, skill_name)
-
-    removal = None
-    if removed:
-        removal = await _remove_unassigned_skills(
-            agent_name, [skill_name], current_user, request
-        )
-        # #2703: fired on the ROW change, even when the package removal
-        # deferred — the listing surfaces re-read the container either way and
-        # the assignment lists read the row.
-        await broadcast_skills_changed(agent_name)
-    gates = await skill_assignment_service.sync_gates(agent_name, current_user, request,
-                                                       removed=[skill_name] if removed else [], conflict=conflict,
-                              removal=removal)
-
     return {
         "success": True,
-        "removed": removed,
+        "removed": result["removed"],
         "skill_name": skill_name,
-        "removal": removal,
-        "gates": gates,
+        "removal": result["removal"],
+        "gates": result["gates"],
     }
 
 

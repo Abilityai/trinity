@@ -2002,6 +2002,9 @@ Example:
               <!-- #2915: the operator-queue aging bound — its own component so
                    this view's raw-colour count cannot move (the registry-panel precedent). -->
               <OperatorQueueAgingSetting />
+              <!-- trinity-enterprise#1068: a system apply's failed gate on a held
+                   skill unassigns it; its own component, same reason. -->
+              <ApplyUnassignOnFailedGateSetting />
             </div>
           </div>
 
@@ -2337,6 +2340,7 @@ import {
   retentionSaveBody,
 } from '../utils/retentionFields'
 import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
+import ApplyUnassignOnFailedGateSetting from '../components/settings/ApplyUnassignOnFailedGateSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
