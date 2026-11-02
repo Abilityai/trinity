@@ -457,29 +457,17 @@ def _tiny_watchdog(process, step_seen, *, stall_after, timeout_seconds):
 # `--` end-of-options separator (Abilityai/lilu#257 step 6 follow-up)
 # ---------------------------------------------------------------------------
 
-def test_prompt_is_passed_after_an_end_of_options_separator():
-    """A prompt beginning with '-' must not be parsed as a flag.
-
-    Verified live against v1.18.32 before pinning it here:
-    `opencode run -- "Reply with exactly the word ZEBRA."` returned `ZEBRA`,
-    so the text after `--` reaches the message rather than yargs' `argv['--']`.
-    """
-    runtime = OpenCodeRuntime()
-    cmd = runtime._build_command(
-        model="ollama/gemma4:12b", session_id=None, directory="/home/developer"
-    )
-    cmd.append("--")
-    cmd.append("-v, what changed?")
-    assert cmd[-2:] == ["--", "-v, what changed?"]
-
+def test_prompt_never_travels_on_argv():
+    """#3838: Linux refuses one argv element over 131,072 bytes, so the
+    message goes on stdin. The end-of-options separator stays, so nothing
+    after the flags can be parsed as one, and the prompt is never appended."""
     source = opencode_runtime.__file__
     with open(source, encoding="utf-8") as fh:
         body = fh.read()
-    # The separator is appended by `_execute_opencode`, immediately before the
-    # prompt — assert the adjacency, not just that '--' appears somewhere.
-    # Abilityai/lilu#655: the pair is skipped only for an argument-less
-    # `--command`, which sends no message at all.
-    assert 'cmd.append("--")\n            cmd.append(prompt)' in body
+    assert 'cmd.append("--")' in body
+    assert "cmd.append(prompt)" not in body
+    assert "stdin=subprocess.PIPE" in body
+    assert "stdin=subprocess.DEVNULL" not in body
 
 
 # ---------------------------------------------------------------------------
