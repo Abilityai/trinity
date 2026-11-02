@@ -47,6 +47,17 @@
       "description": "The `credential` ask kind: raised by name with no options and exactly one resolved person (`no_person`), the name validated against the agent runtime's protected/routing sets and the platform-written keys (parity-tested), answered ONLY through the secret field's sink (`via_credential_sink`) — the operator respond box, the Workspace typed answer and a direct `answer()` are refused 422 `credential_answer_via_field`; the projection carries `credential_name` only; the wake names the variable, never a value."
     },
     {
+      "file": "unit/test_ent1066_credential_read_containment.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "agent",
+        "unit",
+        "security"
+      ],
+      "description": "The agent image's `GET /api/credentials/read` stays inside the agent home (CodeQL path-injection on the ent#1066 `lstat`): a leading `../` into a sibling whose name extends the home's, a `../` existence probe through the `missing` list, deeper `..`, absolute paths, a link (file, dangling, or parent directory) out of the home — each neither read nor reported missing; dotfiles, nested files, an in-home link and an absent in-home file still behave as before. Driven through the real router over a tmp home."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",
