@@ -1277,6 +1277,28 @@ def portal_agent_report_detail(
     return report
 
 
+def _refuse_secret_in_message(message: str) -> None:
+    """trinity-enterprise#1066: a message that LOOKS like a credential is refused
+    BEFORE admission — before the reply context, the title decision, the
+    session row, the execution row and (on the streaming route) the
+    Idempotency-Key — so nothing anywhere holds the text. The secret field a
+    `credential` ask opens is where a value goes; the composer is where it
+    must not. The refusal names the SHAPE that matched and never the text.
+    Shared by both chat routes for the ent#403 reason: the two must not
+    disagree about what is admitted.
+    """
+    from utils.credential_sanitizer import secret_shape
+
+    shape = secret_shape(message)
+    if shape is not None:
+        raise HTTPException(status_code=422, detail={
+            "code": "secret_in_message",
+            "shape": shape,
+            "message": "That looks like a secret. Nothing was stored. Ask the agent for the "
+                       "credential and use the secret field it opens.",
+        })
+
+
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
 async def portal_chat(
     agent_name: str,
@@ -1312,6 +1334,9 @@ async def portal_chat(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: a pasted secret is refused here, before anything
+    # below reads, titles or stores the message.
+    _refuse_secret_in_message(body.message)
     # ent#403: normalise blank → None, then authorise, then allow-list. The
     # policy is one function shared with the streaming route below — enforcement
     # at BOTH router entry points, because this route runs an inline path and
@@ -2024,6 +2049,10 @@ async def portal_chat_stream(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: same guard as the synchronous route, and BEFORE
+    # the idempotency scope is built — a refused message must not consume the
+    # key (the ent#403 rule for a refused model).
+    _refuse_secret_in_message(body.message)
     # Invariant #18: a producer boundary that creates an execution accepts an
     # Idempotency-Key. This route creates one, so a retried dispatch — a proxy
     # replay, a client timeout-and-resend — would otherwise run and BILL the

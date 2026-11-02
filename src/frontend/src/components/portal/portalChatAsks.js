@@ -105,7 +105,15 @@ export function askTileMode(ask) {
 // The history row: kind · title · ending (with who) · when. The kind is a noun
 // here: the card's "Needs approval" is a state, and beside "Answered by you" it
 // would say two contradicting things.
-const HISTORY_KIND = Object.freeze({ approval: 'Approval', question: 'Question', alert: 'Alert' })
+const HISTORY_KIND = Object.freeze({ approval: 'Approval', question: 'Question', alert: 'Alert', credential: 'Credential' })
+// trinity-enterprise#1066: an answered credential ask reads "NAME provided" —
+// the name the agent asked for, never a value (none is on the row).
+function historyEnding(ask, ending) {
+  if (ask?.kind === 'credential' && ending?.kind === 'answered') {
+    return `${ask.credential_name || 'Credential'} provided`
+  }
+  return workspaceEndingText(ask)
+}
 export function askHistoryLine(ask, now = Date.now()) {
   const ending = queueEnding(ask)
   const at = ending?.when || null
@@ -115,7 +123,7 @@ export function askHistoryLine(ask, now = Date.now()) {
     // The row clips the title on a phone; this is its hover/long-press text.
     plain: (ask?.title || '').replace(/[*_`~]/g, ''),
     // #3247: a replaced ask reads "Replaced by the agent with <request_id>".
-    ending: workspaceEndingText(ask),
+    ending: historyEnding(ask, ending),
     when: at ? relativeTime(at, now) : '',
     at,
   }

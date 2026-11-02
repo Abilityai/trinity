@@ -591,6 +591,12 @@
             @click="voiceError = ''"
           >Dismiss</button>
         </p>
+        <!-- trinity-enterprise#1066: a message the server refused because it
+             looked like a secret. The text is kept nowhere on this side — no
+             failed bubble, no Retry, no draft — so only the pointer stays. -->
+        <div v-if="secretRefusal" class="mb-2" data-testid="portal-secret-refused">
+          <InlineError :message="secretRefusal" @dismiss="secretRefusal = ''" />
+        </div>
         <!-- ent#155: a cancel that was REFUSED. Deliberately not `markFailed` —
              the turn is still running and still spending, so calling it failed
              would be the dishonest half of "honest status". -->
@@ -933,6 +939,7 @@ import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
+import InlineError from '@/components/InlineError.vue'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -1314,6 +1321,9 @@ const activeExecutionId = ref(null)
 const pendingUserText = ref('')
 const cancelling = ref(false)
 const cancelError = ref('')
+// trinity-enterprise#1066: the server's pointer after a `secret_in_message`
+// refusal. Cleared by the next send.
+const secretRefusal = ref('')
 // Review finding: `terminate_portal_turn` writes the CANCELLED terminal, and
 // the still-running background turn then finishes — `portal_chat` sees a
 // non-success status, matches no `error_code` branch, and raises the generic
@@ -2115,6 +2125,7 @@ function startElapsedClock() {
 
 async function deliver(text, { replyId = null, attachments = null, tags = null } = {}) {
   terminalOutcome.value = null
+  secretRefusal.value = ''
   sending.value = true
   startElapsedClock()
   const startedNew = currentSessionId.value === null
@@ -2292,6 +2303,13 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // words, never as a status code. It is also the one failure a Retry cannot
     // fix — the same words earn the same answer — so the draft goes back to
     // the composer to be edited instead (`settleDelivery`).
+    // trinity-enterprise#1066: refused BEFORE admission because it looks like a
+    // secret — nothing was stored, and nothing on this side may keep it either
+    // (`settleDelivery` drops the bubble and the draft).
+    const detail = err?.response?.status === 422 ? err.response.data?.detail : null
+    if (detail && typeof detail === 'object' && detail.code === 'secret_in_message') {
+      return { error: detail.message || 'That looks like a secret. Nothing was stored.', retryable: false, secret: true }
+    }
     const refused = messageRefusalReason(err)
     if (refused) return { error: refused, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
@@ -2761,6 +2779,22 @@ async function showOwnTags(text) {
   }
 }
 
+// trinity-enterprise#1066: a message refused as a secret leaves no copy here.
+// The bubble goes (a Retry would only re-send it, and the terminal card would
+// title itself with it), it is never handed back to the composer, and any draft
+// still holding it is cleared — the drafts mirror into localStorage.
+function dropSecretMessage(index, text, error) {
+  const row = messages.value[index]
+  if (row && row.role === 'user' && row.content === text) messages.value.splice(index, 1)
+  if (input.value.includes(text)) input.value = ''
+  for (const [key, entry] of Object.entries(drafts.drafts)) {
+    if (entry?.text?.includes(text)) drafts.clear(key)
+  }
+  terminalOutcome.value = null
+  secretRefusal.value = error
+  return { ok: false, error }
+}
+
 function settleDelivery(index, text, res) {
   if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
@@ -2781,6 +2815,7 @@ function settleDelivery(index, text, res) {
     cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
     return { ok: false, cancelled: true }
   }
+  if (res?.secret) return dropSecretMessage(index, text, res.error)
   markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
   // ent#403: a turn the chosen model could not complete clears that choice, so
   // the server's "switched back to the agent's default" is true next turn.

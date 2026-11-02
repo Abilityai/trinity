@@ -1,6 +1,74 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1066_secret_paste_guard.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "A secret pasted as a plain Workspace chat message is refused by both chat routes (sync and stream) with 422 `secret_in_message` BEFORE admission: no service call, no Idempotency-Key consumed, the SHAPE named and never the text. `utils/credential_sanitizer.secret_shape` over `SECRET_VALUE_PATTERNS` (gaining `ops_` and `dop_v1_` service-token shapes in both the backend and agent-image copies, so logs redact them too), `Bearer`/`Basic` excluded as prose, a sensitive `KEY=value` pair counted only with an 8+ character value and the #3311 harmless-word blanking; the partition of the list into named and excluded pinned complete."
+    },
+    {
+      "file": "unit/test_ent1066_secret_guard_linear.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The paste guard's `KEY=value` walk (`utils/credential_sanitizer.secret_shape`, CodeQL `py/polynomial-redos` on the chat message) is linear by construction: `str.find` per `=`, a bounded walk back to the key start, one fixed-width value match, no unbounded regex. Timing bound and linear scaling at 10k/100k/1M on the `!` shapes CodeQL names and key-walk stress shapes; detection both ways — every sensitive pair refused (quoted, unclosed quote, chained, URL query, a key of 6k characters, a pair or prefixed token at the end of 1M characters) and prose, short values and harmless keys admitted."
+    },
+    {
+      "file": "unit/test_ent1066_credential_sink.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The secret sink behind the Workspace secret field (`client_portal.asks.service.provide_credential` -> `services/credential_sink.set_env_value`): one line of the agent's `.env` set through its own read + inject (round-tripped against the agent image's reader, duplicates collapsed, every other byte kept); staged into the runtime identity scrub FIRST and fail-closed (503 `scrub_unavailable`); a stopped or missing agent a named 409 `agent_not_running`; one writer per agent (`env_busy`); the 256 KiB file cap (`env_too_large`); every refusal names the step and never the value; the value absent from logs, audit, the ask row, the response and the wake; the ask answered `provided` by name; a compare-and-set lost after the write is 409 `already_resolved` with `credential_written: true`; an AST guard that the module never formats, logs, concatenates or raises the value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_route_gates.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "Who may reach `POST /api/enterprise/client-portal/asks/{id}/credential` (the ent#719 shape, through the real router and the real `get_portal_principal`): an agent-scoped key refused 403 before the row is read; a system or ops key 403 `person_required`; a JWT person, a user-scoped key, a Workspace-only `user` and a portal session admitted; a stranger the uniform 404; no credential 401; the typed-answer route refuses the kind 422 `credential_answer_via_field`; a malformed body never echoes the value; the list shows `credential_name` to the addressee."
+    },
+    {
+      "file": "unit/test_ent1066_credential_ask_kind.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The `credential` ask kind: raised by name with no options and exactly one resolved person (`no_person`), the name validated against the agent runtime's protected/routing sets and the platform-written keys (parity-tested), answered ONLY through the secret field's sink (`via_credential_sink`) — the operator respond box, the Workspace typed answer and a direct `answer()` are refused 422 `credential_answer_via_field`; the projection carries `credential_name` only; the wake names the variable, never a value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_read_containment.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "agent",
+        "unit",
+        "security"
+      ],
+      "description": "The agent image's `GET /api/credentials/read` stays inside the agent home (CodeQL path-injection on the ent#1066 `lstat`): a leading `../` into a sibling whose name extends the home's, a `../` existence probe through the `missing` list, deeper `..`, absolute paths, a link (file, dangling, or parent directory) out of the home — each neither read nor reported missing; dotfiles, nested files, an in-home link and an absent in-home file still behave as before. Driven through the real router over a tmp home."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",
@@ -7798,6 +7866,94 @@
         "unit"
       ],
       "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalCredentialField.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalAsks mounted with a credential ask: masked secret field (show/hide), one POST to /asks/{id}/credential with the value in the body only, field empty on submit, nothing in storage/logs/URL, every refusal in words, no typed-answer box or Discuss."
+    },
+    {
+      "file": "../src/frontend/tests/unit/credentialAskSurfaces.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "queueResponseKind names the credential kind; history row reads 'NAME provided'; QueueCard and QueueItemDetail mounted show no respond box, only where the ask is answered."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalSecretInMessage.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalConversation mounted: a 422 secret_in_message (streaming and sync fallback) drops the bubble, offers no Retry, never restores the text to the composer or a draft, and shows the server's pointer."
+    },
+    {
+      "file": "unit/test_4165_github_ref_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: github:owner/repo@ref takes a dotted tag whole (v1.2.0, releases/v1.2.0) and pins the clone; branch names parse unchanged; '..', a leading-dot component, a trailing '.' or '.lock', a leading '-', whitespace and shell metacharacters are a named 400 instead of a silent fall-back to main."
+    },
+    {
+      "file": "unit/test_4165_ref_existence_checks.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: a tag accepted by the parser survives the three ref-existence checks — provisioning.check_remote_branch_exists, ref_probes (anonymous and tokened), and the REST branch check with its tag fallback — driven through _validate_github_access on all three paths against a fake ls-remote that filters like git; the ref is always a value after the URL; a branch wins over a same-named tag; an annotated tag peels to its commit."
+    },
+    {
+      "file": "unit/test_4165_pull_cycle_pinned_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4165: an agent cloned -b <tag> (detached HEAD) runs the real pull cycle as a named skip every cycle, never a failure streak, and stays on the tag while origin moves on; a detached HEAD from a rebase stopped part-way is still a failure."
+    },
+    {
+      "file": "unit/test_4165_ref_probes_real_git.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: ref_probes against a REAL bare git remote over file:// (no fake ls-remote) holding a lightweight tag, an annotated tag and a branch sharing a name with an annotated tag: an annotated tag resolves to its commit, never the tag object (the probe asks for refs/tags/<r>^{} by name); a branch wins over the same-named tag; anonymous and tokened probes agree."
+    },
+    {
+      "file": "unit/test_ent1055_purge_agent_now.py",
+      "feature": "trinity-enterprise#1055",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity-enterprise#1055: purge_agent_now hard-purges an agent at once on the real schema — audit row written while the agent exists and kept; ownership, sharing, permissions (both directions) and MCP key rows gone; container, Redis state and volumes (both identities of a renamed agent, never a base another agent claims) removed; a Docker fault still purges rows; no audit row → 503 and nothing destroyed; non-admin and agent-key callers, system and ephemeral agents refused; no row → no-op."
     }
   ]
 }
