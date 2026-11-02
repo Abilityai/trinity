@@ -30,6 +30,7 @@ from services.platform_prompt_service import (
 )
 from services.settings_service import settings_service
 from services.task_execution_service import get_task_execution_service
+from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillGateError
 from services.telegram_group_context import (  # ent#600
     MAX_AGE_HOURS,
@@ -879,6 +880,25 @@ class ChannelMessageRouter:
                 # compares it (`channel_completion_report`).
                 source_channel_client=verified_email if (verified_email and not is_group) else None,
             )
+
+            refusal = admission_refusal_of(result, agent_name)
+            if refusal is not None:
+                # trinity-enterprise#1059 (review C2): an admission policy
+                # stopped the turn — nothing ran. The policy's sentence is
+                # written for a person (the budget, when the window frees,
+                # whether an ask is pending), so it is the reply; returning
+                # None here, as the failed branch does, means step 12 persists
+                # no empty assistant turn.
+                logger.info(f"[ROUTER:{channel}] Step 9 - refused by an admission policy: {refusal.code}")
+                await self._resolve_indicator(adapter, message, success=False)
+                await adapter.send_response(
+                    message.channel_id,
+                    ChannelResponse(text=refusal.message,
+                                    metadata={"bot_token": bot_token, "agent_name": agent_name}),
+                    thread_id=message.thread_id,
+                )
+                await self._cleanup_uploads(container, upload_dir)
+                return None
 
             if result.status in ("failed", "cancelled"):
                 # #679: a CANCELLED turn is non-delivery — surface the cancel

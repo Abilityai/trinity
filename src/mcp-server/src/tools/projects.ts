@@ -168,7 +168,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
-        "a title, status, owner, the executing agent and priority.",
+        "a title, status, owner, the executing agent, priority, and when its owner was last reached.",
       parameters: z.object({
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
@@ -326,8 +326,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "What needs you on the projects you steward: for each, its health and whether an update is " +
         "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
-        "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Start a " +
-        "stewarding run here, then record health with set_project_health.",
+        "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Each task " +
+        "names its owner and when they were last reached. Start a stewarding run here, then record " +
+        "health with set_project_health.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         try {

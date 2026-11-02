@@ -208,8 +208,11 @@ person read that person's scope while `GET /executions/{id}` refused it (the
 merge-train finding on PR #4114) — and no other live turn on the agent may
 resolve to a different scope; while two do, 422 `memory_turn_ambiguous`, as the
 execution reads fail closed. A finished run is 422 `memory_turn_not_live`. The
-two read sites are declared in `test_ent875_exec_control_routes.READ_SITES`
-with that rule as their reason. The answer's `scope` is the scope that answered
+MEM-001 write door holds the same rule (#4121), so the ledger read is
+`memory_service.another_live_scope`, and both handlers are declared in
+`test_ent875_exec_control_routes.READ_SITES` with that rule as their reason. The
+MCP tool sends the platform's `X-Trinity-Execution-Id` over a typed id, because a
+resumed session copies stale ids. The answer's `scope` is the scope that answered
 (`agent` for the owner's own turn, which `scope_for` folds in). The 503 for a
 missing embedder names the condition, never the loader's text (Bar 10). **It is agents-only** (operator ruling on PR #4114, 403
 `agent_only` for any human, the owner included): a human has the owner door,

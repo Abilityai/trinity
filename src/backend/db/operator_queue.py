@@ -19,7 +19,7 @@ import uuid
 from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update, func, and_, or_, case, delete
+from sqlalchemy import select, update, func, and_, or_, case, delete, false
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
@@ -1207,6 +1207,7 @@ class OperatorQueueOperations:
         owner_agent_names: Optional[Set[str]] = None,
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
+        addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1214,7 +1215,15 @@ class OperatorQueueOperations:
         filters. `None` means "matches nothing" (an empty access set); see
         `list_items` for what each filter means.
         """
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+        # trinity-enterprise#981: the reach is a second way INTO the access set
+        # (below), so an empty set matches nothing only when there is no reach
+        # to widen it — a viewer on no roster at all may still be the addressee
+        # of a platform row about them.
+        reach = tuple(addressee_reach_request_id_prefixes or ())
+        viewer_for_reach = (addressed_to_email or "").strip().lower()
+        if not viewer_for_reach:
+            reach = ()
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0 and not reach:
             return None
 
         conds = []
@@ -1230,7 +1239,29 @@ class OperatorQueueOperations:
         conds.append(_NOT_A_MENTION)
 
         if accessible_agent_names is not None:
-            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
+            access = operator_queue.c.agent_name.in_(sorted(accessible_agent_names))
+            if reach:
+                # trinity-enterprise#981: a row the platform raised about the
+                # viewer reaches them BY ADDRESS — the platform chose this
+                # row's addressee; the roster was never its fence. Three
+                # conditions, all in SQL so the page and its count agree: the
+                # reserved sub-prefix (`ADDRESSEE_REACH_ID_PREFIXES`, inside
+                # the addressee-only family), the row's own `raised_by`
+                # column saying `gate` (the prefix alone is never the key),
+                # and the viewer as its single addressee or one of its
+                # `resolved_to` — stated here, not left to the filter below,
+                # so the branch is a complete rule on its own. OR'd beside the
+                # access set, never in place of it: everything the viewer
+                # could already see, they still see.
+                access = or_(access, and_(
+                    self._request_id_prefixed_ci(reach),
+                    operator_queue.c.raised_by == "gate",
+                    or_(
+                        func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
+                        self._resolved_to_contains(viewer_for_reach),
+                    ),
+                ))
+            conds.append(access)
         if status:
             conds.append(operator_queue.c.status == status)
         if type:
@@ -1345,8 +1376,14 @@ class OperatorQueueOperations:
         owner_agent_names: Optional[Set[str]] = None,
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
+        addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        addressee_reach_request_id_prefixes (trinity-enterprise#981): rows
+        under one of these prefixes, raised by the gate and addressed to
+        `addressed_to_email`, are listed even when their agent is outside
+        `accessible_agent_names` — see `_list_conditions`.
 
         exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
         whose `request_id` starts with one of these prefixes — the platform's
@@ -1403,6 +1440,7 @@ class OperatorQueueOperations:
             owner_agent_names=owner_agent_names,
             addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
             addressee_email=addressee_email,
+            addressee_reach_request_id_prefixes=addressee_reach_request_id_prefixes,
         )
         if conds is None:
             return []
@@ -1734,6 +1772,51 @@ class OperatorQueueOperations:
 
         _note_commit_lag(now)
         return self.get_item(item_id)
+
+    def drop_addressee(self, item_id: str, email: str) -> bool:
+        """Take ONE person off a row's address (trinity-enterprise#981): removed
+        from `resolved_to`, and `addressed_to_email` cleared when it named
+        them. The row itself is untouched — its status, its other addressees —
+        so a shared row stays for the people it was also delivered to. Returns
+        whether anything changed; a row that never named them, or no row, is
+        False. Compare-and-set on the two columns as they were read, so a
+        concurrent drop of another person is never overwritten."""
+        viewer = (email or "").strip().lower()
+        if not viewer:
+            return False
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                select(operator_queue.c.addressed_to_email, operator_queue.c.resolved_to)
+                .where(operator_queue.c.id == item_id)
+            ).mappings().first()
+            if not row:
+                return False
+            raw_single, raw_resolved = row["addressed_to_email"], row["resolved_to"]
+            try:
+                resolved = json.loads(raw_resolved) if raw_resolved else []
+            except ValueError:
+                resolved = []
+            if not isinstance(resolved, list):
+                resolved = []
+            kept = [p for p in resolved if str(p or "").strip().lower() != viewer]
+            single = raw_single
+            if (raw_single or "").strip().lower() == viewer:
+                single = None
+            if single == raw_single and len(kept) == len(resolved):
+                return False
+            result = conn.execute(
+                update(operator_queue)
+                .where(and_(
+                    operator_queue.c.id == item_id,
+                    (operator_queue.c.addressed_to_email.is_(None) if raw_single is None
+                     else operator_queue.c.addressed_to_email == raw_single),
+                    (operator_queue.c.resolved_to.is_(None) if raw_resolved is None
+                     else operator_queue.c.resolved_to == raw_resolved),
+                ))
+                .values(addressed_to_email=single,
+                        resolved_to=json.dumps(kept) if kept else None)
+            )
+            return result.rowcount > 0
 
     def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
         """Link a PENDING ask to the chat a person opened to discuss it
@@ -2424,16 +2507,35 @@ class OperatorQueueOperations:
         Deliberately not `_not_prefixed` below: that one is the sweeps' and the
         own-budget predicate's (case-sensitive, NULL-dropping), and is left
         exactly as it is."""
-        normalised = func.lower(func.replace(func.replace(
+        normalised = OperatorQueueOperations._request_id_normalised_ci()
+        return [
+            func.substr(normalised, 1, len(p)) != p.lower()
+            for p in (prefixes or ())
+        ]
+
+    @staticmethod
+    def _request_id_normalised_ci():
+        """`request_id` as `_request_id_not_prefixed_ci` compares it (above):
+        NULL kept, leading whitespace trimmed, lower-cased, the two code
+        points whose lowering differs rewritten first. One expression for the
+        negative and the positive prefix match, so they cannot drift."""
+        return func.lower(func.replace(func.replace(
             func.ltrim(
                 func.coalesce(operator_queue.c.request_id, ""),
                 OperatorQueueOperations._PY_WHITESPACE,
             ),
             "\u212a", "k"), "\u0130", "i\u0307"))
-        return [
-            func.substr(normalised, 1, len(p)) != p.lower()
+
+    @staticmethod
+    def _request_id_prefixed_ci(prefixes):
+        """`request_id` starts with ONE of `prefixes` — the positive twin of
+        `_request_id_not_prefixed_ci`, compared identically
+        (trinity-enterprise#981). An empty `prefixes` matches nothing."""
+        normalised = OperatorQueueOperations._request_id_normalised_ci()
+        return or_(*[
+            func.substr(normalised, 1, len(p)) == p.lower()
             for p in (prefixes or ())
-        ]
+        ]) if prefixes else false()
 
     @staticmethod
     def _not_prefixed(prefixes):
