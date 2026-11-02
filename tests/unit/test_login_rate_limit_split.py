@@ -139,6 +139,7 @@ def auth_module(monkeypatch):
     deps_mod.revoke_token_jti = lambda *a, **k: None
     deps_mod.session_predates_user_revoke = lambda *a, **k: False  # #3825 session cutoff
     deps_mod.workspace_route = lambda reason: (lambda endpoint: endpoint)  # ent#837 marker
+    deps_mod.terms_route = lambda reason: (lambda endpoint: endpoint)  # terms-gate exempt marker
     stubs["dependencies"] = deps_mod
 
     # Token must be a real Pydantic model — FastAPI validates response_model=
