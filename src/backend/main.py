@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
+from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -1975,6 +1975,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 # User info endpoint
 @app.get("/api/users/me")
 @workspace_route("the SPA reads the role to decide where a signed-in person lands")
+@terms_route("the SPA reads the role before it can land a person on the terms screen")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
