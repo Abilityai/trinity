@@ -129,6 +129,16 @@ def _guardrails_registration() -> str:
     return "ok"
 
 
+def _read_only_enforcement() -> dict:
+    """Abilityai/lilu#654: OpenCode enforces read-only mode through the
+    per-turn ``opencode.json`` (``permission`` denies on ``edit`` and
+    ``bash``), not through a Claude hook — so it reports ``"config"``. Other
+    runtimes report nothing here (their payload is unchanged)."""
+    if str(agent_state.agent_runtime or "").lower() == "opencode":
+        return {"read_only_enforcement": "config"}
+    return {}
+
+
 SKILL_GATE_REGISTRATION = "/etc/claude-code/managed-settings.d/50-skill-gate.json"
 SKILL_GATE_HOOK_FILES = ("/opt/trinity/hooks/skill-gate.py", "/opt/trinity/hooks/_skill_gate.py")
 
@@ -256,6 +266,9 @@ async def health_check():
         # trinity-enterprise#752: the same, for the gated-skill hook, plus
         # "unsupported_runtime" (no hooks on Codex / Gemini).
         "skill_gate_hook": _skill_gate_hook(),
+        # Abilityai/lilu#654: how read-only mode is enforced, emitted for
+        # OpenCode only so the Claude/Codex payloads stay byte-identical.
+        **_read_only_enforcement(),
         "diagnostics": _diagnostics(),
     }
 

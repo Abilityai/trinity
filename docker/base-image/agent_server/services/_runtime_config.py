@@ -241,3 +241,59 @@ def merged_disallowed_tools(guardrails: dict) -> list:
         seen.add(cleaned)
         merged.append(cleaned)
     return merged
+
+
+# Claude Code tool name → the OpenCode tool ids that carry the same capability
+# (Abilityai/lilu#654). The single translation for `merged_disallowed_tools`
+# on an OpenCode agent. Every id on the right was MEASURED on the pinned CLI
+# (opencode-ai 1.18.32) as a tool it offers the model, and each deny was proven
+# by a real turn against a local fake model: `tools: {"<id>": false}` removes
+# the tool from the request and a model call to it comes back as OpenCode's
+# "unavailable tool" error. Ids were not read off the config schema, which
+# already flags `tools`/`permission` deprecated and is renamed in later
+# releases — bump this table together with the CLI pin.
+#
+# A name absent from this table is UNMAPPED and is surfaced, never silently
+# dropped (the Codex `_surface_unmapped_guardrails` precedent). The one
+# deliberate exception is PLATFORM_DENIED_TOOLS: those are Claude-harness
+# promise tools OpenCode does not have at all, so the absence IS the deny.
+OPENCODE_TOOL_IDS = {
+    "Bash": ("bash",),
+    "Write": ("write",),
+    "Edit": ("edit",),
+    "MultiEdit": ("edit",),
+    "Read": ("read",),
+    "Glob": ("glob",),
+    "Grep": ("grep",),
+    "WebFetch": ("webfetch",),
+    # Not offered by default on 1.18.32 (it is provider/flag-gated); denying
+    # it anyway is a no-op today and correct the day it is enabled.
+    "WebSearch": ("websearch",),
+    "Task": ("task",),
+    "Agent": ("task",),
+    "TodoWrite": ("todowrite",),
+    "Skill": ("skill",),
+}
+
+
+def map_disallowed_to_opencode(disallowed) -> tuple:
+    """Split a Claude disallow list into ``(opencode_ids, unmapped_names)``.
+
+    Both lists are order-stable and de-duplicated. ``PLATFORM_DENIED_TOOLS``
+    never reach ``unmapped`` (see the table's comment); every other name with
+    no entry does, so the caller can say which guardrails it could not honour.
+    """
+    ids: list = []
+    unmapped: list = []
+    for name in disallowed or ():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        mapped = OPENCODE_TOOL_IDS.get(name)
+        if mapped:
+            for tool_id in mapped:
+                if tool_id not in ids:
+                    ids.append(tool_id)
+        elif name not in PLATFORM_DENIED_TOOLS and name not in unmapped:
+            unmapped.append(name)
+    return ids, unmapped

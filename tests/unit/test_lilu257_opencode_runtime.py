@@ -818,3 +818,413 @@ async def test_lilu652_headless_with_no_model_uses_the_agent_default(monkeypatch
     with pytest.raises(HTTPException):
         await runtime.execute_headless("task", model=None)
     assert seen == [opencode_runtime.DEFAULT_OPENCODE_MODEL]
+
+
+# ---------------------------------------------------------------------------
+# unattended-safe: read-only, deny-list, max_turns, error parity (Abilityai/lilu#654)
+# ---------------------------------------------------------------------------
+
+import os  # noqa: E402
+import shutil  # noqa: E402
+import subprocess  # noqa: E402
+import threading  # noqa: E402
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+from agent_server.services._runtime_config import (  # noqa: E402
+    OPENCODE_TOOL_IDS,
+    PLATFORM_DENIED_TOOLS,
+    map_disallowed_to_opencode,
+    merged_disallowed_tools,
+)
+
+
+def _read_only(monkeypatch, tmp_path, enabled=True):
+    cfg = tmp_path / "read-only-config.json"
+    cfg.write_text(json.dumps({"enabled": enabled}))
+    monkeypatch.setattr(opencode_runtime, "_READ_ONLY_CONFIG", cfg)
+
+
+def _turn_config(monkeypatch, tmp_path, guardrails=None):
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path / "root"))
+    monkeypatch.setattr(opencode_runtime, "_shared_config_dir", lambda: str(tmp_path / "shared"))
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: dict(guardrails or {}))
+    turn_dir = opencode_runtime._prepare_turn_config("exec-654", None, None, env={})
+    with open(os.path.join(turn_dir, "opencode", "opencode.json")) as fh:
+        return json.load(fh)
+
+
+def test_read_only_config_emits_write_denies(monkeypatch, tmp_path):
+    _read_only(monkeypatch, tmp_path, enabled=True)
+    config = _turn_config(monkeypatch, tmp_path)
+    assert config["permission"]["edit"] == "deny"
+    assert config["permission"]["bash"] == "deny"
+    # `permission.write` was measured to be a silent no-op on 1.18.32 —
+    # emitting it would read as enforcement and be none.
+    assert "write" not in config["permission"]
+
+
+def test_read_only_off_emits_no_permission_denies(monkeypatch, tmp_path):
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    config = _turn_config(monkeypatch, tmp_path)
+    assert "permission" not in config
+
+
+def test_read_only_deny_overrides_an_operator_allow(monkeypatch, tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "opencode.json").write_text(json.dumps({"permission": {"bash": "allow", "webfetch": "ask"}}))
+    _read_only(monkeypatch, tmp_path, enabled=True)
+    config = _turn_config(monkeypatch, tmp_path)
+    assert config["permission"] == {"bash": "deny", "webfetch": "ask", "edit": "deny"}
+
+
+def test_disallowed_tools_are_mapped_or_surfaced(monkeypatch, tmp_path, caplog):
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    guardrails = {"disallowed_tools": ["Bash", "Write", "MultiEdit", "WebSearch", "NotebookEdit", "mcp__x__y"]}
+    with caplog.at_level("WARNING"):
+        config = _turn_config(monkeypatch, tmp_path, guardrails)
+    assert config["tools"] == {"bash": False, "write": False, "edit": False, "websearch": False}
+    warning = " ".join(r.getMessage() for r in caplog.records)
+    assert "NotebookEdit" in warning and "mcp__x__y" in warning
+    # Platform-denied harness tools have no OpenCode counterpart: absence is
+    # the deny, so they are neither mapped nor warned about every turn.
+    for name in PLATFORM_DENIED_TOOLS:
+        assert name not in warning
+
+
+def test_mapping_splits_and_dedupes():
+    ids, unmapped = map_disallowed_to_opencode(
+        merged_disallowed_tools({"disallowed_tools": ["Edit", "MultiEdit", "Zap", "Zap", 7, " "]})
+    )
+    assert ids == ["edit"]
+    assert unmapped == ["Zap"]
+    assert map_disallowed_to_opencode(None) == ([], [])
+
+
+class _SlowProcess:
+    """A process that keeps emitting steps and never exits on its own — the
+    looping local model the cap exists for. Exits only when killed."""
+
+    def __init__(self, lines):
+        import io
+        self.stdout = io.StringIO("".join(l + "\n" for l in lines))
+        self.stderr = io.StringIO("")
+        self.pid = 4242
+        self.returncode = None
+        self.killed = threading.Event()
+
+    def wait(self, timeout=None):
+        if self.killed.wait(timeout):
+            return -15
+        raise subprocess.TimeoutExpired("opencode", timeout)
+
+    def poll(self):
+        return -15 if self.killed.is_set() else None
+
+    def kill(self):
+        self.killed.set()
+
+    def terminate(self):
+        self.killed.set()
+
+
+@pytest.mark.asyncio
+async def test_max_turns_kills_and_returns_422_with_turn_limit_prefix(monkeypatch, tmp_path):
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    _install_fake_subprocess(monkeypatch, stdout_lines=[])
+    stream = []
+    for n in range(10):
+        stream += _lines(
+            {"type": "step_start", "sessionID": "s"},
+            {"type": "tool_use", "sessionID": "s", "id": f"t{n}", "tool": "read", "input": {}},
+            {"type": "step_finish", "sessionID": "s"},
+        )
+    proc = _SlowProcess(stream)
+    monkeypatch.setattr(opencode_runtime.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(
+        opencode_runtime, "_terminate_process_group", lambda p, **k: p.kill()
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless(
+            "count to 1000 one tool call at a time", model="ollama/m", max_turns=3,
+            timeout_seconds=30,
+        )
+    assert exc.value.status_code == 422
+    assert str(exc.value.detail).startswith("Task exceeded turn limit:")
+    assert proc.killed.is_set()
+    # Same literal the Claude headless path raises — one classifier for both.
+    import inspect
+    from agent_server.services import headless_executor
+    assert 'detail=f"Task exceeded turn limit: ' in inspect.getsource(headless_executor)
+
+
+@pytest.mark.asyncio
+async def test_max_turns_defaults_to_guardrails(monkeypatch):
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: {"max_turns_task": 7})
+    seen = {}
+
+    async def _stub(**kwargs):
+        seen.update(kwargs)
+        return ("ok", [], ExecutionMetadata(), [], "s")
+
+    monkeypatch.setattr(runtime, "_execute_with_stall_retry", _stub)
+    await runtime.execute_headless("t", model="ollama/m")
+    assert seen["max_turns"] == 7
+    await runtime.execute_headless("t", model="ollama/m", max_turns=2)
+    assert seen["max_turns"] == 2
+
+
+_OLLAMA_404 = {
+    "type": "error", "sessionID": "s",
+    "error": {"name": "APIError", "data": {
+        "message": 'model "does-not-exist" not found, try pulling it first',
+        "statusCode": 404, "isRetryable": False}},
+}
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_error_is_a_400_model_unsupported(monkeypatch, tmp_path):
+    """The event is the one the pinned CLI emitted for an OpenAI-compatible
+    endpoint answering like Ollama does for an unpulled model."""
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    _install_fake_subprocess(monkeypatch, stdout_lines=_lines(_OLLAMA_404), return_code=1)
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("t", model="ollama/does-not-exist")
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error_code"] == "model_unsupported"
+    assert exc.value.detail["message"].startswith("Model unsupported: ")
+    assert "does-not-exist" in exc.value.detail["message"]
+
+
+@pytest.mark.parametrize(
+    "status,message,expected,error_type",
+    [
+        (401, "Invalid API key provided", 503, "authentication_failed"),
+        (403, "forbidden", 503, "authentication_failed"),
+        (429, "slow down", 429, "rate_limit"),
+        (404, "route not found", 500, "execution_error"),
+        (None, "Unexpected server error. Check server logs for details.", 500, "execution_error"),
+    ],
+)
+def test_structured_error_events_classify(status, message, expected, error_type):
+    event = {"type": "error", "error": {"name": "APIError", "data": {"message": message}}}
+    if status is not None:
+        event["error"]["data"]["statusCode"] = status
+    metadata = ExecutionMetadata()
+    state = opencode_runtime._OpenCodeParseState(execution_log=[], metadata=metadata)
+    opencode_runtime._process_opencode_event(event, state)
+    assert metadata.error_message == message
+    code, _ = classify_opencode_failure(
+        1, "", metadata, error_status=state.error_status, error_name=state.error_name
+    )
+    assert code == expected
+    assert metadata.error_type == error_type
+    assert metadata.error_code
+
+
+def test_cache_write_sets_cache_creation_tokens():
+    _text, _log, metadata, _raw, _out = parse_opencode_jsonl(_lines(
+        {"type": "step_start"},
+        {"type": "text", "text": "hi"},
+        {"type": "step_finish", "tokens": {"input": 10, "output": 2, "cache": {"read": 3, "write": 5}}},
+    ))
+    assert metadata.cache_creation_tokens == 5
+    assert metadata.cache_read_tokens == 3
+
+
+def test_health_reports_config_enforcement_for_opencode_only(monkeypatch):
+    from agent_server.routers import info
+    from agent_server.state import agent_state
+    monkeypatch.setattr(agent_state, "agent_runtime", "opencode")
+    assert info._read_only_enforcement() == {"read_only_enforcement": "config"}
+    for other in ("claude-code", "codex", "gemini-cli"):
+        monkeypatch.setattr(agent_state, "agent_runtime", other)
+        assert info._read_only_enforcement() == {}
+
+
+# -- real denied turns against the PINNED binary ------------------------------
+# Every opencode.json key the runtime relies on is proven here by a real turn of
+# opencode 1.18.32 against a local fake OpenAI-compatible model (127.0.0.1, no
+# network, no live model). Skipped when the binary is absent (CI does not build
+# the base image); run with OPENCODE_BIN=/path/to/opencode or it on PATH.
+
+_OPENCODE_BIN = os.environ.get("OPENCODE_BIN") or shutil.which("opencode")
+_needs_binary = pytest.mark.skipif(not _OPENCODE_BIN, reason="pinned opencode binary not available")
+
+
+class _FakeModel(BaseHTTPRequestHandler):
+    calls: list = []
+    tool = ("write", {"filePath": "rw-probe.txt", "content": "x"})
+    loop = False
+    status = None
+
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if type(self).status:
+            code, msg = type(self).status
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": {"message": msg}}).encode())
+            return
+        msgs = body.get("messages", [])
+        type(self).calls.append({
+            "tools": [t["function"]["name"] for t in body.get("tools") or []],
+            "tool_results": [m.get("content") for m in msgs if m.get("role") == "tool"],
+        })
+        if not type(self).loop and any(m.get("role") == "tool" for m in msgs):
+            delta, finish = {"role": "assistant", "content": "done"}, "stop"
+        else:
+            name, args = type(self).tool
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": f"call_{len(type(self).calls)}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)}}]}
+            finish = "tool_calls"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        for chunk in ({"choices": [{"index": 0, "delta": delta}]},
+                      {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}]}):
+            chunk.update(id="x", object="chat.completion.chunk", created=0, model="m")
+            self.wfile.write(f"data: {json.dumps(chunk)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+
+@pytest.fixture
+def fake_model():
+    _FakeModel.calls = []
+    _FakeModel.loop = False
+    _FakeModel.status = None
+    _FakeModel.tool = ("write", {"filePath": "rw-probe.txt", "content": "x"})
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeModel)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server
+    server.shutdown()
+
+
+@pytest.fixture
+def real_runtime(monkeypatch, tmp_path, fake_model):
+    """The real `_execute_opencode` driving the real binary at the fake model."""
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "opencode.json").write_text(json.dumps({"provider": {"fake": {
+        "npm": "@ai-sdk/openai-compatible", "name": "Fake",
+        "options": {"baseURL": f"http://127.0.0.1:{fake_model.server_address[1]}/v1", "apiKey": "x"},
+        "models": {"m": {"name": "m", "tool_call": True}}}}}))
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path / "root"))
+    monkeypatch.setattr(opencode_runtime, "_shared_config_dir", lambda: str(shared))
+    monkeypatch.setattr(opencode_runtime, "_AGENT_HOME", str(home))
+    monkeypatch.setattr(opencode_runtime, "apply_mcp_config", lambda config: None)
+    monkeypatch.setattr(opencode_runtime, "refresh_agents_md", lambda: None)
+    monkeypatch.setenv("PATH", os.path.dirname(_OPENCODE_BIN) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    # Kill only the child's OWN group (it runs with start_new_session): the
+    # production sweep also hunts the execution tag across the container, which
+    # in a test run reaches the test runner's siblings.
+    import signal
+
+    def _kill_group(process, **kwargs):
+        try:
+            os.killpg(kwargs.get("pgid") or process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    monkeypatch.setattr(opencode_runtime, "_terminate_process_group", _kill_group)
+    monkeypatch.setattr(
+        opencode_runtime, "_drain_bounded",
+        lambda process, out_t, err_t, grace=3, **k: (out_t.join(grace), err_t.join(grace)),
+    )
+    build = runtime._build_command
+    # The spawn env carries the container's PATH, not the test's: name the
+    # binary absolutely instead.
+    monkeypatch.setattr(runtime, "_build_command", lambda **k: [_OPENCODE_BIN, *build(**k)[1:]])
+    return runtime, home
+
+
+@_needs_binary
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool,args", [
+    ("write", {"filePath": "rw-probe.txt", "content": "x"}),
+    ("edit", {"filePath": "rw-probe.txt", "oldString": "", "newString": "x"}),
+    ("bash", {"command": "echo x > rw-probe.txt", "description": "probe"}),
+])
+async def test_real_binary_read_only_denies_the_write(monkeypatch, tmp_path, real_runtime, tool, args):
+    runtime, home = real_runtime
+    _read_only(monkeypatch, tmp_path, enabled=True)
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: {})
+    _FakeModel.tool = (tool, args)
+    await runtime.execute_headless("create a file named rw-probe.txt", model="fake/m", timeout_seconds=90)
+    assert not (home / "rw-probe.txt").exists()
+    offered = _FakeModel.calls[-1]["tools"]
+    assert not {"edit", "write", "bash"} & set(offered)
+    assert "unavailable tool" in _FakeModel.calls[-1]["tool_results"][-1]
+
+
+@_needs_binary
+@pytest.mark.asyncio
+async def test_real_binary_read_only_off_still_writes(monkeypatch, tmp_path, real_runtime):
+    """The control: without the deny the same turn DOES write the file."""
+    runtime, home = real_runtime
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: {})
+    await runtime.execute_headless("create a file named rw-probe.txt", model="fake/m", timeout_seconds=90)
+    assert (home / "rw-probe.txt").exists()
+
+
+@_needs_binary
+@pytest.mark.asyncio
+async def test_real_binary_every_mapped_id_is_removed(monkeypatch, tmp_path, real_runtime):
+    runtime, home = real_runtime
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    monkeypatch.setattr(
+        opencode_runtime, "_load_guardrails",
+        lambda: {"disallowed_tools": sorted(OPENCODE_TOOL_IDS)},
+    )
+    await runtime.execute_headless("create a file named rw-probe.txt", model="fake/m", timeout_seconds=90)
+    assert not (home / "rw-probe.txt").exists()
+    mapped = {i for ids in OPENCODE_TOOL_IDS.values() for i in ids}
+    offered = set(_FakeModel.calls[-1]["tools"])
+    # Every tool 1.18.32 offers by default is in the table, so none is left.
+    assert len(_FakeModel.calls) >= 2 and not (mapped & offered), offered
+
+
+@_needs_binary
+@pytest.mark.asyncio
+async def test_real_binary_max_turns_kills_a_looping_model(monkeypatch, tmp_path, real_runtime):
+    runtime, _home = real_runtime
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: {})
+    _FakeModel.loop = True
+    _FakeModel.tool = ("read", {"filePath": "x"})
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("count to 1000", model="fake/m", max_turns=3, timeout_seconds=90)
+    assert exc.value.status_code == 422
+    assert str(exc.value.detail).startswith("Task exceeded turn limit:")
+    assert len([c for c in _FakeModel.calls if c["tools"]]) <= 5
+
+
+@_needs_binary
+@pytest.mark.asyncio
+async def test_real_binary_unknown_model_is_400(monkeypatch, tmp_path, real_runtime):
+    runtime, _home = real_runtime
+    _read_only(monkeypatch, tmp_path, enabled=False)
+    monkeypatch.setattr(opencode_runtime, "_load_guardrails", lambda: {})
+    _FakeModel.status = (404, 'model "does-not-exist" not found, try pulling it first')
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("t", model="fake/m", timeout_seconds=60)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error_code"] == "model_unsupported"
