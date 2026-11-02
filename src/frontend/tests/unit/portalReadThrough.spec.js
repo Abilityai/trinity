@@ -44,7 +44,7 @@ vi.mock('axios', () => {
 })
 
 import { useClientPortalStore, portalHttp } from '@/stores/clientPortal'
-import { heldThrough, laterInstant, newestAt, READ_UP_TO_NOW } from '@/utils/readThrough'
+import { heldPast, heldThrough, laterInstant, newestAt, READ_UP_TO_NOW } from '@/utils/readThrough'
 
 const READ = (kind, id) => `/api/enterprise/client-portal/chat-state/${kind}/${id}/read`
 
@@ -82,6 +82,21 @@ describe('heldThrough', () => {
 
   it('says nothing for an empty view', () => {
     expect(heldThrough([], 'at')).toBe(null)
+  })
+})
+
+describe('heldPast', () => {
+  // #4103 review: the conversation reads itself after a history load only when
+  // that load brought something past the chat state the open already read.
+  it('is true only for an instant strictly after the as_of', () => {
+    expect(heldPast('2026-01-15T10:00:01Z', '2026-01-15T10:00:00Z')).toBe(true)
+    expect(heldPast('2026-01-15T10:00:00Z', '2026-01-15T10:00:00.000000Z')).toBe(false)
+    expect(heldPast('2026-01-15T09:59:59Z', '2026-01-15T10:00:00Z')).toBe(false)
+  })
+  it('says no for nothing held, "up to now", or no as_of yet', () => {
+    expect(heldPast(null, '2026-01-15T10:00:00Z')).toBe(false)
+    expect(heldPast(READ_UP_TO_NOW, '2026-01-15T10:00:00Z')).toBe(false)
+    expect(heldPast('2026-01-15T10:00:00Z', null)).toBe(false)
   })
 })
 

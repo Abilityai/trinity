@@ -6126,10 +6126,17 @@ def mark_chat_read(email: str, chat_kind: str, chat_id: str,
         if not (room_reader and db.is_active_room_participant(cid, *room_reader)):
             return
         cursor_kind, floor_kind = db.room_cursor_kind(room_reader[0]), "room"
-    if _would_create_row_past_cap(email, cursor_kind, cid):
+    if _would_create_row_past_cap(email, cursor_kind, cid) and not (
+            floor_kind and db.chat_state_row_exists(email, floor_kind, cid)):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because
         # a bookkeeping table is full would be absurd.
+        #
+        # A room whose shared `room` row already exists is exempt (#1011
+        # review): that row lists the room and counts its unread from the
+        # pre-split floor, so refusing the space row would leave a badge no
+        # read can clear. The exemption is bounded — at most one space row per
+        # identity space beside a row the viewer already owns.
         return
     db.mark_chat_read(email, cursor_kind, cid, now, through=held, floor_kind=floor_kind)
 

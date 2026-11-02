@@ -898,7 +898,7 @@
 </template>
 
 <script setup>
-import { heldThrough } from '@/utils/readThrough'
+import { heldPast, heldThrough } from '@/utils/readThrough'
 import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { wrapUpPrompt } from './projects/projectsUtils'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } from 'vue'
@@ -1554,8 +1554,11 @@ async function loadThread(sessionId) {
     // trinity-enterprise#1010: the history now on screen is read, up to its
     // newest row. The open's own read covers only what the chat state held, so
     // without this an arrival that landed between that read and this load would
-    // badge the conversation the person is looking at.
-    if (sessionId) emit('thread-caught-up', sessionId, heldThrough(messages.value, 'at'))
+    // badge the conversation the person is looking at. Only then, though: a load
+    // that brings nothing past that state owes no read (#3439 — no write for
+    // nothing new).
+    const held = heldThrough(messages.value, 'at')
+    if (sessionId && heldPast(held, store.chatStateAsOf)) emit('thread-caught-up', sessionId, held)
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome

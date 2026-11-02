@@ -82,7 +82,7 @@ describe('#3439 — the open thread catches up when its row moves', () => {
     await flushPromises()
     expect(store.fetchHistory).toHaveBeenCalledWith('scout', 's1', { limit: 9 })   // unread 1 + REPLY_POLL_ROWS 8
     expect(shown(w)).toEqual(['u1', 'a1', 'a2'])
-    expect(w.emitted('thread-caught-up')).toEqual([['s1']])
+    expect(w.emitted('thread-caught-up')).toEqual([['s1', '2026-10-26T10:05:00Z']])
   })
 
   it('does not re-read when the tick re-stamps the row with the same values (new object, same thread)', async () => {
@@ -130,7 +130,7 @@ describe('#3439 — the open thread catches up when its row moves', () => {
     expect(store.fetchHistory).toHaveBeenCalledWith('scout', 's1', { limit: 50 })
     expect(store.fetchHistory).toHaveBeenCalledWith('scout', 's1')
     expect(shown(w)).toEqual(['u1', 'a1', ...burst.map((m) => m.id), 'z'])
-    expect(w.emitted('thread-caught-up')).toEqual([['s1']])
+    expect(w.emitted('thread-caught-up')).toEqual([['s1', '2026-10-26T10:05:00Z']])
   })
 
   it('a row that moves for a different thread is not this conversation\'s business', async () => {

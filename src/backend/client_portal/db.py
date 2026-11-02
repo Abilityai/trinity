@@ -1192,16 +1192,35 @@ def mark_chat_read(client_email: str, chat_kind: str, chat_id: str, now: str,
     """
     target = through or now
     _ensure_unread_baseline(client_email, target)
-    current = _read_cursor(client_email, chat_kind, chat_id)
-    if current is None and floor_kind:
-        current = _read_cursor(client_email, floor_kind, chat_id)
-    cursor = _later(current, target)
-    if cursor == _read_cursor(client_email, chat_kind, chat_id):
-        return
-    _upsert_chat_state(client_email, chat_kind, chat_id, now, last_read_at=cursor)
+    # Compare-and-set, never read-then-upsert (#1010 review): two tabs reading
+    # the same old cursor would otherwise both write, and the older `through`
+    # landing last would re-badge what the newer one read. Instants cannot be
+    # compared in SQL across spellings (see `_later`), so the comparison stays
+    # here and the write only lands if the row still holds what was compared
+    # against; a lost race re-reads and decides again.
+    for _ in range(_CURSOR_CAS_ATTEMPTS):
+        found, current = _read_cursor(client_email, chat_kind, chat_id)
+        floor = current
+        if floor is None and floor_kind:
+            floor = _read_cursor(client_email, floor_kind, chat_id)[1]
+        cursor = _later(floor, target)
+        if cursor == current:
+            return
+        if _cas_cursor(client_email, chat_kind, chat_id, now,
+                       found=found, expected=current, cursor=cursor):
+            return
+    # Still losing after every attempt: the reads that won moved the cursor on
+    # their own, and a read marker is never worth failing the open over.
 
 
-def _read_cursor(client_email: str, chat_kind: str, chat_id: str) -> Optional[str]:
+# A lost compare-and-set means another read of the same chat landed in between;
+# a handful of retries covers any real number of tabs.
+_CURSOR_CAS_ATTEMPTS = 5
+
+
+def _read_cursor(client_email: str, chat_kind: str,
+                 chat_id: str) -> tuple[bool, Optional[str]]:
+    """(row exists, its read cursor)."""
     stmt = text(
         "SELECT last_read_at FROM enterprise_portal_chat_state "
         "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id"
@@ -1210,7 +1229,39 @@ def _read_cursor(client_email: str, chat_kind: str, chat_id: str) -> Optional[st
         row = conn.execute(stmt, {
             "email": (client_email or "").lower(), "kind": chat_kind, "id": chat_id,
         }).first()
-    return row[0] if row else None
+    return (row is not None, row[0] if row else None)
+
+
+def _cas_cursor(client_email: str, chat_kind: str, chat_id: str, now: str, *,
+                found: bool, expected: Optional[str], cursor: str) -> bool:
+    """Write ``cursor`` only if the row is still as read: absent (insert, losing
+    to a concurrent insert), or holding ``expected``. True when it landed."""
+    email = (client_email or "").lower()
+    with get_engine().begin() as conn:
+        if not found:
+            stmt = (
+                make_insert(enterprise_portal_chat_state)
+                .values(client_email=email, chat_kind=chat_kind, chat_id=chat_id,
+                        updated_at=now, last_read_at=cursor)
+                .on_conflict_do_nothing(index_elements=[
+                    enterprise_portal_chat_state.c.client_email,
+                    enterprise_portal_chat_state.c.chat_kind,
+                    enterprise_portal_chat_state.c.chat_id,
+                ])
+            )
+            return conn.execute(stmt).rowcount == 1
+        guard = "last_read_at IS NULL" if expected is None else "last_read_at = :expected"
+        stmt = text(
+            "UPDATE enterprise_portal_chat_state "
+            "SET last_read_at = :cursor, updated_at = :now "
+            "WHERE client_email = :email AND chat_kind = :kind AND chat_id = :id "
+            f"AND {guard}"
+        )
+        params = {"cursor": cursor, "now": now, "email": email,
+                  "kind": chat_kind, "id": chat_id}
+        if expected is not None:
+            params["expected"] = expected
+        return conn.execute(stmt, params).rowcount == 1
 
 
 # ---------------------------------------------------------------------------

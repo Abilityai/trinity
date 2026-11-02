@@ -457,3 +457,48 @@ def test_the_row_cap_applies_to_a_new_space_row(cursor_db, monkeypatch):
     _mark("room", "r1", through="2026-10-01T10:00:00Z", now=NOW, monkeypatch=monkeypatch)
 
     assert _rows() == {}
+
+
+def test_a_room_with_a_shared_row_is_read_at_the_cap(cursor_db, monkeypatch):
+    """#4103 review: a viewer at the row cap whose room already has the shared
+    `room` row (a star, or a pre-split cursor) must still be able to read it.
+    That row lists the room and counts its unread from the legacy floor, so a
+    refused space row would leave a badge no read can clear."""
+    from client_portal import db as pdb
+
+    _room("r1")
+    pdb.mark_chat_read(ALICE, "room", "r1", "2026-10-01T09:00:00Z")   # pre-split write
+    _say("r1", "2026-10-01T09:30:00Z")
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", 0)
+    assert _unread("room", "r1") == 1
+
+    _mark("room", "r1", through="2026-10-01T10:00:00Z", now=NOW, monkeypatch=monkeypatch)
+
+    assert _unread("room", "r1") == 0
+
+
+def test_a_lost_race_never_moves_the_cursor_back(cursor_db, monkeypatch):
+    """#4103 review: two tabs read the same old cursor; the newer read lands
+    between the older one's read and its write. The older write must notice and
+    leave the newer cursor in place, not overwrite it."""
+    from client_portal import db as pdb
+
+    _thread("s1")
+    _reply("s1", "2026-10-01T10:30:00Z")
+    _mark("thread", "s1", through="2026-10-01T10:00:00Z", now=NOW, monkeypatch=monkeypatch)
+
+    real = pdb._read_cursor
+    raced = []
+
+    def _read_then_overtaken(*a, **k):
+        out = real(*a, **k)
+        if not raced:   # the newer tab writes right after the older one read
+            raced.append(True)
+            _mark("thread", "s1", through="2026-10-01T11:00:00Z", now=NOW, monkeypatch=monkeypatch)
+        return out
+
+    monkeypatch.setattr(pdb, "_read_cursor", _read_then_overtaken)
+    _mark("thread", "s1", through="2026-10-01T10:15:00Z", now=NOW, monkeypatch=monkeypatch)
+
+    assert _rows()[("thread", "s1")]["last_read_at"] == "2026-10-01T11:00:00Z"
+    assert _unread("thread", "s1") == 0

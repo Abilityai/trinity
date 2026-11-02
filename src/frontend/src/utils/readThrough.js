@@ -33,3 +33,14 @@ export function heldThrough(rows, field = 'created_at') {
   if (!(last && last[field]) || Number.isNaN(Date.parse(last[field]))) return READ_UP_TO_NOW
   return newestAt(list, field)
 }
+
+// Whether a view's `held` instant reaches past `asOf`, the instant a read
+// already covered: a load that brings nothing newer owes no read write. An
+// unnamed instant (READ_UP_TO_NOW) or no `asOf` to compare against says no — the
+// read that already happened went up to now.
+export function heldPast(held, asOf) {
+  if (!held || held === READ_UP_TO_NOW || !asOf) return false
+  const th = Date.parse(held)
+  const ta = Date.parse(asOf)
+  return !Number.isNaN(th) && !Number.isNaN(ta) && th > ta
+}
