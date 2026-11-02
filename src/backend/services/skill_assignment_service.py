@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 from database import db
 from dependencies import is_person_principal
 from services.skill_packaging import validate_skill_name
-from services.skill_service import skill_service, broadcast_skills_changed
+from services.skill_service import skill_service, broadcast_skills_changed, SkillInjectionBusy
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,138 @@ async def deliver_assigned_skills(
             "reason": "injection_error",
             "skills": {n: {"status": "not_delivered"} for n in sorted(names)},
         }
+
+
+async def remove_unassigned_skills(
+    agent_name: str,
+    removed_names: List[str],
+    current_user,
+    request=None,
+) -> Optional[Dict[str, Any]]:
+    """Remove just-unassigned skill packages from the agent (ent#236).
+
+    Best-effort by design, and the ordering is the point: the DB unassign has
+    already committed and is authoritative. A stopped agent, a busy injection
+    lock, or a transport failure must NOT fail the caller's unassign — it
+    degrades to a named `deferred` outcome, and the start-path reconcile
+    (`reconcile_agent_skills`) finishes the job the next time the agent runs.
+
+    Returns the removal report for the response body, or None when nothing was
+    unassigned.
+    """
+    from services.platform_audit_service import AuditEventType, platform_audit_service
+
+    names = [n for n in removed_names if validate_skill_name(n)]
+    if not names:
+        return None
+
+    try:
+        result = await skill_service.remove_skills(agent_name, names)
+    except SkillInjectionBusy:
+        return {
+            "status": "deferred",
+            "reason": "injection_in_progress",
+            "skills": sorted(names),
+        }
+    except Exception as e:  # noqa: BLE001 — never fail a committed unassign
+        logger.warning(f"skill removal failed for {agent_name}: {e}")
+        return {
+            "status": "deferred",
+            "reason": "removal_error",
+            "skills": sorted(names),
+        }
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.CONFIGURATION,
+            event_action="skill_removed",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request and request.client else None,
+            endpoint=request.scope["path"] if request else None,
+            request_id=getattr(request.state, "request_id", None) if request else None,
+            target_type="agent",
+            target_id=agent_name,
+            details={
+                "trigger": "unassign",
+                "skills": sorted(names)[:50],
+                "removed": result.get("skills_removed", 0),
+                "failed": result.get("skills_failed", 0),
+            },
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+    return {
+        "status": "completed" if result.get("success") else "partial",
+        "skills_removed": result.get("skills_removed", 0),
+        "skills_failed": result.get("skills_failed", 0),
+        "results": result.get("results", {}),
+    }
+
+
+class SkillSetUnresolved(Exception):
+    """A set brought the skill and cannot be read right now (the route's 409)."""
+
+    code = "skill_set_unresolved"
+
+    def __init__(self, skill_name: str):
+        self.message = (f"'{skill_name}' was assigned through a skill set that cannot be read "
+                        "right now; unassign the set, or retry once its source is available.")
+        super().__init__(f"{self.code}: {self.message}")
+
+
+async def unassign_and_remove(
+    agent_name: str,
+    skill_name: str,
+    actor,
+    request=None,
+    *,
+    keep_set_held: bool = False,
+) -> Dict[str, Any]:
+    """Unassign one library skill and remove its package — the unassign
+    route's sequence, for a system apply too (trinity-enterprise#1068): the
+    row, then the package (best-effort, `deferred` is a named outcome), then
+    the change broadcast, then the gate reconcile (a PERSON's unassign drops
+    the explicit gate once the package is gone, ent#753).
+
+    ent#530: a skill an assigned set still names stays (as set-derived) — the
+    set is what brought it — and `retained_via_sets` says so. The route turns
+    the individual row into a set-derived one; `keep_set_held=True` leaves the
+    row as it is (apply does not change what it was not asked to). Raises
+    `SkillSetUnresolved` before any write when a set brought the skill and
+    cannot be read right now: deleting the row would be silently undone by the
+    next reconcile once the set resolves.
+
+    Returns `{removed, retained_via_sets, removal, gates}`.
+    """
+    from services import skill_set_service
+
+    retained_via = (await asyncio.to_thread(skill_set_service.via_sets_map, agent_name)).get(skill_name, [])
+    row = next((r for r in db.get_agent_skills(agent_name) if r.skill_name == skill_name), None)
+    if (not retained_via and row is not None and not row.individual
+            and await asyncio.to_thread(skill_set_service.any_unresolved, agent_name)):
+        raise SkillSetUnresolved(skill_name)
+    if retained_via and (keep_set_held or db.set_skill_individual(agent_name, skill_name, False)):
+        if not keep_set_held:
+            await broadcast_skills_changed(agent_name)
+        return {"removed": False, "retained_via_sets": list(retained_via),
+                "removal": None, "gates": None}
+
+    conflict = [skill_name] if row is not None and getattr(row, "delivery_status", None) == "conflict" else []
+    removed = db.unassign_skill(agent_name, skill_name)
+
+    removal = None
+    if removed:
+        removal = await remove_unassigned_skills(agent_name, [skill_name], actor, request)
+        # #2703: fired on the ROW change, even when the package removal
+        # deferred — the listing surfaces re-read the container either way and
+        # the assignment lists read the row.
+        await broadcast_skills_changed(agent_name)
+    gates = await sync_gates(agent_name, actor, request,
+                             removed=[skill_name] if removed else [], conflict=conflict,
+                             removal=removal)
+    return {"removed": bool(removed), "retained_via_sets": [], "removal": removal, "gates": gates}
 
 
 def conflict_names(agent_name: str) -> List[str]:
