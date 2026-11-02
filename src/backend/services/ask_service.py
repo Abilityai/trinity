@@ -318,8 +318,16 @@ def answer(
     actor: Actor,
     responded_by_id: Optional[str] = None,
     divergence_acknowledged: bool = False,
+    via_credential_sink: bool = False,
 ) -> Ending:
     """A person answered `item` (the row the caller read and checked).
+
+    `via_credential_sink` (trinity-enterprise#1066) is set by exactly one
+    caller — the Workspace secret field's sink, after it wrote the value into
+    the agent's environment — and is what lets a `credential` row end as
+    answered. Any other answer to that kind raises `CredentialAnswerRefused`
+    before anything is checked or written: the value must never reach
+    `response`.
 
     Raises `ResponseNotOfferedError` (#2376), or a `ReservedAnswerError` for the
     reserved `SOMETHING_ELSE` decision (#3242), before anything is written, then
@@ -327,6 +335,8 @@ def answer(
     options are frozen at ingest, so validating against the caller's read is
     sound; the status is not, which is what the compare-and-set is for.
     """
+    if (item or {}).get("type") == "credential" and not via_credential_sink:
+        raise CredentialAnswerRefused(item["id"])
     # #3242: a platform-minted approval (a skill gate) counts only its own
     # options and no agent reads the instruction — refused, named.
     if response == SOMETHING_ELSE and decided_by_options(item):
@@ -538,6 +548,21 @@ def clear_platform(ids: Iterable[str], *, reason: str, batch_id: Optional[str] =
 # The one way an ask begins (PR B): an agent — or, later, a gate — raises it
 # ---------------------------------------------------------------------------
 
+class CredentialAnswerRefused(Exception):
+    """trinity-enterprise#1066: a `credential` ask is answered ONLY by the
+    Workspace secret field's sink — the one caller that wrote the value into
+    the agent's environment and answers by name. An operator's respond box, a
+    Workspace typed answer or a direct `answer(...)` would put the secret into
+    `response`, the row, the write-back and the wake prompt; refused before
+    anything is written. `code` is what both doors answer with."""
+
+    code = "credential_answer_via_field"
+
+    def __init__(self, item_id: str):
+        super().__init__(self.code)
+        self.item_id = item_id
+
+
 class AskRejected(Exception):
     """A create the sink refused: the HTTP status and the NAMED code the caller
     answers with (422 for a malformed ask, 429 for the caps). `extra` carries
@@ -552,7 +577,10 @@ class AskRejected(Exception):
         self.extra = extra
 
 
-ASK_TYPES = ("approval", "question", "alert")
+# trinity-enterprise#1066: `credential` — the agent asks for a secret BY NAME
+# (`context.credential_name`); the person fills it through the Workspace secret
+# field, whose sink is the only thing that may answer it (`CredentialAnswerRefused`).
+ASK_TYPES = ("approval", "question", "alert", "credential")
 ASK_ROLES = ("primary", "approver", "viewer", "operator")
 # trinity-enterprise#1007: beside the four kinds, an agent's `to` may name a
 # canon role by id. This is the form the `invalid_to` refusal teaches; the id
@@ -746,6 +774,16 @@ def raise_ask(
         people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
+    if norm["type"] == "credential" and not addressee:
+        # trinity-enterprise#1066: a secret field has exactly ONE reader. No
+        # resolved person (the operator role, an agent with no owner and no
+        # primary) or several (a role two people fill) is refused before
+        # anything is written — the value must not be typed by whoever
+        # answers first and recorded against everyone it was delivered to.
+        raise AskRejected(
+            422, "no_person",
+            "A credential ask must reach exactly one person; ask it from a conversation "
+            "with the person who holds the credential, addressed to primary.")
 
     context = dict(norm["context"])
     turn = _platform_turn(agent_name, platform_execution_id)
@@ -1009,11 +1047,29 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if kind == "approval" and not options:
         raise AskRejected(422, "options_required",
                           "An approval needs the options a person can choose from.")
+    if kind == "credential" and options:
+        # trinity-enterprise#1066: the person types the value into the secret
+        # field; there is nothing to choose, and an option list would read as
+        # a place to put the value.
+        raise AskRejected(422, "invalid_options",
+                          "A credential ask offers no options; the person types the value "
+                          "into the secret field it opens.")
     context = ask.get("context")
     if context is None:
         context = {}
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
+    if kind == "credential":
+        from services import credential_ask_policy
+        problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
+        if problem is not None:
+            raise AskRejected(
+                422, "invalid_credential_name",
+                "A credential ask needs context.credential_name: the environment variable "
+                f"the person is filling — a variable name of at most "
+                f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
+                "and the agent runtime do not reserve.",
+                reason=problem)
     # The workspace thread is platform-written: an agent that could author it
     # would choose which conversation its ask claims to belong to (ent#429), and
     # whether it is drawn in that chat at all (ent#734).

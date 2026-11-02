@@ -17,7 +17,7 @@ class WorkspaceAsk(BaseModel):
     """
     id: str
     agent_name: str
-    kind: str                       # question | approval | alert
+    kind: str                       # question | approval | alert | credential
     priority: str
     title: str
     question: str
@@ -110,6 +110,12 @@ class WorkspaceAsk(BaseModel):
     # cross.
     agent_ending: Optional[str] = None
     ending_reason: Optional[str] = None
+    # trinity-enterprise#1066: for a `credential` ask, the NAME of the
+    # environment variable the person is filling — the one context key this
+    # projection forwards, because it is what the secret field is labelled
+    # with. Never a value: the value goes to the agent's environment and to
+    # nothing a reader sees.
+    credential_name: Optional[str] = None
 
 
 class WorkspaceAskAnswer(BaseModel):

@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service, skill_gate_service
+from services import ask_service, credential_ask_policy, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # Only these reach a client. `alert` is included because an informational update
 # is one of the three things ent#364 asks for; anything else an agent invents is
 # not rendered rather than rendered as an unknown kind.
-_VISIBLE_KINDS = ("question", "approval", "alert")
+# trinity-enterprise#1066: `credential` — rendered as a masked secret field,
+# answered only through `provide_credential`.
+_VISIBLE_KINDS = ("question", "approval", "alert", "credential")
 
 
 class AsksUnavailable(Exception):
@@ -323,6 +325,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         agent_ending=agent_ending,
         ending_reason=(item.get("disposition_reason") or None)
         if agent_ending == ask_service.WITHDRAWN else None,
+        # trinity-enterprise#1066: the variable's NAME, for a credential ask only.
+        credential_name=(credential_ask_policy.credential_name_of(context)
+                         if item.get("type") == "credential" else None),
     )
 
 
@@ -652,6 +657,13 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     except ReservedAnswerError as e:
         # #3242: the reserved "(something else)" decision, refused by name.
         raise AskError(422, e.code, str(e))
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask takes its value through the
+        # secret field (`provide_credential`), never a typed answer — which
+        # would persist the secret on the row and in the agent's wake.
+        raise AskError(422, e.code,
+                       "This ask is answered through the secret field it opened, "
+                       "not with a typed answer.")
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
     except ask_service.AskNotAddressee as e:

@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1066_credential_ask_kind.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The `credential` ask kind: raised by name with no options and exactly one resolved person (`no_person`), the name validated against the agent runtime's protected/routing sets and the platform-written keys (parity-tested), answered ONLY through the secret field's sink (`via_credential_sink`) — the operator respond box, the Workspace typed answer and a direct `answer()` are refused 422 `credential_answer_via_field`; the projection carries `credential_name` only; the wake names the variable, never a value."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",

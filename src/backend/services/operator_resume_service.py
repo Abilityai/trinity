@@ -122,6 +122,21 @@ def _framed_message(
             "person's instruction; re-plan from it or ask again.",
             "",
         ]
+    if item.get("type") == "credential":
+        # trinity-enterprise#1066: the person filled the secret field. The
+        # row's answer is the word `provided`; the wake names the VARIABLE and
+        # tells the agent where to read it — the value is in its environment
+        # and nowhere else, and `response_text` is never set for this kind.
+        from services.credential_ask_policy import credential_name_of
+        name = credential_name_of(item.get("context")) or "the credential"
+        lines += [
+            "---",
+            label,
+            f"answer: {answer} — {name} is now set in your environment; read it from "
+            "there and never repeat its value.",
+            "---",
+        ]
+        return "\n".join(lines)
     lines += [
         "---",
         label,
