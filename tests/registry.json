@@ -2678,6 +2678,18 @@
       "description": "Disabling autonomy must not touch the circuit breaker (#1557). Structural guards: autonomy.py no longer references force_circuit_dormant/reset_circuit (regression guard — fails on pre-#1557 source) and still calls set_schedule_enabled (proactive suppression intact). Message honesty: _circuit_breaker_error names transport-unreachable vs dispatch-auth-dead, and every branch keeps the 'circuit breaker open' substring pinned by the #1560 integration test."
     },
     {
+      "file": "integration/test_4121_user_memory_write_door.py",
+      "feature": "#4121",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "memory",
+        "security",
+        "integration"
+      ],
+      "description": "The write_user_memory door over the network on a sibling stack with a real agent key seeded inside the backend under test (no agent container needed): live turn writes, finished run refused, two live people refuse each other, a human session and a user-scoped key refused agent_only."
+    },
+    {
       "file": "integration/test_1557_autonomy_inbound.py",
       "feature": "#1557",
       "added": "2026-07-10",
@@ -6173,6 +6185,17 @@
       "description": "trinity-enterprise#787: the GUARD-002 hooks register in exec form under env -i + -I -S with a policy-pinned empty CLAUDE_CODE_SHELL_PREFIX (exact shape, key set of a known-loading entry, a port of CLI 2.1.281's hook spawn branch ratcheted to the image's CLI pin); each hook executed under its registered flags/env keeps its deny/allow tables; a hostile PYTHONPATH and a user-site usercustomize flip a deny under the old invocation (precondition) and not under the registered flags; read-only config is root-owned (guard and Codex never read the home file; the backend's root-exec argv writes the config as data, injection payloads included); startup.sh's legacy cleanup, executed under bash, removes both shipped claude-settings.json versions and keeps anything else. Mutation-proven."
     },
     {
+      "file": "unit/test_ent1002_nested_cli_guardrail.py",
+      "feature": "abilityai/trinity-enterprise#1002",
+      "added": "2026-11-01",
+      "categories": [
+        "agent",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1002: on an agent with gated skills the Bash guardrail refuses a nested claude, codex or gemini. The real hook runs under its registered flags and env with the skill-gate marker on and off (an agent with no gates keeps the old behaviour); a per-agent override cannot remove the rows; every reader names the one marker path; a must-refuse and a must-pass corpus pin the rule, commands that start no session pass (--version, --help, mcp, and plugin except on gemini, where that word is a prompt), with two known-limit tables (quoted prose refused too, deliberate wrappers get past) so tightening it prompts a docs change; 512k adversarial commands stay under 1 s, since a hook that outlives its timeout lets the tool run; the image smoke fails a hook that ignores the marker and never leaves the marker behind. Mutation-proven. No Docker."
+    },
+    {
       "file": "unit/test_ent815_broad_list_agent_scope.py",
       "feature": "abilityai/trinity-enterprise#815",
       "added": "2026-10-07",
@@ -7629,6 +7652,18 @@
       "description": "Retrieval memory follow-up on PR #4102: the ranking leaf (recency weight shape, relevance gates while recency only re-orders, an old strong match beats a fresh weak one, recency off is plain cosine), recall rendered as `(date, kind of run) text` with records carrying relevance and score, the `trinity_memory_recency_half_life_days` knob, the fact journal for every add/update/delete/none/screened/prune/recall/forget row with the execution, the proposed candidate, the previous text and the neighbour ids, the last-writer stamp on rewritten and retired rows, the journal's 90-day pruning from apply, the events route's filters and 422 on a bad op, the Haiku 5.5 pin with thinking off at low effort and the first TEXT block read, both migration tracks and cleanup parity; plus the dated recency dataset against the real model where it is cached."
     },
     {
+      "file": "unit/test_4121_user_memory_write_door.py",
+      "feature": "#4121",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "memory",
+        "security",
+        "unit"
+      ],
+      "description": "The write_user_memory door serves the turn the agent is in, through the real route, real get_current_user, a real agent key and real rows: a finished run of another person is refused memory_turn_not_live and their notes stand; another live turn resolving to a different scope is refused memory_turn_ambiguous, fail-closed on an unreadable ledger; any human is refused agent_only; both refusals are logged without the text."
+    },
+    {
       "file": "unit/test_ent1028_memory_search.py",
       "feature": "trinity-enterprise#1028",
       "added": "2026-10-30",
@@ -7660,6 +7695,29 @@
         "security"
       ],
       "description": "trinity-enterprise#1043: a gate write that fails on a skill the member already holds (a service refusal after the plan validated, a database fault, a lost lease), through the real apply route on the real database facade: the skill is still assigned and the admission read shows no gate, and the result says so — the failed[] reason carries the consequence, the member reports skill_runs_ungated (no gate in force) or previous_gate_stands (the stored gate still applies), one top-level warning line per ungated skill, applied false, summary.gates.write 0; a skill held only through a set; the #4125 hold-back of a new assignment in the same run untouched; a landed gate reports nothing new; the dry run predicts no failure."
+    },
+    {
+      "file": "unit/test_4058_loop_stale_run_rows.py",
+      "feature": "#4058",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "reliability",
+        "migrations"
+      ],
+      "description": "#4058: a stale duplicate running loop-run row (pre-#4023) is never the open run: rearm_lost_dispatch returns the real one or re-arms, reconcile advances the real run; the dual-track cleanup closes stale rows abandoned without moving failed_runs, idempotently."
+    },
+    {
+      "file": "unit/test_3785_operator_queue_package.py",
+      "feature": "#3785",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "guard",
+        "unit"
+      ],
+      "description": "#3785: services/operator_queue_service is a package and the split changes no behaviour. Every property is derived from the tree, so the extraction slices never edit this guard: every module under 800 lines (the pre-split __init__ exempt, with a staleness check); every name src/backend and tests/ read through the package still resolves (a scoped alias scan, pinned not to go blind); no from-import between package modules; the collaborators (db, _queue_db, principal_reach, get_breaker_redis, ask_service, AgentClient, _audit_sync) bound once, in deps: no other package module imports a collaborator's source (derived from deps' own imports) in any scope under any alias, holds a collaborator object at module level, or binds a collaborator name, and the package has none of them, so a stale patch on the package raises; one top-level binding per name and no import-time copy of a package binding; every import-time read defined above the submodule's import, and the _MARKER_UNCHANGED default the owner's object; a monkeypatch of a re-exported name lands where its readers read (both-sided names refused, an unresolvable patch fails closed), and no test reaches a package function's __globals__ (provenance tracked per scope: an attribute chain, a from-import or a simple assignment; parameters shadow); one logger identity; owner-exact qualified reads and no name unresolved in its own scope; no submodule named like a package attribute; one rate_limiter binding; no method defined on two classes of the composed service; deps imported first and holding no package reference; every external import before the first submodule import, and a failed first import, injected at that last external statement and proven to fire there, leaves no stale submodule. The other shape, a fresh install: each consumer imported first in its own interpreter on an empty database raises a bounded alert (created; only main binds a WebSocket manager, and then exactly one thin operator_queue_sync trigger is sent). No Docker, no network."
     },
     {
       "file": "unit/test_ent1059_admission_policy_seam.py",

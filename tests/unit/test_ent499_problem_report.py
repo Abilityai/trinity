@@ -272,7 +272,7 @@ def test_an_agent_authored_item_is_not_platform_minted():
 
 
 def test_the_agent_file_write_back_skips_platform_alarms():
-    src = (REPO / "src/backend/services/operator_queue_service.py").read_text()
+    src = (REPO / "src/backend/services/operator_queue_service/__init__.py").read_text()
     fn = src[src.index("def _write_responses_to_agent"):]
     loop = fn[fn.index("for resp in responded_items:"):]
     assert "is_platform_minted(resp)" in loop[:400], (

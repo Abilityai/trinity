@@ -230,9 +230,9 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 
 **Hook protocol**: exit 0 (silent) = allow; exit 2 + stderr = deny (message shown to model); exit 1 / uncaught = Claude treats as non-blocking, so hooks deliberately convert all errors to exit 2.
 
-### Bash deny — `hooks/bash-guardrail.py` (54 lines)
+### Bash deny — `hooks/bash-guardrail.py` (66 lines)
 
-Loads config → compiles `bash_deny` (baseline regex) → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
+Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned skill-gate marker exists (trinity-enterprise#1002) → compiles them → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
 
 ### File deny — `hooks/file-guardrail.py` (89 lines)
 
@@ -273,6 +273,7 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 Immutable, root-owned `0444`. Contents:
 
 - **`bash_deny`** (12 regex+reason rules): recursive root/home delete, `chmod 777`, pipe-to-shell, git force-push, `kill -9 1`, raw `dd of=/dev/sd…`, `mkfs.*`, fork bomb, read-only-config tamper, host shutdown/reboot/poweroff, `sudo` naming `/etc/claude-code`/`/opt/trinity`/`/etc/sudoers` or `visudo`, root shells (`sudo -i`/`-s`/`--login`/`--shell`, `sudo su`, `sudo <shell>` with no script, bare `su`) (#3105).
+- **`gated_bash_deny`** (1 rule, trinity-enterprise#1002): `claude`, `codex` or `gemini` in command position, after any run of `VAR=value`, shell keywords and launchers (`env`, `nohup`, `timeout`, `sudo`, `xargs`, …), or inside `sh -c "`. A command that starts no session passes: `--version`, `--help`, `mcp`, and `plugin` on `claude` and `codex` (`gemini` has no `plugin` subcommand and reads the word as its prompt), unless a `-p` or `--print` comes before any `--`: that skips subcommand parsing, so `claude mcp -p x` is a session. `claude = x` passes too, as a variable in an inline script. Applies only on an agent with gates; not overridable from `AGENT_GUARDRAILS`. Quote-unaware like the `su` row. No nested quantifiers, no `\s*` after a command position, no inner token that can swallow `;`, `&`, `|`, `(` or `)`, and the `-p` scan after an allowed word stops at 512 characters, because a hook that outlives its 30 s timeout lets the tool run.
 - **`path_deny`** (16 globs): `.env`, `.env.*`, `.mcp.json`, `.credentials.enc`, `~/.ssh/*`, `~/.aws/*`, `~/.gcp/*`, `~/.claude/settings.json`, `~/.claude/settings.local.json`, `.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json`, `~/.tmp/codex/*` (the runtimes' login and MCP config, trinity-enterprise#823), `~/.trinity/read-only-config.json`, `/opt/trinity/*`, `/etc/claude-code/*`. The image-build smoke (`guard002-smoke.py`) includes a `~/.claude.json` row and a `.env.local` deny / `.env.example` allow pair.
 - **`path_allow`** (`[".env.example"]`, #3868): not overridable from `AGENT_GUARDRAILS`; mirrored into the platform prompt as `_GUARDRAIL_PATH_ALLOW`.
 - **`credential_patterns`** (9): Anthropic key/OAuth, OpenAI, GitHub PAT (classic + fine-grained), AWS access key, Slack bot/user token, Google API key.
@@ -308,6 +309,7 @@ See [read-only-mode.md](read-only-mode.md).
 | `tests/unit/test_guardrails.py` | Baseline bash deny-list (dangerous blocked / normal allowed), required credential patterns, router `_validate_guardrails_payload` bounds, `write-runtime-config.py` sanitization + clamping + malformed-env handling, migration idempotency |
 | `tests/test_files_guardrail_bypass.py` | AISEC-C2 RCE-by-config bypass repro, `PUT /files` deny-list coverage for protected paths, credential-inject allowlist rejection |
 | `tests/unit/test_ent787_guardrail_exec_form.py` | Exec-form registration shape of the four GUARD-002 hooks, no shell-prefix wrap, each hook's verdicts under the registered invocation and a hostile env, smoke-script coverage, `CLAUDE_CODE_SHELL_PREFIX` in `PROTECTED_KEYS` (trinity-enterprise#787) |
+| `tests/unit/test_ent1002_nested_cli_guardrail.py` | `gated_bash_deny`: the real hook under its registered flags with the marker on and off, refuse and pass tables run on the pinned CLIs, known-limit tables, adversarial commands to 512 KB, the image smoke's marker case |
 
 ---
 
@@ -343,7 +345,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Routing env pins | `docker/base-image/hooks/write-routing-env.py` → `/etc/claude-code/managed-settings.d/60-routing-env.json` (trinity-enterprise#1001) | `tests/unit/test_ent1001_endpoint_env.py` |
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
-| Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-54 |
+| Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |
 | File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
 | Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-58 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |

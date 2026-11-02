@@ -56,6 +56,7 @@ def _execution(**over):
         id="e1", agent_name="analyst", triggered_by="public",
         source_user_email="person@example.com", source_channel=None,
         source_channel_chat_id=None, source_channel_client=None, schedule_id=None,
+        status="running",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -65,6 +66,7 @@ def _router(monkeypatch, execution=None, *, recorded, previous=""):
     import routers.public_memory as pm
     monkeypatch.setattr(pm, "assert_agent_access", lambda *a, **k: None)
     monkeypatch.setattr(pm.db, "get_execution", lambda _id: execution or _execution())
+    monkeypatch.setattr(pm.db, "get_running_turn_attribution", lambda _agent: [])  # #4121: alone on the agent
     monkeypatch.setattr(pm.db, "get_public_user_memory_agent_notes",
                         lambda agent, email: previous, raising=False)
 

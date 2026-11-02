@@ -1917,6 +1917,10 @@ failed iteration and proceeds, bounded so a fully-broken agent still terminates.
   `source_channel_client` on the row, and memory is keyed `UNIQUE(agent_name,
   user_email)` — a companion serving several seats runs one schedule per seat and
   each run can only reach its own.
+- **One live scope at a time** (#4121). The write is refused `memory_turn_ambiguous`
+  while another live turn on the agent resolves to a different scope, so two seats
+  briefed at the same time cannot save until one ends: stagger the schedules. A run
+  that is not running is refused `memory_turn_not_live`.
 - **The same gate as chat, not a back door** (AC 2). There is one write boundary —
   `POST /api/agents/{name}/user-memory` → `db.write_user_memory_agent_notes` — and
   the seat case is a second *resolver* of "which user", not a second writer. The

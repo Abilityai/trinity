@@ -176,8 +176,10 @@ scheduler ──► POST /api/internal/execute-task {deliver_to_workspace_email}
                  │
    agent ───► mcp write_user_memory(execution_id, memory_text)
                  │  routers/public_memory: seat_for_execution(row)
+                 │     row not running → 422 memory_turn_not_live
                  │     triggered_by == 'schedule' AND source_channel == 'portal'
                  │     → source_channel_client is the seat
+                 │     another live scope on the agent → 422 memory_turn_ambiguous (#4121)
                  │  user_memory_guard.prepare_write(memory_text, previous=…)   ← ent#419 screen
                  │     a hit → 422 {code, message, line}, nothing stored
                  ▼
