@@ -148,16 +148,24 @@ class TestProbeAnonymousRef:
         argv = spawn.await_args.args
         assert argv == ("git", "ls-remote", "https://github.com/o/r.git", "HEAD")
 
-    def test_a_branch_is_asked_for_by_its_full_ref(self):
+    def test_a_ref_is_asked_for_by_its_full_branch_and_tag_refs(self):
+        # trinity#4165: `@ref` may be a tag, so both forms are asked for (the
+        # branch first — it wins over a same-named tag); never a bare name,
+        # so a same-named ref elsewhere (`refs/pull/…`) cannot answer.
         proc = _FakeProc(0, f"{SHA}\trefs/heads/feature/x\n".encode())
         with _spawn(proc) as spawn:
             assert asyncio.run(gs.probe_anonymous_ref("o/r", "feature/x")) == ("ok", SHA)
-        assert spawn.await_args.args[-1] == "refs/heads/feature/x"
+        assert spawn.await_args.args[3:] == ("refs/heads/feature/x", "refs/tags/feature/x")
 
-    def test_a_same_named_tag_never_answers_for_the_branch(self):
-        proc = _FakeProc(0, f"{SHA}\trefs/tags/main\n".encode())
-        with _spawn(proc):
-            assert asyncio.run(gs.probe_anonymous_ref("o/r", "main")) == ("missing_ref", "")
+    def test_a_same_named_tag_answers_only_when_no_branch_does(self):
+        # The clone (`git clone -b main`) checks out the tag when no branch
+        # `main` exists, so the probe pins the same commit (trinity#4165).
+        tag_sha = "e" * 40
+        with _spawn(_FakeProc(0, f"{tag_sha}\trefs/tags/main\n".encode())):
+            assert asyncio.run(gs.probe_anonymous_ref("o/r", "main")) == ("ok", tag_sha)
+        both = f"{tag_sha}\trefs/tags/main\n{SHA}\trefs/heads/main\n".encode()
+        with _spawn(_FakeProc(0, both)):
+            assert asyncio.run(gs.probe_anonymous_ref("o/r", "main")) == ("ok", SHA)
 
     def test_no_matching_line_is_a_missing_ref_on_a_readable_repo(self):
         with _spawn(_FakeProc(0, b"")):
@@ -221,7 +229,7 @@ class TestProbeTokenedRepoAccess:
                 gs.probe_tokened_repo_access("o/r", USER_PAT, "main")) == ("ok", SHA)
         argv = spawn.await_args.args
         assert all(USER_PAT not in a for a in argv), argv
-        assert argv[-1] == "refs/heads/main"
+        assert argv[-2:] == ("refs/heads/main", "refs/tags/main")  # trinity#4165
         env = spawn.await_args.kwargs["env"]
         import base64
         token_b64 = base64.b64encode(f"x-access-token:{USER_PAT}".encode()).decode()

@@ -97,7 +97,10 @@ def generate_working_branch(agent_name: str, instance_id: str) -> str:
 
 
 async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
-    """Return True if ``refs/heads/<branch>`` exists on the remote.
+    """Return True if ``refs/heads/<branch>`` or ``refs/tags/<branch>`` exists
+    on the remote — the ``@ref`` of a template may be a release tag, which
+    ``git clone -b`` takes as readily as a branch (trinity#4165); both forms are
+    asked for as values after the URL, never ``--heads``, which hides the tag.
 
     Uses ``git ls-remote`` so the check does not require the GitHub REST API
     or a specific auth mode — anything that can `git fetch` can also
@@ -112,16 +115,15 @@ async def check_remote_branch_exists(github_repo: str, branch: str) -> bool:
     # unauthenticated; private repos fall through to False and Layer 2
     # catches any duplicate insert.
     remote_url = f"https://github.com/{github_repo}.git"
-    ref = f"refs/heads/{branch}"
+    refs = (f"refs/heads/{branch}", f"refs/tags/{branch}")
 
     try:
         proc = await asyncio.create_subprocess_exec(
             "git",
             "ls-remote",
-            "--heads",
             "--exit-code",
             remote_url,
-            ref,
+            *refs,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
