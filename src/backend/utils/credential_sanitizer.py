@@ -39,7 +39,7 @@ SECRET_VALUE_PATTERNS = [
     # trinity-enterprise#1066: two service-token shapes a person is likely to
     # hand an agent — added to the list the redaction runs, not to a
     # guard-private one, so logs learn them in the same change.
-    r'ops_[A-Za-z0-9_-]{20,}',        # 1Password service-account token
+    r'ops_eyJ[A-Za-z0-9_-]{40,}',     # 1Password service-account token (ops_ + base64url JSON)
     r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
@@ -485,7 +485,7 @@ _GUARD_SHAPES = {
     r'xoxa-[a-zA-Z0-9\-]+': "slack",
     r'AKIA[A-Z0-9]{16}': "aws",
     r'trinity_mcp_[a-zA-Z0-9]{16,}': "trinity_mcp",
-    r'ops_[A-Za-z0-9_-]{20,}': "ops",
+    r'ops_eyJ[A-Za-z0-9_-]{40,}': "ops",
     r'dop_v1_[a-f0-9]{20,}': "dop",
 }
 _GUARD_EXCLUDED = frozenset({

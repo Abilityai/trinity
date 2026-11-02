@@ -48,6 +48,18 @@ PERSON = "person-1066-guard@example.com"
 AGENT = "agent-1066-guard"
 TOKEN = "portal-session-token"
 
+# The service-account token's real form: `ops_` + a base64url JSON document,
+# which always begins `eyJ` (`{"`). Fabricated at run time.
+OPS_TOKEN = "ops_eyJ" + "zaWduSW5BZGRyZXNzIjoibXkuZXhhbXBsZS5jb20i" * 3
+
+# snake_case identifiers that merely start `ops_` — settings, lease keys,
+# function names. Neither a secret to refuse nor a value to redact.
+OPS_IDENTIFIERS = [
+    pytest.param("the helper ops_fleet_restart_lease_key does X", id="lease-key"),
+    pytest.param("rename ops_dashboard_refresh_interval to something", id="setting-name"),
+    pytest.param("call ops_reconcile_agent_container_states_now() first", id="function-name"),
+]
+
 # One value per shape the guard must catch. Fabricated; each matches only by
 # prefix and length, which is all the sanitizer ever looks at.
 SECRETS = [
@@ -57,9 +69,9 @@ SECRETS = [
     pytest.param("xoxb-1234-5678-" + "d" * 24, "slack", id="slack-bot"),
     pytest.param("AKIA" + "E" * 16, "aws", id="aws-access-key"),
     pytest.param("trinity_mcp_" + "f" * 32, "trinity_mcp", id="trinity-mcp-key"),
-    pytest.param("ops_" + "g" * 40, "ops", id="service-account-ops"),
+    pytest.param(OPS_TOKEN, "ops", id="service-account-ops"),
     pytest.param("dop_v1_" + "0123456789abcdef" * 4, "dop", id="service-token-dop"),
-    pytest.param("here you go: OP_SERVICE_ACCOUNT_TOKEN=ops_" + "h" * 40, "ops", id="prefixed-in-prose"),
+    pytest.param("here you go: OP_SERVICE_ACCOUNT_TOKEN=" + OPS_TOKEN, "ops", id="prefixed-in-prose"),
     pytest.param("VAULT_TOKEN=hvs.AAAAAAAAAAAAAAAAAAAAAAAA", "env_pair", id="sensitive-env-pair"),
     pytest.param('export MY_API_KEY="qwertyuiop1234567890"', "env_pair", id="quoted-env-pair"),
 ]
@@ -72,6 +84,7 @@ PROSE = [
     pytest.param("the author=bob field is harmless", id="harmless-key"),
     pytest.param("What is my current API key called?", id="plain-question"),
     pytest.param("ops_team meeting at 3", id="ops-prefix-too-short"),
+    *OPS_IDENTIFIERS,
 ]
 
 
@@ -105,8 +118,22 @@ class TestSecretShape:
         from utils.credential_sanitizer import secret_shape
         assert secret_shape("") is None and secret_shape(None) is None
 
+    @pytest.mark.parametrize("text", OPS_IDENTIFIERS)
+    def test_an_ops_identifier_is_not_a_secret(self, text):
+        from utils.credential_sanitizer import secret_shape
+        assert secret_shape(text) is None
+
+    @pytest.mark.parametrize("text", OPS_IDENTIFIERS)
+    def test_an_ops_identifier_is_not_redacted_from_logs_in_either_copy(self, text):
+        for rel in ("src/backend/utils/credential_sanitizer.py",
+                    "docker/base-image/agent_server/utils/credential_sanitizer.py"):
+            spec = importlib.util.spec_from_file_location("_cs_" + rel.replace("/", "_"), _REPO / rel)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            assert mod.sanitize_text(text) == text, rel
+
     @pytest.mark.parametrize("value", [
-        "ops_" + "x" * 40,
+        OPS_TOKEN,
         "dop_v1_" + "9" * 64,
     ])
     def test_the_two_new_shapes_are_redacted_from_logs_too_in_both_copies(self, value):
