@@ -62,8 +62,12 @@ def test_a_shared_prefix_pair_at_one_instant_is_two_rows(db, pa, agent, first, s
     )
 
 
-def test_one_event_twice_at_one_instant_is_two_rows(db, pa, agent):
-    kind = "gitignore_untracked"
+def test_one_event_twice_at_one_instant_is_two_rows(db, pa, agent, monkeypatch):
+    # #3254: no built-in kind is an event any more, so the property is pinned on a
+    # registered-for-the-test event kind (as test_3246_platform_alerts_leaf does).
+    kind = "test_event"
+    monkeypatch.setitem(pa.KINDS, kind, pa.Kind(
+        kind, "test-event-", None, pa.CLEARS_PERSON, event=True))
     assert pa.KINDS[kind].event, "control: an event kind, always a new row"
 
     first = pa.observe(agent, kind, title="first", question="q")

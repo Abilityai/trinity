@@ -390,6 +390,20 @@ async def dispatch_chat(email: str, agent: str, message: str) -> "object":
         model=db.get_public_channel_model(agent),
     )
 
+    from services.chat_signals import admission_refusal_of
+
+    refusal = admission_refusal_of(result, agent)
+    if refusal is not None:
+        # trinity-enterprise#1059 (review C2): an admission policy stopped the
+        # turn — nothing ran, so no success-shaped empty reply. The policy's
+        # sentence is the body and its code rides the header the MCP server
+        # already reads for the /chat door (`Retry-After` when it is known).
+        from services.chat_execution_service import _error_code_headers
+        retry_after = refusal.retry_after_seconds()
+        extra = {"Retry-After": str(retry_after)} if retry_after is not None else None
+        raise HTTPException(status_code=429, detail=refusal.message,
+                            headers=_error_code_headers(refusal.code, extra))
+
     if result.status in ("failed", "cancelled"):
         error = result.error or ""
         if "at capacity" in error:
