@@ -61,7 +61,7 @@ def test_concurrent_volume_claim_is_not_written_or_deleted(monkeypatch, tmp_path
     client.volumes.get.side_effect = docker.errors.NotFound('absent')
     foreign = Mock(attrs={'Labels': {'trinity.config-creation': 'other-attempt'}})
     client.volumes.create.return_value = foreign
-    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {'trinity.instance': 'test-instance'})
     with pytest.raises(config_volume.ConfigVolumeConflict):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     client.containers.create.assert_not_called()
@@ -80,7 +80,7 @@ def test_failed_archive_removes_only_owned_unattached_volume(monkeypatch, tmp_pa
     client.volumes.get.side_effect = [docker.errors.NotFound('absent'), volume]
     helper = client.containers.create.return_value
     helper.put_archive.return_value = False
-    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {'trinity.instance': 'test-instance'})
     with pytest.raises(config_volume.ConfigVolumeError):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     helper.remove.assert_called_once_with(force=True)
@@ -196,7 +196,7 @@ def test_helper_remove_failure_still_attempts_owned_volume_cleanup(monkeypatch, 
     helper = client.containers.create.return_value
     helper.put_archive.return_value = True
     helper.remove.side_effect = docker.errors.APIError('synthetic remove failure')
-    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {'trinity.instance': 'test-instance'})
     with pytest.raises(docker.errors.APIError):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     volume.remove.assert_called_once_with(force=False)
@@ -293,13 +293,17 @@ def test_3722_archive_helper_is_never_started_and_is_removed_after_upload(monkey
         return volume
     client.volumes.create.side_effect = create
     client.volumes.get.side_effect = docker.errors.NotFound('absent')
-    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    monkeypatch.setattr('services.docker_utils._resolve_instance_id', lambda: 'test-instance')
     def cached_image(selected):
         if selected != image:
             raise docker.errors.ImageNotFound("only the selected image is cached")
         return Mock()
     client.images.get.side_effect = cached_image
     config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, image)
+    labels = client.volumes.create.call_args.kwargs["labels"]
+    assert labels["trinity.instance"] == "test-instance"
+    assert labels["trinity.agent-name"] == "ag1"
+    assert labels["trinity.platform"] == "agent-config"
     client.containers.create.assert_called_once()
     assert client.containers.create.call_args.args[0] == image
     client.images.pull.assert_not_called()
@@ -323,9 +327,63 @@ def test_missing_local_helper_image_does_not_pull_and_cleans_owned_volume(monkey
     client.volumes.create.side_effect = create
     client.volumes.get.side_effect = [docker.errors.NotFound('absent'), volume]
     client.images.get.side_effect = docker.errors.ImageNotFound('local base image absent')
-    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {})
+    monkeypatch.setattr('services.docker_utils.agent_volume_labels', lambda *args: {'trinity.instance': 'test-instance'})
     with pytest.raises(docker.errors.ImageNotFound):
         config_volume.create_config_volume(client, 'ag1', *_inputs(tmp_path), None, 'trinity-agent-base:latest')
     client.images.pull.assert_not_called()
     client.containers.create.assert_not_called()
     volume.remove.assert_called_once_with(force=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name,owner,platform,instance,current", [
+    ("agent-original-config", "original", "agent-config", None, "ours"),
+    ("agent-original-config", "original", "agent-workspace", "ours", "ours"),
+    ("agent-original-config", "original", "agent-config", "other", "ours"),
+    ("agent-original-config", "original", "agent-config", None, None),
+    ("agent-original-config", "original", "agent-config", "ours", None),
+    ("agent-other-config", "original", "agent-config", "ours", "ours"),
+    ("agent-original-config", "other", "agent-config", "ours", "ours"),
+])
+async def test_3722_recovery_requires_exact_config_provenance(monkeypatch, name, owner, platform, instance, current):
+    from unittest.mock import AsyncMock, Mock
+    from fastapi import HTTPException
+    from services.agent_service import lifecycle
+    import services.docker_utils as docker_utils
+
+    monkeypatch.setattr(lifecycle.db, "get_agent_config_storage_format", lambda name: "volume-v1")
+    monkeypatch.setattr(lifecycle.db, "get_volume_base_name", lambda name: "original")
+    labels = {"trinity.agent-name": owner, "trinity.platform": platform}
+    if instance is not None:
+        labels["trinity.instance"] = instance
+    volume = Mock(attrs={"Labels": labels})
+    volume.name = name
+    monkeypatch.setattr(lifecycle, "volume_get", AsyncMock(return_value=volume))
+    monkeypatch.setattr(docker_utils, "_resolve_instance_id", lambda: current)
+    monkeypatch.setattr(lifecycle, "validate_base_image", Mock())
+    read_template = AsyncMock(side_effect=AssertionError("untrusted config reached template read"))
+    revoke = Mock()
+    mint = Mock()
+    monkeypatch.setattr(lifecycle, "_read_template_yaml_from_volume", read_template)
+    monkeypatch.setattr(lifecycle.db, "deactivate_agent_mcp_keys", revoke)
+    monkeypatch.setattr(lifecycle.db, "create_agent_mcp_api_key", mint)
+    with pytest.raises(HTTPException) as error:
+        await lifecycle.recreate_missing_container("renamed")
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "AGENT_CONFIG_OWNER_MISMATCH"
+    read_template.assert_not_awaited()
+    revoke.assert_not_called()
+    mint.assert_not_called()
+
+
+def test_3722_creation_refuses_unresolved_instance_before_provisioning(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+    import docker
+    client = Mock()
+    client.volumes.get.side_effect = docker.errors.NotFound("absent")
+    client.volumes.create.side_effect = lambda **kw: Mock(attrs={"Labels": kw["labels"]})
+    monkeypatch.setattr("services.docker_utils._resolve_instance_id", lambda: None)
+    with pytest.raises(config_volume.ConfigVolumeError, match="installation identity"):
+        config_volume.create_config_volume(client, "ag1", *_inputs(tmp_path), None, "trinity-agent-base:latest")
+    client.volumes.create.assert_not_called()
+    client.containers.create.assert_not_called()

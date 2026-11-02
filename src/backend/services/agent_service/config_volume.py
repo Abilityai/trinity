@@ -98,10 +98,27 @@ def remove_created_config_volume(client, handle: ConfigVolumeHandle):
     volume.remove(force=False)
 
 
+def config_volume_matches_owner(volume, volume_base: str, instance_id: str | None) -> bool:
+    """Require new-format provenance before reading configuration, not deletion compatibility."""
+    if not volume_base or not instance_id:
+        return False
+    if getattr(volume, "name", None) != f"agent-{volume_base}-config":
+        return False
+    labels = (volume.attrs or {}).get("Labels") or {}
+    return (
+        labels.get("trinity.platform") == "agent-config"
+        and labels.get("trinity.agent-name") == volume_base
+        and labels.get("trinity.instance") == instance_id
+    )
+
+
 def create_config_volume(client, agent_name, config, credentials, seeds, image):
     """Populate one new agent-config volume using the native archive interface."""
     from services.docker_utils import agent_volume_labels
 
+    labels = agent_volume_labels(agent_name, "agent-config")
+    if not labels.get("trinity.instance"):
+        raise ConfigVolumeError("Configuration requires a resolved installation identity")
     name = f"agent-{agent_name}-config"
     try:
         client.volumes.get(name)
@@ -110,7 +127,6 @@ def create_config_volume(client, agent_name, config, credentials, seeds, image):
     else:
         raise ConfigVolumeConflict("Existing configuration volume requires recovery")
     claim = uuid.uuid4().hex
-    labels = agent_volume_labels(agent_name, "agent-config")
     labels[_CLAIM_LABEL] = claim
     handle = ConfigVolumeHandle(name, claim)
     with config_archive(config, credentials, seeds) as archive:

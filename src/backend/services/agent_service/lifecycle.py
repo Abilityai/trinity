@@ -1702,7 +1702,8 @@ async def recreate_missing_container(agent_name: str):
             "message": "Agent configuration format is unsupported by this backend.",
         })
     if storage_format == "volume-v1":
-        from services.docker_utils import is_reclaimable_agent_volume, _resolve_instance_id
+        from services.docker_utils import _resolve_instance_id
+        from .config_volume import config_volume_matches_owner
         volume_base = db.get_volume_base_name(agent_name) or agent_name
         config_name = f"agent-{volume_base}-config"
         try:
@@ -1712,7 +1713,7 @@ async def recreate_missing_container(agent_name: str):
                 "code": "AGENT_CONFIG_UNAVAILABLE",
                 "message": "Original agent configuration is unavailable; restore it before recovery.",
             }) from None
-        if not is_reclaimable_agent_volume(config_volume, volume_base, _resolve_instance_id()):
+        if not config_volume_matches_owner(config_volume, volume_base, _resolve_instance_id()):
             raise HTTPException(status_code=409, detail={
                 "code": "AGENT_CONFIG_OWNER_MISMATCH",
                 "message": "Agent configuration ownership could not be verified.",
