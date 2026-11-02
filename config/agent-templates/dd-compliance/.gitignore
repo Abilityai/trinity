@@ -36,6 +36,7 @@ __pycache__/
 .claude/policy-limits.json
 .claude/backups/
 .claude/.last-cleanup
+/uploads/
 *.log
 *.tmp
 .DS_Store
@@ -70,6 +71,9 @@ outputs/
 .env
 .env.*
 .mcp.json
+.gemini/settings.json
+.gemini/oauth_creds.json
+.gemini/installation_id
 credentials.json
 *.pem
 *.key

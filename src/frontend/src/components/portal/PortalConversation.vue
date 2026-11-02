@@ -916,6 +916,7 @@ import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
 import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
+import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -1055,7 +1056,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'thread-caught-up', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1503,6 +1504,23 @@ const typeaheadTrigger = ref(null)
 const activeIndex = ref(-1)
 const dismissed = ref(null)
 
+// A persisted history row as the transcript shows it — the ONE mapper for a
+// row read back from the server, used by the load and by the catch-up read
+// (#3439), so the two cannot disagree about a row's shape. A user row keeps its
+// own role; only the assistant shape is shared with the two live-turn sites.
+function historyRow(m) {
+  return {
+    ...(m.role === 'assistant'
+      ? assistantRow(m)
+      // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
+      : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
+          source: m.source || null, voiceCallId: m.voice_call_id || null,
+          // #3265: what the turn carried, stored on its row.
+          attachments: m.attachments || null }),
+    at: m.created_at || null,
+  }
+}
+
 // ---- Load history when the thread/agent changes -------------------------------
 async function loadThread(sessionId) {
   loadingHistory.value = true
@@ -1531,16 +1549,7 @@ async function loadThread(sessionId) {
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
     // #3166: each reply under its own question, when two turns overlapped.
-    messages.value = pairRepliesWithQuestions(msgs).map((m) => ({
-      ...(m.role === 'assistant'
-        ? assistantRow(m)
-        // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
-        : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-            source: m.source || null, voiceCallId: m.voice_call_id || null,
-            // #3265: what the turn carried, stored on its row.
-            attachments: m.attachments || null }),
-      at: m.created_at || null,
-    }))
+    messages.value = pairRepliesWithQuestions(msgs).map(historyRow)
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -3287,10 +3296,95 @@ watch(
 )
 onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))
 
+// ---- The open thread catches up (#3439) --------------------------------------
+//
+// Anything written into THIS thread after the person's turn ended — a
+// completion report, an approval outcome (#3709), a recovered lost turn
+// (#2319), a background task's later reply — reached the sidebar badge on the
+// shell's 20 s tick and never the transcript: `loadThread` runs on mount and on
+// a switch only. The shell hands this component its thread list on every tick
+// (`props.threads`, re-stamped with unread and stars), so the row for the open
+// thread is the signal. No new timer, no new transport (the Workspace has no
+// WebSocket by design — see `startAsksPoll` in the shell).
+//
+// `reconcileTail` is the ONE fetch-dedupe-append for a row that arrived on its
+// own: the ent#747 ask-result poll below rides it too, as a faster cadence over
+// the same function, rather than keeping its own copy.
+//
+// Returns the rows it appended (possibly none). A read failure is swallowed —
+// the row is still there on the next move, and a 404 here is never
+// `thread-missing` (a gone thread leaves the list and the signal stops).
+async function reconcileTail(sid, { limit = REPLY_POLL_ROWS } = {}) {
+  let data
+  try {
+    data = await store.fetchHistory(props.agent.name, sid, { limit })
+  } catch { return [] }
+  if (currentSessionId.value !== sid) return []
+  // The server's copy of the person's own question carries the id the local
+  // row lacks — adopt it, or the first read after their own turn shows the
+  // question twice.
+  adoptLocalIds(messages.value, data.messages)
+  let rows = data.messages
+  if (tailOverflowed(messages.value, rows, limit)) {
+    // Every row of a full-length read was unseen: the gap may be deeper than
+    // the read. Re-read the window and merge — never `loadThread`, which empties
+    // and pins the viewport; this is an arrival, not an intent (#2624).
+    try { rows = (await store.fetchHistory(props.agent.name, sid)).messages } catch { return [] }
+    if (currentSessionId.value !== sid) return []
+    adoptLocalIds(messages.value, rows)
+  }
+  const fresh = freshRows(messages.value, rows)
+  if (!fresh.length) return []
+  messages.value = [...messages.value, ...fresh.map(historyRow)]
+  onMessagesArrived(fresh.length)
+  return fresh
+}
+
+// What the open thread's row last looked like when this component read its
+// tail — compared as a STRING (`tailSignature`), because `decorate()` hands
+// down new objects every tick. Set only when a reconcile actually ran, so a move
+// that landed mid-turn (skipped below) fires the moment the turn ends.
+let reconciledSignature = null
+const countOf = (sig) => Number(String(sig || '').split('|')[0]) || 0
+watch(
+  () => [tailSignature(currentThread.value), currentSessionId.value, sending.value, voiceCallActive.value, loadingHistory.value],
+  async ([sig, sid, inTurn, inCall, loading], old) => {
+    if (sig === null || !sid) { reconciledSignature = null; return }
+    // First sight of this thread's row (the mount, a switch, an adoption landing
+    // in the list): the load itself is the baseline. The row cannot be ahead of
+    // a load that just ran, and a tick arriving later compares against it.
+    if (reconciledSignature === null || old?.[0] === null || old?.[1] !== sid) { reconciledSignature = sig; return }
+    if (sig === reconciledSignature) return
+    // A turn's own path delivers its reply; a call's spoken rows are folded once
+    // at its end (`loadThread` below `voice.stop`). Leave the signature alone so
+    // this re-runs when the flag clears.
+    if (inTurn || inCall || loading) return
+    const before = reconciledSignature
+    reconciledSignature = sig
+    const fresh = await reconcileTail(sid, { limit: tailLimit(currentThread.value?.unread, REPLY_POLL_ROWS, TAIL_LIMIT_CAP) })
+    if (currentSessionId.value !== sid) return
+    if (fresh.length) {
+      // The shell marks the thread read — only if the person is still looking
+      // at it. A distinct event, not `sessions-changed`: that one also clears and
+      // re-arms the #2579 title-settle cycle and re-reads the list, none of which
+      // an agent-initiated row should drive.
+      emit('thread-caught-up', sid)
+    } else if (countOf(sig) === countOf(before)) {
+      // The time moved and the count did not: a deliverable touched the row
+      // (`report_service`, `added=0`) — the one writer with that shape. The card
+      // list re-reads on this cue the way it does after the person's own turn
+      // (ent#365). A moved count with nothing fresh is the person's own turn,
+      // already on screen, and `deliver()` bumped this itself.
+      deliverableTick.value += 1
+    }
+  },
+  { immediate: true },
+)
+
 // trinity-enterprise#747: an answer here woke the agent, and its result is
-// delivered into this chat as a completion report (ent#457). The chat has no
-// history poll, so it looks for that report itself — every few seconds, for a
-// bounded time, only while this chat is the one on screen — and appends it.
+// delivered into this chat as a completion report (ent#457). The 20 s tick above
+// would bring it; this looks every few seconds instead, for a bounded time, only
+// while this chat is the one on screen — and stops once a report has landed.
 const ASK_RESULT_POLL_MS = 5000
 const ASK_RESULT_WAIT_MS = 5 * 60 * 1000
 let askResultTimer = null
@@ -3305,18 +3399,12 @@ async function checkAskResult(watch) {
     if (store.askResultWatch === watch) store.askResultWatch = null
     return
   }
-  let data
-  try {
-    data = await store.fetchHistory(props.agent.name, sid, { limit: REPLY_POLL_ROWS })
-  } catch (_) { return }   // the next tick tries again; the report is a row, not an event
-  if (currentSessionId.value !== sid) return
-  const have = new Set(messages.value.map((m) => m.id).filter(Boolean))
-  const fresh = (data.messages || []).filter((m) => (
-    m.id && !have.has(m.id) && m.role === 'assistant' && String(m.source || '').startsWith('completion:')
-  ))
-  if (!fresh.length) return
-  messages.value = [...messages.value, ...fresh.map((m) => ({ ...assistantRow(m), at: m.created_at || null }))]
-  onMessagesArrived(fresh.length)
+  const fresh = await reconcileTail(sid)
+  // #3439: what landed here was watched landing — read, the same as the
+  // signature path says it. Before this the report appeared and the chat the
+  // person was sitting in kept its badge until the next turn.
+  if (fresh.length) emit('thread-caught-up', sid)
+  if (!fresh.some((m) => m.role === 'assistant' && String(m.source || '').startsWith('completion:'))) return
   stopAskResultPoll()
   if (store.askResultWatch === watch) store.askResultWatch = null
 }

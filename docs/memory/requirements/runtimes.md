@@ -402,15 +402,30 @@ Composition paths and whether the model is known:
 ---
 
 
-## Codex uploaded images
+## Codex uploaded images (#3870)
 
 Headless Codex tasks must forward validated JPEG, PNG, GIF and WebP attachments
 through native CLI image arguments on both new and resumed executions. Reject
 invalid base64, unsupported MIME types, more than ten images, individual images
 over 5 MiB or combined images over 10 MiB. Temporary copies must be private,
-unique per execution and removed after the subprocess reader completes, including
-when its HTTP waiter has already failed or been canceled. Before subprocess
-handoff, errors remove partial files immediately. Cancellation of an HTTP waiter
-must not delete files still needed by the child or introduce a new process-kill
-policy for text-only turns. Native image support does not require persistent
-workspace originals or additional tool permissions.
+unique per execution and removed only after the subprocess exit is observed,
+including cancelled waiters and failed reader handoffs with unconfirmed kills.
+Before spawn, errors remove partial files immediately. Reuse existing registry
+ownership and process policy; do not weaken endpoint pins or tool restrictions.
+
+The shared upload interface must also retain validated image originals in an
+isolated per-dispatch workspace directory, alongside existing non-image files.
+Keep existing channel limits, MIME checks, permission boundaries and uploader
+attribution. Original storage failure must be visible in prompt context and
+audit metadata while preserving native vision for every runtime.
+
+Retention follows existing channel policy: web tasks, session turns and public
+chat retain originals as workspace-owned data until explicit removal. Messaging
+removes its dispatch directory after successful completion or confirmed
+pre-dispatch refusal. An uncertain failure, timeout or cancelled waiter keeps
+originals for manual removal after an operator confirms the execution stopped;
+there is no background reaper for this exceptional case. Storage usage therefore
+persists until removal. Concurrent dispatches must not overwrite or remove one
+another's originals. New originals are excluded from Git by default, including
+existing workspaces before their next Push; deliberate user overrides keep the
+existing gitignore precedence policy.

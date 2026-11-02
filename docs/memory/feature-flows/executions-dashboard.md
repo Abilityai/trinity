@@ -142,6 +142,10 @@ Store handler refreshes on `schedule_start` / `schedule_end` activity types only
 while the panel is mounted (the socket feeds this store on every operator page, #3451), and
 guarded by `!loading.value` to prevent concurrent fetches on burst events.
 
+## Whose Executions a Viewer Sees (trinity-enterprise#875)
+
+`GET /api/executions` (and the per-agent list, detail, log, schedule history, live stream, running list, queue, fan-out status and `GET /api/activities/timeline`) narrow to the **caller's own executions** (`source_user_id`) on an agent they only hold a share on; on an agent they own, as an admin, or with an agent/system/ops/connector key, every row. The narrowing is in the WHERE, before the LIMIT/OFFSET and before the `search` LIKE, so another person's busy day cannot push the caller's own turns off the list and a search cannot reach their text. Rows with no user id (scheduled, Slack, Telegram, VoIP, public-link and legacy turns) are not a share holder's own and are hidden. A row that is not theirs answers the same 404 as an unknown id. Aggregates (`/stats`, `/timeline`) carry counts and cost, no text, and are unchanged. The container's shared state (`/chat/history`, `/activity`, `/logs`) cannot be split by user, so a share holder gets 403 `owner_tier_path` there (their own conversations are under `chat/history/persistent`). Helpers: `dependencies.agent_viewer_tier`, `viewer_row_scope`, `row_is_viewers`; fleet reads use `services/agent_service/helpers.viewer_own_rows`. See [security.md §5d](../architecture/security.md).
+
 ## Models
 
 **`FleetExecutionSummary`** (`models.py`): id, schedule_id, agent_name, status,

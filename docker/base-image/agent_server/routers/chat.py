@@ -476,6 +476,18 @@ async def terminate_execution(execution_id: str):
         raise HTTPException(status_code=404, detail="Execution not found")
     elif result["reason"] == "already_finished":
         return {"status": "already_finished", "execution_id": execution_id, "returncode": result.get("returncode")}
+    elif result["reason"] == "termination_unconfirmed":
+        # #3408: the child outlived SIGINT and SIGKILL and is still registered.
+        # Name the reason but keep a 500: the backend reads a 2xx as stopped,
+        # which frees the execution's capacity, and a 404 as already gone, which
+        # makes an A2A cancel report success. Both would be false here.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"termination_unconfirmed: execution {execution_id} did not exit after "
+                "SIGINT and SIGKILL; it remains registered and termination can be retried"
+            ),
+        )
     else:
         raise HTTPException(status_code=500, detail=result.get("error", "Termination failed"))
 

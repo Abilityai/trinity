@@ -65,7 +65,7 @@ from ..utils.credential_sanitizer import (
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
 from .activity_tracking import complete_tool_execution, start_tool_execution
-from .execution_env import build_execution_env
+from .execution_env import build_execution_env, strip_protected_env_lines
 from .process_registry import get_process_registry
 from .runtime_adapter import AgentRuntime, RuntimeCapabilities
 from .subprocess_lifecycle import (
@@ -340,6 +340,14 @@ def calculate_codex_cost(
 # ---------------------------------------------------------------------------
 
 _API_KEY_VARS = ("OPENAI_API_KEY", "CODEX_API_KEY")
+# trinity-enterprise#1001: the endpoint keys of `config.toml`, held at the CLI's
+# own defaults for every turn (read from Codex 0.147.0: `openai_base_url = ""` is
+# ignored, so the built-in URL applies; `chatgpt_base_url` defaults to this).
+_ENDPOINT_PINS = (
+    "-c", 'model_provider="openai"',
+    "-c", 'openai_base_url=""',
+    "-c", 'chatgpt_base_url="https://chatgpt.com/backend-api/"',
+)
 _AGENT_HOME = "/home/developer"
 # ent#787: root-owned, written by the backend as root; it decides while it
 # exists. The agent-owned home copy decides only while it is missing (same
@@ -749,8 +757,8 @@ def _image_files(images: Optional[List[Dict]]) -> Iterator[List[str]]:
     if not isinstance(images, list) or len(images) > _MAX_IMAGES:
         raise HTTPException(status_code=400, detail="At most 10 images are supported")
     # TemporaryDirectory uses mode 0700 and a random name, independent of the
-    # caller's execution/session id. The subprocess reader owns cleanup after
-    # handoff; canceling its HTTP waiter must not remove files still in use.
+    # caller's execution/session id. After spawn the registry owns cleanup;
+    # canceling an HTTP waiter must not remove files still in use.
     with tempfile.TemporaryDirectory(prefix="trinity-codex-images-") as directory:
         paths = []
         total = 0
@@ -1180,6 +1188,12 @@ class CodexRuntime(AgentRuntime):
         image_paths: Optional[List[str]] = None,
     ) -> List[str]:
         cmd = ["codex", "exec"]
+        # trinity-enterprise#1001: `$CODEX_HOME/config.toml` is agent-writable
+        # (under `$TMPDIR`), and a provider or base URL there decides where the
+        # API key or ChatGPT token goes. `-c` beats every config layer the agent
+        # can write, and the built-in `openai` provider cannot be redefined, so
+        # these three pins put the endpoint back in the platform's hands.
+        cmd += _ENDPOINT_PINS
         # Exec-level flags belong to `codex exec`, NOT to the `resume`
         # sub-subcommand. In codex 0.139.0, `exec resume [OPTIONS] [SESSION_ID]
         # [PROMPT]` has a NARROWER option set and rejects -C/--sandbox/--json/-o
@@ -1237,6 +1251,21 @@ class CodexRuntime(AgentRuntime):
 
         api_key = _load_openai_api_key()
         codex_home = _ensure_codex_home()
+        # trinity-enterprise#1001: the CLI loads `$CODEX_HOME/.env` over the
+        # process env, so the names `.env` may not set are taken out of it
+        # before anything below spawns `codex`. A line that cannot be removed
+        # refuses the turn: the CLI would apply it.
+        try:
+            strip_protected_env_lines(Path(codex_home) / ".env")
+        except OSError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"{codex_home}/.env sets a variable an agent's files may not set (a proxy, "
+                    f"TLS-trust, endpoint or loader variable) and could not be rewritten: {exc}. "
+                    "Remove that line or restore the file's permissions."
+                ),
+            ) from exc
 
         # #1971: an API key is required only when there is no SUBSCRIPTION
         # credential. A ChatGPT-plan Codex agent has no API key by design, and
@@ -1331,8 +1360,13 @@ class CodexRuntime(AgentRuntime):
             env=env,
         )
         process_pgid = _capture_pgid(process)
+        # After spawn, the registry owns image inputs until it observes exit.
+        # This includes a refused reader handoff or an unconfirmed kill; a
+        # cancelled HTTP waiter must never unwind the still-live child's files.
+        owned_images = image_scope.pop_all() if image_scope is not None else None
         registry.register(
-            execution_id, process, metadata={"type": "codex", "pgid": process_pgid}
+            execution_id, process, metadata={"type": "codex", "pgid": process_pgid},
+            **({"on_exit": owned_images.close} if owned_images is not None else {}),
         )
         # Same guard as the Claude and Gemini runtimes (#2433): the
         # `finally: registry.unregister()` below starts after this write, so a
@@ -1341,18 +1375,52 @@ class CodexRuntime(AgentRuntime):
             process.stdin.write(composed_prompt)
             process.stdin.close()
         except BaseException:
-            try:
-                if image_scope is not None:
-                    # No reader owns the child yet. Stop it before the caller
-                    # unwinds the image scope after a failed stdin write/flush.
+            # #3408: since #3307 `unregister()` keeps a live child, so a write
+            # that fails while the child lives must end it first (no reader
+            # yet, stdin still open). Off the event loop: the kill waits up to
+            # ~2s, and `loop` is assigned only below.
+            # Best-effort and logged, never raised: the caller must see the
+            # handoff error, and the pipes close even if the kill fails.
+            def _abort_handoff() -> None:
+                try:
                     _terminate_process_group(
                         process, graceful_timeout=0, pgid=process_pgid,
                         execution_tag=execution_id,
                     )
-                    _safe_close_pipes(process)
-                    _safe_unlink(result_file, codex_home)
-            finally:
+                except Exception:
+                    logger.exception(
+                        "[Codex] killing %s after its failed handoff raised", execution_id,
+                    )
+                finally:
+                    for pipe in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            pipe.close()
+                        except Exception:  # noqa: BLE001 — a close after a failed write flushes again
+                            logger.debug(
+                                "[Codex] pipe close after failed handoff of %s raised",
+                                execution_id, exc_info=True,
+                            )
+
+            try:
+                teardown = asyncio.get_running_loop().run_in_executor(None, _abort_handoff)
+            except Exception:
+                # The executor refused (shut down, or no thread to start): log it,
+                # keep the live child owned, and still re-raise the handoff error.
+                logger.exception("[Codex] could not start the teardown of %s after its failed handoff", execution_id)
+                teardown = None
+            if teardown is None:
                 registry.unregister(execution_id)
+            else:
+                try:
+                    await asyncio.shield(teardown)
+                finally:
+                    # Release only once the child is dead: now, or, if this await
+                    # was cancelled mid-teardown, when the teardown ends.
+                    if teardown.done():
+                        registry.unregister(execution_id)
+                    else:
+                        teardown.add_done_callback(lambda _: registry.unregister(execution_id))
+            _safe_unlink(result_file, codex_home)
             raise
 
         import threading
@@ -1431,55 +1499,67 @@ class CodexRuntime(AgentRuntime):
         reader_executor = None if concurrent_reader else _executor
 
         loop = asyncio.get_event_loop()
-        # Transfer the image scope before submission: even a queued reader must
-        # retain its inputs if the HTTP waiter is canceled. Cleanup runs in the
-        # reader itself, without competing for another executor slot.
-        worker_images = image_scope.pop_all() if image_scope is not None else None
+        # #3408, the Codex half of #3307: the child is spawned and has its
+        # prompt, so even a reader still queued in its pool must run to reap
+        # it (hence the shield). A waiter that stops waiting (cancelled, or
+        # past its outer timeout with the stop unconfirmed) hands release to
+        # that worker, which runs it once the child's exit is observed: the -o
+        # file first (Codex writes it at turn end, after the waiter's own
+        # unlink below), then the registry entry, on the loop.
+        waiter_abandoned = threading.Event()
 
-        def read_with_images():
+        def read_owned_subprocess_output():
             try:
                 return read_subprocess_output()
             except BaseException:
-                # Thread startup can fail before process.wait's timeout fence.
-                # Stop the child before releasing its image inputs. Do not close
-                # pipes here: a partially started reader may hold their locks.
-                _terminate_process_group(
-                    process, graceful_timeout=0, pgid=process_pgid,
-                    execution_tag=execution_id,
-                )
-                raise
-            finally:
-                worker_images.close()
-
-        try:
-            worker = loop.run_in_executor(
-                reader_executor, read_with_images if worker_images is not None else read_subprocess_output,
-            )
-        except BaseException:
-            if worker_images is not None:
-                # The executor rejected the handoff: no reader can reap this
-                # child. Use the bounded synchronous helper, not that executor.
-                try:
+                # Thread startup can fail before the reader's timeout fence.
+                # Retain registry-owned inputs if termination is unconfirmed.
+                if owned_images is not None:
                     _terminate_process_group(
                         process, graceful_timeout=0, pgid=process_pgid,
                         execution_tag=execution_id,
                     )
-                    _safe_close_pipes(process)  # No reader was started.
-                finally:
-                    worker_images.close()
-            _safe_unlink(result_file, codex_home)
-            registry.unregister(execution_id)
+                raise
+            finally:
+                if waiter_abandoned.is_set():
+                    try:
+                        _safe_unlink(result_file, codex_home)
+                    finally:
+                        loop.call_soon_threadsafe(
+                            lambda: registry.unregister(execution_id)
+                        )
+
+        try:
+            worker = loop.run_in_executor(reader_executor, read_owned_subprocess_output)
+        except BaseException:
+            # No worker owns a rejected submission. Use the bounded helper
+            # directly because the executor itself is unavailable.
+            try:
+                if owned_images is not None:
+                    _terminate_process_group(
+                        process, graceful_timeout=0, pgid=process_pgid,
+                        execution_tag=execution_id,
+                    )
+                    _safe_close_pipes(process)
+            finally:
+                _safe_unlink(result_file, codex_home)
+                registry.unregister(execution_id)
             raise
-        if worker_images is not None:
-            # An abandoned waiter still leaves a reader that must reap its child.
-            worker.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        # Consume the worker's eventual exception once no waiter awaits it.
+        worker.add_done_callback(
+            lambda done: None if done.cancelled() else done.exception()
+        )
         try:
             try:
                 stderr_output, return_code = await asyncio.wait_for(
-                    asyncio.shield(worker) if worker_images is not None else worker,
+                    asyncio.shield(worker),
                     timeout=timeout_seconds + 60,
                 )
+            except asyncio.CancelledError:
+                waiter_abandoned.set()
+                raise
             except asyncio.TimeoutError:
+                waiter_abandoned.set()
                 logger.error(
                     "[Codex] outer timeout on %s — killing group as last resort",
                     execution_id,
@@ -1533,14 +1613,8 @@ class CodexRuntime(AgentRuntime):
             return response_text, execution_log, metadata, raw_messages, session_id
         finally:
             # Read-then-delete in finally — happy + error path (#1187 decision 5).
-            def cleanup_execution():
-                _safe_unlink(result_file, codex_home)
-                registry.unregister(execution_id)
-
-            if worker_images is not None and not worker.done():
-                worker.add_done_callback(lambda done: cleanup_execution())
-            else:
-                cleanup_execution()
+            _safe_unlink(result_file, codex_home)
+            registry.unregister(execution_id)
 
     # -- public interface ------------------------------------------------------
     async def execute(

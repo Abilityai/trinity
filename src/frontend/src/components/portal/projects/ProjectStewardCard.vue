@@ -9,6 +9,11 @@
   a time the viewer may not read, `unknown` → the read failed), and health.
   A backend that predates those fields omits the lines rather than guessing.
 
+  A steward agent's proposal (trinity-enterprise#980) — members, agents, the
+  steward, visibility, task owners — waits on the project's creator, who
+  answers it once in the Inbox. The card says who it waits on, so nobody
+  reads the unchanged member list as the proposal having been lost.
+
   A person steward sees what waits on them (tasks to verify, stuck tasks —
   from the roll-up the page already has) and, when it is me, the way to the
   "I steward" tab.
@@ -20,6 +25,28 @@
       <PortalAvatar v-if="steward?.kind === 'agent'" :name="steward.ref" :size="24" />
       <p class="min-w-0 flex-1 truncate text-sm font-medium text-gray-900 dark:text-gray-100">{{ who }}</p>
       <BaseBadge v-if="health" :variant="HEALTH_BADGE[health.state] || 'neutral'" dot>{{ healthLabel(health.state) }}</BaseBadge>
+    </div>
+    <!-- trinity-enterprise#980: a decision waiting on someone — tinted so it
+         reads as "act on this", not as one more fact in the list below. -->
+    <div
+      v-if="proposal"
+      class="mt-3 rounded-lg border border-status-warning-200 dark:border-status-warning-900/50 bg-status-warning-50 dark:bg-status-warning-900/20 px-3 py-2.5"
+      data-testid="project-steward-proposal"
+    >
+      <p class="text-sm font-semibold text-status-warning-700 dark:text-status-warning-400" data-testid="project-steward-proposal-heading">
+        {{ waitsOnMe ? 'Waiting on you' : `Waiting on ${waitingOn}` }}
+      </p>
+      <p class="mt-1 text-sm text-gray-700 dark:text-gray-300">
+        {{ proposal.proposed_by }} proposed changes to this project {{ '' }}<span v-if="proposal.proposed_at" :title="absolute(proposal.proposed_at)">{{ relative(proposal.proposed_at) }}</span>.
+        {{ waitsOnMe ? 'Nothing changes until you approve it.' : 'Nothing changes until they approve it.' }}
+      </p>
+      <router-link
+        v-if="waitsOnMe && inboxRoute"
+        :to="inboxRoute"
+        :class="INBOX_LINK_CLASS"
+        class="mt-2 text-sm font-medium"
+        data-testid="project-steward-proposal-review"
+      >Review in Inbox</router-link>
     </div>
     <p v-if="!steward" class="mt-2 text-sm text-gray-600 dark:text-gray-300">The creator stewards it until someone is named.</p>
 
@@ -61,6 +88,8 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import PortalAvatar from '@/components/portal/PortalAvatar.vue'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
+import { askInboxRoute } from '../portalRailAsks'
+import { INBOX_LINK_CLASS } from '../portalUtils'
 import { HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine } from './projectsUtils'
 
 const props = defineProps({
@@ -78,6 +107,15 @@ const who = computed(() => {
   if (!s) return 'Not set'
   if (s.kind === 'agent') return `${s.ref} (agent)`
   return isMe.value ? 'You' : s.ref
+})
+const proposal = computed(() => props.project.proposal || null)
+const waitsOnMe = computed(() => Boolean(props.myEmail) && proposal.value?.waiting_on === props.myEmail)
+const waitingOn = computed(() => (waitsOnMe.value ? 'you' : proposal.value?.waiting_on || 'the creator'))
+// The Needs you row's link: straight to this decision in the Inbox, routed in
+// the app (no Workspace reload).
+const inboxRoute = computed(() => {
+  const p = proposal.value
+  return p ? askInboxRoute({ id: p.ask_id, agent_name: p.proposed_by }) : null
 })
 const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule))
 const scheduleAt = computed(() => (steward.value?.schedule?.state === 'scheduled' ? steward.value.schedule.next_run_at : null))

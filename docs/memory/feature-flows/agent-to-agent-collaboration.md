@@ -203,6 +203,17 @@ async chat(name: string, message: string, sourceAgent?: string): Promise<ChatRes
 }
 ```
 
+### Reading an agent's edges (trinity-enterprise#991)
+
+`get_agent_permissions(agent_name)` (`src/mcp-server/src/tools/permissions.ts`) reads
+`GET /api/agents/{name}/permissions?strict=true` and returns `source_agent` and
+`permitted_agents` (`available_agents`, the caller's roster, is dropped). Strict mode
+makes a Docker fault an error (503), not "no edges". The route lists only edge targets
+that have a container and lie within the caller's reach, so the output carries
+`observed_within: "caller_reach_with_container"`: a missing edge is not a removed edge.
+Access row `enforce` on `agent_name`: an agent key reads itself, an edge target, or an
+agent it spawned. Granting an edge has no MCP tool.
+
 ---
 
 ## Agent-to-agent `/chat` on a pull pilot (#3127)

@@ -40,7 +40,13 @@ permissions:
 
 concurrency:
   group: backend-unit-test-${{ github.ref }}
-  cancel-in-progress: true
+  # Cancel superseded runs on a PR branch only. A `dev` push run is the
+  # `junit-push` baseline for every PR later based on that SHA (the `baseline`
+  # job keys on the exact base SHA), so cancelling it mid-burst left 10 of 60
+  # PR runs in Oct 2026 with no baseline and a 45-minute inline base run
+  # instead (#4096). A burst of N merges now costs N push runs; it no longer
+  # costs every following PR a second full suite.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   lint-sys-modules:
@@ -105,7 +111,7 @@ jobs:
     # this change; raising the cap stops the bleeding without hiding the trend,
     # since the durations above are recorded here for the next reader.
     #
-    # 2026-09-01 (#2461): that alternative is now taken — see `-n auto
+    # 2026-09-01 (#2461): that alternative is now taken — see `-n logical
     # --dist loadfile` on the run step below. The cap STAYS at 45. The point of
     # parallelising is not to use the headroom, it is to move the whole
     # distribution far enough below the cap that a slow runner stops reaching
@@ -225,9 +231,15 @@ jobs:
         # holding the GIL; if that ever turns out to be the case here, the
         # symptom is another anonymous cancel and `thread` is the fallback.
         #
-        # -n auto --dist loadfile (#2461): the "make the suite faster" half of
-        # the timeout-minutes note above. `auto` is os.cpu_count(), which is 4
-        # on ubuntu-latest and follows the runner if that ever changes.
+        # -n logical --dist loadfile (#2461, #4096): the "make the suite faster"
+        # half of the timeout-minutes note above. `logical`, NOT `auto`: with
+        # psutil importable (tests/requirements-test.txt has carried it since
+        # v0.6.0) xdist's `auto` is psutil.cpu_count(logical=False) — PHYSICAL
+        # cores — and ubuntu-latest's 4 vCPUs are 2 physical cores, so `auto`
+        # ran 2 workers the whole time while this block said 4 (#4096: the
+        # per-file JUnit durations replayed through loadfile give a 1,373s
+        # makespan on 2 workers vs the 1,452s observed, 692s on 4). `logical`
+        # follows the runner if that ever changes.
         #
         # `loadfile`, not the default `load`: it keeps every test in a file on
         # one worker. This suite manipulates sys.modules and pins env at module
@@ -262,7 +274,7 @@ jobs:
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
-            -n auto --dist loadfile \
+            -n logical --dist loadfile \
             -p randomly --randomly-seed=${{ matrix.seed }} \
             --junit-xml="$GITHUB_WORKSPACE/junit-${{ matrix.side }}-${{ matrix.seed }}.xml" \
             --tb=no -q || true
@@ -373,7 +385,7 @@ jobs:
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
-            -n auto --dist loadfile \
+            -n logical --dist loadfile \
             -p randomly --randomly-seed=12345 \
             --junit-xml="$GITHUB_WORKSPACE/junit-base-12345.xml" \
             --tb=no -q || true
@@ -483,7 +495,7 @@ jobs:
           cd tests
           python -m pytest unit/ -m "not slow" \
             --timeout=300 --timeout-method=signal \
-            -n auto --dist loadfile \
+            -n logical --dist loadfile \
             -p randomly --randomly-seed=12345 \
             --junit-xml="$GITHUB_WORKSPACE/junit-push.xml" \
             --tb=no -q || true

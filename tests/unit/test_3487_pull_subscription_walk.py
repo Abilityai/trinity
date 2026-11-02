@@ -330,6 +330,22 @@ class TestTheSinkWalksInPlace:
         assert "tok-sub-b" not in json.dumps(details)
 
 
+class TestCancelledText:
+    """#3618: a cancelled pull row reads like the push path's terminate write."""
+
+    @pytest.mark.parametrize("content", [
+        "Execution error: Claude Code reported no error detail",
+        "partial work",
+    ])
+    def test_a_cancel_records_the_terminate_text(self, sink, content):
+        out = _post(sink, token="t0", status="cancelled", error_code=None,
+                    capable=False, terminated=True, content=content)
+        assert out.kind == "applied" and out.status == sink.db.S.CANCELLED
+        result = sink.db.terminals[0][1]
+        assert result.error == "Execution terminated by user"
+        assert result.response == content
+
+
 class TestReviewFindings:
     """PR #3883 review: each of these failed on the first version of the sink."""
 

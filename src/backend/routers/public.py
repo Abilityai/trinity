@@ -5,9 +5,7 @@ These endpoints do NOT require authentication and are used by public users
 to access agents via shareable links.
 """
 import asyncio
-import ipaddress
 import json
-import os
 import secrets
 import httpx
 import logging
@@ -202,7 +200,7 @@ def _latch_public_url_reached(host: str) -> None:
 MAX_VERIFICATION_REQUESTS_PER_EMAIL = 3  # per 10 minutes
 # Re-exported, NOT redeclared: the per-IP / per-token chat caps moved to
 # `public_chat_service` with the accounting that reads them (#1028). Two equal
-# literals would leave `tests/test_ip_rate_limit_fix.py` asserting a constant
+# literals would leave `tests/unit/test_181_ip_rate_limit_spoofing.py` asserting a constant
 # nothing enforces — the values agree today, so only the guard would break, and
 # silently.
 MAX_CHAT_MESSAGES_PER_IP = public_chat_service.MAX_CHAT_MESSAGES_PER_IP
@@ -213,71 +211,18 @@ PUBLIC_LINK_LOOKUP_RATE_WINDOW = 60  # 1 minute in seconds
 # Generic error message for invalid tokens — prevents oracle-based enumeration (pentest 3.3.2)
 INVALID_LINK_MESSAGE = "Invalid or expired link"
 
-# Trusted proxy networks — only trust X-Forwarded-For / X-Real-IP from these.
-# Default: RFC-1918 private ranges (covers Docker bridge networks).
-# Override via TRUSTED_PROXIES env var (comma-separated CIDRs).
-_trusted_proxy_networks: list | None = None
-
-
-def _get_trusted_networks() -> list:
-    """Parse TRUSTED_PROXIES env var into network objects (cached)."""
-    global _trusted_proxy_networks
-    if _trusted_proxy_networks is not None:
-        return _trusted_proxy_networks
-
-    raw = os.environ.get("TRUSTED_PROXIES", "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8,127.0.0.0/8")
-    networks = []
-    for cidr in raw.split(","):
-        cidr = cidr.strip()
-        if cidr:
-            try:
-                networks.append(ipaddress.ip_network(cidr, strict=False))
-            except ValueError:
-                logger.warning(f"Invalid TRUSTED_PROXIES entry ignored: {cidr}")
-    _trusted_proxy_networks = networks
-    return networks
-
-
-def _is_trusted_proxy(ip_str: str) -> bool:
-    """Check if an IP belongs to a trusted proxy network."""
-    try:
-        addr = ipaddress.ip_address(ip_str)
-        return any(addr in net for net in _get_trusted_networks())
-    except ValueError:
-        return False
-
-
 def _get_client_ip(request: Request) -> str:
-    """Get client IP for rate limiting.
+    """Client address for per-IP rate limiting.
 
-    Only trusts proxy headers (X-Real-IP, X-Forwarded-For) when the direct
-    TCP peer is a known trusted proxy (e.g. the nginx container in Docker).
-    This prevents attackers from bypassing rate limits by spoofing headers.
-
-    See: pentest finding 3.2.4 / GitHub issue #181.
+    The address is resolved once per request, before any route runs, by
+    `utils/client_ip.ClientAddressMiddleware` (trinity-enterprise#873): forwarding
+    headers count only from an explicitly trusted proxy, and only their
+    authenticated right-hand suffix is read, so a direct caller or an agent
+    cannot choose the key (pentest finding 3.2.4 / #181). This wrapper keeps the
+    name every per-IP consumer already imports and the fixed `unknown` for a
+    request with no socket address.
     """
-    direct_ip = request.client.host if request.client else "unknown"
-
-    if direct_ip == "unknown":
-        return direct_ip
-
-    # Only read proxy headers when the connection comes from a trusted proxy
-    if not _is_trusted_proxy(direct_ip):
-        return direct_ip
-
-    # X-Real-IP is set (and overwritten) by our nginx — preferred source
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip.strip()
-
-    # Fallback: rightmost non-trusted IP in X-Forwarded-For
-    forwarded_for = request.headers.get("X-Forwarded-For")
-    if forwarded_for:
-        for ip in reversed([ip.strip() for ip in forwarded_for.split(",")]):
-            if not _is_trusted_proxy(ip):
-                return ip
-
-    return direct_ip
+    return request.client.host if request.client else "unknown"
 
 
 def check_public_link_rate_limit(client_ip: str) -> None:

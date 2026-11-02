@@ -452,4 +452,20 @@ def test_terminated_turn_reports_the_terminate_message(monkeypatch):
         raise RuntimeError("Claude Code reported no error detail")
 
     _, body, _, _ = _drive_worker(monkeypatch, run=_run)
-    assert (body["status"], body["error"]) == ("cancelled", "Execution terminated by user")
+    # #3618: parsed through the sink's own model, so a key it drops cannot pass.
+    from models import PullTaskResultRequest
+
+    parsed = PullTaskResultRequest(**body)
+    assert (parsed.status, parsed.content) == ("cancelled", "Execution terminated by user")
+    assert "error" not in body
+
+
+def test_terminated_turn_that_finished_keeps_its_reply(monkeypatch):
+    """#3618: a turn that exits gracefully on SIGINT keeps its reply, as the
+    push relabel (`result_callback._cancelled_override`) does."""
+    def _run(registry):
+        registry.terminate("e1")
+        return ("partial work", [], SimpleNamespace(model_dump=lambda: {}), "s")
+
+    _, body, _, _ = _drive_worker(monkeypatch, run=_run)
+    assert (body["status"], body["content"]) == ("cancelled", "partial work")

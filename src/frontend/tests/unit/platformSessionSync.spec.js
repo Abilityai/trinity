@@ -412,6 +412,14 @@ describe('one credential source, one handler (source guards — wiring only)', (
     expect(MAIN).not.toContain("router.push('/login')\n}")
   })
 
+  it('#3444 — main.js hands the reaction the full page and pushes the location it builds', () => {
+    // Executed against the real router in loginReturnPath.spec.js; this pins
+    // the two lines that feed it.
+    expect(MAIN).toContain('returnPath: fullPathForVerdict(router, START_LOCATION, window.location),')
+    expect(MAIN).toContain('goToLogin: (location) => router.push(location),')
+    expect(MAIN).not.toContain("router.push('/login')")
+  })
+
   it('trinity-enterprise#837 — main.js and api.js wire the workspace_only reaction', () => {
     // The reaction itself is executed in workspaceOnly.spec.js; these pin the
     // hand-offs, which a node-env spec cannot drive (deleting one left the

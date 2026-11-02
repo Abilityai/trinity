@@ -25,10 +25,18 @@ This is an MVP (follow-up to spike #854). For adding a *fourth* runtime, see the
    `AGENTS.md`), creates `CODEX_HOME` under `$TMPDIR` (off the git-tracked repo),
    gitignores `.tmp/`. MCP config (`trinity_mcp.py`) writes `$CODEX_HOME/config.toml`.
 3. **Chat / Task.** `POST /api/chat` → `runtime.execute()`; `POST /api/task` →
-   `runtime.execute_headless()`. Both build `codex exec --json --skip-git-repo-check
-   -C /home/developer --sandbox <mode> -o <CODEX_HOME>/<exec_id>-last.txt
-   [-m model] [resume <thread_id>] -- -`, write the prompt to stdin, close
-   it, and stream the JSONL.
+   `runtime.execute_headless()`. Both build `codex exec -c model_provider="openai"
+   -c openai_base_url="" -c chatgpt_base_url="https://chatgpt.com/backend-api/"
+   --json --skip-git-repo-check -C /home/developer --sandbox <mode>
+   -o <CODEX_HOME>/<exec_id>-last.txt [-m model] [resume <thread_id>] -- -`,
+   write the prompt to stdin, close it, and stream the JSONL.
+   The three `-c` pins (trinity-enterprise#1001) keep the endpoint the platform's:
+   `$CODEX_HOME/config.toml` is agent-writable, `-c` beats every config layer the
+   agent can write, and the built-in `openai` provider cannot be redefined, so a
+   custom provider or base URL there would otherwise carry the API key or ChatGPT
+   token to its host. Before the turn, `execution_env.strip_protected_env_lines`
+   removes `.env`-protected names (proxy, TLS trust, loader names, …) from
+   `$CODEX_HOME/.env`, which the CLI loads over the process env at start.
    `<mode>` = `danger-full-access` normally (no inner bwrap sandbox — see Safety
    parity), `read-only` when the agent is read-only. Exec-level flags **precede**
    `resume` (the `resume` sub-subcommand rejects them — the turn-2+ continuity
@@ -195,7 +203,7 @@ best-effort + lazily from the `trinity.agent-runtime` label
 
 | Layer | File |
 |-------|------|
-| Base image | `docker/base-image/Dockerfile` (`@openai/codex@0.139.0`), `startup.sh` (AGENTS.md, CODEX_HOME) |
+| Base image | `docker/base-image/Dockerfile` (`@openai/codex@0.147.0`), `startup.sh` (AGENTS.md, CODEX_HOME) |
 | Runtime | `docker/base-image/agent_server/services/codex_runtime.py` |
 | Contract | `runtime_adapter.py` (`RuntimeCapabilities`, factory + validation), `models.py` (`ExecutionMetadata.status/error_code`) |
 | MCP | `agent_server/services/trinity_mcp.py`, `services/platform_prompt_service.py` (runtime-aware tool naming) |
@@ -230,21 +238,60 @@ Headless task images are passed to native `codex exec --image` options. Resumed
 turns put these options after `resume`, so images attach to the current turn.
 The prompt still travels on stdin (`-- -`), preserving support for long messages.
 The runtime accepts base64 JPEG, PNG, GIF and WebP payloads, up to ten images,
-5 MiB each and 10 MiB combined; violations of these MIME, base64 and size checks return HTTP 400 before spawn.
+5 MiB each and 10 MiB combined; violations return HTTP 400 before spawn.
 Raster decoding is performed by the Codex CLI, not by this validation helper.
-A private, unique mode-0700 temporary directory holds mode-0600 copies. Before
-subprocess handoff, failures remove partial files immediately. If writing or
-closing stdin fails after spawn but before reader handoff, the image execution
-stops its child before removing its inputs. After handoff, the
-reader owns cleanup until subprocess reading and bounded cleanup finish. Canceling the
-HTTP waiter leaves those inputs and the process registry entry available until
-that worker completes; cleanup does not need another executor slot. Native
-process timeouts and explicit operator cancellation retain their existing policy.
-Text-only execution cancellation remains unchanged.
 
-This change adds no persistent upload originals or tool permissions. Existing
-upload authorization, preprocessing, and channel behavior remain in place.
+A private mode-0700 temporary directory holds mode-0600 native CLI copies.
+Before spawn, failures remove partial files. After spawn, the process registry
+owns those inputs through its optional exit callback. A cancelled HTTP waiter,
+failed stdin write, refused reader submission or unconfirmed kill cannot remove
+a live child's inputs. Normal completion releases them through unregister;
+when no reader remains, the existing running-executions watchdog poll releases
+them upon observing exit. Callbacks run once outside registry locks. Native
+process timeouts, explicit cancellation and endpoint restrictions retain their
+existing policy. These temporary inputs are separate from workspace originals.
 
-Unit coverage: `test_codex_runtime.py` exercises initial/resumed argv, bounded
-validation, private permissions, spawn/stdio failure, long prompts, concurrent isolation, and
-cancellation with a saturated reader executor.
+### Workspace originals and retention
+
+The existing shared upload processor writes validated originals to
+`/home/developer/uploads/<random-dispatch-id>/<sanitized-filename>` and includes
+the path and uploader in prompt context. Every dispatch gets a different
+directory, even within one session. Existing size/count/MIME limits apply;
+images still reach the native vision payload independently of disk storage.
+If an original cannot be saved, the prompt states **original unavailable** and
+the upload audit records `original_saved: false` with no destination path.
+Other usable files and vision remain available; callers reject only when no
+usable delivery succeeded. Audit metadata retains uploader/source attribution.
+
+Web task, session and public-chat originals remain workspace-owned until
+explicit removal, matching existing non-image retention. They consume storage
+until removed. Messaging removes only its own dispatch directory after a
+successful completed turn or confirmed pre-dispatch refusal. Failed, timed-out,
+or cancelled waits cannot prove the child stopped: they retain originals and
+log the opaque dispatch ID and execution ID when known. Operators must confirm
+that execution has stopped before manually removing that directory. No automatic
+terminal reaper exists for these uncertain cases; server interruption can also
+leave a dispatch directory requiring manual removal. Agents that need enduring
+messaging records must copy originals to their own durable location during the
+turn, before successful-turn cleanup.
+
+`/uploads/` is a canonical Git default. Before storing originals, an existing
+workspace also receives this rule in its local Git `info/exclude`, so heartbeat
+sync cannot accidentally commit a new upload before the next backend Push.
+Git resolves linked-worktree metadata paths itself. Both defaults preserve
+explicit user `.gitignore` overrides; intentionally overriding uploads makes
+those files eligible for sync. A Git-preparation failure prevents original
+storage and reports the incomplete outcome without disabling native vision.
+No upload authorization or tool permissions are expanded: image originals use
+the same workspace access boundaries as existing files. Public/channel image
+attachments do not grant the `Read` tool: a restricted runtime can analyze the
+native vision payload, but reading its workspace original still requires an
+existing operator-authorized tool permission.
+
+Unit coverage includes `test_codex_runtime.py`, the real-child
+`test_3408_codex_process_ownership.py` and `test_3408_failed_handoff.py`,
+`test_3870_image_resource_ownership.py`, `test_web_file_upload.py`,
+`test_3603_channel_failure_reply.py` and the existing Git-precedence suite.
+These cover initial/resumed arguments, validation, concurrent isolation,
+failed storage, uploader attribution, live-child cancellation, refused handoff,
+watchdog cleanup, and real Git staging of existing-workspace originals.

@@ -149,3 +149,34 @@ async def test_a_successful_turn_is_untouched(monkeypatch):
     _, channel, router = _harness(monkeypatch, result)
     assert await _run(router, channel) is result
     channel.send_response.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "exception", "waiter_cancel"])
+async def test_3870_uncertain_channel_turn_keeps_originals(monkeypatch, tmp_path, caplog, outcome):
+    import asyncio
+    import services.task_execution_service as tes
+    original = tmp_path / "opaque-dispatch" / "photo.png"
+    original.parent.mkdir()
+    original.write_bytes(b"original")
+    result = SimpleNamespace(status=outcome, error="timeout", response="", execution_id="execution-3870")
+    mr, channel, router = _harness(monkeypatch, result)
+    async def remove(container, directory):
+        original.unlink()
+    monkeypatch.setattr(router, "_cleanup_uploads", remove)
+    if outcome in ("exception", "waiter_cancel"):
+        error = RuntimeError("transport failed") if outcome == "exception" else asyncio.CancelledError()
+        monkeypatch.setattr(tes, "dispatch_and_await_terminal", AsyncMock(side_effect=error))
+    call = router._run_agent_task(
+        channel, _message(), "agent", "bot-token", "telegram", True,
+        container=None, upload_dir=str(original.parent), context_prompt="prompt",
+        verified_email=None, image_data=[])
+    with caplog.at_level(logging.WARNING, logger="adapters.message_router"):
+        if outcome == "waiter_cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await call
+        else:
+            await call
+    assert original.read_bytes() == b"original"
+    assert "Remove manually only after confirming" in caplog.text
+    assert "opaque-dispatch" in caplog.text

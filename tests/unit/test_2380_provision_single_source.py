@@ -278,9 +278,10 @@ def test_the_provisioned_caddyfile_gates_on_demand_tls_on_the_backend() -> None:
     assert re.search(r"tls \{[^}]*\bon_demand\b", site.group(1), re.S), (
         "the catch-all site does not request an on-demand certificate"
     )
-    assert "reverse_proxy 127.0.0.1:8081" in site.group(1), (
-        "the catch-all site serves no backend"
-    )
+    # ent#873: the upstream is chosen per render (protected PROXY-protocol
+    # listener or the ordinary one) and shared by every site; which one each
+    # site actually gets is asserted by EXECUTING the renderer below.
+    assert "${_rp_site}" in site.group(1), "the catch-all site serves no backend"
 
     # The bare-IP site keeps its own short-lived certificate: it is what the
     # instance answers to before any domain exists.
@@ -400,3 +401,73 @@ def test_ask_gate_refuses_when_nothing_is_configured_or_readable() -> None:
 
     blew_up, status = _load_ask_gate("https://trinity.example.com", raises=True)("trinity.example.com")
     assert blew_up is None and status == 404
+
+
+# ---------------------------------------------------------------------------
+# trinity-enterprise#873 — every site proxies to the listener the probe chose
+# ---------------------------------------------------------------------------
+
+def _render_with_probe(probe_ok: bool) -> str:
+    """Run the real renderer with the host stubbed: the live listener probe
+    answers `probe_ok`, and PRIVATE_NETWORK_CIDRS is set so all three
+    `reverse_proxy` sites (bare IP, on-demand domains, private network) exist."""
+    import tempfile
+
+    src = _START.read_text()
+    cidr_start = src.index("provision_private_cidrs() {")
+    cidr_fn = src[cidr_start: src.index("\n}\n", cidr_start) + 3]
+    caddy_fn = src[src.index("provision_caddyfile() {"): src.index("\nprovision_site() {")]
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "Caddyfile"
+        harness = (
+            (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
+            + "\nenv_value() { case \"$1\" in PRIVATE_NETWORK_CIDRS) printf '%s' 100.64.0.0/10 ;; esac; }\n"
+            + "systemctl() { :; }\ncaddy() { :; }\n"
+            # The probe is the independent variable: it is asked about the
+            # DEFAULT protected port and answers what the test says.
+            + "provision_proxy_listener_ready() { [ \"$1\" = 18082 ] && return "
+            + ("0" if probe_ok else "1") + "; return 1; }\n"
+            + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
+        )
+        proc = subprocess.run(["bash", "-c", harness], capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin"})
+        assert proc.returncode == 0, proc.stderr
+        return out.read_text(), proc.stderr
+
+
+def _sites(rendered: str) -> dict:
+    ip = re.search(r"^https://203\.0\.113\.10 \{\n(.*?)^\}", rendered, re.S | re.M)
+    wild = re.search(r"^https://\*\.\*,[^\n]*\{\n(.*?)^\}", rendered, re.S | re.M)
+    private = re.search(r"^    handle @private \{\n(.*?)^    \}", rendered, re.S | re.M)
+    assert ip and wild and private, rendered
+    return {"bare-ip": ip.group(1), "domains": wild.group(1), "private": private.group(1)}
+
+
+def test_a_live_protected_listener_gets_proxy_protocol_in_every_site() -> None:
+    rendered, _ = _render_with_probe(True)
+    for name, body in _sites(rendered).items():
+        # The block closes at its OWN indentation; the transport's brace is deeper.
+        rp = re.search(r"^( *)reverse_proxy (\S+) \{\n(.*?)\n\1\}$", body, re.S | re.M)
+        assert rp, (name, body)
+        assert rp.group(2) == "127.0.0.1:18082", (name, rp.group(2))
+        inner = rp.group(3)
+        assert "flush_interval -1" in inner, name           # SSE still unbuffered
+        transport = re.search(r"transport http \{(.*?)\}", inner, re.S)
+        assert transport, (name, inner)
+        lines = {ln.strip() for ln in transport.group(1).splitlines() if ln.strip()}
+        assert lines == {"proxy_protocol v2", "keepalive off", "versions 1.1"}, (name, lines)
+    assert "8081" not in rendered
+    assert rendered.count("{") == rendered.count("}"), rendered
+
+
+def test_without_a_live_listener_every_site_keeps_the_ordinary_upstream() -> None:
+    """The compatibility fallback: byte-for-byte the block every install had
+    before, and no PROXY transport anywhere — an older web image cannot parse
+    one, and sending it would take the site down."""
+    rendered, err = _render_with_probe(False)
+    for name, body in _sites(rendered).items():
+        pad = "        " if name == "private" else "    "
+        assert f"{pad}reverse_proxy 127.0.0.1:8081 {{\n{pad}    flush_interval -1\n{pad}}}" in body, (name, body)
+    assert "proxy_protocol" not in rendered and "transport" not in rendered
+    assert "18082" not in rendered
+    assert "NOT yet passed through" in err, "the fallback must say client addresses are not migrated"

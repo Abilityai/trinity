@@ -1272,12 +1272,23 @@ class _FakeRegistry:
     def __init__(self):
         self.registered = []
         self.unregistered = []
+        self.cleanups = {}
+        self.processes = {}
 
-    def register(self, execution_id, process, metadata=None):
+    def register(self, execution_id, process, metadata=None, *, on_exit=None):
         self.registered.append(execution_id)
+        self.cleanups[execution_id] = on_exit
+        self.processes[execution_id] = process
 
     def unregister(self, execution_id):
+        process = self.processes.get(execution_id)
+        if process is None or process.poll() is None:
+            return
+        self.processes.pop(execution_id)
         self.unregistered.append(execution_id)
+        cleanup = self.cleanups.pop(execution_id, None)
+        if cleanup:
+            cleanup()
 
     def publish_log_entry(self, execution_id, event):
         pass
@@ -2026,6 +2037,7 @@ async def test_cancelled_execution_keeps_worker_and_image_lifetime(tmp_path, mon
     paths, terminated = [], []
     def spawn(cmd, **kwargs):
         process = fake_popen(cmd, **kwargs)
+        process.returncode = None
         if with_image:
             paths.append(Path(cmd[cmd.index("--image") + 1]))
         def wait(timeout=None):
@@ -2033,6 +2045,7 @@ async def test_cancelled_execution_keeps_worker_and_image_lifetime(tmp_path, mon
             assert release.wait(5)
             if with_image:
                 assert paths[0].read_bytes() == b"a"
+            process.returncode = 0
             return 0
         process.wait = wait
         return process
@@ -2126,9 +2139,11 @@ async def test_cancelled_queued_image_reader_still_reaps_child(tmp_path, monkeyp
     paths, waited = [], []
     def spawn(cmd, **kwargs):
         process = fake_popen(cmd, **kwargs)
+        process.returncode = None
         paths.append(Path(cmd[cmd.index("--image") + 1]))
         def wait(timeout=None):
             waited.append(paths[0].read_bytes())
+            process.returncode = 0
             return 0
         process.wait = wait
         spawned.set()
@@ -2172,11 +2187,13 @@ async def test_cancel_during_outer_timeout_retains_images_until_reader_finishes(
     paths = []
     def spawn(cmd, **kwargs):
         process = fake_popen(cmd, **kwargs)
+        process.returncode = None
         paths.append(Path(cmd[cmd.index("--image") + 1]))
         def wait(timeout=None):
             started.set()
             assert release.wait(5)
             assert paths[0].exists()
+            process.returncode = 0
             return 0
         process.wait = wait
         return process
@@ -2276,7 +2293,7 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
                                                          tmp_path, resume):
     import subprocess as sp
 
-    spawned, written, unregistered = {}, [], []
+    spawned, written, events = {}, [], []
 
     class _Stdin:
         def write(self, data):
@@ -2289,16 +2306,24 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
         spawned["cmd"], spawned["stdin"] = cmd, kwargs.get("stdin")
         if kwargs.get("stdin") is not sp.PIPE:
             raise _StopAfterStdin()
-        return type("P", (), {"stdin": _Stdin(), "pid": 1})()
+        return type("P", (), {
+            "stdin": _Stdin(), "stdout": io.StringIO(), "stderr": io.StringIO(), "pid": 1,
+        })()
 
     registry = type("R", (), {
         "register": lambda self, *a, **k: None,
-        "unregister": lambda self, eid: unregistered.append(eid),
+        "unregister": lambda self, eid: events.append(("unregister", eid)),
     })()
     monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: None)
     monkeypatch.setattr(codex_runtime, "_ensure_codex_home", lambda: str(tmp_path))
     monkeypatch.setattr(codex_runtime, "_has_subscription_auth", lambda _home: True)
     monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda _p: None)
+    # #3408: the failed handoff kills the child before releasing it. Stubbed:
+    # with pgid=None the real helper would look up the fake's pid=1 group.
+    monkeypatch.setattr(
+        codex_runtime, "_terminate_process_group",
+        lambda _p, **kw: events.append(("kill", kw["graceful_timeout"], kw["pgid"])),
+    )
     monkeypatch.setattr(codex_runtime, "get_process_registry", lambda: registry)
     monkeypatch.setattr(codex_runtime.subprocess, "Popen", _popen)
 
@@ -2314,8 +2339,9 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
     assert cmd[-2:] == ["--", "-"], "stdin is read for `-` after the separator"
     assert spawned["stdin"] is sp.PIPE
     assert prompt in "".join(written)
-    # A failed stdin write must not leak the registry entry (#2433).
-    assert unregistered == ["ex_1"]
+    # A failed stdin write must not leak the registry entry (#2433), and the
+    # child is killed before it is released (#3408).
+    assert events == [("kill", 0, None), ("unregister", "ex_1")]
 
 
 @pytest.mark.asyncio
@@ -2366,7 +2392,7 @@ async def test_image_stdin_failure_stops_child_before_removing_inputs(
             images=[{"media_type": "image/png", "data": "YQ=="}])
     assert error.value.status_code == 502
     assert prompt in written[0]
-    assert stopped and closed
+    assert stopped
     assert registry.unregistered == ["stdin-image"]
     assert not paths[0].parent.exists()
     assert not list(tmp_path.glob("*-last.txt"))
