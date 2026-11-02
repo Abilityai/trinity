@@ -13,6 +13,7 @@ path) can import it without a circular dependency.
 from __future__ import annotations
 
 import json
+import os
 
 _GUARDRAILS_RUNTIME_PATH = "/opt/trinity/guardrails-runtime.json"
 _GUARDRAILS_BASELINE_PATH = "/opt/trinity/guardrails-baseline.json"
@@ -297,3 +298,56 @@ def map_disallowed_to_opencode(disallowed) -> tuple:
         elif name not in PLATFORM_DENIED_TOOLS and name not in unmapped:
             unmapped.append(name)
     return ids, unmapped
+
+
+# Abilityai/lilu#660: does an image attached to an OpenCode turn reach the
+# model? The pinned 1.18.32 binary decides per MODEL, from
+# `capabilities.input.image`, which for a model declared in opencode.json is
+# `modalities.input` includes "image", else the models.dev entry, else false —
+# and an image part on a model without it is replaced by an
+# "ERROR: Cannot read … (this model does not support image input)" text part.
+# A provider OpenCode only knows from config (Ollama, any URL-declared
+# OpenAI-compatible endpoint) therefore defaults to NO images; a models.dev
+# provider (openrouter/anthropic/openai) defaults to yes and the binary's own
+# per-model gate still applies. `OPENCODE_PROVIDER_<ID>_IMAGES` overrides both.
+OPENCODE_IMAGES_ENV_SUFFIX = "_IMAGES"
+OPENCODE_IMAGES_DEFAULT_OFF = frozenset({"ollama"})
+_MODELS_DEV_PROVIDERS = frozenset({"openrouter", "anthropic", "openai"})
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def opencode_images_env_name(provider_id: str) -> str:
+    """``"ollama"`` -> ``OPENCODE_PROVIDER_OLLAMA_IMAGES``."""
+    return f"OPENCODE_PROVIDER_{provider_id.upper()}{OPENCODE_IMAGES_ENV_SUFFIX}"
+
+
+def opencode_images_override(provider_id, env=None):
+    """The explicit ``OPENCODE_PROVIDER_<ID>_IMAGES`` value, or ``None``."""
+    if not provider_id:
+        return None
+    source = os.environ if env is None else env
+    raw = (source.get(opencode_images_env_name(provider_id)) or "").strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    return None
+
+
+def opencode_provider_images(provider_id, env=None) -> bool:
+    """Whether ``provider_id`` is configured to receive image input.
+
+    Explicit env first, then the default above. ``None`` (no provider pinned:
+    OpenCode picks its own) is True — the binary's per-model gate decides.
+    """
+    override = opencode_images_override(provider_id, env)
+    if override is not None:
+        return override
+    if not provider_id:
+        return True
+    if provider_id in OPENCODE_IMAGES_DEFAULT_OFF:
+        return False
+    source = os.environ if env is None else env
+    declared_by_url = (source.get(f"OPENCODE_PROVIDER_{provider_id.upper()}_BASE_URL") or "").strip()
+    return provider_id in _MODELS_DEV_PROVIDERS or not declared_by_url
