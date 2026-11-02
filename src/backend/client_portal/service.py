@@ -47,6 +47,7 @@ from services.chat_title import (
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
+from services.chat_signals import AdmissionRefused
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
 )
@@ -183,6 +184,11 @@ PORTAL_FAILURE_CATEGORIES = (
     # Not retryable: resending meets the same refusal. A request that WAS put up
     # for approval is not a failure at all — the turn answers with the notice.
     "gated",
+    # trinity-enterprise#1059 — an admission policy stopped the turn before it
+    # ran (today: the agent's share of its subscription is used up). Not
+    # retryable: re-sending meets the same refusal until the window frees or
+    # the share is raised; the policy's own sentence says which and when.
+    "limit",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -3353,6 +3359,12 @@ async def portal_chat(agent_name: str, message: str, email: str,
     result = turn.result
 
     status = getattr(result, "status", None)
+    refusal = getattr(result, "admission_refusal", None)
+    if isinstance(refusal, AdmissionRefused):
+        # trinity-enterprise#1059: nothing ran, and the policy's sentence is
+        # written for a person (the budget, when it frees, whether an ask is
+        # pending) — shown as is, never the internal copy.
+        raise ClientPortalError(429, refusal.message, category="limit", retryable=False)
     if status == "cancelled":
         # ent#155 review (NEW-1): a cancellation is not a failure, and saying so
         # only in the browser was not enough. The client-side suppression shields

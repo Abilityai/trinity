@@ -45,6 +45,10 @@ class TaskExecutionErrorCode(str, Enum):
     # Agent-to-agent hop past inter_agent_max_chain_depth (#2806). Refused before
     # a row exists, so it only ever appears on the X-Trinity-Error-Code header.
     INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded"
+    # A registered admission policy stopped the turn before it ran — today an
+    # agent's share of its subscription is used up (trinity-enterprise#1059).
+    # Closes the row SKIPPED, never FAILED: it is not the agent's failure.
+    USAGE_SHARE = "usage_share"
 
 
 @dataclass
@@ -77,6 +81,11 @@ class TaskExecutionResult:
     # as `retryable=False` — while the agent sat on a fresh subscription and a
     # re-send would very likely have worked (#2638 gap 4).
     subscription_switch: Optional[dict] = None
+    # trinity-enterprise#1059: the `chat_signals.AdmissionRefused` a registered
+    # admission policy raised for this turn (status SKIPPED, nothing ran). The
+    # sync /task mapping re-raises it and the Workspace reads its message.
+    # In-memory only, like `subscription_switch`.
+    admission_refusal: Optional[Any] = None
 
 
 @dataclass

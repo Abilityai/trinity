@@ -20,9 +20,13 @@ translation.
     is a mapping hint, not a FastAPI import.
   * ``InterAgentDepthExceeded`` — an agent-to-agent hop past the configured
     chain depth (#2806). Each router maps it explicitly to a named 403.
+  * ``AdmissionRefused`` — a registered admission policy stopped the turn
+    before anything was claimed or acquired (trinity-enterprise#1059,
+    ``services/admission_policy``). The routers map it to a named 429.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import NamedTuple, Optional
 
 from services.execution_envelope import TaskExecutionErrorCode
@@ -137,4 +141,51 @@ class InterAgentDepthExceeded(Exception):
                 "Do not retry this call or route it through another agent; finish your "
                 "turn with what you have and report back to your caller."
             ),
+        }
+
+
+class AdmissionRefused(Exception):
+    """A registered admission policy refused the turn (trinity-enterprise#1059).
+
+    Raised by ``admission_policy.enforce`` at the admission seams, before any
+    idempotency claim, capacity slot or (on ``/chat`` and ``/task``) execution
+    row exists, so the same request goes through unchanged once the condition
+    clears. ``code`` names the reason on ``X-Trinity-Error-Code``; ``message``
+    is the plain-words sentence a person or a calling agent reads; ``frees_at``
+    (aware UTC, optional) is when the policy expects to admit again and becomes
+    ``Retry-After``. Not retryable by default: re-sending before ``frees_at``
+    meets the same refusal.
+    """
+
+    def __init__(self, code: str, agent_name: str, message: str, *,
+                 frees_at: Optional[datetime] = None, retryable: bool = False):
+        super().__init__(f"{code}: {agent_name}: {message}")
+        self.code = code
+        self.agent_name = agent_name
+        self.message = message
+        self.frees_at = frees_at
+        self.retryable = retryable
+
+    def retry_after_seconds(self, now: Optional[datetime] = None) -> Optional[int]:
+        """Whole seconds until ``frees_at`` (never negative), or None if unknown."""
+        if self.frees_at is None:
+            return None
+        now = now or datetime.now(timezone.utc)
+        frees_at = self.frees_at
+        if frees_at.tzinfo is None:
+            frees_at = frees_at.replace(tzinfo=timezone.utc)
+        return max(0, int((frees_at - now).total_seconds()))
+
+    def detail(self) -> dict:
+        frees_at = self.frees_at
+        if frees_at is not None:
+            if frees_at.tzinfo is None:
+                frees_at = frees_at.replace(tzinfo=timezone.utc)
+            frees_at = frees_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {
+            "error": self.code,
+            "agent": self.agent_name,
+            "message": self.message,
+            "frees_at": frees_at,
+            "retryable": self.retryable,
         }
