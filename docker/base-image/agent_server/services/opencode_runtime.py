@@ -98,9 +98,16 @@ from ..utils.credential_sanitizer import (
     sanitize_text,
 )
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
-from ._runtime_config import _DEFAULT_EXECUTION_TIMEOUT_SEC, _load_guardrails
+from ._runtime_config import (
+    _DEFAULT_EXECUTION_TIMEOUT_SEC,
+    _DEFAULT_MAX_TURNS_TASK,
+    _load_guardrails,
+    map_disallowed_to_opencode,
+    merged_disallowed_tools,
+)
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .agents_md_mirror import refresh_agents_md
+from .error_classifier import _model_rejection_detail
 from .execution_env import build_execution_env
 from .opencode_mcp import apply_mcp_config
 from .opencode_provider import (
@@ -364,6 +371,7 @@ def _prepare_turn_config(
     system_prompt: Optional[str],
     model: Optional[str] = None,
     env: Optional[Dict[str, str]] = None,
+    disallowed_tools: Optional[List[str]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
@@ -431,6 +439,14 @@ def _prepare_turn_config(
     # persistent store that can disagree with `.mcp.json`.
     apply_mcp_config(config)
 
+    # Read-only mode and the guardrail deny-list (Abilityai/lilu#654), applied
+    # LAST so neither the shared config nor a provider block can re-open a
+    # denied tool for this turn. The deny-list is the same GUARD-003 ∪
+    # platform list every Claude spawn passes as `--disallowedTools`.
+    if disallowed_tools is None:
+        disallowed_tools = merged_disallowed_tools(_load_guardrails())
+    apply_tool_policy(config, read_only=_is_read_only(), disallowed_tools=disallowed_tools)
+
     config_path = os.path.join(config_dir, "opencode.json")
     with open(config_path, "w", encoding="utf-8") as fh:
         json.dump(config, fh, indent=2)
@@ -465,8 +481,63 @@ def _cleanup_turn_dir(turn_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Read-only mode
+# Read-only mode and the guardrail deny-list
 # ---------------------------------------------------------------------------
+
+# OpenCode permission ids denied in read-only mode. Measured on the pinned CLI
+# (1.18.32) by real turns against a local fake model, not read off the schema:
+#   * `permission.edit: "deny"` removes BOTH the `edit` and `write` tools — a
+#     model call to `write` comes back "unavailable tool" and no file appears.
+#     `permission.write: "deny"` is a SILENT NO-OP (the file was written), so
+#     `write` is deliberately not listed: it would read as enforcement and be
+#     none. There is no `patch` tool on this version.
+#   * `permission.bash: "deny"` removes the `bash` tool. Bash is denied whole,
+#     which is STRICTER than the Claude hook (it guards Write/Edit paths only):
+#     a read-only-shell allowlist was measured and rejected, because
+#     `{"*": "deny", "ls *": "allow"}` still let `ls > rw-probe.txt` create the
+#     file — a pattern over the command string cannot see a redirect.
+# The explicit deny survives `--auto`, which auto-approves only what is not
+# explicitly denied.
+_READ_ONLY_PERMISSION_DENIES = ("edit", "bash")
+
+
+def apply_tool_policy(
+    config: Dict[str, object],
+    *,
+    read_only: bool,
+    disallowed_tools: Optional[List[str]] = None,
+) -> None:
+    """Write this turn's tool denies into ``config`` (in place).
+
+    Read-only → ``permission.<id> = "deny"`` for ``_READ_ONLY_PERMISSION_DENIES``.
+    Guardrail ``disallowed_tools`` (Claude names, ``merged_disallowed_tools``) →
+    ``tools.<id> = false`` via ``OPENCODE_TOOL_IDS``; names with no OpenCode id
+    are logged at WARNING naming them, never silently dropped. Denies are
+    additive over whatever the shared config declared and only ever remove
+    capability, so an operator's own ``permission``/``tools`` entries survive
+    unless they would re-allow a denied tool.
+    """
+    if read_only:
+        permission = config.get("permission")
+        permission = dict(permission) if isinstance(permission, dict) else {}
+        for tool_id in _READ_ONLY_PERMISSION_DENIES:
+            permission[tool_id] = "deny"
+        config["permission"] = permission
+
+    tool_ids, unmapped = map_disallowed_to_opencode(disallowed_tools)
+    if tool_ids:
+        tools = config.get("tools")
+        tools = dict(tools) if isinstance(tools, dict) else {}
+        for tool_id in tool_ids:
+            tools[tool_id] = False
+        config["tools"] = tools
+    if unmapped:
+        logger.warning(
+            "[OpenCode] guardrails disallow %s — no OpenCode tool id maps to "
+            "these names (OPENCODE_TOOL_IDS); they are NOT enforced on this "
+            "runtime.",
+            unmapped,
+        )
 
 def _is_read_only() -> bool:
     """True when the backend has put this agent in read-only mode.
@@ -477,8 +548,7 @@ def _is_read_only() -> bool:
     Codex loader — diverging one runtime to fail-closed would make read-only
     enforcement inconsistent across runtimes.
 
-    Step 1 only READS this, for the log line and the capability report. Actual
-    enforcement is step 3's scope.
+    Enforcement is ``apply_tool_policy`` (Abilityai/lilu#654).
     """
     try:
         raw = _READ_ONLY_CONFIG.read_text()
@@ -520,6 +590,11 @@ class _OpenCodeParseState:
     seen_tool_ids: set = field(default_factory=set)
     reasoning_tokens: int = 0
     cache_write_tokens: int = 0
+    # Abilityai/lilu#654: one OpenCode `step_start` is one model call — the
+    # unit `max_turns` caps — and the structured fields of an `error` event.
+    step_count: int = 0
+    error_name: Optional[str] = None
+    error_status: Optional[int] = None
 
     def current_step(self) -> List[str]:
         if not self.step_texts:
@@ -639,6 +714,7 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     state.metadata.output_tokens += _as_int(tokens.get("output"))
     state.metadata.cache_read_tokens += _as_int(cache.get("read"))
     state.cache_write_tokens += _as_int(cache.get("write"))
+    state.metadata.cache_creation_tokens += _as_int(cache.get("write"))
     state.reasoning_tokens += _as_int(tokens.get("reasoning"))
 
     cost = event.get("cost")
@@ -673,6 +749,7 @@ def _process_opencode_event(event: dict, state: _OpenCodeParseState) -> None:
     event_type = event.get("type") or event.get("event")
 
     if event_type == "step_start":
+        state.step_count += 1
         state.step_texts.append([])
     elif event_type == "step_finish":
         _accumulate_usage(state, event)
@@ -688,7 +765,19 @@ def _process_opencode_event(event: dict, state: _OpenCodeParseState) -> None:
             state.reasoning_parts.append(text)
     elif event_type == "error":
         state.metadata.error_type = "error"
-        message = event.get("message") or event.get("error") or "OpenCode error"
+        # Measured 1.18.32 shape: {"error": {"name": "APIError", "data":
+        # {"message": ..., "statusCode": 404, ...}}}. The provider's own
+        # sentence and status are kept so classification reads a field, not a
+        # JSON dump; an unknown shape falls back to the dump as before.
+        error = event.get("error")
+        data = error.get("data") if isinstance(error, dict) else None
+        data = data if isinstance(data, dict) else {}
+        if isinstance(error, dict) and isinstance(error.get("name"), str):
+            state.error_name = error["name"]
+        status = data.get("statusCode")
+        if isinstance(status, int):
+            state.error_status = status
+        message = data.get("message") or event.get("message") or error or "OpenCode error"
         state.metadata.error_message = (
             message if isinstance(message, str) else json.dumps(message, default=str)
         )
@@ -769,26 +858,66 @@ _AUTH_PATTERNS = (
 _RATE_MARKERS = ("429", "rate limit", "rate_limit", "quota", "too many requests")
 
 
-def classify_opencode_failure(
-    return_code: int, stderr: str, metadata: ExecutionMetadata
-) -> Tuple[int, str]:
-    """Map a non-zero exit (+ stderr + parsed error) to an HTTP status.
+# A provider refusing the MODEL rather than the request. Measured on 1.18.32
+# against an OpenAI-compatible endpoint answering the way Ollama does for an
+# unpulled model: `APIError`, statusCode 404, message `model "x" not found, try
+# pulling it first`. Name-based for a provider that says so in the error class.
+_MODEL_NOT_FOUND_PATTERNS = (
+    re.compile(r"\bmodel\b.*\bnot\s+(?:found|exist)", re.IGNORECASE),
+    re.compile(r"\b(?:unknown|unsupported|invalid)\s+model\b", re.IGNORECASE),
+    re.compile(r"\bno\s+such\s+model\b", re.IGNORECASE),
+)
+_MODEL_NOT_FOUND_ERROR_NAMES = re.compile(r"model.*not.*found", re.IGNORECASE)
 
-    auth → 503, rate-limit → 429, everything else → 500. A generic runtime
-    failure is deliberately 500 and NOT 503: 503 is the backend's AUTH signal
-    and the dispatch breaker counts AUTH only, so a 503 for an unrelated crash
-    would open the breaker on a healthy credential.
+
+def classify_opencode_failure(
+    return_code: int,
+    stderr: str,
+    metadata: ExecutionMetadata,
+    *,
+    error_status: Optional[int] = None,
+    error_name: Optional[str] = None,
+):
+    """Map a non-zero exit (+ stderr + parsed error) to ``(status, detail)``.
+
+    Sets ``metadata.error_type`` ∈ {``rate_limit``, ``authentication_failed``,
+    ``model_unsupported``, ``execution_error``} and the matching structured
+    ``error_code`` (Abilityai/lilu#654 — parity with the Claude parser).
+
+    rate-limit → 429, auth → 503, model refused → 400 with the #3012
+    ``model_unsupported`` body (``"Model unsupported: …"``, which the backend's
+    ``is_model_rejection`` already matches, so no subscription switch is
+    attempted), everything else → 500. A generic runtime failure is
+    deliberately 500 and NOT 503: 503 is the backend's AUTH signal and the
+    dispatch breaker counts AUTH only, so a 503 for an unrelated crash would
+    open the breaker on a healthy credential. The provider's HTTP status, when
+    the error event carried one, is read before any text match.
     """
     haystack = " ".join(s for s in (stderr or "", metadata.error_message or "") if s)
     lowered = haystack.lower()
-    if any(marker in lowered for marker in _RATE_MARKERS):
-        return 429, f"OpenCode rate limit: {(stderr or metadata.error_message or '')[:300]}"
-    if any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
+    reason = (stderr or metadata.error_message or "")[:300]
+    if error_status == 429 or any(marker in lowered for marker in _RATE_MARKERS):
+        metadata.error_type = "rate_limit"
+        metadata.error_code = "RATE_LIMIT"
+        return 429, f"OpenCode rate limit: {reason}"
+    if error_status in (401, 403) or any(pattern.search(haystack) for pattern in _AUTH_PATTERNS):
+        metadata.error_type = "authentication_failed"
+        metadata.error_code = "AUTH"
         return 503, (
-            f"OpenCode authentication failure: "
-            f"{(stderr or metadata.error_message or '')[:300]}. "
+            f"OpenCode authentication failure: {reason}. "
             "Check the provider credentials injected into this agent."
         )
+    if (
+        (error_name and _MODEL_NOT_FOUND_ERROR_NAMES.search(error_name))
+        or (error_status in (400, 404) and any(p.search(haystack) for p in _MODEL_NOT_FOUND_PATTERNS))
+    ):
+        metadata.error_type = "model_unsupported"
+        metadata.error_code = "model_unsupported"
+        return 400, _model_rejection_detail(
+            metadata.error_message or (stderr or "").strip() or "model refused by provider"
+        )
+    metadata.error_type = "execution_error"
+    metadata.error_code = "AGENT_ERROR"
     detail = (stderr or "").strip() or metadata.error_message or "see agent logs"
     return 500, f"OpenCode execution failed (exit code {return_code}): {detail[:300]}"
 
@@ -796,6 +925,12 @@ def classify_opencode_failure(
 # ---------------------------------------------------------------------------
 # Runtime
 # ---------------------------------------------------------------------------
+
+class OpenCodeTurnLimitError(RuntimeError):
+    """The turn started more steps than ``max_turns`` allows; the process group
+    has been killed. Converted to the 422 ``"Task exceeded turn limit:"`` the
+    Claude path raises, so ``failure_classifier`` reads both the same way."""
+
 
 class OpenCodeRuntime(AgentRuntime):
     """OpenCode CLI implementation of :class:`AgentRuntime`."""
@@ -884,6 +1019,7 @@ class OpenCodeRuntime(AgentRuntime):
         timeout_seconds: int,
         execution_id: Optional[str],
         concurrent_reader: bool = False,
+        max_turns: Optional[int] = None,
     ) -> Tuple[str, List[ExecutionLogEntry], ExecutionMetadata, List[Dict], Optional[str]]:
         execution_id = execution_id or str(uuid.uuid4())
         model = validate_provider_model(model)
@@ -971,6 +1107,9 @@ class OpenCodeRuntime(AgentRuntime):
         # watchdog below. An Event, not a flag, because the two live on
         # different threads.
         step_seen = threading.Event()
+        # Set by the reader when a `step_start` beyond `max_turns` arrives;
+        # acted on by the watchdog, which owns killing the group.
+        turn_limit_hit = threading.Event()
 
         def read_stdout() -> None:
             try:
@@ -996,6 +1135,8 @@ class OpenCodeRuntime(AgentRuntime):
                                     pub_err,
                                 )
                             _process_opencode_event(event, state)
+                            if max_turns is not None and state.step_count > max_turns:
+                                turn_limit_hit.set()
                     except Exception as line_err:  # noqa: BLE001
                         logger.debug(
                             "[OpenCode] per-line processing error (continuing): %s",
@@ -1024,7 +1165,12 @@ class OpenCodeRuntime(AgentRuntime):
                 remaining = timeout_seconds - elapsed
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(cmd, timeout_seconds)
-                if step_seen.is_set():
+                if turn_limit_hit.is_set():
+                    raise OpenCodeTurnLimitError(
+                        f"OpenCode started step {state.step_count} with "
+                        f"max_turns={max_turns}"
+                    )
+                if step_seen.is_set() and max_turns is None:
                     # Progress proven — the ordinary turn timeout governs the
                     # rest, exactly as before.
                     return process.wait(timeout=remaining)
@@ -1045,6 +1191,20 @@ class OpenCodeRuntime(AgentRuntime):
             stderr_thread.start()
             try:
                 return_code = wait_with_watchdog()
+            except OpenCodeTurnLimitError:
+                logger.warning(
+                    "[OpenCode] execution %s reached max_turns=%s — killing group",
+                    execution_id, max_turns,
+                )
+                _terminate_process_group(
+                    process, graceful_timeout=5, pgid=process_pgid,
+                    execution_tag=execution_id,
+                )
+                _drain_bounded(
+                    process, stdout_thread, stderr_thread, grace=3,
+                    pgid=process_pgid, execution_tag=execution_id,
+                )
+                raise
             except OpenCodeStallError:
                 logger.error(
                     "[OpenCode] execution %s stalled — no step_start within %ss; "
@@ -1109,6 +1269,18 @@ class OpenCodeRuntime(AgentRuntime):
                     status_code=504,
                     detail=f"OpenCode execution timed out after {timeout_seconds} seconds",
                 )
+            except OpenCodeTurnLimitError:
+                metadata.error_type = "max_turns"
+                metadata.num_turns = state.step_count
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"Task exceeded turn limit: OpenCode reached max_turns="
+                        f"{max_turns} (step {state.step_count} started). Consider "
+                        "increasing max_turns_task in guardrails or breaking into "
+                        "smaller subtasks."
+                    ),
+                )
             except OpenCodeStallError:
                 # Deliberately NOT converted to an HTTPException here:
                 # `_execute_with_stall_retry` retries a stall once on a fresh
@@ -1122,7 +1294,8 @@ class OpenCodeRuntime(AgentRuntime):
 
             if return_code != 0:
                 status_code, detail = classify_opencode_failure(
-                    return_code, stderr_output, metadata
+                    return_code, stderr_output, metadata,
+                    error_status=state.error_status, error_name=state.error_name,
                 )
                 logger.error("[OpenCode] %s", detail)
                 raise HTTPException(status_code=status_code, detail=detail)
@@ -1409,12 +1582,12 @@ class OpenCodeRuntime(AgentRuntime):
                 "step 3 of Abilityai/lilu#257 — not enforced by this build.",
                 allowed_tools,
             )
-        if max_turns is not None:
-            logger.info(
-                "[OpenCode] max_turns=%s requested; `opencode run` has no turn-cap "
-                "flag — relying on the %ss wall-clock timeout.",
-                max_turns, timeout_seconds,
-            )
+        # GUARD-003 parity with the Claude headless path: caller value wins,
+        # then guardrails, then the default. `opencode run` has no turn-cap
+        # flag, so the cap is enforced by counting `step_start` events and
+        # killing the group (Abilityai/lilu#654).
+        if max_turns is None:
+            max_turns = int(_load_guardrails().get("max_turns_task") or _DEFAULT_MAX_TURNS_TASK)
 
         try:
             response, log, metadata, _raw, session_id = await self._execute_with_stall_retry(
@@ -1425,6 +1598,7 @@ class OpenCodeRuntime(AgentRuntime):
                 timeout_seconds=timeout_seconds,
                 execution_id=execution_id,
                 concurrent_reader=True,
+                max_turns=max_turns,
             )
         except OpenCodeModelShapeError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
