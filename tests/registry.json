@@ -1,6 +1,29 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1066_credential_sink.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The secret sink behind the Workspace secret field (`client_portal.asks.service.provide_credential` -> `services/credential_sink.set_env_value`): one line of the agent's `.env` set through its own read + inject (round-tripped against the agent image's reader, duplicates collapsed, every other byte kept); staged into the runtime identity scrub FIRST and fail-closed (503 `scrub_unavailable`); a stopped or missing agent a named 409 `agent_not_running`; one writer per agent (`env_busy`); the 256 KiB file cap (`env_too_large`); every refusal names the step and never the value; the value absent from logs, audit, the ask row, the response and the wake; the ask answered `provided` by name; a compare-and-set lost after the write is 409 `already_resolved` with `credential_written: true`; an AST guard that the module never formats, logs, concatenates or raises the value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_route_gates.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "Who may reach `POST /api/enterprise/client-portal/asks/{id}/credential` (the ent#719 shape, through the real router and the real `get_portal_principal`): an agent-scoped key refused 403 before the row is read; a system or ops key 403 `person_required`; a JWT person, a user-scoped key, a Workspace-only `user` and a portal session admitted; a stranger the uniform 404; no credential 401; the typed-answer route refuses the kind 422 `credential_answer_via_field`; a malformed body never echoes the value; the list shows `credential_name` to the addressee."
+    },
+    {
       "file": "unit/test_ent1066_credential_ask_kind.py",
       "feature": "trinity-enterprise#1066",
       "added": "2026-11-02",

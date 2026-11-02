@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WorkspaceAsk(BaseModel):
@@ -135,6 +135,17 @@ class WorkspaceAskAnswer(BaseModel):
     response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: see `OperatorResponse.acknowledge_divergence`.
     acknowledge_divergence: bool = False
+
+
+class WorkspaceCredentialValue(BaseModel):
+    """The secret field's body (trinity-enterprise#1066): the value the person
+    typed for a `credential` ask. TYPES ONLY — no `max_length`, no pattern:
+    every bound is the sink's (`credential_sink._check_value`), so the one
+    refusal a value gets is a named 422 that never echoes it, and no validator
+    path ever handles the value a second time. Unknown fields are refused."""
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
 
 
 # --- trinity-enterprise#610 PR A2, §3g L7 (E1): an ask's context ---------------
