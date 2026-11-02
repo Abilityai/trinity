@@ -235,6 +235,8 @@ export function createSystemTools(
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
+        "`deploy: false` members are skipped and listed in `agents_declared_only[]`; a manifest whose every " +
+        "member is `deploy: false` is refused with a 400 `nothing_to_deploy` (use apply_system to report on them). " +
         "Pass strict: true to restore abort-on-first-error.",
       parameters: z.object({
         manifest: z
@@ -312,16 +314,17 @@ export function createSystemTools(
     },
 
     // ========================================================================
-    // list_systems - List all deployed systems (agents grouped by prefix)
+    // list_systems - List deployed systems by their system tag (#4129)
     // ========================================================================
     listSystems: {
       name: "list_systems",
       description:
-        "List all deployed systems with their agents. " +
-        "Groups agents by system prefix (before first '-'). " +
-        "For example, agents 'content-production-orchestrator' and 'content-production-writer' " +
-        "are grouped under system 'content-production'. " +
-        "Returns system summaries with agent counts and details.",
+        "List the systems deployed or applied from a manifest, by their system tag, with " +
+        "the agents you can access that carry it. A tag is listed only when it is known " +
+        "to be a system (its auto-created system view, an apply of that manifest, or a " +
+        "member named '<system>-*'); a plain tag such as 'prod' is not. Names are never " +
+        "split at a hyphen, so a system whose members are named bare (e.g. 'writer') " +
+        "lists under its own name. Returns system summaries with agent counts and details.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
@@ -353,6 +356,8 @@ export function createSystemTools(
         "Restart all agents belonging to a system. " +
         "Membership is resolved from the system's tag when the agents carry one, " +
         "falling back to the '{system_name}-*' name prefix. " +
+        "A system whose tagged members all lack that prefix is read as bare-named, and then " +
+        "an untagged '{system_name}-*' agent is not a member. " +
         "Stops then starts each member. " +
         "Useful after configuration changes (credentials, schedules, shared folders). " +
         "Returns list of successfully restarted agents and any failures. " +
@@ -400,7 +405,8 @@ export function createSystemTools(
           .describe(
             "System name to export (e.g., 'content-production'). " +
             "Members are the agents carrying the system's tag (every deploy and apply writes it), " +
-            "plus untagged agents named '{system_name}-*' as a fallback."
+            "plus untagged agents named '{system_name}-*' as a fallback — except when every " +
+            "tagged member lacks that prefix (a bare-named system): then the tag alone decides."
           ),
         naming: z
           .enum(["prefixed", "bare"])
@@ -469,9 +475,9 @@ export function createSystemTools(
           .describe(
             "System to remove (e.g., 'content-production'). Members are the "
             + "agents tagged with the system, else those matching "
-            + "'{system_name}-*'. Do NOT take this name from list_systems, "
-            + "which groups by the last hyphen and can report a name that is "
-            + "not a real system."
+            + "'{system_name}-*'. list_systems lists systems deployed or applied "
+            + "from a manifest, by their tag; take a system name from a deploy "
+            + "or apply result, or confirm it with the detail route."
           ),
         dry_run: z
           .boolean()
@@ -556,29 +562,30 @@ export function createSystemTools(
       canAccess: applySystemAccess,
       description:
         "Reconcile a live instance to a system manifest: the idempotent sibling of deploy_system, "
-        + "same manifest format. Per declared member: absent → created; existing → its declared fields "
-        + "updated in place; an agent carrying the system's tag but not declared → reported as drift. "
-        + "It never deletes, stops, restarts, renames or suffixes an existing agent, so applying an "
-        + "unchanged manifest twice changes nothing. "
+        + "same manifest format. Per declared member: absent → created; existing → declared fields "
+        + "updated in place; an undeclared agent carrying the system's tag → reported as drift. "
+        + "It never deletes, stops, restarts, renames or suffixes an existing agent, so re-applying an "
+        + "unchanged manifest changes nothing. "
         + "dry_run defaults to TRUE, unlike deploy_system: a call without it returns the plan "
         + "(per-member verdicts create | update | unchanged | blocked, drift, blockers) and writes "
         + "nothing; pass dry_run: false only to apply a plan a human has reviewed. "
         + "Switch on `status`, never the HTTP code: 'valid' | 'invalid' on a dry run; 'applied' | "
         + "'partial' | 'failed' | 'refused' on a real run (a refused run wrote nothing). A result "
         + "without `status` (a 400/422 manifest error, a 401, an unexpected 500) has `success: false` "
-        + "and a `detail`: read those. Every entry in "
-        + "`blockers[]` names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
-        + "evidence (an agent that matches the system by NAME ONLY) is refused before any write; its "
+        + "and a `detail`. Each "
+        + "`blockers[]` entry names its `code`, a `remedy` and whether it is `retryable`. Weak membership "
+        + "evidence (an agent matching the system by NAME ONLY) is refused before any write; its "
         + "remedy says which tag to add (tag_agent). Under `naming: bare` an untagged agent the manifest "
         + "declares is adopted instead (one tag write, listed in `adopted[]`). "
         + "Per-member skills, skill_sets, gates, grants, seat and person_seats are additive: an "
         + "absent key or a held extra is reported, never revoked; grants and seat are written only for an "
-        + "admin in a signed-in session; from an MCP key they are only reported. `summary` counts write | report | unobserved per group. "
+        + "admin in a signed-in session; from an MCP key they are only reported. `summary` counts write | report | unobserved per group; "
+        + "a real run's `write` and `adopted[]` name only what landed. "
         + "Human-only: needs the 'creator' role AND a person's credential (an interactive session or an "
         + "operator's own user-scoped key); agent, connector and system sessions are not shown it, "
-        + "and the backend refuses those keys (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
-        + "do NOT fall back to deploy_system there, it is create-only and would create suffixed "
-        + "copies (`_2`) of members that already exist.",
+        + "and their keys are refused (`not_permitted`). On a build without apply mode the result is `not_available: true`: "
+        + "do NOT fall back to deploy_system: it is create-only and would make suffixed "
+        + "copies (`_2`) of existing members.",
       parameters: z.object({
         manifest: z
           .string()

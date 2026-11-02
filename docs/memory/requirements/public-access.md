@@ -265,7 +265,7 @@
   - Delivery stays best-effort: per-channel consent, a missing binding or token, or a failed send suppresses the note.
 - **Per-channel consent units**:
   - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
-  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
+  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `assert_person`: only a signed-in session or the person's own `user` key passes, and every machine principal is refused; trigger mode and welcome on the same route stay agent-callable). Requires `is_active` too.
   - **Telegram DM**: **consent-by-construction** — a chat link exists only because the user personally cold-started the bot (Telegram's own cold-DM prohibition is the transport guarantee); a block surfaces as a 403 the send handles as a logged no-op.
   - Unknown Telegram destination (no group config, no chat link) → suppress with log — never fire a send destined to fail.
   - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
@@ -296,7 +296,7 @@
 - **Database Changes**:
   - `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` — dual-track migration (SQLite `telegram_progress_indicator` in `db/migrations.py` + Alembic `0031_telegram_progress_indicator`), plus `db/schema.py` / `db/tables.py` DDL parity
 - **API Endpoints**:
-  - `PUT /api/agents/{name}/telegram/progress-indicator` — owner-only (`OwnedAgentByName`) **+ `reject_agent_principal`** (human-only: an agent-scoped key resolves to the owner and could otherwise flip its own toggle — ent#223 lesson); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — **`Depends(require_person)`** (human-only: only a signed-in session or the person's own `user` key passes, and every machine principal is refused before the ownership lookup — ent#223 lesson) + owner-only (`OwnedAgentByName`); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
   - `GET /api/agents/{name}/telegram` — response gains `progress_indicator_enabled` (null when unconfigured); endpoint hardened to `AuthorizedAgentByName` (see §15.1c Security)
 - **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
 - **Known residuals**:

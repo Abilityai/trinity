@@ -68,6 +68,11 @@ class WorkspaceAsk(BaseModel):
     # when they did. Platform-written; Discuss on an ask that has one continues
     # it instead of opening a second.
     discussion_chat_id: Optional[str] = None
+    # trinity-enterprise#981: the project a row the platform raised about this
+    # person is attached to — `{id, task_id, event}` — from the platform-written
+    # context keys only (stripped from agent content at both ingestion
+    # boundaries); None when the row carries no project.
+    project: Optional[Dict[str, Any]] = None
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
     # A client never sees the reason (it names the operator's infrastructure)

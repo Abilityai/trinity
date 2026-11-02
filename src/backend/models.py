@@ -1456,6 +1456,9 @@ class SystemDeployResponse(BaseModel):
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
+    # #4130: final names of the `deploy: false` members, skipped and never
+    # created (the `warnings` line stays beside it). Every branch sets it.
+    agents_declared_only: List[str] = []
     prompt_updated: bool
     permissions_configured: int = 0
     schedules_created: int = 0
@@ -1529,8 +1532,9 @@ class SystemApplyMember(BaseModel):
     # platform's own drift predicates; independent of this run's writes. Apply
     # never restarts an existing member.
     restart_required: bool = False
-    # None on a dry run or a refused run; otherwise whether every write planned
-    # for this member succeeded.
+    # None on a dry run or a refused run, and for a declared-only member (nothing
+    # is planned or attempted for it, #4130); otherwise whether every write
+    # planned for this member succeeded.
     applied: Optional[bool] = None
     # trinity-enterprise#1030: the config groups the platform could not
     # observe for this member (no hook answers them on this install) — never
@@ -1576,6 +1580,10 @@ class SystemApplyFailure(BaseModel):
     short_name: str
     step: str
     reason: str  # Sanitized, truncated (`system_service._failure_reason`)
+    # What the write was for when a step writes more than one thing on a
+    # member — the skill(s), set, gate's skill, capability, seat, edge target
+    # or tag (#4130); None for a member-wide write.
+    key: Optional[str] = None
 
 
 class SystemApplyAdoption(BaseModel):
@@ -1612,13 +1620,18 @@ class SystemApplyResponse(BaseModel):
     # trinity-enterprise#1030: agents this run adopts (dry run) or adopted
     # into the system by tagging it, kept apart from `members` because adoption
     # is when an agent joins `restart_system` / teardown's reach.
+    # #4130: a dry run lists the plan; a refused run lists nobody; a real run
+    # lists only the members whose system tag landed.
     adopted: List[SystemApplyAdoption] = []
     # trinity-enterprise#1030: per config group — `skills`, `grants`, `gates`,
     # `roles` — and `members`, each `{"write": n, "report": n, "unobserved": n}`
     # (services/system_apply/summary.py). `grants` also carries `held_back:
     # [{"name", "grants": [...]}]` and `roles` `held_back: [{"name", "seat"}]`,
     # so a grant or seat the CALLER's credential could not write is loud
-    # (theme 3). Blocked members are counted nowhere.
+    # (theme 3). Blocked members are counted nowhere. #4130: `write` is the
+    # plan on a dry run ("would make") and only the LANDED writes on a real
+    # run, each by its own key (two sets on one member, one held: 1), none on
+    # a refused run; `report` / `unobserved` are plan counts.
     summary: Dict[str, Dict[str, Any]] = {}
     # What a real run actually did, for the router's audit row and its thin
     # `agent_tags_changed` triggers (never the plan: a create that failed is
@@ -2506,7 +2519,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -2516,7 +2529,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None
@@ -4445,8 +4458,10 @@ class ScheduleResponse(BaseModel):
     deliver_to_workspace_email: Optional[str] = None
     # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
     # webhook (its creator, the agent owner, an admin). Computed server-side by
-    # the same predicate the webhook routes enforce — the client has no numeric
-    # user id to compare an owner id against, and the creator's id is not exposed.
+    # both checks the webhook routes enforce — the principal rule (a person, or an
+    # agent key holding `schedules.manage`, trinity-enterprise#719) and the share
+    # tier — the client has no numeric user id to compare an owner id against,
+    # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
 
@@ -4864,7 +4879,7 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
-    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    # ent#265: human-only arm — the router calls assert_person when set.
     allow_proactive: Optional[bool] = None
     # ent#600: human-only arm too — recording a group's conversation is a
     # privacy decision the owner makes, not one an agent grants itself.
@@ -4910,8 +4925,8 @@ class ChangePasswordRequest(BaseModel):
     service with the rule first-run setup uses, so the reasons come back named."""
     current_password: str = Field(..., max_length=1024)
     new_password: str = Field(..., max_length=1024)
-    # Also revoke the MCP API keys this person minted (user / ops / portal
-    # delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    # Also revoke the MCP API keys this person minted (user / ops / ops_write /
+    # portal delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
     revoke_api_keys: bool = False
 
 

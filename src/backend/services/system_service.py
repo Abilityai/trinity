@@ -19,7 +19,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 from fastapi import HTTPException, Request
 
@@ -73,6 +73,11 @@ _UNLISTED_MANIFEST_KEYS = frozenset({"naming"})
 
 # trinity-enterprise#1030: the values `naming:` may take. `prefixed` is today.
 MANIFEST_NAMING_MODES = ("prefixed", "bare")
+# #4131: a manifest key accepts what the platform's own name producers write —
+# the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
+# chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
+# exported suffixed member must parse again, in both naming modes.
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -340,9 +345,11 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
 
     # Validate agent names
     for agent_name in manifest.agents.keys():
-        if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', agent_name):
+        if not MANIFEST_KEY_RE.match(agent_name):
             raise ValueError(
-                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric and hyphens"
+                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric, "
+                "hyphens, underscores or dots, starting with a letter or digit and "
+                "not ending with a hyphen"
             )
 
     # Validate template references
@@ -448,6 +455,11 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 "'reports-to-*' carry the org chart and can only be set by a "
                 "human operator through the tags API"
             )
+
+    # The system name is a tag writer too: `configure_tags` applies it to every
+    # agent the manifest creates, so it meets the same reserved-prefix rule as
+    # the manifest's own tags (trinity-enterprise#719).
+    _reject_org_tag(manifest.name, "System name")
 
     # Validate default_tags
     if manifest.default_tags:
@@ -979,7 +991,8 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     return system_membership(system_name, agent_names).members
 
 
-def system_membership(system_name: str, agent_names: List[str]) -> SystemMembership:
+def system_membership(system_name: str, agent_names: List[str],
+                      naming: Optional[str] = None) -> SystemMembership:
     """Which agents belong to `system_name` (#2373).
 
     THE ONE membership predicate. `get_system`, `restart_system` and
@@ -1008,7 +1021,20 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     of the other are ambiguous whenever no tag distinguishes them — deployed
     before tagging, or during a tag-read outage. Tagging is what removes the
     ambiguity, and every system deployed since ent#124 has it.
+
+    `naming` (#4131): under `bare` a prefix is no evidence of anything, so the
+    prefix step is dropped and membership is the tag. Only apply knows the
+    naming (it holds the manifest). With `None` (restart, get, export: nothing
+    stores the naming) bare is INFERRED the way export infers it — tags
+    readable and every tagged member unprefixed — and the prefix step is then
+    dropped too; a prefixed system keeps the union above. The tag read still
+    runs under `bare`, so an outage reports `tags_readable=False` (apply
+    refuses) instead of adopting over a guess.
     """
+    if naming is not None and naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{naming}': naming must be 'prefixed' or 'bare'"
+        )
     if not system_name or not agent_names:
         return SystemMembership(members=[])
     tags_readable = True
@@ -1031,8 +1057,13 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     tagged = [n for n in agent_names if system_name in (tags_by_agent.get(n) or [])]
 
     prefix = f"{system_name}-"
+    if naming is None and tags_readable and tagged and not any(
+            n.startswith(prefix) for n in tagged):
+        naming = "bare"  # #4131 (D): export's own inference
     narrowed = []
     for name in agent_names:
+        if naming == "bare":
+            break  # #4131: no prefix step for a bare system
         if not name.startswith(prefix) or name in tagged:
             continue
         # A longer sibling system's member (`acme-extra-worker` under `acme`) is
@@ -1218,8 +1249,11 @@ async def assign_manifest_skills(
                 warnings.append(f"Skill '{n}' not assigned to '{name}': {verdict[0]}.")
         try:
             if ok:
-                await skill_assignment_service.assign_and_deliver(
-                    name, ok, current_user, acting_agent=acting)
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_and_deliver(
+                        name, ok, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
             for set_name in set_names:
                 verdict = apply_skills.library_verdict_set(set_name)
                 if verdict is not None:
@@ -1231,8 +1265,11 @@ async def assign_manifest_skills(
                     warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
                                     f"{apply_gates.not_written_reason(held_by_set)}.")
                     continue
-                await skill_assignment_service.assign_set_and_deliver(
-                    name, set_name, current_user, acting_agent=acting)
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_set_and_deliver(
+                        name, set_name, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
         except Exception as e:  # noqa: BLE001 — the next member still gets its skills
             reason, _ = _failure_reason(e)
             logger.exception(f"Skill assignment failed for '{name}'")
@@ -1429,6 +1466,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # be a strict subset of `agents` and permission edges to real members would
     # be dropped from the backup in silence.
     member_names = {a['name'] for a in agents}
+    # #4132: by name, so two exports of one system are byte-identical whatever
+    # order the roster read returned — members, edges and every header list
+    # follow this order.
+    agents = sorted(agents, key=lambda a: a['name'])
 
     # Extract short names (remove system prefix)
     agent_configs = {}
@@ -1451,6 +1492,8 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # header so an export never reads as "nothing here" when it means "unknown".
     unobserved_reads: List[str] = []
     withheld: List[str] = []
+    # #4132: members whose person seats an export can never state.
+    person_seats_unread: List[str] = []
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
@@ -1491,7 +1534,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         try:
             resources = _export_resources(full_name, agent.get('resources'))
             if resources:
-                config["resources"] = resources
+                config["resources"] = dict(sorted(resources.items()))
         except Exception as e:
             logger.warning(f"Failed to get the resources of {full_name}: {e}")
             unobserved_reads.append(f"resources of {full_name}")
@@ -1513,16 +1556,20 @@ def export_manifest(system_name: str, agents: List[Dict], *,
         except Exception as e:
             logger.warning(f"Failed to get git config for {full_name}: {e}")
 
-        # Get folders config from database
+        # Get folders config from database. #4128: `get_agent_folder_config`
+        # never existed, and the row is a pydantic model, not a dict — the read
+        # apply's snapshot makes, by attribute. A failed read is named: an
+        # absent `folders` would otherwise read as "both off".
         try:
-            folder_config = db.get_agent_folder_config(full_name)
-            if folder_config and (folder_config['expose_enabled'] or folder_config['consume_enabled']):
+            folder_config = db.get_shared_folder_config(full_name)
+            if folder_config is not None and (folder_config.expose_enabled or folder_config.consume_enabled):
                 config["folders"] = {
-                    "expose": bool(folder_config['expose_enabled']),
-                    "consume": bool(folder_config['consume_enabled'])
+                    "expose": bool(folder_config.expose_enabled),
+                    "consume": bool(folder_config.consume_enabled)
                 }
         except Exception as e:
             logger.warning(f"Failed to get folder config for {full_name}: {e}")
+            unobserved_reads.append(f"folders of {full_name}")
 
         # Get schedules from database
         try:
@@ -1536,7 +1583,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                         "enabled": bool(s.enabled),
                         "timezone": s.timezone
                     }
-                    for s in schedules
+                    for s in sorted(schedules, key=lambda s: s.name)
                 ]
         except Exception as e:
             logger.warning(f"Failed to get schedules for {full_name}: {e}")
@@ -1546,7 +1593,7 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             agent_tags = db.get_agent_tags(full_name)
             # Filter out the system prefix tag (auto-applied on import)
             # so export shows only explicitly configured tags
-            non_prefix_tags = [t for t in agent_tags if t != system_name]
+            non_prefix_tags = sorted(t for t in agent_tags if t != system_name)
             if non_prefix_tags:
                 config["tags"] = non_prefix_tags
         except Exception as e:
@@ -1606,6 +1653,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
             except Exception as e:
                 logger.warning(f"Failed to get the seat of {full_name}: {e}")
                 unobserved_reads.append(f"seat of {full_name}")
+        # #4132: the seam answers per seat and never lists who fills what, so
+        # the person seats a member needs can never be read back — for any
+        # caller, so the line names every member, not only seat-readable ones.
+        person_seats_unread.append(full_name)
 
         agent_configs[short_name] = config
 
@@ -1649,87 +1700,33 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # snapshot uses; `get_agent_permissions` never existed, so until
     # trinity-enterprise#1030 every export dropped this block behind a
     # WARNING.
+    #
+    # #4128: ONE pass over every member. The block used to probe `agents[0]`
+    # and only looked further if that member had edges, so a system whose
+    # first member had none exported no edges at all. Edges are filtered to
+    # members before anything is compared (#2373: an edge leaving the system
+    # cannot be represented), and the mesh is stated over the members that
+    # have a manifest key — a tag-only member has none and the header names it.
     try:
-        # Check first agent's permissions to infer pattern
-        if agents:
-            first_agent = agents[0]['name']
-            perms = db.get_permitted_agents(first_agent)
+        edges: Dict[str, List[str]] = {}
+        for agent in agents:
+            short_name = _member_short_name(agent['name'], system_name, naming)
+            if short_name is None:
+                continue
+            targets = {
+                _member_short_name(target, system_name, naming)
+                for target in db.get_permitted_agents(agent['name'])
+                if target in member_names
+            }
+            edges[short_name] = sorted(t for t in targets if t is not None and t != short_name)
 
-            if perms:
-                # Try to detect full-mesh pattern
-                all_agents_names = [a['name'] for a in agents]
-                permitted_targets = list(perms)
-
-                # Full-mesh: agent can call all other agents
-                expected_targets = [n for n in all_agents_names if n != first_agent]
-                if set(permitted_targets) == set(expected_targets):
-                    # Verify other agents also have full-mesh
-                    is_full_mesh = True
-                    for agent in agents:
-                        agent_perms = db.get_permitted_agents(agent['name'])
-                        expected = [n for n in all_agents_names if n != agent['name']]
-                        actual = list(agent_perms)
-                        if set(actual) != set(expected):
-                            is_full_mesh = False
-                            break
-
-                    if is_full_mesh:
-                        manifest_dict["permissions"] = {"preset": "full-mesh"}
-                    else:
-                        # Export explicit permissions
-                        # #2373: the sibling branch below filters on membership
-                        # and this one did not — a permission edge pointing
-                        # OUTSIDE the system was blind-sliced into a garbage
-                        # short name, which then failed validate_manifest's
-                        # "unknown agent in permissions" check on re-deploy. The
-                        # round trip was broken by the export, not the import.
-                        explicit_perms = {}
-                        for agent in agents:
-                            # #2373 review (C1): prefix-safe on BOTH sides of the
-                            # edge. A tag-only member has no manifest key, so its
-                            # edges cannot be represented — skip rather than emit
-                            # a sliced-to-garbage key that breaks the round trip.
-                            short_name = _member_short_name(agent['name'], system_name, naming)
-                            if short_name is None:
-                                continue
-                            agent_perms = db.get_permitted_agents(agent['name'])
-                            targets = [
-                                t for t in (
-                                    _member_short_name(target, system_name, naming)
-                                    for target in agent_perms
-                                    if target in member_names
-                                ) if t is not None
-                            ]
-                            if targets:
-                                explicit_perms[short_name] = targets
-
-                        if explicit_perms:
-                            manifest_dict["permissions"] = {"explicit": explicit_perms}
-                else:
-                    # Export explicit permissions
-                    explicit_perms = {}
-                    for agent in agents:
-                        # #2373 review (C1): see the sibling branch — membership
-                        # admits tag-only members, which have no manifest key.
-                        short_name = _member_short_name(agent['name'], system_name, naming)
-                        if short_name is None:
-                            continue
-                        agent_perms = db.get_permitted_agents(agent['name'])
-                        # #2373: membership, not the prefix — `acme` must not
-                        # export an edge to an `acme-extra` agent as though it
-                        # were its own member.
-                        targets = [
-                            t for t in (
-                                _member_short_name(target, system_name, naming)
-                                for target in agent_perms
-                                if target in member_names
-                            ) if t is not None
-                        ]
-                        if targets:
-                            explicit_perms[short_name] = targets
-
-                    if explicit_perms:
-                        manifest_dict["permissions"] = {"explicit": explicit_perms}
+        keyed = set(edges)
+        # Fewer than two keyed members is never a mesh: with no edge to state,
+        # `full-mesh` would read as a claim about the topology.
+        if len(keyed) >= 2 and all(set(v) == keyed - {k} for k, v in edges.items()):
+            manifest_dict["permissions"] = {"preset": "full-mesh"}
+        elif any(edges.values()):
+            manifest_dict["permissions"] = {"explicit": {k: v for k, v in edges.items() if v}}
 
     except Exception as e:
         logger.warning(f"Failed to export permissions for system {system_name}: {e}")
@@ -1751,6 +1748,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
 
+    if person_seats_unread:
+        yaml_output = (f"# unobserved: person seats are not exported (the assignment module "
+                       f"answers per seat and never lists them): "
+                       f"{', '.join(person_seats_unread)}\n" + yaml_output)
     yaml_output = DECLARED_ONLY_EXPORT_HEADER + "\n" + yaml_output  # CP5, T6 = A
     if withheld:
         # The same line whether or not anything is held: it reports the caller's
@@ -2246,6 +2247,13 @@ async def deploy_manifest(
             {s: c for s, c in manifest.agents.items() if c.deploy},
             naming=manifest.naming,
         )
+        if not agent_names:
+            # #4130: every member is `deploy: false` — a property of the
+            # manifest, named before any read (apply reports on them instead).
+            raise HTTPException(status_code=400, detail=(
+                "nothing_to_deploy: every member is declared-only (deploy: false); deploy "
+                "creates nothing. Remove deploy: false from a member, or use apply to "
+                "report on them"))
         all_warnings = validation_warnings + name_warnings
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
@@ -2352,6 +2360,7 @@ async def deploy_manifest(
                 system_name=manifest.name,
                 agents_created=[],
                 agents_to_create=agents_to_create,
+                agents_declared_only=declared_only,
                 prompt_updated=bool(manifest.prompt),
                 warnings=all_warnings,
                 failed=preview_failed,
@@ -2440,6 +2449,7 @@ async def deploy_manifest(
                 status="failed",
                 system_name=manifest.name,
                 agents_created=[],
+                agents_declared_only=declared_only,
                 prompt_updated=False,
                 warnings=all_warnings,
                 failed=failed
@@ -2637,6 +2647,7 @@ async def deploy_manifest(
             status="partial" if failed else "deployed",
             system_name=manifest.name,
             agents_created=created_agents,
+            agents_declared_only=declared_only,
             prompt_updated=prompt_updated,
             permissions_configured=permissions_count,
             schedules_created=schedules_count,
@@ -2769,6 +2780,10 @@ class ApplyMemberState:
     # trinity-enterprise#1030 CP3: every stored gate row by skill key
     # (tombstones included), read only when the member declares `gates:`.
     gates: Dict[str, dict] = field(default_factory=dict)
+    # trinity-enterprise#1043: every skill the member holds (casefolded; set-
+    # derived included), read with the gates, so the plan knows which declared
+    # gate sits on a skill that keeps running if its write fails.
+    skill_names: Set[str] = field(default_factory=set)
     # trinity-enterprise#1030 CP4: the seat the member holds (None = not
     # observed on this install) and each declared person seat's status.
     seat: Optional[Dict[str, object]] = None
@@ -2779,6 +2794,12 @@ class ApplyMemberState:
     declared_only: bool = False
     live: bool = False
     template_in_catalog: Optional[bool] = None
+    # #4131: the declared-only name is an agent on the caller's roster that
+    # carries the system tag, so restart and teardown reach it.
+    tagged_by_system: bool = False
+    # #4131: an untagged roster agent holding the name is a member by the
+    # `<system>-` prefix alone (prefixed mode), so restart reaches it by name.
+    prefixed_by_system: bool = False
 
 
 @dataclass
@@ -2974,7 +2995,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     # 2. Membership through THE one predicate, and the evidence gate (AC5).
     declared = declared_names(manifest)
     if roster_ok:
-        snapshot.membership = system_membership(system, snapshot.roster)
+        snapshot.membership = system_membership(system, snapshot.roster, naming=manifest.naming)
         if not snapshot.membership.tags_readable:
             blockers.append(_apply_blocker(
                 "membership_tags_unreadable", None,
@@ -2999,6 +3020,12 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             continue
         if not manifest.agents[short].deploy:  # trinity-enterprise#1030 CP5
             state.declared_only, state.live = True, bool(taken)
+            state.tagged_by_system = bool(  # #4131
+                roster_ok and snapshot.membership.tags_readable
+                and snapshot.membership.evidence.get(name) in ("tag", "both"))
+            state.prefixed_by_system = bool(
+                roster_ok and snapshot.membership.tags_readable
+                and snapshot.membership.evidence.get(name) == "prefix")
             try:
                 state.template_in_catalog = _template_in_catalog(manifest.agents[short].template)
             except Exception as e:  # noqa: BLE001
@@ -3106,6 +3133,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             if manifest.agents[state.short_name].gates is not None:  # trinity-enterprise#1030 CP3
                 from services.system_apply import gates as apply_gates
                 state.gates = apply_gates.read_member(name)
+                state.skill_names = apply_gates.read_held_skills(name)  # trinity-enterprise#1043
             from services.system_apply import seats as apply_seats
             if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
                 state.seat, state.person_seats = apply_seats.read_member(
@@ -3132,8 +3160,13 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     if roster_ok and snapshot.membership.tags_readable:
         unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
         declared_set = set(declared.values())
+        # #4131: a `deploy: false` member is never written, so the gate (which
+        # protects writes) does not apply, and "add the tag" would make it
+        # restart-reachable. Excluded in both naming modes.
+        declared_only = {s.name for s in snapshot.members.values() if s.declared_only}
         for member in snapshot.membership.members:
-            if snapshot.membership.evidence.get(member) != "prefix" or member in unavailable:
+            if (snapshot.membership.evidence.get(member) != "prefix" or member in unavailable
+                    or member in declared_only):
                 continue
             is_declared = member in declared_set
             blockers.append(_apply_blocker(
@@ -3431,6 +3464,9 @@ class ApplyPlan:
     warnings: List[str] = field(default_factory=list)
     default_resources: Optional[Dict[str, str]] = None
     adopted: List["SystemApplyAdoption"] = field(default_factory=list)
+    # #4130: the plan's adoption line, so a refused or real run can drop or
+    # restate it by identity.
+    adoption_warning: Optional[str] = None
     # trinity-enterprise#1030: `SystemApplyResponse.summary`, per config group.
     summary: Dict[str, Dict] = field(default_factory=dict)
 
@@ -3824,17 +3860,31 @@ def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers
     from services.system_apply import gates as apply_gates
     apply_gates.plan(
         mp, stored=None if state is None else state.gates, blockers=blockers,
-        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp)
+        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp,
+        skill_names=None if state is None else state.skill_names)
 
 
 _DECLARED_ONLY_LIVE_NOTE = (
     "a live agent holds this name; apply never deletes it and never reconciles it. Remove "
     "`deploy: false` to manage it as a member, or delete it by hand if it is unwanted")
+# #4131: `deploy: false` governs apply only. Restart and teardown reach a
+# declared-only name that is a member by the system tag (or, in prefixed mode,
+# by the `<system>-` prefix of an untagged name).
+_DECLARED_ONLY_TAGGED_NOTE = (
+    "this agent carries the system tag '{system}', so restarting the system restarts it "
+    "and a teardown of the system removes it; `deploy: false` governs apply only. Remove "
+    "the tag by hand (DELETE /api/agents/{name}/tags/{system}, or the untag_agent tool) "
+    "if it should stay out")
+_DECLARED_ONLY_PREFIXED_NOTE = (
+    "this agent is untagged but its name starts with '{system}-', so restarting the system "
+    "restarts it and a teardown of the system removes it; `deploy: false` governs apply "
+    "only. Rename the agent if it should stay out")
 _TEMPLATE_NOT_IN_CATALOG_NOTE = (
     "apply never adds a template to the catalog; an admin adds it in Settings")
 
 
-def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState) -> None:
+def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState,
+                        system: str = "") -> None:
     """trinity-enterprise#1030 CP5: a `deploy: false` member is named, never
     run — reports only, no op, whatever else it declares."""
     if state.blocked:
@@ -3851,6 +3901,14 @@ def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState) -> None:
     if state.live:
         mp.changes.append(_apply_change("members", "report", "declared_only_member_live",
                                         current=mp.name, note=_DECLARED_ONLY_LIVE_NOTE))
+    if state.tagged_by_system:  # #4131
+        mp.changes.append(_apply_change(
+            "members", "report", "declared_only_member_tagged", current=mp.name,
+            note=_DECLARED_ONLY_TAGGED_NOTE.format(system=system, name=mp.name)))
+    elif state.prefixed_by_system:  # #4131
+        mp.changes.append(_apply_change(
+            "members", "report", "declared_only_member_prefixed", current=mp.name,
+            note=_DECLARED_ONLY_PREFIXED_NOTE.format(system=system)))
 
 
 def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -3902,7 +3960,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         before = len(blockers)
 
         if state.declared_only:  # trinity-enterprise#1030 CP5
-            _plan_declared_only(mp, state)
+            _plan_declared_only(mp, state, manifest.name)
             continue
 
         folders_error = _folders_error(cfg.folders)
@@ -3964,7 +4022,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
             if evidence not in ("tag", "both"):
                 continue
             note = None
-            if any(re.fullmatch(re.escape(d) + r"_\d+", member) for d in declared_final):
+            if any(re.fullmatch(re.escape(d) + r"_\d+(?:_\d+)*", member) for d in declared_final):
                 note = ("suffixed copy from an earlier create-mode deploy; apply never "
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
@@ -4026,13 +4084,9 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         for mp in members.values() if mp.verdict != "blocked"
         for c in mp.changes if c.code == "member_adopted"
     ]
-    if adopted:
-        names = ", ".join(a.name for a in adopted)
-        count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
-        warnings.append(
-            f"{count} will be adopted into '{system}' by adding the tag '{system}': "
-            f"{names}. From then on, restarting the system restarts them and a "
-            f"teardown of the system removes them too.")
+    adoption_warning = _adoption_line(system, adopted, done=False)
+    if adoption_warning:
+        warnings.append(adoption_warning)
 
     # trinity-enterprise#1030 CP2: a grant the caller's credential could not
     # write is loud — a top-level summary entry and one warning line, beside
@@ -4060,8 +4114,30 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
         system_name=system, agent_names=agent_names, members=members, drift=drift,
         blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
         view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
-        adopted=adopted, summary=summary,
+        adopted=adopted, adoption_warning=adoption_warning, summary=summary,
     )
+
+
+def _adoption_line(system: str, adopted: List["SystemApplyAdoption"], *, done: bool) -> Optional[str]:
+    """The adoption sentence: the plan's (`will be`), or a real run's over the
+    members whose system tag landed (`was` / `were`, #4130)."""
+    if not adopted:
+        return None
+    names = ", ".join(a.name for a in adopted)
+    count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
+    verb = ("were" if len(adopted) != 1 else "was") if done else "will be"
+    return (
+        f"{count} {verb} adopted into '{system}' by adding the tag '{system}': "
+        f"{names}. From then on, restarting the system restarts them and a "
+        f"teardown of the system removes them too."
+        # #4131: a default export infers `prefixed` once a member carries the
+        # prefix and would omit the bare members; name the explicit export.
+        + (f" Export this system with ?naming=bare (get_system_manifest naming=\"bare\"), "
+           f"since an adopted name starts with '{system}-'. While a tagged member's "
+           f"name starts with '{system}-', restart, teardown, the system view and export "
+           f"read the system as prefixed, so an untagged '{system}-*' agent is reached "
+           f"by name too."
+           if any(a.name.startswith(f"{system}-") for a in adopted) else ""))
 
 
 # ----------------------------------------------------------------------------
@@ -4161,6 +4237,12 @@ class ApplyOutcome:
     succeeded: int = 0
     writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
     tags_written: List[str] = field(default_factory=list)
+    # #4130: (name, step, key) of every write that landed — `key` is what the
+    # write wrote (the skill, set, gate's skill, capability, seat, edge target,
+    # tag), None for a member-wide write — and (name, tag) of every tag that
+    # landed: the result counts and lists only what happened.
+    landed: set = field(default_factory=set)
+    tags_landed: set = field(default_factory=set)
     member_failed: set = field(default_factory=set)
     # (member, gate key) of every planned gate write that has not landed. Seeded
     # with all of them, so a skipped or lost write holds its skill back too.
@@ -4217,32 +4299,39 @@ async def execute_apply_plan(
     system = plan.system_name
     by_name = {mp.name: mp for mp in plan.members.values()}
 
-    def fail(name: str, short: str, step: str, reason: str) -> None:
-        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step, reason=reason))
+    def fail(name: str, short: str, step: str, reason: str, key=None) -> None:
+        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step,
+                                             reason=reason, key=_write_key(key)))
         if name in by_name:
             out.member_failed.add(name)
 
-    def lost(name: str, short: str, step: str) -> bool:
+    def lost(name: str, short: str, step: str, key=None) -> bool:
         if lease.ok:
             return False
-        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply")
+        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply",
+             key)
         return True
 
-    async def attempt(name: str, short: str, step: str, write) -> bool:
-        if lost(name, short, step):
+    async def attempt(name: str, short: str, step: str, write, key=None) -> bool:
+        """One write. `key` is what it writes (a string, or a list when one
+        write lands several, e.g. a skill assignment), so the result counts and
+        names each write by its own key, never per member and step (#4130)."""
+        if lost(name, short, step, key):
             return False
         try:
             result = write()
             if asyncio.iscoroutine(result):
                 result = await result
         except Exception as e:  # noqa: BLE001 — recorded per write, the run continues (P-C)
-            fail(name, short, step, _failure_reason(e)[0])
+            fail(name, short, step, _failure_reason(e)[0], key)
             return False
         if result is False or result is None:
-            fail(name, short, step, "the write was refused or stored nothing")
+            fail(name, short, step, "the write was refused or stored nothing", key)
             return False
         out.succeeded += 1
         out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
+        for k in (key if isinstance(key, (list, tuple)) else [key]):
+            out.landed.add((name, step, k))
         return True
 
     # 1. Create absent members; tag each with the system tag first.
@@ -4257,9 +4346,11 @@ async def execute_apply_plan(
         if not created:
             continue
         out.created.append(mp.name)
-        tagged = await attempt(mp.name, mp.short_name, "tag", lambda n=mp.name: _tag_stored(n, system))
+        tagged = await attempt(mp.name, mp.short_name, "tag",
+                               lambda n=mp.name: _tag_stored(n, system), key=system)
         if tagged:
             out.tags_written.append(mp.name)
+            out.tags_landed.add((mp.name, system))
         else:
             # The next apply would refuse it as name-only evidence; say so.
             out.failed[-1].reason += (
@@ -4309,7 +4400,8 @@ async def execute_apply_plan(
     # mounts another must have.
     if out.succeeded:
         for mp in plan.members.values():
-            if mp.creating:
+            # #4130: a declared-only member is never run nor written; nothing to re-read.
+            if mp.creating or mp.verdict == "declared_only":
                 continue
             try:
                 container = _member_container(mp.name)
@@ -4321,6 +4413,14 @@ async def execute_apply_plan(
                     f"restart_required for '{mp.name}' could not be re-read after the "
                     "writes; the plan's prediction is shown.")
     return out
+
+
+def _write_key(key) -> Optional[str]:
+    """`SystemApplyFailure.key`: what the failed write was for, joined when
+    one write carries several."""
+    if isinstance(key, (list, tuple)):
+        return ", ".join(str(k) for k in key) or None
+    return None if key is None else str(key)
 
 
 async def _created(awaitable) -> bool:
@@ -4341,14 +4441,16 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
                   request: Optional[Request] = None) -> None:
     name, short = op.member, op.short_name
     if op.kind == "tag":
-        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"])):
+        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"]),
+                         key=op.args["tag"]):
+            out.tags_landed.add((name, op.args["tag"]))
             if name not in out.tags_written:
                 out.tags_written.append(name)
     elif op.kind == "edge":
         target = op.args["target"]
         await attempt(name, short, "permissions", lambda: (
             db.add_agent_permission(name, target, current_user.username) is not None
-            or bool(db.is_agent_permitted(name, target))))
+            or bool(db.is_agent_permitted(name, target))), key=target)
     elif op.kind == "folders":
         await attempt(name, short, "folders", lambda: db.upsert_shared_folder_config(
             agent_name=name, expose_enabled=op.args["expose_enabled"],
@@ -4487,10 +4589,29 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
                 changes = [c for c in changes if c.code != "pending_template_resolution"]
                 changes.extend(outcome.extra_changes[mp.name])
             restart = outcome.restart_required.get(mp.name, restart)
-            applied = mp.name not in outcome.member_failed
+            # #4130: nothing is planned or attempted for a declared-only member.
+            applied = None if mp.verdict == "declared_only" else mp.name not in outcome.member_failed
         members.append(SystemApplyMember(
             name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
             restart_required=restart, applied=applied, unobserved=list(mp.unobserved)))
+    # #4130: a dry run (valid or invalid) shows the plan; a refused run adopted
+    # and wrote nothing; a real run names only the system tags and the writes
+    # that landed. `report` / `unobserved` stay plan counts.
+    adopted, plan_warnings, summary = list(plan.adopted), list(plan.warnings), dict(plan.summary)
+    if not dry_run and (outcome is not None or status == "refused"):
+        landed = outcome.landed if outcome is not None else set()
+        tags_landed = outcome.tags_landed if outcome is not None else set()
+        adopted = [a for a in plan.adopted if (a.name, plan.system_name) in tags_landed]
+        if plan.adoption_warning is not None:
+            line = _adoption_line(plan.system_name, adopted, done=True)
+            plan_warnings = [line if w is plan.adoption_warning else w for w in plan_warnings]
+            plan_warnings = [w for w in plan_warnings if w is not None]
+        from services.system_apply import summary as apply_summary
+        summary = apply_summary.build(
+            plan.members, landed=landed,
+            extras={g: {k: v for k, v in counts.items()
+                        if k not in ("write", "report", "unobserved")}
+                    for g, counts in plan.summary.items()})
     response = SystemApplyResponse(
         dry_run=dry_run,
         system_name=plan.system_name,
@@ -4501,9 +4622,9 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         prompt=plan.prompt,
         system_view=plan.system_view,
         failed=list(outcome.failed) if outcome else [],
-        warnings=[*warnings, *plan.warnings, *(outcome.warnings if outcome else [])],
-        adopted=list(plan.adopted),
-        summary=dict(plan.summary),
+        warnings=[*warnings, *plan_warnings, *(outcome.warnings if outcome else [])],
+        adopted=adopted,
+        summary=summary,
     )
     if outcome is not None:
         response._tags_written = list(outcome.tags_written)

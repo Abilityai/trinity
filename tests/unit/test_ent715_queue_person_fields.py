@@ -873,6 +873,7 @@ _NON_ROW_ACCESSORS = frozenset({
     "mark_operator_queue_acknowledged",   # #3254: update_pending_problem_report retired
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
+    "drop_operator_queue_addressee",   # trinity-enterprise#981: a boolean, did the address change
 })
 
 #: What happens to the rows each reader gets.
@@ -898,7 +899,9 @@ _ROW_READERS = {
     (_PORTAL_ASKS, "_linked_request_id"): (
         "addressee", "the linked row's request_id only, when this ask's addressee could already see it"),
     (_PORTAL_ASKS, "_owned_ask"): (
-        "addressee", "the viewer's own ask (`_is_addressed_to`, roster, visible kinds), else the uniform 404"),
+        "addressee", "the viewer's own ask (`_is_addressed_to`, visible kinds, then the roster — or, for "
+                     "the reserved reach family the gate raised about them, trinity-enterprise#981, the "
+                     "address alone), else the uniform 404"),
     (_PORTAL_ASKS, "_recent_answers"): (
         "addressee", "the viewer's own recent answers: addressed to the viewer in SQL"),
     (_PORTAL_ASKS, "discuss_ask"): (
@@ -908,7 +911,9 @@ _ROW_READERS = {
                  "kind, status, title and options, never its question or answer (a gate card's title "
                  "names no person)"),
     (_PORTAL_ASKS, "list_asks_page"): (
-        "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit"),
+        "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit; the roster "
+                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981), "
+                     "both in the same SQL for the page and its count"),
     (_ROUTER_FILE, "bulk_cancel_queue_items"): ("door", "§6: person only"),
     (_ROUTER_FILE, "cancel_queue_item"): ("door", "§6: person only"),
     (_ROUTER_FILE, "get_agent_queue_items"): ("door", "§6: `_for_principal`, the exclusion in SQL"),

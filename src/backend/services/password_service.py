@@ -31,7 +31,8 @@ from jose import jwt
 from config import ACCESS_TOKEN_EXPIRE_MINUTES
 from database import db
 from dependencies import (
-    OPS_SCOPE, PORTAL_DELEGATE_SCOPE, create_access_token, hash_password, revoke_user_sessions,
+    OPS_SCOPE, OPS_WRITE_SCOPE, PORTAL_DELEGATE_SCOPE, create_access_token, hash_password,
+    revoke_user_sessions,
     verify_password,
 )
 from redis_breaker_util import get_breaker_redis
@@ -47,7 +48,10 @@ _ATTEMPT_PREFIX = "pwchange:fail:"
 
 #: Key scopes a person mints for themselves (`POST /api/mcp/keys`). The ones a
 #: password change may revoke, and the ones it reports as still working.
-PERSON_KEY_SCOPES = frozenset({"user", OPS_SCOPE, PORTAL_DELEGATE_SCOPE})
+#: Must equal `db/mcp_keys.py::_USER_CREATABLE_SCOPES` (pinned by
+#: `test_3180_ops_write_scope.py`): a mintable scope missing here survives a
+#: "revoke keys" password change after a suspected leak.
+PERSON_KEY_SCOPES = frozenset({"user", OPS_SCOPE, OPS_WRITE_SCOPE, PORTAL_DELEGATE_SCOPE})
 
 
 @dataclass
