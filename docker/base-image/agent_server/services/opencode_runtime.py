@@ -107,6 +107,7 @@ from .opencode_provider import (
     OpenCodeProviderConfigError,
     apply_provider_config,
     require_ollama_base_url,
+    require_openrouter_key,
 )
 from .process_registry import get_process_registry
 from .runtime_adapter import (
@@ -359,7 +360,10 @@ _COPY_FROM_SHARED = ("node_modules", "package.json", "package-lock.json", "auth.
 
 
 def _prepare_turn_config(
-    execution_id: str, system_prompt: Optional[str], model: Optional[str] = None
+    execution_id: str,
+    system_prompt: Optional[str],
+    model: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
 ) -> str:
     """Build this turn's private ``XDG_CONFIG_HOME`` and return its path.
 
@@ -414,8 +418,11 @@ def _prepare_turn_config(
     # "ollama/gemma4:12b"}` works with nothing hand-edited inside the
     # container — and so a changed base URL takes effect on the next turn
     # (the agent's .env is re-read at every spawn, #1999) instead of
-    # surviving as a stale value baked at boot.
-    apply_provider_config(config, model=model)
+    # surviving as a stale value baked at boot. `env` is the turn's SPAWN env
+    # (Abilityai/lilu#653): the provider block must read the same layers the
+    # `opencode` child does, or a `template.yaml runtime.env` declaration
+    # reaches the child but not the config that routes its model.
+    apply_provider_config(config, model=model, env=env)
 
     # Trinity MCP (and any template-declared server) — translated from the
     # agent's `.mcp.json` into OpenCode's own `mcp:` shape, on the SAME seam
@@ -885,10 +892,36 @@ class OpenCodeRuntime(AgentRuntime):
         # once OpenCode owns the turn the operator's only diagnosis is its
         # opaque `err_*` ref for a provider it cannot resolve
         # (Abilityai/lilu#272), which names nothing they can set.
-        require_ollama_base_url(model, config=_load_shared_config())
+        root = _opencode_root()
+        # The spawn env is built FIRST (Abilityai/lilu#653) so the provider
+        # guards and the provider block read the same layers the child gets —
+        # container baseline (platform settings) < `.env` < `template.yaml`
+        # `runtime.env`. XDG_CONFIG_HOME is set once the turn dir exists.
+        env = build_execution_env({
+            EXECUTION_TAG_NAME: execution_id,
+            # Per-turn config carries this turn's `instructions:`; the other
+            # three stay on the shared root so the model cache and the session
+            # database survive across turns.
+            "XDG_DATA_HOME": os.path.join(root, "data"),
+            "XDG_CACHE_HOME": os.path.join(root, "cache"),
+            "XDG_STATE_HOME": os.path.join(root, "state"),
+            "OPENCODE_DISABLE_AUTOUPDATE": "1",
+            "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
+            "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
+        })
+        shared_config = _load_shared_config()
+        require_ollama_base_url(model, env=env, config=shared_config)
+        # `openrouter/…` with no key anywhere is refused by name here — never
+        # left for OpenCode to answer with an opaque ref, and never run on
+        # another provider's credentials.
+        require_openrouter_key(
+            model, env=env, config=shared_config,
+            auth_path=os.path.join(_shared_config_dir(), "auth.json"),
+        )
 
         refresh_agents_md()  # Abilityai/lilu#627: identity tracks CLAUDE.md per turn
-        turn_dir = _prepare_turn_config(execution_id, system_prompt, model)
+        turn_dir = _prepare_turn_config(execution_id, system_prompt, model, env=env)
+        env["XDG_CONFIG_HOME"] = turn_dir
         cmd = self._build_command(
             model=model, session_id=session_id, directory=_AGENT_HOME
         )
@@ -900,21 +933,6 @@ class OpenCodeRuntime(AgentRuntime):
         # and the turn either errors or silently runs on an empty message.
         cmd.append("--")
         cmd.append(prompt)
-
-        root = _opencode_root()
-        env = build_execution_env({
-            EXECUTION_TAG_NAME: execution_id,
-            # Per-turn config carries this turn's `instructions:`; the other
-            # three stay on the shared root so the model cache and the session
-            # database survive across turns.
-            "XDG_CONFIG_HOME": turn_dir,
-            "XDG_DATA_HOME": os.path.join(root, "data"),
-            "XDG_CACHE_HOME": os.path.join(root, "cache"),
-            "XDG_STATE_HOME": os.path.join(root, "state"),
-            "OPENCODE_DISABLE_AUTOUPDATE": "1",
-            "OPENCODE_DISABLE_LSP_DOWNLOAD": "1",
-            "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1",
-        })
 
         metadata = ExecutionMetadata()
         metadata.context_window = self.get_context_window(model)

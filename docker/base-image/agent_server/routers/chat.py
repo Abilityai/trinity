@@ -405,11 +405,12 @@ def _model_surface(runtime: str) -> dict:
         }
     if runtime == "opencode":
         return {
-            "available_models": [],
+            "available_models": _opencode_available_models(),
             "note": "OpenCode takes a 'provider/model' id (e.g. "
-                    "anthropic/claude-sonnet-5, ollama/qwen3.6:27b). The provider "
-                    "must be declared in opencode.json; `opencode models` lists "
-                    "what this container can reach.",
+                    "anthropic/claude-sonnet-5, ollama/qwen3.6:27b, "
+                    "openrouter/<model>). Listed: the agent's pinned model plus "
+                    "every model declared by opencode.json or an "
+                    "OPENCODE_PROVIDER_<ID>_MODELS setting.",
             "validate": _validate_opencode_model,
         }
     return {
@@ -420,6 +421,39 @@ def _model_surface(runtime: str) -> dict:
             or m.startswith("claude-")
         ) else f"Invalid Claude model: {m}. Use aliases (sonnet, opus, haiku) or full model names.",
     }
+
+
+def _opencode_available_models() -> list:
+    """``provider/model`` ids from the provider map a turn would generate now.
+
+    Built from the same spawn env and shared config a turn uses
+    (Abilityai/lilu#653), so the list is what the next turn can route — not a
+    second catalog. A provider declaration that cannot be built yields an
+    empty list here (the turn itself reports the named reason); a read must
+    never 500 on configuration.
+    """
+    from ..services.execution_env import build_execution_env
+    from ..services.opencode_provider import (
+        ENV_RUNTIME_MODEL,
+        OpenCodeProviderConfigError,
+        apply_provider_config,
+        configured_models,
+    )
+    from ..services.opencode_runtime import _load_shared_config
+
+    env = build_execution_env()
+    try:
+        config = apply_provider_config(
+            _load_shared_config(), model=agent_state.current_model, env=env
+        )
+    except OpenCodeProviderConfigError as exc:
+        logger.warning("[OpenCode] available_models: provider config unbuildable: %s", exc)
+        return []
+    models = configured_models(config)
+    pinned = (env.get(ENV_RUNTIME_MODEL) or "").strip()
+    if pinned and "/" in pinned and pinned not in models:
+        models.insert(0, pinned)
+    return models
 
 
 def _validate_opencode_model(model: str):

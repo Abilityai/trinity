@@ -694,3 +694,559 @@ async def test_an_unrunnable_ollama_turn_fails_with_the_env_var_not_an_err_ref(
     assert exc.value.status_code == 400
     assert ENV_BASE_URL in str(exc.value.detail)
     assert "err_" not in str(exc.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# Providers are configuration (Abilityai/lilu#653)
+#
+# Before: only `provider.ollama` was ever generated, from the agent-server's
+# own os.environ — so a `template.yaml runtime.env` declaration reached the
+# `opencode` child but NOT the provider block, and OpenRouter worked only by
+# accident. Now any provider is `OPENCODE_PROVIDER_<ID>_*` in the SPAWN env.
+# No test here touches the network: there is no OpenRouter key in the lab.
+# ---------------------------------------------------------------------------
+
+from agent_server.services import opencode_provider  # noqa: E402
+from agent_server.services.execution_env import build_execution_env  # noqa: E402
+from agent_server.services.opencode_provider import (  # noqa: E402
+    ENV_OPENROUTER_API_KEY,
+    ENV_PLATFORM_BASE_URL,
+    OpenCodeProviderCredentialError,
+    configured_models,
+    provider_env,
+    require_openrouter_key,
+)
+
+
+def _template_env(tmp_path, runtime_env: dict, dotenv: str = ""):
+    """The real spawn-env builder over a fixture `.env` + `template.yaml`."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(dotenv, encoding="utf-8")
+    lines = ["runtime:", "  type: opencode", "  env:"]
+    lines += [f'    {k}: "{v}"' for k, v in runtime_env.items()]
+    template = tmp_path / "template.yaml"
+    template.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return build_execution_env(env_file=env_file, template_file=template)
+
+
+def test_template_runtime_env_reaches_the_provider_block(tmp_path, monkeypatch):
+    """The defect, end to end on disk: a base URL declared ONLY in
+    `template.yaml runtime.env` (nothing in the agent-server's os.environ)
+    lands in the turn's opencode.json."""
+    for var in (ENV_BASE_URL, "OPENCODE_PROVIDER_OLLAMA_BASE_URL", ENV_PLATFORM_BASE_URL,
+                "AGENT_RUNTIME_MODEL", "OPENCODE_OLLAMA_MODELS"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("OPENCODE_ROOT", str(tmp_path / "root"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    env = _template_env(tmp_path, {
+        "OPENCODE_PROVIDER_OLLAMA_BASE_URL": "http://dgx:11434",
+        "OPENCODE_PROVIDER_OLLAMA_MODELS": "ministral-3:14b",
+    })
+
+    turn_dir = opencode_runtime._prepare_turn_config(
+        "exec-653", None, "ollama/gemma4:12b", env=env
+    )
+    with open(f"{turn_dir}/opencode/opencode.json", encoding="utf-8") as fh:
+        written = json.load(fh)
+    assert written["provider"]["ollama"] == {
+        "npm": OPENAI_COMPATIBLE_NPM,
+        "options": {"baseURL": "http://dgx:11434/v1"},
+        "models": {"gemma4:12b": {}, "ministral-3:14b": {}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_runtime_builds_the_spawn_env_before_the_provider_block(monkeypatch, tmp_path):
+    """Wiring: `_execute_opencode` hands the spawn env (not os.environ) to the
+    guards and to `_prepare_turn_config`."""
+    spawn_env = {"OPENCODE_PROVIDER_OLLAMA_BASE_URL": "http://from-template:11434"}
+    monkeypatch.setattr(opencode_runtime, "build_execution_env", lambda extra=None, **kw: dict(spawn_env))
+    monkeypatch.setattr(opencode_runtime, "_load_shared_config", lambda: dict(_BASE))
+    monkeypatch.setattr(opencode_runtime, "refresh_agents_md", lambda: None)
+    monkeypatch.delenv(ENV_BASE_URL, raising=False)
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    def _capture(execution_id, system_prompt, model=None, env=None):
+        seen["env"] = env
+        raise _Stop()
+
+    monkeypatch.setattr(opencode_runtime, "_prepare_turn_config", _capture)
+    with pytest.raises(_Stop):
+        await OpenCodeRuntime()._execute_opencode(
+            prompt="ping", model="ollama/gemma4:12b", system_prompt=None,
+            session_id=None, timeout_seconds=30, execution_id="e-1",
+        )
+    assert seen["env"]["OPENCODE_PROVIDER_OLLAMA_BASE_URL"] == "http://from-template:11434"
+
+
+def test_openrouter_turn_emits_no_block_but_passes_the_key(tmp_path):
+    """Built-in provider: no `provider` key is written, the guard passes, and
+    the key is in the env the child is spawned with."""
+    env = _template_env(
+        tmp_path,
+        {ENV_OPENROUTER_API_KEY: "${OPENROUTER_API_KEY}"},
+        dotenv="OPENROUTER_API_KEY=placeholder-openrouter-key\n",
+    )
+    assert env[ENV_OPENROUTER_API_KEY] == "placeholder-openrouter-key"
+    require_openrouter_key("openrouter/z-ai/glm-5", env=env, config=dict(_BASE))
+    emitted = apply_provider_config(dict(_BASE), model="openrouter/z-ai/glm-5", env=env)
+    assert "provider" not in emitted
+
+
+def test_openrouter_turn_without_a_key_is_refused_by_name(tmp_path):
+    """Never a silent fallback onto another provider: named, before spawn."""
+    with pytest.raises(OpenCodeProviderCredentialError) as exc:
+        require_openrouter_key(
+            "openrouter/z-ai/glm-5", env={}, config=dict(_BASE),
+            auth_path=str(tmp_path / "missing-auth.json"),
+        )
+    assert ENV_OPENROUTER_API_KEY in str(exc.value)
+    assert "openrouter_api_key" in str(exc.value)
+    # A subclass, so every existing `except OpenCodeProviderConfigError` 400s it.
+    assert isinstance(exc.value, OpenCodeProviderConfigError)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"env": {"OPENCODE_PROVIDER_OPENROUTER_API_KEY": "k"}},
+        {"env": {}, "config": {"provider": {"openrouter": {"options": {"apiKey": "k"}}}}},
+        {"env": {"AGENT_RUNTIME_MODEL": "anthropic/claude-sonnet-5"}},
+    ],
+)
+def test_openrouter_guard_accepts_every_key_source_and_ignores_other_providers(kwargs):
+    model = None if "AGENT_RUNTIME_MODEL" in kwargs.get("env", {}) else "openrouter/x/y"
+    require_openrouter_key(model, **kwargs)
+
+
+def test_openrouter_key_in_opencode_auth_json_counts(tmp_path):
+    auth = tmp_path / "auth.json"
+    auth.write_text(json.dumps({"openrouter": {"type": "api", "key": "k"}}), encoding="utf-8")
+    require_openrouter_key("openrouter/x/y", env={}, auth_path=str(auth))
+
+
+@pytest.mark.asyncio
+async def test_a_keyless_openrouter_turn_fails_400_naming_the_key(monkeypatch, tmp_path):
+    monkeypatch.setattr(opencode_runtime, "_opencode_root", lambda: str(tmp_path))
+    monkeypatch.setattr(opencode_runtime, "_load_shared_config", lambda: dict(_BASE))
+    monkeypatch.setattr(opencode_runtime, "build_execution_env", lambda extra=None, **kw: dict(extra or {}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "no-config"))
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    with pytest.raises(HTTPException) as exc:
+        await runtime.execute_headless("ping", model="openrouter/z-ai/glm-5")
+    assert exc.value.status_code == 400
+    assert ENV_OPENROUTER_API_KEY in str(exc.value.detail)
+
+
+def test_unseeded_npm_driver_is_refused_by_name():
+    env = {
+        "OPENCODE_PROVIDER_LMSTUDIO_BASE_URL": "http://lab:1234/v1",
+        "OPENCODE_PROVIDER_LMSTUDIO_NPM": "@ai-sdk/openai",
+    }
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(dict(_BASE), model="lmstudio/qwen", env=env)
+    assert "OPENCODE_PROVIDER_LMSTUDIO_NPM" in str(exc.value)
+    assert "@ai-sdk/openai'" in str(exc.value)
+
+
+def test_unseeded_npm_driver_in_the_operator_config_is_refused_too():
+    config = dict(_BASE)
+    config["provider"] = {"vllm": {"npm": "some-unseeded-driver", "options": {"baseURL": "http://v/v1"}}}
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(config, model="anthropic/claude-sonnet-5", env={})
+    assert "provider.vllm.npm" in str(exc.value)
+
+
+def test_unseeded_ollama_npm_override_is_refused():
+    env = {ENV_BASE_URL: "http://dgx:11434", "OPENCODE_PROVIDER_OLLAMA_NPM": "ollama-ai-provider"}
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(dict(_BASE), model="ollama/gemma4:12b", env=env)
+    assert "OPENCODE_PROVIDER_OLLAMA_NPM" in str(exc.value)
+
+
+def test_any_openai_compatible_endpoint_is_a_block():
+    env = {
+        "OPENCODE_PROVIDER_LMSTUDIO_BASE_URL": "http://lab:1234/v1/",
+        "OPENCODE_PROVIDER_LMSTUDIO_API_KEY": "lab-key",
+        "OPENCODE_PROVIDER_LMSTUDIO_MODELS": "lmstudio/qwen3:8b, phi-4",
+    }
+    emitted = apply_provider_config(dict(_BASE), model="lmstudio/qwen3:8b", env=env)
+    assert emitted["provider"] == {
+        "lmstudio": {
+            "npm": OPENAI_COMPATIBLE_NPM,
+            "options": {"baseURL": "http://lab:1234/v1", "apiKey": "lab-key"},
+            "models": {"qwen3:8b": {}, "phi-4": {}},
+        }
+    }
+
+
+def test_a_custom_provider_without_a_base_url_is_a_named_failure():
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(
+            dict(_BASE), model="lab/x", env={"OPENCODE_PROVIDER_LAB_MODELS": "x"}
+        )
+    assert "OPENCODE_PROVIDER_LAB_BASE_URL" in str(exc.value)
+
+
+def test_a_bad_endpoint_url_names_its_variable():
+    with pytest.raises(OpenCodeProviderConfigError) as exc:
+        apply_provider_config(
+            dict(_BASE), model="lab/x", env={"OPENCODE_PROVIDER_LAB_BASE_URL": "lab:1234"}
+        )
+    assert "OPENCODE_PROVIDER_LAB_BASE_URL" in str(exc.value)
+
+
+def test_an_optional_openrouter_block_pins_a_proxy_or_declares_models():
+    proxied = apply_provider_config(
+        dict(_BASE), model="openrouter/z-ai/glm-5",
+        env={"OPENCODE_PROVIDER_OPENROUTER_BASE_URL": "https://proxy.example.com/api/v1"},
+    )
+    assert proxied["provider"]["openrouter"] == {
+        "npm": OPENAI_COMPATIBLE_NPM,
+        "options": {"baseURL": "https://proxy.example.com/api/v1"},
+        "models": {"z-ai/glm-5": {}},
+    }
+    declared = apply_provider_config(
+        dict(_BASE), model="openrouter/z-ai/glm-5",
+        env={"OPENCODE_PROVIDER_OPENROUTER_MODELS": "qwen/qwen3-coder"},
+    )
+    # Built-in: no npm, no baseURL — OpenCode resolves the endpoint itself.
+    assert declared["provider"]["openrouter"] == {
+        "models": {"z-ai/glm-5": {}, "qwen/qwen3-coder": {}},
+    }
+
+
+def test_canonical_name_wins_over_the_legacy_alias_and_models_union():
+    env = {
+        "OPENCODE_PROVIDER_OLLAMA_BASE_URL": "http://canonical:11434",
+        ENV_BASE_URL: "http://alias:11434",
+        "OPENCODE_PROVIDER_OLLAMA_MODELS": "a:1b",
+        "OPENCODE_OLLAMA_MODELS": "b:2b",
+    }
+    entry = apply_provider_config(dict(_BASE), model="ollama/a:1b", env=env)["provider"]["ollama"]
+    assert entry["options"]["baseURL"] == "http://canonical:11434/v1"
+    assert entry["models"] == {"a:1b": {}, "b:2b": {}}
+
+
+def test_platform_base_url_sits_below_every_agent_declaration_and_above_the_gateway(tmp_path):
+    route = str(_route_file(tmp_path, _ROUTE_WITH_DEFAULT))
+    platform_only = apply_provider_config(
+        dict(_BASE), model="ollama/g:1b", env={ENV_PLATFORM_BASE_URL: "http://platform:11434"},
+        route_path=route,
+    )
+    assert platform_only["provider"]["ollama"]["options"]["baseURL"] == "http://platform:11434/v1"
+    agent_wins = apply_provider_config(
+        dict(_BASE), model="ollama/g:1b",
+        env={ENV_PLATFORM_BASE_URL: "http://platform:11434", ENV_BASE_URL: "http://agent:11434"},
+        route_path=route,
+    )
+    assert agent_wins["provider"]["ollama"]["options"]["baseURL"] == "http://agent:11434/v1"
+    # And the boundary guard counts the platform tier as a URL.
+    require_ollama_base_url(
+        "ollama/g:1b", env={ENV_PLATFORM_BASE_URL: "http://platform:11434"},
+        route_path=str(_routeless(tmp_path)),
+    )
+
+
+def test_provider_env_grammar():
+    assert provider_env({
+        "OPENCODE_PROVIDER_MY_LAB_BASE_URL": "http://x/v1",
+        "OPENCODE_PROVIDER_MY_LAB_API_KEY": "k",
+        "OPENCODE_PROVIDER_BLANK_BASE_URL": "  ",
+        "OPENCODE_PROVIDER_TYPO_BASEURL": "http://x",
+        "UNRELATED": "1",
+    }) == {"my_lab": {"BASE_URL": "http://x/v1", "API_KEY": "k"}}
+
+
+def test_configured_models_lists_every_provider():
+    config = {"provider": {"ollama": {"models": {"g:1b": {}}}, "lmstudio": {"models": {"q": {}}}}}
+    assert configured_models(config) == ["lmstudio/q", "ollama/g:1b"]
+    assert configured_models(dict(_BASE)) == []
+
+
+def test_get_model_lists_the_configured_models(monkeypatch):
+    """`GET /api/model` for an OpenCode agent returns the generated provider
+    map, not `[]` (Abilityai/lilu#653 item 3)."""
+    from agent_server.routers import chat
+    from agent_server.services import execution_env
+
+    monkeypatch.setattr(execution_env, "build_execution_env", lambda *a, **kw: {
+        "AGENT_RUNTIME_MODEL": "openrouter/z-ai/glm-5",
+        ENV_BASE_URL: "http://dgx:11434",
+        "OPENCODE_OLLAMA_MODELS": "gemma4:12b",
+    })
+    monkeypatch.setattr(opencode_runtime, "_load_shared_config", lambda: dict(_BASE))
+    monkeypatch.setattr(chat.agent_state, "current_model", None, raising=False)
+    surface = chat._model_surface("opencode")
+    assert surface["available_models"] == ["openrouter/z-ai/glm-5", "ollama/gemma4:12b"]
+
+
+def test_get_model_degrades_to_empty_on_an_unbuildable_provider(monkeypatch):
+    from agent_server.routers import chat
+    from agent_server.services import execution_env
+
+    monkeypatch.setattr(execution_env, "build_execution_env", lambda *a, **kw: {
+        "OPENCODE_PROVIDER_LAB_MODELS": "x",
+    })
+    monkeypatch.setattr(opencode_runtime, "_load_shared_config", lambda: dict(_BASE))
+    monkeypatch.setattr(chat.agent_state, "current_model", None, raising=False)
+    assert chat._model_surface("opencode")["available_models"] == []
+
+
+# ===========================================================================
+# Platform OpenCode provider tier — backend half (Abilityai/lilu#653)
+#
+# * `openrouter_api_key` is an ent#435 secret: encrypted at rest, refused in
+#   cleartext at the sink, written only through its dedicated route.
+# * The platform OpenRouter key and default Ollama base URL are injected into
+#   the container env of `runtime == opencode` agents ONLY, by ONE writer
+#   (`settings_service.apply_opencode_provider_env`) that create and both
+#   rebuild paths call.
+# * A Claude (or Gemini/Codex) agent's env is BYTE-IDENTICAL with the feature
+#   configured or not.
+# No network, no Docker: the conftest's throwaway SQLite only.
+# ===========================================================================
+
+import ast  # noqa: E402
+import copy  # noqa: E402
+import importlib  # noqa: E402
+import os  # noqa: E402
+import types  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+os.environ.setdefault("CREDENTIAL_ENCRYPTION_KEY", "ab" * 32)
+
+from fastapi import FastAPI  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+_BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
+_KEYS = ("openrouter_api_key", "opencode_default_provider_base_url")
+
+
+def _live(name):
+    """Resolve at call time — sibling harnesses re-import these modules."""
+    return importlib.import_module(name)
+
+
+@pytest.fixture()
+def _platform_clean(monkeypatch):
+    from services.secret_settings import encrypted_key_for
+
+    def purge():
+        db = _live("database").db
+        for key in _KEYS:
+            db.delete_setting(key)
+            db.delete_setting(encrypted_key_for(key))
+    for env in ("OPENROUTER_API_KEY", "OPENCODE_DEFAULT_PROVIDER_BASE_URL"):
+        monkeypatch.delenv(env, raising=False)
+    purge()
+    yield
+    purge()
+
+
+def _configure_platform_tier():
+    ss = _live("services.settings_service")
+    ss.set_secret_setting("openrouter_api_key", "placeholder-openrouter-key")
+    _live("database").db.set_setting("opencode_default_provider_base_url", "http://ollama-host:11434")
+
+
+# ---------------------------------------------------------------------------
+# The secret
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_openrouter_key_is_an_encrypted_secret_setting():
+    from services.secret_settings import SECRET_SETTING_KEYS, encrypted_key_for, looks_like_envelope
+
+    assert "openrouter_api_key" in SECRET_SETTING_KEYS
+    _configure_platform_tier()
+    db = _live("database").db
+    assert db.get_setting_value("openrouter_api_key", None) is None
+    assert looks_like_envelope(db.get_setting_value(encrypted_key_for("openrouter_api_key")))
+    assert _live("services.settings_service").settings_service.get_openrouter_api_key() == "placeholder-openrouter-key"
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_openrouter_key_is_refused_in_cleartext_at_the_sink():
+    from services.secret_settings import SecretSettingWriteError
+
+    with pytest.raises(SecretSettingWriteError):
+        _live("database").db.set_setting("openrouter_api_key", "cleartext")
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_env_is_the_fallback_tier(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+    monkeypatch.setenv("OPENCODE_DEFAULT_PROVIDER_BASE_URL", "http://env-host:11434")
+    assert _live("services.settings_service").get_opencode_provider_env() == {
+        "OPENROUTER_API_KEY": "from-env",
+        "OPENCODE_DEFAULT_PROVIDER_BASE_URL": "http://env-host:11434",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Injection — opencode only, and nothing else moves
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_opencode_agent_gets_the_platform_tier():
+    _configure_platform_tier()
+    env = {"AGENT_NAME": "a1", "AGENT_RUNTIME": "opencode"}
+    _live("services.settings_service").apply_opencode_provider_env(env, "opencode")
+    assert env["OPENROUTER_API_KEY"] == "placeholder-openrouter-key"
+    assert env["OPENCODE_DEFAULT_PROVIDER_BASE_URL"] == "http://ollama-host:11434"
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_unset_settings_plant_no_empty_key():
+    env = {"AGENT_RUNTIME": "opencode"}
+    _live("services.settings_service").apply_opencode_provider_env(env, "opencode")
+    assert "OPENROUTER_API_KEY" not in env
+    assert "OPENCODE_DEFAULT_PROVIDER_BASE_URL" not in env
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_a_removed_setting_stops_applying_on_recreate():
+    """Recreate replays the OLD container env; the tier is re-derived, so a
+    deleted platform key does not survive in a rebuilt opencode container."""
+    env = {"AGENT_RUNTIME": "opencode", "OPENROUTER_API_KEY": "stale",
+           "OPENCODE_DEFAULT_PROVIDER_BASE_URL": "http://stale:11434"}
+    _live("services.settings_service").apply_opencode_provider_env(env, "opencode")
+    assert "OPENROUTER_API_KEY" not in env
+    assert "OPENCODE_DEFAULT_PROVIDER_BASE_URL" not in env
+
+
+@pytest.mark.usefixtures("_platform_clean")
+@pytest.mark.parametrize("runtime", [None, "", "claude-code", "claude", "gemini-cli", "codex"])
+def test_non_opencode_env_is_byte_identical(runtime):
+    """The dispatch's assertion: with the platform tier FULLY configured, a
+    Claude agent's env (and every other non-OpenCode runtime's) is identical,
+    key for key and byte for byte — including a pre-existing value under one
+    of the tier's own names, which is not this writer's to touch."""
+    _configure_platform_tier()
+    env = {
+        "AGENT_NAME": "a1",
+        "ANTHROPIC_API_KEY": "sk-ant-api-placeholder",
+        "AGENT_RUNTIME": runtime or "claude-code",
+        "AGENT_RUNTIME_MODEL": "sonnet",
+        "OPENROUTER_API_KEY": "agent-own-value",
+    }
+    before = copy.deepcopy(env)
+    _live("services.settings_service").apply_opencode_provider_env(env, runtime)
+    assert env == before
+    assert repr(sorted(env.items())).encode() == repr(sorted(before.items())).encode()
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_build_base_env_for_claude_is_unchanged_by_the_feature(monkeypatch):
+    """Create path, Claude: identical env with the tier configured vs not."""
+    crud = _live("services.agent_service.crud")
+    models = _live("models")
+    config = models.AgentConfig(name="claude-a", runtime="claude-code")
+
+    without = crud._build_base_env(copy.deepcopy(config))
+    _configure_platform_tier()
+    with_tier = crud._build_base_env(copy.deepcopy(config))
+    assert with_tier == without
+    assert "OPENROUTER_API_KEY" not in with_tier
+    assert "OPENCODE_DEFAULT_PROVIDER_BASE_URL" not in with_tier
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_build_base_env_for_opencode_carries_the_tier():
+    crud = _live("services.agent_service.crud")
+    models = _live("models")
+    _configure_platform_tier()
+    env = crud._build_base_env(models.AgentConfig(name="oc-a", runtime="opencode"))
+    assert env["OPENROUTER_API_KEY"] == "placeholder-openrouter-key"
+    assert env["OPENCODE_DEFAULT_PROVIDER_BASE_URL"] == "http://ollama-host:11434"
+
+
+def _calls_in(path: Path, function: str) -> set:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+            return {
+                c.func.id for c in ast.walk(node)
+                if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
+            }
+    raise AssertionError(f"{function} not found in {path}")
+
+
+@pytest.mark.usefixtures("_platform_clean")
+@pytest.mark.parametrize("path,function", [
+    ("services/agent_service/crud.py", "_build_base_env"),
+    ("services/agent_service/lifecycle.py", "recreate_container_with_updated_config"),
+    ("services/agent_service/lifecycle.py", "_apply_persisted_auth_env"),
+])
+def test_every_container_env_writer_re_derives_the_tier(path, function):
+    """Create, recreate and rebuild-recovery all call the one writer — the
+    same three seams the platform ANTHROPIC_API_KEY follows."""
+    assert "apply_opencode_provider_env" in _calls_in(_BACKEND / path, function)
+
+
+# ---------------------------------------------------------------------------
+# Settings API
+# ---------------------------------------------------------------------------
+
+def _client(role="admin"):
+    pk = _live("routers.settings.provider_keys")
+    app = FastAPI()
+    app.include_router(pk.router, prefix="/api/settings")
+    app.dependency_overrides[pk.get_current_user] = lambda: types.SimpleNamespace(
+        id=1, username=role, role=role, email=f"{role}@example.com",
+        agent_name=None, connector_agent=None, mcp_scope=None,
+    )
+    return TestClient(app, raise_server_exceptions=True)
+
+
+@pytest.mark.usefixtures("_platform_clean")
+@pytest.mark.parametrize("method,path,body", [
+    ("get", "/api/settings/opencode-provider", None),
+    ("put", "/api/settings/api-keys/openrouter", {"api_key": "k"}),
+    ("delete", "/api/settings/api-keys/openrouter", None),
+    ("put", "/api/settings/opencode-provider/base-url", {"base_url": "http://h:11434"}),
+])
+def test_endpoints_are_admin_only(method, path, body):
+    kwargs = {"json": body} if body is not None else {}
+    assert getattr(_client("user"), method)(path, **kwargs).status_code == 403
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_put_get_delete_roundtrip_masks_the_key():
+    client = _client()
+    assert client.put("/api/settings/api-keys/openrouter",
+                      json={"api_key": "placeholder-openrouter-key"}).status_code == 200
+    assert client.put("/api/settings/opencode-provider/base-url",
+                      json={"base_url": "http://ollama-host:11434"}).status_code == 200
+    status = client.get("/api/settings/opencode-provider").json()
+    assert status["openrouter"]["configured"] is True
+    assert status["openrouter"]["source"] == "settings"
+    assert "placeholder-openrouter-key" not in str(status)
+    assert status["default_provider_base_url"] == "http://ollama-host:11434"
+
+    assert client.delete("/api/settings/api-keys/openrouter").json()["deleted"] is True
+    assert client.put("/api/settings/opencode-provider/base-url",
+                      json={"base_url": ""}).json()["default_provider_base_url"] is None
+    status = client.get("/api/settings/opencode-provider").json()
+    assert status["openrouter"]["configured"] is False
+    assert status["default_provider_base_url"] is None
+
+
+@pytest.mark.usefixtures("_platform_clean")
+@pytest.mark.parametrize("bad", ["ollama-host:11434", "ftp://h", "not a url"])
+def test_bad_base_url_is_a_named_400(bad):
+    resp = _client().put("/api/settings/opencode-provider/base-url", json={"base_url": bad})
+    assert resp.status_code == 400
+    assert "opencode_default_provider_base_url" in resp.json()["detail"]
+
+
+@pytest.mark.usefixtures("_platform_clean")
+def test_whitespace_key_is_a_named_400():
+    resp = _client().put("/api/settings/api-keys/openrouter", json={"api_key": "a b"})
+    assert resp.status_code == 400
+    assert "openrouter_api_key" in resp.json()["detail"]

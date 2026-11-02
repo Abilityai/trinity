@@ -57,12 +57,44 @@ An operator-declared ``provider.ollama`` already present in the shared config
 wins on ``options``/``npm`` — the env is a default, not an override — and its
 model map is *unioned* with the models above rather than replaced, so a pinned
 model can never be missing from a config an operator has customised.
+
+**Any provider is configuration** (Abilityai/lilu#653). The Ollama block above
+is one instance of a general grammar, read from the SAME spawn env the
+``opencode`` child gets (so a ``template.yaml runtime.env`` declaration reaches
+it, not only ``.env``)::
+
+    OPENCODE_PROVIDER_<ID>_BASE_URL   absolute http(s) URL of the endpoint
+    OPENCODE_PROVIDER_<ID>_API_KEY    -> provider.<id>.options.apiKey
+    OPENCODE_PROVIDER_<ID>_MODELS     comma-separated, '<id>/' prefix optional
+    OPENCODE_PROVIDER_<ID>_NPM        driver; only the pre-seeded
+                                      ``@ai-sdk/openai-compatible`` is accepted
+
+``<ID>`` is lower-cased into the provider id (``..._LMSTUDIO_...`` ->
+``lmstudio/<model>``). ``OPENCODE_OLLAMA_BASE_URL`` / ``OPENCODE_OLLAMA_MODELS``
+remain as aliases of ``<ID>=OLLAMA`` (the canonical name wins on a base URL;
+model lists are unioned). For ``ollama`` only, the base URL falls back to
+``OPENCODE_DEFAULT_PROVIDER_BASE_URL`` — the platform setting the backend
+injects into the container env at create/recreate — and then to the derived
+gateway, so the order is ``runtime.env`` > ``.env`` > platform > gateway.
+
+``openrouter/…`` needs no block: it is a built-in OpenCode provider and reads
+``OPENROUTER_API_KEY`` from the child env. A turn on it with no key anywhere is
+refused by :func:`require_openrouter_key` with a named error — never left to
+fall through to some other provider's credentials. An optional
+``OPENCODE_PROVIDER_OPENROUTER_*`` block pins a proxy base URL or declares
+models.
+
+A driver other than the pre-seeded one is refused by name at config time: the
+image ships exactly one, and OpenCode would otherwise fetch the package from
+the npm registry in the middle of a turn.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import socket
 import struct
 from typing import Dict, Iterable, List, Mapping, Optional
@@ -77,6 +109,28 @@ OLLAMA_PROVIDER_ID = "ollama"
 #: at ``/opt/trinity/opencode/node_modules`` — OpenCode does NOT fetch it on
 #: demand (measured), and a cold container must not depend on the npm registry.
 OPENAI_COMPATIBLE_NPM = "@ai-sdk/openai-compatible"
+
+#: Drivers present in the image's seeded ``node_modules``. Anything else would
+#: be installed from the npm registry at turn time, which a turn must never do.
+SEEDED_NPM_DRIVERS = frozenset({OPENAI_COMPATIBLE_NPM})
+
+#: ``OPENCODE_PROVIDER_<ID>_<FIELD>`` — the general per-provider grammar.
+ENV_PROVIDER_PREFIX = "OPENCODE_PROVIDER_"
+PROVIDER_ENV_FIELDS = ("BASE_URL", "API_KEY", "MODELS", "NPM")
+
+#: Platform-tier Ollama base URL, injected by the backend from the
+#: ``opencode_default_provider_base_url`` setting. A distinct name (not the
+#: alias) so any agent-level declaration outranks it whatever layer it is in.
+ENV_PLATFORM_BASE_URL = "OPENCODE_DEFAULT_PROVIDER_BASE_URL"
+
+OPENROUTER_PROVIDER_ID = "openrouter"
+ENV_OPENROUTER_API_KEY = "OPENROUTER_API_KEY"
+
+#: Providers OpenCode resolves on its own (models.dev): a block for one of
+#: these may omit the base URL. Every other declared provider needs one.
+BUILTIN_PROVIDER_IDS = frozenset({OPENROUTER_PROVIDER_ID})
+
+_PROVIDER_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 ENV_BASE_URL = "OPENCODE_OLLAMA_BASE_URL"
 ENV_EXTRA_MODELS = "OPENCODE_OLLAMA_MODELS"
@@ -97,6 +151,42 @@ class OpenCodeProviderConfigError(ValueError):
     Named rather than swallowed: a typo'd base URL must fail with the env var
     name (quality bar 6), not degrade into OpenCode's own "unknown provider".
     """
+
+
+class OpenCodeProviderCredentialError(OpenCodeProviderConfigError):
+    """A turn on a provider whose credential is configured nowhere.
+
+    A subclass so every existing ``except OpenCodeProviderConfigError`` site
+    already turns it into the same named 400.
+    """
+
+
+def provider_env_name(provider_id: str, field: str) -> str:
+    """``("ollama", "BASE_URL")`` -> ``OPENCODE_PROVIDER_OLLAMA_BASE_URL``."""
+    return f"{ENV_PROVIDER_PREFIX}{provider_id.upper()}_{field}"
+
+
+def provider_env(env: Optional[Mapping[str, str]] = None) -> Dict[str, Dict[str, str]]:
+    """Every ``OPENCODE_PROVIDER_<ID>_<FIELD>`` with a non-blank value.
+
+    Returns ``{provider_id: {FIELD: value}}``. Unknown suffixes are ignored
+    (a typo there is not a declaration), as are blank values (an unset
+    ``${VAR}`` substitution must not declare an empty endpoint).
+    """
+    source = os.environ if env is None else env
+    declared: Dict[str, Dict[str, str]] = {}
+    for key, value in source.items():
+        if not key.startswith(ENV_PROVIDER_PREFIX) or not (value or "").strip():
+            continue
+        rest = key[len(ENV_PROVIDER_PREFIX):]
+        for field in PROVIDER_ENV_FIELDS:
+            suffix = f"_{field}"
+            if rest.endswith(suffix) and len(rest) > len(suffix):
+                provider_id = rest[: -len(suffix)].lower()
+                if _PROVIDER_ID_RE.match(provider_id):
+                    declared.setdefault(provider_id, {})[field] = value.strip()
+                break
+    return declared
 
 
 def normalize_base_url(raw: Optional[str], *, env_var: str = ENV_BASE_URL) -> Optional[str]:
@@ -124,11 +214,24 @@ def normalize_base_url(raw: Optional[str], *, env_var: str = ENV_BASE_URL) -> Op
     return f"{trimmed}/v1"
 
 
-def _strip_provider(model: str) -> Optional[str]:
+def validate_endpoint_url(raw: str, *, env_var: str) -> str:
+    """An OpenAI-compatible endpoint URL, used as given (no ``/v1`` appended:
+    unlike an Ollama root, an endpoint's path is part of its address)."""
+    candidate = raw.strip().rstrip("/")
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise OpenCodeProviderConfigError(
+            f"{env_var}={raw!r} is not an absolute http(s) URL. Use the "
+            "endpoint's OpenAI-compatible base, e.g. 'https://host/api/v1'."
+        )
+    return candidate
+
+
+def _strip_provider(model: str, provider_id: str = OLLAMA_PROVIDER_ID) -> Optional[str]:
     """``ollama/gemma4:12b`` → ``gemma4:12b``; a bare name passes through.
 
     Returns ``None`` for a model that belongs to a different provider — its
-    name must not leak into the Ollama model map.
+    name must not leak into this provider's model map.
     """
     candidate = (model or "").strip()
     if not candidate:
@@ -136,7 +239,7 @@ def _strip_provider(model: str) -> Optional[str]:
     if "/" not in candidate:
         return candidate
     provider, _, rest = candidate.partition("/")
-    if provider != OLLAMA_PROVIDER_ID:
+    if provider != provider_id:
         return None
     return rest.strip() or None
 
@@ -206,6 +309,22 @@ def derive_gateway_base_url(route_path: str = PROC_NET_ROUTE) -> Optional[str]:
     return normalize_base_url(f"http://{gateway}:{OLLAMA_DEFAULT_PORT}")
 
 
+def configured_ollama_base_url(env: Mapping[str, str]) -> Optional[str]:
+    """The Ollama base URL from configuration, before the gateway fallback.
+
+    Canonical ``OPENCODE_PROVIDER_OLLAMA_BASE_URL``, then the
+    ``OPENCODE_OLLAMA_BASE_URL`` alias, then the platform tier. Each is
+    normalized under its own name, so a malformed value fails naming the
+    variable that holds it rather than falling through to the next tier.
+    """
+    for env_var in (provider_env_name(OLLAMA_PROVIDER_ID, "BASE_URL"),
+                    ENV_BASE_URL, ENV_PLATFORM_BASE_URL):
+        configured = normalize_base_url(env.get(env_var), env_var=env_var)
+        if configured:
+            return configured
+    return None
+
+
 def resolve_base_url(
     *,
     model: Optional[str] = None,
@@ -220,7 +339,7 @@ def resolve_base_url(
     a NAMED failure rather than an opaque one.
     """
     source = os.environ if env is None else env
-    configured = normalize_base_url(source.get(ENV_BASE_URL))
+    configured = configured_ollama_base_url(source)
     if configured:
         return configured
     if model_provider(model=model, env=source) != OLLAMA_PROVIDER_ID:
@@ -247,15 +366,46 @@ def resolve_models(
     be attributed to is the first thing in the emitted config.
     """
     source = os.environ if env is None else env
-    candidates: List[Optional[str]] = [model, source.get(ENV_RUNTIME_MODEL)]
-    for entry in (source.get(ENV_EXTRA_MODELS) or "").split(","):
-        candidates.append(entry)
+    return _provider_models(
+        OLLAMA_PROVIDER_ID,
+        model=model,
+        env=source,
+        extra=(source.get(provider_env_name(OLLAMA_PROVIDER_ID, "MODELS")),
+               source.get(ENV_EXTRA_MODELS)),
+    )
 
+
+def _provider_models(
+    provider_id: str,
+    *,
+    model: Optional[str],
+    env: Mapping[str, str],
+    extra: Iterable[Optional[str]] = (),
+) -> List[str]:
+    """Turn model, agent pin, then each comma-separated ``extra`` list,
+    de-duplicated, first-seen order.
+
+    The turn model and the pin are full ``provider/model`` ids, kept only when
+    they belong to ``provider_id``. A declared list entry is already scoped to
+    this provider, so its ``<id>/`` prefix is optional and anything else is
+    the model id verbatim — OpenRouter ids carry their own slash
+    (``qwen/qwen3-coder``) and must not be mistaken for a foreign provider.
+    """
     resolved: List[str] = []
-    for candidate in candidates:
-        name = _strip_provider(candidate or "")
+
+    def _add(name: Optional[str]) -> None:
         if name and name not in resolved:
             resolved.append(name)
+
+    for candidate in (model, env.get(ENV_RUNTIME_MODEL)):
+        _add(_strip_provider(candidate or "", provider_id))
+    prefix = f"{provider_id}/"
+    for listing in extra:
+        for entry in (listing or "").split(","):
+            name = entry.strip()
+            if name.startswith(prefix):
+                name = name[len(prefix):].strip()
+            _add(name or None)
     return resolved
 
 
@@ -306,7 +456,7 @@ def require_ollama_base_url(
         return
     # normalize_base_url deliberately raises on a malformed value: a typo'd
     # URL must fail named here too, not resolve into the gateway default.
-    if normalize_base_url(source.get(ENV_BASE_URL)):
+    if configured_ollama_base_url(source):
         return
     if _declared_base_url(config):
         return
@@ -325,11 +475,90 @@ def _unresolvable_base_url_reason(route_path: str) -> str:
     operator nothing about what to set.
     """
     return (
-        f"OpenCode provider 'ollama' has no base URL: {ENV_BASE_URL} is unset "
-        f"and no default gateway could be read from {route_path}. Set "
-        f"{ENV_BASE_URL} (e.g. 'http://10.0.0.5:11434') or declare "
-        "provider.ollama.options.baseURL in opencode.json."
+        f"OpenCode provider 'ollama' has no base URL: "
+        f"{provider_env_name(OLLAMA_PROVIDER_ID, 'BASE_URL')}, {ENV_BASE_URL} "
+        f"and {ENV_PLATFORM_BASE_URL} are unset and no default gateway could "
+        f"be read from {route_path}. Set {ENV_BASE_URL} (e.g. "
+        "'http://10.0.0.5:11434') in the agent's template.yaml runtime.env or "
+        ".env, or declare provider.ollama.options.baseURL in opencode.json."
     )
+
+
+def _checked_npm(value: str, *, source: str) -> str:
+    """Refuse a driver the image does not ship, naming where it came from."""
+    if value not in SEEDED_NPM_DRIVERS:
+        raise OpenCodeProviderConfigError(
+            f"{source}={value!r} is not a pre-seeded OpenCode driver. Only "
+            f"{', '.join(sorted(SEEDED_NPM_DRIVERS))} is installed in the image; "
+            "any other package would be fetched from the npm registry during a "
+            "turn, which Trinity refuses. Drop the setting to use the default."
+        )
+    return value
+
+
+def _merge_entry(existing: Optional[Mapping[str, object]], generated: Dict[str, object]) -> Dict[str, object]:
+    """Operator declaration wins on ``npm`` and on each option key; models are
+    unioned so a pinned model is never absent from a customised config."""
+    if not isinstance(existing, Mapping):
+        return generated
+    entry = dict(existing)
+    if "npm" in generated:
+        entry.setdefault("npm", generated["npm"])
+    options = entry.get("options")
+    options = dict(options) if isinstance(options, Mapping) else {}
+    for key, value in (generated.get("options") or {}).items():
+        if not options.get(key):
+            options[key] = value
+    if options:
+        entry["options"] = options
+    declared = entry.get("models")
+    declared = dict(declared) if isinstance(declared, Mapping) else {}
+    for name in generated.get("models") or {}:
+        declared.setdefault(name, {})
+    entry["models"] = declared
+    return entry
+
+
+def _build_env_provider(
+    provider_id: str,
+    fields: Mapping[str, str],
+    *,
+    model: Optional[str],
+    env: Mapping[str, str],
+) -> Dict[str, object]:
+    """``provider.<id>`` from its ``OPENCODE_PROVIDER_<ID>_*`` declaration."""
+    entry: Dict[str, object] = {}
+    options: Dict[str, object] = {}
+    base_url = fields.get("BASE_URL")
+    if base_url:
+        options["baseURL"] = validate_endpoint_url(
+            base_url, env_var=provider_env_name(provider_id, "BASE_URL")
+        )
+        entry["npm"] = _checked_npm(
+            fields.get("NPM") or OPENAI_COMPATIBLE_NPM,
+            source=provider_env_name(provider_id, "NPM"),
+        )
+    elif provider_id not in BUILTIN_PROVIDER_IDS:
+        raise OpenCodeProviderConfigError(
+            f"OpenCode provider {provider_id!r} is declared "
+            f"({', '.join(provider_env_name(provider_id, f) for f in sorted(fields))}) "
+            f"but {provider_env_name(provider_id, 'BASE_URL')} is unset. A "
+            "custom provider needs the URL of its OpenAI-compatible endpoint."
+        )
+    elif fields.get("NPM"):
+        _checked_npm(fields["NPM"], source=provider_env_name(provider_id, "NPM"))
+        entry["npm"] = fields["NPM"]
+    if fields.get("API_KEY"):
+        options["apiKey"] = fields["API_KEY"]
+    if options:
+        entry["options"] = options
+    entry["models"] = {
+        name: {}
+        for name in _provider_models(
+            provider_id, model=model, env=env, extra=(fields.get("MODELS"),)
+        )
+    }
+    return entry
 
 
 def apply_provider_config(
@@ -339,58 +568,132 @@ def apply_provider_config(
     env: Optional[Mapping[str, str]] = None,
     route_path: str = PROC_NET_ROUTE,
 ) -> Dict[str, object]:
-    """Merge the Ollama provider block into ``config``; returns ``config``.
+    """Merge the env-declared provider blocks into ``config``; returns ``config``.
 
     Mutates and returns the same dict so a caller can chain it onto the loaded
-    shared config. A no-op when the turn is not on ``ollama/…`` **and** the
-    operator declared nothing — the common Anthropic/OpenRouter case pays
-    nothing and sees no ``provider`` key it did not ask for. An ``ollama/…``
-    turn always gets a base URL (env, else the derived gateway) or a NAMED
-    failure; it never silently emits nothing.
+    shared config. A no-op when the turn is not on ``ollama/…``, no provider is
+    declared in the env **and** the operator declared nothing — the common
+    Anthropic/OpenRouter case pays nothing and sees no ``provider`` key it did
+    not ask for. An ``ollama/…`` turn always gets a base URL (env, platform,
+    else the derived gateway) or a NAMED failure; it never silently emits
+    nothing. Every provider in the result is checked for an unseeded driver.
     """
     source = os.environ if env is None else env
-    base_url = resolve_base_url(model=model, env=source, route_path=route_path)
-    models = resolve_models(model=model, env=source)
-
+    declared_env = provider_env(source)
+    had_provider_key = isinstance(config.get("provider"), Mapping)
     providers = config.get("provider")
     providers = dict(providers) if isinstance(providers, Mapping) else {}
+
+    # -- ollama: the one provider with a derived fallback --------------------
+    base_url = resolve_base_url(model=model, env=source, route_path=route_path)
     existing = providers.get(OLLAMA_PROVIDER_ID)
     existing = dict(existing) if isinstance(existing, Mapping) else None
 
     if base_url is None and existing is None:
-        # Either this turn wants nothing from Ollama — emit no `provider` key
-        # at all — or it wants Ollama and neither the env nor the gateway
-        # could supply a host, which is a named failure, not a silent skip
+        # Either this turn wants nothing from Ollama, or it wants Ollama and
+        # nothing could supply a host — a named failure, not a silent skip
         # that degrades into OpenCode's own `err_*` ref (Abilityai/lilu#272).
         if model_provider(model=model, env=source) == OLLAMA_PROVIDER_ID:
             raise OpenCodeProviderConfigError(_unresolvable_base_url_reason(route_path))
-        return config
-
-    if existing is None:
-        entry: Dict[str, object] = build_ollama_provider(base_url or "", models)
     else:
-        # Operator's declaration wins on npm/options; models are unioned so a
-        # pinned model is never absent from a customised config.
-        entry = dict(existing)
-        entry.setdefault("npm", OPENAI_COMPATIBLE_NPM)
-        options = entry.get("options")
-        options = dict(options) if isinstance(options, Mapping) else {}
-        if not options.get("baseURL") and base_url:
-            options["baseURL"] = base_url
-        entry["options"] = options
-        declared = entry.get("models")
-        declared = dict(declared) if isinstance(declared, Mapping) else {}
-        for name in models:
-            declared.setdefault(name, {})
-        entry["models"] = declared
+        ollama_npm = declared_env.get(OLLAMA_PROVIDER_ID, {}).get("NPM")
+        generated = build_ollama_provider(base_url or "", resolve_models(model=model, env=source))
+        if ollama_npm:
+            generated["npm"] = _checked_npm(
+                ollama_npm, source=provider_env_name(OLLAMA_PROVIDER_ID, "NPM")
+            )
+        ollama_key = declared_env.get(OLLAMA_PROVIDER_ID, {}).get("API_KEY")
+        if ollama_key:
+            generated["options"]["apiKey"] = ollama_key
+        if not base_url:
+            generated["options"].pop("baseURL", None)
+        entry = _merge_entry(existing, generated)
+        if not (entry.get("options") or {}).get("baseURL"):
+            raise OpenCodeProviderConfigError(_unresolvable_base_url_reason(route_path))
+        providers[OLLAMA_PROVIDER_ID] = entry
+        logger.info(
+            "[OpenCode] provider 'ollama' -> %s models=%s",
+            entry["options"]["baseURL"], sorted(entry.get("models", {})),
+        )
 
-    if not entry.get("options", {}).get("baseURL"):
-        raise OpenCodeProviderConfigError(_unresolvable_base_url_reason(route_path))
+    # -- every other env-declared provider -----------------------------------
+    for provider_id, fields in sorted(declared_env.items()):
+        if provider_id == OLLAMA_PROVIDER_ID:
+            continue
+        generated = _build_env_provider(provider_id, fields, model=model, env=source)
+        entry = _merge_entry(providers.get(provider_id), generated)
+        providers[provider_id] = entry
+        logger.info(
+            "[OpenCode] provider %r -> %s models=%s", provider_id,
+            (entry.get("options") or {}).get("baseURL") or "(built-in endpoint)",
+            sorted(entry.get("models", {})),
+        )
 
-    providers[OLLAMA_PROVIDER_ID] = entry
-    config["provider"] = providers
-    logger.info(
-        "[OpenCode] provider 'ollama' -> %s models=%s",
-        entry["options"]["baseURL"], sorted(entry.get("models", {})),
-    )
+    # -- no provider may pull a driver from the registry mid-turn ------------
+    for provider_id, entry in providers.items():
+        if isinstance(entry, Mapping) and entry.get("npm"):
+            _checked_npm(str(entry["npm"]), source=f"opencode.json provider.{provider_id}.npm")
+
+    if providers or had_provider_key:
+        config["provider"] = providers
     return config
+
+
+def require_openrouter_key(
+    model: Optional[str],
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    config: Optional[Mapping[str, object]] = None,
+    auth_path: Optional[str] = None,
+) -> None:
+    """Raise if this turn is on ``openrouter/…`` and no key exists anywhere.
+
+    Sources, any one of which suffices: ``OPENROUTER_API_KEY`` in the spawn env
+    (agent ``runtime.env`` / ``.env`` / the platform ``openrouter_api_key``
+    setting injected at create), ``OPENCODE_PROVIDER_OPENROUTER_API_KEY``, an
+    operator-declared ``provider.openrouter.options.apiKey``, or an
+    ``openrouter`` entry in OpenCode's ``auth.json``. Refused BEFORE the
+    subprocess, named — a keyless OpenRouter turn must never be answered by
+    some other provider's credentials or by OpenCode's opaque ``err_*`` ref.
+    """
+    source = os.environ if env is None else env
+    if model_provider(model=model, env=source) != OPENROUTER_PROVIDER_ID:
+        return
+    for env_var in (ENV_OPENROUTER_API_KEY,
+                    provider_env_name(OPENROUTER_PROVIDER_ID, "API_KEY")):
+        if (source.get(env_var) or "").strip():
+            return
+    if isinstance(config, Mapping):
+        entry = (config.get("provider") or {}) if isinstance(config.get("provider"), Mapping) else {}
+        entry = entry.get(OPENROUTER_PROVIDER_ID)
+        options = entry.get("options") if isinstance(entry, Mapping) else None
+        if isinstance(options, Mapping) and str(options.get("apiKey") or "").strip():
+            return
+    if auth_path:
+        try:
+            with open(auth_path, "r", encoding="utf-8") as fh:
+                stored = json.load(fh)
+            if isinstance(stored, Mapping) and stored.get(OPENROUTER_PROVIDER_ID):
+                return
+        except (OSError, ValueError):
+            pass
+    raise OpenCodeProviderCredentialError(
+        f"OpenCode model {model or source.get(ENV_RUNTIME_MODEL)!r} is on provider "
+        f"'openrouter' but no key is configured: {ENV_OPENROUTER_API_KEY} is "
+        "unset in the agent's template.yaml runtime.env and .env, and the "
+        "platform setting 'openrouter_api_key' is empty. Set one of them; the "
+        "turn is refused rather than run on another provider's credentials."
+    )
+
+
+def configured_models(config: Optional[Mapping[str, object]]) -> List[str]:
+    """``provider/model`` ids declared in a (generated) config, sorted."""
+    providers = config.get("provider") if isinstance(config, Mapping) else None
+    if not isinstance(providers, Mapping):
+        return []
+    found: List[str] = []
+    for provider_id, entry in providers.items():
+        models = entry.get("models") if isinstance(entry, Mapping) else None
+        if isinstance(models, Mapping):
+            found.extend(f"{provider_id}/{name}" for name in models)
+    return sorted(set(found))
