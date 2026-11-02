@@ -7821,6 +7821,39 @@
         "channels"
       ],
       "description": "trinity-enterprise#1059 (re-review N1): a refused turn's completion report (Workspace, Slack, Telegram) shows the policy's sentence without the stored [usage_share] code; an unknown [...] and every success report are left as the agent wrote them."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalCredentialField.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalAsks mounted with a credential ask: masked secret field (show/hide), one POST to /asks/{id}/credential with the value in the body only, field empty on submit, nothing in storage/logs/URL, every refusal in words, no typed-answer box or Discuss."
+    },
+    {
+      "file": "../src/frontend/tests/unit/credentialAskSurfaces.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "queueResponseKind names the credential kind; history row reads 'NAME provided'; QueueCard and QueueItemDetail mounted show no respond box, only where the ask is answered."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalSecretInMessage.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalConversation mounted: a 422 secret_in_message (streaming and sync fallback) drops the bubble, offers no Retry, never restores the text to the composer or a draft, and shows the server's pointer."
     }
   ]
 }

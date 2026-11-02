@@ -266,6 +266,15 @@
           </form>
         </template>
 
+        <!-- trinity-enterprise#1066: a credential ask is answered through the
+             masked secret field, never a typed answer — the value goes to the
+             agent's environment, the ask ends "provided" by name. -->
+        <PortalCredentialField
+          v-else-if="controlsKind(ask) === 'credential'"
+          :ask="ask"
+          @provided="(answered) => credentialProvided(ask, answered)"
+        />
+
         <!-- An alert only wants acknowledging; "Got it" mirrors desktop and /m. -->
         <button
           v-else-if="controlsKind(ask) === 'acknowledge'"
@@ -362,6 +371,7 @@ import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import GatedSkillRequest from '../operator/GatedSkillRequest.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
+import PortalCredentialField from './PortalCredentialField.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
@@ -632,7 +642,9 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 // trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
 // resolves to) — the server refuses both (`shared_ask`) until they are per
 // person, so the card does not offer them.
-const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
+// trinity-enterprise#1066: nor on a credential ask — a discussion chat is a
+// composer, which is exactly where the value must not be typed.
+const canDiscuss = (ask) => ask.kind !== 'alert' && ask.kind !== 'credential' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
@@ -663,6 +675,14 @@ function dismiss(ask) {
 
 async function undoDismiss(ask) {
   if (!store.undoDismissAsk(ask.id)) return
+  await nextTick()
+  cardEls.get(ask.id)?.focus?.({ preventScroll: true })
+}
+
+// trinity-enterprise#1066: the secret field answered — the same confirmation
+// and focus landing as a typed answer (below), nothing kept.
+async function credentialProvided(ask, answered) {
+  showConfirmation(answerConfirmation(answered, ask.agent_name))
   await nextTick()
   cardEls.get(ask.id)?.focus?.({ preventScroll: true })
 }

@@ -2395,6 +2395,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // trinity-enterprise#1066 — the secret field's one call. The value travels
+    // in the BODY of one POST (never a URL, never stored here, never logged);
+    // what comes back is the ask, ended `provided` by name, merged like any
+    // other answer.
+    async provideCredential(askId, value) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${askId}/credential`,
+        { value },
+        { headers: this.authHeader },
+      )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // The answered row replaces the waiting one (shared by `answerAsk` and
+    // `provideCredential`).
+    mergeAnsweredAsk(askId, data) {
       this.asks = data && data.id === askId
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
