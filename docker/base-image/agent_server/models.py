@@ -322,6 +322,9 @@ class CredentialReadResponse(BaseModel):
     """Response with credential file contents"""
     files: Dict[str, str]  # {path: text content} for files that exist
     files_b64: Dict[str, str] = {}  # {path: base64} for non-UTF-8 (binary) files (#11)
+    # Paths the agent proved absent (ent#1066). A requested path in none of the
+    # three was not read — never "no file".
+    missing: List[str] = []
 
 
 class CredentialInjectRequest(BaseModel):

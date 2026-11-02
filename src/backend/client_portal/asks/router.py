@@ -16,13 +16,19 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from client_portal.portal_auth import PortalPrincipal, get_portal_principal
 from dependencies import PERSON_REQUIRED_DETAIL
 
 from . import service
-from .models import WorkspaceAsk, WorkspaceAskAnswer, WorkspaceAskContext, WorkspaceAskDiscussion
+from .models import (
+    WorkspaceAsk,
+    WorkspaceAskAnswer,
+    WorkspaceAskContext,
+    WorkspaceAskDiscussion,
+    WorkspaceCredentialValue,
+)
 from .service import AskError, AsksUnavailable
 
 # The 503 `asks_unavailable` Retry-After, in seconds (trinity-enterprise#610,
@@ -107,6 +113,42 @@ def answer_ask(
             item_id, principal.email, principal.is_platform,
             body.response, body.response_text,
             acknowledge_divergence=body.acknowledge_divergence,
+        )
+    except AskError as e:
+        _raise(e)
+
+
+@router.post("/{item_id}/credential", response_model=WorkspaceAsk)
+async def provide_credential(
+    item_id: str,
+    body: WorkspaceCredentialValue,
+    request: Request,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """The secret field's one door (trinity-enterprise#1066): the person types
+    the value a `credential` ask names, it is stored on the agent, and the ask
+    ends `provided` — by name.
+
+    A PERSON only, like the answer route, refused before the row is read; an
+    agent-scoped key never reaches this far (`get_portal_principal`). The same
+    uniform 404 as the answer route, which here also covers an ask of another
+    kind. The value is handled by the sink alone: every refusal is a named
+    code (`invalid_value`, `scrub_unavailable`, `agent_not_running`,
+    `env_busy`, `env_too_large`, `agent_unreachable`, `already_resolved`), and
+    none of them — nor a validation error on this body — ever carries the
+    value back. Rate-limited like the portal's other mutating routes.
+    """
+    from services import rate_limiter
+
+    if not principal.is_person:
+        raise HTTPException(status_code=403, detail=dict(PERSON_REQUIRED_DETAIL))
+    rate_limiter.enforce(f"portal_ask_credential:{principal.email}", 30, 60)
+    try:
+        return await service.provide_credential(
+            item_id, principal.email, principal.is_platform, body.value,
+            actor_ip=request.client.host if request.client else None,
+            endpoint=request.scope.get("path"),
+            request_id=getattr(request.state, "request_id", None),
         )
     except AskError as e:
         _raise(e)
