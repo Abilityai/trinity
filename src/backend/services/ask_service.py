@@ -1098,6 +1098,12 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     elif to not in ASK_ROLES:
         raise AskRejected(422, "invalid_to", "Unknown role.",
                           allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
+    if kind == "credential" and to != "primary":
+        # trinity-enterprise#1066: the secret field writes into the agent's
+        # environment, so it opens for the agent's primary person only — never
+        # a viewer, an approver or a canon role.
+        raise AskRejected(422, "invalid_to", "A credential ask is addressed to primary.",
+                          allowed=["primary"])
     expires_at = ask.get("expires_at")
     _deadline(expires_at, floor=False)
     supersedes = ask.get("supersedes_expired")

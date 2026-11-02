@@ -10,8 +10,10 @@ NAME only.
 
 What is pinned here, driven through the real sink over the real SQLite:
 
-* the kind is raised with a valid name, no options, and exactly one resolved
-  person (`no_person` otherwise — a secret field has one reader);
+* the kind is raised with a valid name, no options, addressed to primary on
+  every door (`invalid_to` for any other role; the file channel's clamp leaves
+  a non-primary addressee unaddressed), and exactly one resolved person
+  (`no_person` otherwise — a secret field has one reader);
 * the name is a variable name the agent's own `.env` reader would set, at most
   64 characters, and never one the platform or the agent runtime reserves
   (`credential_ask_policy`, held in parity with the agent image's
@@ -182,8 +184,10 @@ class TestRaise:
         receipt = _raise(ask, self.AGENT, _body("cred-lower", context={"credential_name": "my_token"}))
         assert receipt["status"] == "created"
 
-    def test_the_operator_role_has_no_person_and_is_refused(self, ask):
-        with _rejected(ask, 422, "no_person"):
+    def test_the_operator_role_is_refused(self, ask):
+        """The operator role is no person; it is refused with every role but
+        primary, before any addressing."""
+        with _rejected(ask, 422, "invalid_to"):
             _raise(ask, self.AGENT, _body("cred-op", to="operator"))
         assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, "cred-op") is None
 
@@ -204,6 +208,49 @@ class TestRaise:
         assignment_provider.register_provider(_Two())
         with _rejected(ask, 422, "no_person"):
             _raise(ask, self.AGENT, _body("cred-shared"))
+
+    @pytest.mark.parametrize("to", ["viewer", "approver", "role:finance"])
+    def test_a_credential_ask_is_addressed_to_primary_only(self, ask, to):
+        """`POST /api/agents/{self}/operator-queue` (which the MCP tool calls)
+        raises through `raise_ask` → `_validated_ask`: a role other
+        than primary is refused even when exactly one person fills it — a
+        viewer must not be handed a field that writes into the agent's
+        environment."""
+        from services import assignment_provider
+
+        class _OneEach:
+            def people_for(self, agent, role):
+                return {"emails": [f"{role}@example.com"]}
+
+            def people_for_role_id(self, agent, role_id):
+                return {"emails": [f"{role_id}@example.com"]}
+
+        assignment_provider.register_provider(_OneEach())
+        rid = f"cred-to-{to.replace(':', '-')}"
+        with _rejected(ask, 422, "invalid_to"):
+            _raise(ask, self.AGENT, _body(rid, to=to))
+        assert ask.db.get_operator_queue_item_for_agent_by_request_id(self.AGENT, rid) is None
+
+    def test_the_file_channel_addresses_a_credential_ask_to_the_primary_only(self, ask, monkeypatch):
+        """The file channel never reaches `_validated_ask`; its clamp resolves
+        the addressee. A credential entry addressed to anyone but the agent's
+        primary person is ingested unaddressed — an operator item no
+        Workspace field opens for — never handed to that person."""
+        from services import role_addressing
+        from services.operator_queue_service import _clamp_ingested_item
+
+        monkeypatch.setattr(role_addressing, "owner_email", lambda agent: OWNER)
+        entry = {"id": "file-cred", "type": "credential", "title": f"Needs {NAME}",
+                 "context": {"credential_name": NAME}}
+        other = _clamp_ingested_item({**entry, "addressed_to_email": "viewer@example.com"},
+                                     self.AGENT)
+        assert other["addressed_to_email"] is None
+        primary = _clamp_ingested_item({**entry, "addressed_to_email": OWNER}, self.AGENT)
+        assert primary["addressed_to_email"] == OWNER
+        # every other kind keeps the roster rule it had
+        question = _clamp_ingested_item({**entry, "type": "question",
+                                         "addressed_to_email": "viewer@example.com"}, self.AGENT)
+        assert question["addressed_to_email"] == "viewer@example.com"
 
     def test_a_replay_returns_the_first_receipt(self, ask):
         first = _raise(ask, self.AGENT, _body("cred-replay"))
