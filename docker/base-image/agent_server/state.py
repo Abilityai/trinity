@@ -66,6 +66,11 @@ class AgentState:
         self.chat_session_id: Optional[str] = None
         self.chat_session_model: Optional[str] = None
         self.chat_session_generation: int = 0
+        # OpenCode chat session tracking — mirrors the Claude fields above.
+        # reset_session() clears these so a DELETE /api/chat/history does not
+        # silently resume the "cleared" conversation (Abilityai/lilu#651).
+        self.opencode_chat_session_id: Optional[str] = None
+        self.opencode_chat_session_model: Optional[str] = None
         # Session-level token tracking
         self.session_total_cost: float = 0.0
         self.session_total_output_tokens: int = 0
@@ -239,6 +244,8 @@ class AgentState:
         self.chat_session_id = None
         self.chat_session_model = None
         self.chat_session_generation += 1
+        self.opencode_chat_session_id = None
+        self.opencode_chat_session_model = None
         from .services import chat_session_marker  # lazy: avoids an import cycle
         chat_session_marker.clear()
         self.session_total_cost = 0.0
