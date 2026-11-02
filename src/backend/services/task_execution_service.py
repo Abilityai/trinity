@@ -163,8 +163,16 @@ def _default_model_for(agent_name: str) -> Optional[str]:
     it. A Codex or Gemini agent gets ``None`` and runs on its own model
     (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
     ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+
+    OpenCode (#2981) has its OWN platform default
+    (``platform_default_model_opencode``, a ``provider/model`` id) because the
+    fleet default is a bare Claude id it refuses with "missing a provider
+    prefix". Unset → ``None``, and the agent's ``get_default_model()`` decides.
     """
-    if _resolve_agent_runtime(agent_name) != "claude-code":
+    runtime = _resolve_agent_runtime(agent_name)
+    if runtime == "opencode":
+        return settings_service.get_platform_default_model(runtime=runtime)
+    if runtime != "claude-code":
         return None
     return settings_service.get_platform_default_model()
 

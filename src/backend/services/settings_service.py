@@ -25,6 +25,12 @@ PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-4-6"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0
+# Abilityai/lilu#652: OpenCode's platform default is its own setting, because
+# the fleet default above is a bare Claude id OpenCode refuses ("missing a
+# provider prefix"). NO code default on purpose: unset means "send no model and
+# let the agent's own `get_default_model()` decide" — a hardcoded local-model
+# id here would be wrong on every install that does not run that model.
+PLATFORM_DEFAULT_MODEL_OPENCODE_KEY = "platform_default_model_opencode"
 
 # #894: current-gen models an agent owner may select as a per-agent override for
 # public-facing channels. Derived from the single source of truth,
@@ -915,13 +921,21 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def get_platform_default_model(self) -> str:
+    def get_platform_default_model(self, runtime: Optional[str] = None) -> Optional[str]:
         """
-        Return the platform-wide default Claude model (#831).
+        Return the platform-wide default model for ``runtime`` (#831, lilu#652).
 
         Resolution: system_settings.platform_default_model → PLATFORM_DEFAULT_MODEL_VALUE.
         Result is cached for 60 s to avoid per-turn SQLite reads during burst drain.
+
+        ``runtime="opencode"`` resolves ``platform_default_model_opencode``
+        instead, and returns ``None`` when it is unset (never the Claude
+        default, which OpenCode cannot run). Uncached, so an operator's write
+        applies on the next turn with no invalidation hook.
         """
+        if runtime == "opencode":
+            value = self.get_setting(PLATFORM_DEFAULT_MODEL_OPENCODE_KEY, None)
+            return (value or "").strip() or None
         global _platform_model_cache, _platform_model_cache_ts
         now = time.monotonic()
         if _platform_model_cache is not None and (now - _platform_model_cache_ts) < _PLATFORM_MODEL_CACHE_TTL:
@@ -1622,6 +1636,6 @@ def is_template_registry_enabled() -> bool:
     return settings_service.is_template_registry_enabled()
 
 
-def get_platform_default_model() -> str:
-    """Return the platform-wide default Claude model (#831)."""
-    return settings_service.get_platform_default_model()
+def get_platform_default_model(runtime: Optional[str] = None) -> Optional[str]:
+    """Return the platform-wide default model for ``runtime`` (#831, lilu#652)."""
+    return settings_service.get_platform_default_model(runtime)

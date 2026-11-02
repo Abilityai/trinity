@@ -31,7 +31,7 @@ from db_models import WebFileUpload, SessionMessageInsert
 from dependencies import AuthorizedAgent, get_current_user
 from models import CreateSessionRequest, SessionMessageRequest, User
 from services import dispatch_admission_service
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, get_agent_runtime
 from services.model_catalog import InvalidModelError, validate_dispatch_model
 from services.session_cleanup_service import get_session_cleanup_service
 from services.session_turn_service import (
@@ -297,8 +297,11 @@ async def send_session_message(
     # `run_resumable_turn` splats this value into `execute_task` on BOTH the
     # initial attempt and the cold retry, so validating the single source here
     # covers both call sites.
+    # Abilityai/lilu#652: runtime-aware — an OpenCode agent takes `provider/model`.
     try:
-        body.model = validate_dispatch_model(body.model)
+        body.model = validate_dispatch_model(
+            body.model, runtime=get_agent_runtime(name)
+        )
     except InvalidModelError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

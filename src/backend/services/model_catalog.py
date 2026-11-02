@@ -55,6 +55,7 @@ one-way — ``settings_service`` imports this, never the reverse.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 
@@ -272,6 +273,17 @@ _MODEL_FAMILY_PREFIXES: tuple[str, ...] = (
 )
 
 
+# Abilityai/lilu#652: OpenCode's `-m` takes `provider/model`, never a bare id, so
+# none of the families above can name a model for it and every per-request
+# override 422'd here. A TWIN of `agent_service/helpers.py::_OPENCODE_MODEL_RE`
+# (create-time) and of the agent image's `opencode_runtime._PROVIDER_MODEL_RE`
+# (turn-time) — mirrored, not imported, because this module is a stdlib-only
+# leaf. `test_lilu652_*` asserts the three patterns are byte-identical.
+_OPENCODE_MODEL_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][\w./:@+-]*$"
+)
+
+
 class InvalidModelError(ValueError):
     """A caller-supplied model id that cannot name a model (#2796).
 
@@ -281,7 +293,7 @@ class InvalidModelError(ValueError):
     """
 
 
-def validate_dispatch_model(raw: str | None) -> str | None:
+def validate_dispatch_model(raw: str | None, runtime: str | None = None) -> str | None:
     """Normalise and shape-check a caller-supplied model id for a dispatch.
 
     Order matches ``client_portal.service.validate_requested_model`` and is
@@ -291,6 +303,11 @@ def validate_dispatch_model(raw: str | None) -> str | None:
 
     Args:
         raw: The model id as the caller sent it, or ``None``.
+        runtime: The target agent's runtime (``trinity.agent-runtime`` label),
+            or ``None`` for the Claude/Gemini/Codex family gate. ``opencode``
+            accepts ``provider/model`` ONLY (Abilityai/lilu#652): a bare id is
+            what the agent refuses one spawn later, so it is refused here,
+            where the error can name it.
 
     Returns:
         The stripped id, or ``None`` to inherit. The value is never rewritten
@@ -304,13 +321,21 @@ def validate_dispatch_model(raw: str | None) -> str | None:
     model = (raw or "").strip() or None
     if model is None:
         return None
-    if model.lower().startswith(_MODEL_FAMILY_PREFIXES):
-        return model
     # Bounded before it is echoed. The field is deliberately unbounded at the
     # payload layer, so without this an authenticated caller could have a
     # megabyte-long value reflected verbatim into the error body — the same
     # reasoning, and the same 64-char cut, as the ent#403 Workspace refusal.
     shown = model if len(model) <= 64 else model[:64] + "…"
+    if runtime == "opencode":
+        if _OPENCODE_MODEL_RE.match(model):
+            return model
+        raise InvalidModelError(
+            f"'{shown}' is not an OpenCode model id. OpenCode agents take "
+            f"'provider/model', such as 'ollama/qwen3.6:27b' or "
+            f"'anthropic/claude-sonnet-5'."
+        )
+    if model.lower().startswith(_MODEL_FAMILY_PREFIXES):
+        return model
     raise InvalidModelError(
         f"'{shown}' is not a model id. Use a short alias (sonnet, opus, haiku, "
         f"fable) or a full id such as '{_recommended[0].id}'."

@@ -402,3 +402,108 @@ def test_2796_resumable_turn_carries_one_model_to_both_call_sites():
     assert turn.fallback_fired is True
     assert len(calls) == 2, "expected the initial attempt and the cold retry"
     assert [c["model"] for c in calls] == ["claude-sonnet-5", "claude-sonnet-5"]
+
+
+# ---------------------------------------------------------------------------
+# Abilityai/lilu#652 — the gate is runtime-aware: OpenCode takes provider/model
+# ---------------------------------------------------------------------------
+
+OPENCODE_MODEL = "ollama/gemma4:12b"
+
+
+@pytest.mark.parametrize(
+    "raw", [OPENCODE_MODEL, "anthropic/claude-sonnet-5", "ollama/qwen3.6:27b",
+            "openrouter/meta-llama/llama-4"],
+)
+def test_lilu652_opencode_accepts_provider_model(raw):
+    assert validate_dispatch_model(raw, runtime="opencode") == raw
+
+
+@pytest.mark.parametrize(
+    "raw", ["sonnet", "claude-sonnet-5", BAD_MODEL, "-p", "/gemma", "ollama/"],
+)
+def test_lilu652_opencode_refuses_what_it_cannot_run(raw):
+    """A bare id is what the agent refuses one spawn later ("missing a provider
+    prefix"); refuse it here, where the 422 can name it."""
+    with pytest.raises(InvalidModelError) as exc:
+        validate_dispatch_model(raw, runtime="opencode")
+    assert "provider/model" in str(exc.value)
+
+
+@pytest.mark.parametrize("runtime", [None, "claude-code", "gemini-cli", "codex"])
+def test_lilu652_non_opencode_runtimes_still_refuse_provider_model(runtime):
+    with pytest.raises(InvalidModelError):
+        validate_dispatch_model(OPENCODE_MODEL, runtime=runtime)
+
+
+def test_lilu652_opencode_blank_still_inherits():
+    assert validate_dispatch_model("  ", runtime="opencode") is None
+
+
+def test_lilu652_gate_regex_is_the_twin_of_create_and_turn_time():
+    """Three homes for one shape (backend create-time, backend dispatch-time,
+    agent turn-time). They cannot import each other; drift fails here."""
+    import re
+    from pathlib import Path
+
+    from services.agent_service.helpers import _OPENCODE_MODEL_RE as create_re
+    from services.model_catalog import _OPENCODE_MODEL_RE as gate_re
+
+    assert gate_re.pattern == create_re.pattern
+    agent_src = (
+        Path(__file__).resolve().parents[2]
+        / "docker/base-image/agent_server/services/opencode_runtime.py"
+    ).read_text()
+    m = re.search(r'_PROVIDER_MODEL_RE = re\.compile\(r"([^"]+)"\)', agent_src)
+    assert m, "agent-side _PROVIDER_MODEL_RE not found"
+    assert m.group(1) == gate_re.pattern
+
+
+def test_dispatch_gate_accepts_provider_model_for_opencode_agents():
+    """THE REGRESSION (all three routes): `ollama/...` 422'd on every OpenCode
+    agent, so a per-request model never reached it. The same body against a
+    Claude agent must still 422."""
+    # /task
+    with _task_env() as m, \
+         patch.object(_CHAT_MOD, "get_agent_runtime", return_value="opencode"):
+        _call_task(ParallelTaskRequest(message="hi", model=OPENCODE_MODEL))
+    assert m["task_service"].execute_task.await_args.kwargs["model"] == OPENCODE_MODEL
+
+    with _task_env() as m, \
+         patch.object(_CHAT_MOD, "get_agent_runtime", return_value="claude-code"):
+        with pytest.raises(Exception) as exc:
+            _call_task(ParallelTaskRequest(message="hi", model=OPENCODE_MODEL))
+    assert getattr(exc.value, "status_code", None) == 422
+    m["task_service"].execute_task.assert_not_awaited()
+
+    # /chat
+    admit = AsyncMock(return_value=ChatAdmissionReplay(
+        execution_id="exec1", in_flight=False, snapshot={"ok": True}))
+    with patch.object(_CHAT_MOD, "get_agent_container", return_value=MagicMock(status="running")), \
+         patch.object(_CHAT_MOD, "get_agent_runtime", return_value="opencode"), \
+         patch.object(_DISPATCH, "admit_chat_request", admit):
+        _call_chat(ChatMessageRequest(message="hi", model=OPENCODE_MODEL))
+    assert admit.await_args.kwargs["request"].model == OPENCODE_MODEL
+
+    admit = AsyncMock()
+    with patch.object(_CHAT_MOD, "get_agent_container", return_value=MagicMock(status="running")), \
+         patch.object(_CHAT_MOD, "get_agent_runtime", return_value="claude-code"), \
+         patch.object(_DISPATCH, "admit_chat_request", admit):
+        with pytest.raises(Exception) as exc:
+            _call_chat(ChatMessageRequest(message="hi", model=OPENCODE_MODEL))
+    assert getattr(exc.value, "status_code", None) == 422
+    admit.assert_not_awaited()
+
+    # /sessions/{id}/message
+    with _session_env() as db, \
+         patch.object(_SESSION_MOD, "get_agent_runtime", return_value="opencode"):
+        db.add_session_message.side_effect = _Reached
+        with pytest.raises(_Reached):
+            _call_session(SessionMessageRequest(message="hi", model=OPENCODE_MODEL))
+
+    with _session_env() as db, \
+         patch.object(_SESSION_MOD, "get_agent_runtime", return_value="claude-code"):
+        with pytest.raises(Exception) as exc:
+            _call_session(SessionMessageRequest(message="hi", model=OPENCODE_MODEL))
+    assert getattr(exc.value, "status_code", None) == 422
+    db.add_session_message.assert_not_called()
