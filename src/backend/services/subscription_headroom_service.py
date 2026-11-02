@@ -1218,6 +1218,19 @@ def resolve_rate_limited_now(
     return bool(db_says_limited)
 
 
+def rate_limited_now_cached(subscription_id: str) -> bool:
+    """The one derivation (``resolve_rate_limited_now``) over the CACHED
+    snapshot — no probe, no await — for a synchronous caller that must decide
+    now whether a subscription may carry a call (the model gateway,
+    trinity-enterprise#1027). Same answer the Subscriptions card shows when its
+    snapshot is this one; with no fresh snapshot it is the 2h db inference."""
+    _, snapshot = _read_snapshot(subscription_id)
+    return resolve_rate_limited_now(
+        db_says_limited=bool(db.is_subscription_rate_limited(subscription_id)),
+        headroom=_to_model(snapshot),
+    )
+
+
 async def decorate_usage(usage: SubscriptionUsage, *, force: bool = False) -> SubscriptionUsage:
     """Attach the provider snapshot + finalize `rate_limited_now` via the ONE
     derivation every surface consumes (``resolve_rate_limited_now``).

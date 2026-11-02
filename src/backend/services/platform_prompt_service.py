@@ -9,7 +9,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import httpx
 
@@ -617,8 +617,37 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     return instructions
 
 
-def format_user_memory_block(memory_record: dict) -> Optional[str]:
+AGENT_MEMORY_BLOCK_HEADING = "## What you remember from earlier work"   # trinity-enterprise#1022
+
+
+def format_agent_memory_block(retrieved: Optional[Sequence[str]]) -> Optional[str]:
+    """The agent-scope retrieval block for a headless run (trinity-enterprise#1022).
+
+    Same envelope, same margin, same "reference, not instructions" framing as
+    the per-user block — only the retrieved section, under its own heading, so
+    a copy-back cannot mistake it for a person's notes. None when empty.
+    """
+    if not retrieved:
+        return None
+    try:
+        memory = user_memory_guard.envelope("", "", retrieved=retrieved, agent_scope=True)
+    except Exception:  # noqa: BLE001 — leave the memory out, never inject it raw
+        logger.warning("[ent#1022] agent memory envelope failed; memory left out of this run", exc_info=True)
+        return None
+    if not memory:
+        return None
+    return "\n".join([AGENT_MEMORY_BLOCK_HEADING, "", memory, "", "---"])
+
+
+def format_user_memory_block(
+    memory_record: dict, *, retrieved: Optional[Sequence[str]] = None,
+) -> Optional[str]:
     """Format a user-memory record into a system-prompt block for injection.
+
+    ``retrieved`` (trinity-enterprise#1022) is the retrieval memory's answer for
+    this request — `memory_service.recall(...)`, awaited by the caller off the
+    event loop — rendered as a third section inside the same envelope. A caller
+    that passes nothing gets exactly the pre-#1022 block.
 
     ``memory_record`` is the dict returned by
     :py:meth:`Database.get_or_create_public_user_memory` — it carries two
@@ -648,6 +677,7 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         memory = user_memory_guard.envelope(
             memory_record.get("agent_notes") or "",
             memory_record.get("conversation_summary") or "",
+            retrieved=retrieved or (),
         )
     except Exception:  # noqa: BLE001 — leave the memory out, never inject it raw
         logger.warning("[ent#419] memory envelope failed; memory left out of this turn", exc_info=True)
@@ -682,7 +712,6 @@ def _seat_decisions_block(memory_record: dict) -> Optional[str]:
 # Background user-memory summarization (#895)
 # ---------------------------------------------------------------------------
 
-_SUMMARIZATION_MODEL = "claude-haiku-4-5-20251001"
 
 _SUMMARIZATION_PROMPT = """\
 You are a memory system. Given this conversation, extract a concise bullet list of facts \
@@ -722,14 +751,12 @@ async def summarize_user_memory_background(
     # Local imports to avoid an import cycle at module load:
     # platform_prompt_service is imported by routers that the settings
     # service may transitively pull in.
-    from services.settings_service import get_anthropic_api_key
+    from services import model_gateway
 
     try:
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            logger.warning(
-                "[MemSummarize] No ANTHROPIC_API_KEY configured, skipping summarization"
-            )
+        credential = model_gateway.resolve(agent_name)
+        if not credential.usable:
+            logger.warning("[MemSummarize] nobody to summarize for %s (%s), skipping", agent_name, credential.reason)
             return
 
         memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
@@ -771,30 +798,13 @@ async def summarize_user_memory_background(
             conversation=conversation_text,
         )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": _SUMMARIZATION_MODEL,
-                    "max_tokens": 512,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-
-        if response.status_code != 200:
-            logger.error(
-                f"[MemSummarize] Anthropic API error {response.status_code}: "
-                f"{response.text[:200]}"
-            )
+        # The platform's one model door (trinity-enterprise#1027): the agent's
+        # own subscription when it runs on one, the platform key otherwise.
+        new_summary = await model_gateway.complete(
+            "user_memory_summary", prompt, agent_name=agent_name, max_tokens=512, timeout=30.0,
+        )
+        if new_summary is None:
             return
-
-        data = response.json()
-        new_summary = (data.get("content", [{}])[0].get("text", "") or "").strip()
         # ent#419: the summary is the second writer of the injected block, with
         # no agent in the loop to rephrase — the same screen as
         # `write_user_memory`, but a line that trips it is dropped and the rest

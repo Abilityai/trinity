@@ -85,7 +85,7 @@ def seat_for_execution(execution: Any) -> Optional[str]:
     return client or None
 
 
-def build_seat_caller_prompt(agent_name: str, email: str) -> Optional[str]:
+def build_seat_caller_prompt(agent_name: str, email: str, *, retrieved=()) -> Optional[str]:
     """The caller prompt for a seat run: the seat's memory block + the seat note.
 
     Returns None only when the memory could not be read at all — the seat note
@@ -101,6 +101,6 @@ def build_seat_caller_prompt(agent_name: str, email: str) -> Optional[str]:
     except Exception as e:  # noqa: BLE001 — never block a scheduled run on memory
         logger.warning("[ent#637] seat memory read failed for %s/%s: %s", agent_name, email, e)
         return None
-    block = format_user_memory_block(record)
+    block = format_user_memory_block(record, retrieved=retrieved)
     parts = [p for p in (block, SEAT_MEMORY_INSTRUCTION) if p and p.strip()]
     return "\n\n".join(parts)

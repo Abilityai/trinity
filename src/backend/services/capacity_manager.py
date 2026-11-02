@@ -83,10 +83,15 @@ class AcquireResult:
         "queued_persistent" — overflow persisted to the SQL backlog; caller
                               should return 202 Accepted. The drain handles
                               actual execution later.
+
+    pull: True when a pull pilot's gate queued the row (#3625). The durable
+        queue is that agent's only dispatch route, so "queued" carries no
+        claim about load and callers must not word it as "at capacity".
     """
     state: Literal["admitted", "queued_in_memory", "queued_persistent"]
     execution_id: str
     queue_position: Optional[int] = None
+    pull: bool = False
 
 
 @dataclass
@@ -333,13 +338,19 @@ class CapacityManager:
         # autonomous triggers and every interactive trigger (#3114, #3127; a
         # pilot's /chat never calls acquire); it fails safe to push, so a
         # non-pilot's path is byte-for-byte unchanged.
-        from services.pull_pilot import pull_owns_dispatch
+        from services.pull_pilot import note_unreachable_pull_trigger, pull_owns_dispatch
 
         pull_exclusive = (
             overflow_policy == "queue_persistent"
             and overflow_payload is not None
             and pull_owns_dispatch(agent_name, overflow_payload.triggered_by)
         )
+        # #4105: `POST /task` pre-acquires here and hands `execute_task` a held
+        # slot, so this is the only place its pushed row on a pilot is visible.
+        # Logs once per (agent, trigger) for a trigger in no pull set; a no-op
+        # for every non-pilot.
+        if overflow_payload is not None and not pull_exclusive:
+            note_unreachable_pull_trigger(agent_name, overflow_payload.triggered_by)
 
         # ---- 0. Dispatch breaker gate (#526) ----------------------------
         # Checked FIRST so a raised CircuitOpen never reaches the overflow
@@ -443,7 +454,8 @@ class CapacityManager:
             if not enqueued:
                 raise CapacityFull(agent_name, max_concurrent, "persistent_full")
             return AcquireResult(
-                state="queued_persistent", execution_id=execution_id
+                state="queued_persistent", execution_id=execution_id,
+                pull=pull_exclusive,
             )
 
         raise ValueError(f"Unknown overflow_policy: {overflow_policy!r}")

@@ -221,6 +221,12 @@
             <TelemetrySharingPanel />
           </div>
 
+          <!-- trinity-enterprise#1022 — retrieval memory. OSS-core, default-off;
+               the honest status line says why it cannot run when it cannot. -->
+          <div v-if="activeTab === 'general'" class="mb-6">
+            <RetrievalMemoryPanel />
+          </div>
+
           <!-- ent#463 — Operator-intake Settings home. Identified contact
                capture (email + optional profile), NOT anonymous telemetry.
                First-run form (SetupPassword.vue) is the other producer; both
@@ -2349,6 +2355,7 @@ import CredentialVaultPanel from '../components/settings/CredentialVaultPanel.vu
 import SkillRunnerPanel from '../components/settings/SkillRunnerPanel.vue'
 import ActivationFunnelPanel from '../components/settings/ActivationFunnelPanel.vue'
 import TelemetrySharingPanel from '../components/settings/TelemetrySharingPanel.vue'
+import RetrievalMemoryPanel from '../components/settings/RetrievalMemoryPanel.vue'
 import FirstRunRerunPanel from '../components/settings/FirstRunRerunPanel.vue'
 import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'

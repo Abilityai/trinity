@@ -192,3 +192,12 @@ audioop-lts; python_version >= '3.13'
 # would prove nothing about cell mapping). Mirrors the backend image pins.
 openpyxl==3.1.5
 reportlab==4.2.5
+
+# trinity-enterprise#1022 retrieval memory — local ONNX embeddings and the
+# vector math. EXACT pins, equal to docker/backend/Dockerfile; pinned by
+# tests/unit/test_ent1022_retrieval_memory.py (the #1891 / ent#679 shape).
+fastembed==0.9.1
+onnxruntime==1.31.1
+numpy==2.5.4
+tokenizers==0.23.3
+huggingface-hub==1.33.0

@@ -11,9 +11,10 @@ import secrets
 from datetime import datetime, timezone
 from typing import Any, Callable, List, Optional, Tuple
 
-from sqlalchemy import select, insert, update, func, and_
+from sqlalchemy import select, insert, update, func, and_, or_
 
 from .engine import get_engine
+from .loop_run_hygiene import stale_running_run_ids
 from .tables import agent_loops, agent_loop_runs
 from utils.helpers import utc_now_iso
 
@@ -227,13 +228,26 @@ class LoopOperations:
         path can omit it. `last_response` carries the last *successful* response
         even on a tolerated-failure iteration (continue mode), preserving
         `{{previous_response}}` semantics.
+
+        #4057: never moves a loop backwards. A write for a run older than the
+        loop's `runs_completed` (a slow worker landing after a park-sourced
+        dispatch already advanced the loop) writes nothing: its
+        `last_response` and `failed_runs` are as stale as its run number.
         """
         values: dict = {"runs_completed": runs_completed, "last_response": last_response}
         if failed_runs is not None:
             values["failed_runs"] = failed_runs
         stmt = (
             update(agent_loops)
-            .where(agent_loops.c.id == loop_id)
+            .where(
+                and_(
+                    agent_loops.c.id == loop_id,
+                    or_(
+                        agent_loops.c.runs_completed.is_(None),
+                        agent_loops.c.runs_completed <= runs_completed,
+                    ),
+                )
+            )
             .values(**values)
         )
         with get_engine().begin() as conn:
@@ -575,11 +589,17 @@ class LoopOperations:
                     .order_by(agent_loop_runs.c.run_number.asc())
                 ).mappings()
             ]
-            open_run = next((r for r in runs if r["status"] == "running"), None)
+            runs_completed = loop["runs_completed"] or 0
+            # #4058: a stale duplicate `running` row (pre-#4023) is never the
+            # open run: no terminal can advance it, and choosing it would hide
+            # the real open run, or keep the loop from ever re-arming.
+            stale = stale_running_run_ids(
+                loop_is_terminal=False, runs_completed=runs_completed, runs=runs)
+            open_run = next(
+                (r for r in runs if r["status"] == "running" and r["id"] not in stale), None)
             if open_run is not None:
                 tx.rollback()
                 return "open_run", open_run
-            runs_completed = loop["runs_completed"] or 0
             if any(r["run_number"] > runs_completed for r in runs):
                 tx.rollback()
                 return "stuck", None
