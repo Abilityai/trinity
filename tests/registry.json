@@ -7718,6 +7718,29 @@
         "unit"
       ],
       "description": "#3785: services/operator_queue_service is a package and the split changes no behaviour. Every property is derived from the tree, so the extraction slices never edit this guard: every module under 800 lines (the pre-split __init__ exempt, with a staleness check); every name src/backend and tests/ read through the package still resolves (a scoped alias scan, pinned not to go blind); no from-import between package modules; the collaborators (db, _queue_db, principal_reach, get_breaker_redis, ask_service, AgentClient, _audit_sync) bound once, in deps: no other package module imports a collaborator's source (derived from deps' own imports) in any scope under any alias, holds a collaborator object at module level, or binds a collaborator name, and the package has none of them, so a stale patch on the package raises; one top-level binding per name and no import-time copy of a package binding; every import-time read defined above the submodule's import, and the _MARKER_UNCHANGED default the owner's object; a monkeypatch of a re-exported name lands where its readers read (both-sided names refused, an unresolvable patch fails closed), and no test reaches a package function's __globals__ (provenance tracked per scope: an attribute chain, a from-import or a simple assignment; parameters shadow); one logger identity; owner-exact qualified reads and no name unresolved in its own scope; no submodule named like a package attribute; one rate_limiter binding; no method defined on two classes of the composed service; deps imported first and holding no package reference; every external import before the first submodule import, and a failed first import, injected at that last external statement and proven to fire there, leaves no stale submodule. The other shape, a fresh install: each consumer imported first in its own interpreter on an empty database raises a bounded alert (created; only main binds a WebSocket manager, and then exactly one thin operator_queue_sync trigger is sent). No Docker, no network."
+    },
+    {
+      "file": "unit/test_4157_workspace_login_handoff.py",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "auth",
+        "security",
+        "workspace"
+      ],
+      "description": "#4157: a platform account that starts at the Workspace sign-in enters ONE code. The portal 409 carries a one-time hand-off (Redis, SHA-256 at rest, email-bound, 5-min TTL, single-use) only after a correct code; POST /api/auth/email/handoff redeems it through the platform email login's gates, buckets, allow-list, audit and 2FA. Real-flow test pins one minted code used once, and no code or token in logs."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceLoginHandoff.mount.spec.js",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "auth",
+        "workspace"
+      ],
+      "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
     }
   ]
 }

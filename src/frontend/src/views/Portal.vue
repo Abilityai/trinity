@@ -1116,6 +1116,9 @@ async function onVerify() {
     // signs in at `/login`, which gives it the team view, then comes back here.
     if (err.response?.status === 409 && err.response?.data?.detail?.reason === 'platform_login_required') {
       store.resumePath = null
+      // #4157: the 409 carries a one-time hand-off, so `/login` signs the
+      // person in without a second code. Held in memory only, never the URL.
+      authStore.setWorkspaceHandoff(address, err.response.data.detail.handoff)
       router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
       return
     }

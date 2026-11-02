@@ -320,7 +320,6 @@ def platform_login_admits(email: str | None) -> bool:
     addr = (email or "").strip().lower()
     if not addr:
         return False
-    from config import EMAIL_AUTH_ENABLED
     from database import db as core_db
     try:
         user = core_db.get_user_by_email(addr)
@@ -328,13 +327,44 @@ def platform_login_admits(email: str | None) -> bool:
             return False
         if user.get("password"):
             return True
-        setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-        if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
-            return False
-        return bool(core_db.is_email_whitelisted(addr))
+        return _platform_email_login_open(core_db, addr)
     except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
         logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
         return False
+
+
+def _platform_email_login_open(core_db, addr: str) -> bool:
+    """The platform email login would take this address: email login on, the
+    login policy allows codes, and the address is allow-listed (#2381)."""
+    from config import EMAIL_AUTH_ENABLED
+    setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+    if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+        return False
+    return bool(core_db.is_email_whitelisted(addr))
+
+
+def platform_login_handoff(email: str | None) -> str | None:
+    """#4157 — after a CORRECT code for a platform account, a one-time token
+    `/login` redeems at `POST /api/auth/email/handoff`, so the person does not
+    need a second emailed code.
+
+    Minted only when the platform email login would take the address. A
+    password-only account the email door refuses gets None and signs in with
+    its password, as before. Never call this before the code has verified:
+    the token is what tells the inbox owner the address has an account (#186).
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return None
+    from database import db as core_db
+    try:
+        if not _platform_email_login_open(core_db, addr):
+            return None
+    except Exception as exc:  # noqa: BLE001 — no token; `/login` asks for a code
+        logger.warning("[#4157] hand-off admission check failed: %s", type(exc).__name__)
+        return None
+    from services import login_handoff_service
+    return login_handoff_service.mint(addr)
 
 
 def portal_signin_request(email: str | None) -> str | None:

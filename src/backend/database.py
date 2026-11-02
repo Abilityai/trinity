@@ -68,6 +68,7 @@ from db_models import (
     EmailWhitelistAdd,
     EmailLoginRequest,
     EmailLoginVerify,
+    EmailLoginHandoff,
     EmailLoginResponse,
     # Agent Notifications (NOTIF-001)
     NotificationCreate,

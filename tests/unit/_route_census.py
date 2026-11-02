@@ -1169,6 +1169,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/auth.py::request_access": ("POST /api/access/request", "unauthenticated by design (access request)"),
     "routers/auth.py::request_email_login_code": ("POST /api/auth/email/request", "email sign-in, step 1"),
     "routers/auth.py::verify_email_login_code": ("POST /api/auth/email/verify", "email sign-in, step 2"),
+    "routers/auth.py::redeem_email_login_handoff": ("POST /api/auth/email/handoff", "email sign-in, step 2 via the Workspace's one-time hand-off (#4157)"),
     "routers/auth.py::validate_token": ("GET /api/auth/validate", "validates the presented token itself"),
     "routers/public.py::clear_public_session": ("DELETE /api/public/session/{token}", _PUBLIC_LINK),
     "routers/public.py::confirm_verification_code": ("POST /api/public/verify/confirm", "public-link surface; the link token in the path is the credential (email verification)"),

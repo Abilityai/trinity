@@ -12,6 +12,7 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-11-02 | **#4157** — new `POST /api/auth/email/handoff` `{email, token}` redeems the one-time token the Workspace code page hands a platform account after a correct code (see [workspace-only-role.md](workspace-only-role.md)), so that path needs one emailed code, not two. It shares the verify route's code — `_require_email_login_open`, `_email_allow_listed`, `_email_login_failed`, `_complete_email_login` — so door gates, rate-limit buckets, the #2381 allow-list re-check, audit (`method: email_handoff`) and the 2FA step are the same; only the code check becomes a single-use `GETDEL` of the token (`services/login_handoff_service.py`). |
 | 2026-10-21 | **trinity-enterprise#717** — adding a whitelist entry (`POST /api/settings/email-whitelist`) takes a signed-in admin session for **every** role, the default `user` included: authentication → `require_interactive` → `assert_admin` → body parsing → DB. A key — an admin's own user-scoped key and the system key included — gets 403 before the body is read (never a 422) and no row is written or replaced. Signed-in admins are unchanged. See [POST /api/settings/email-whitelist](#post-apisettingsemail-whitelist-add_email_to_whitelist). |
 | 2026-10-09 | **trinity-enterprise#837** — sharing and access-request approval stop writing the whitelist; the Settings whitelist form gains a role picker (default `user`) and a Role column; a `user` signing in at `/login` lands in `/workspace`. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-09-29 | **Binding a sign-in email needs mailbox proof (trinity-enterprise#720)**: new `POST /api/users/me/email/code` sends a bind code; `PUT /api/users/me/email` now requires it (console-provider admin bypass, audited unverified), caps wrong guesses at 5 per 10 min under `otp_attempts:bind:{user_id}:{email}`, and `users.email` is unique (case-insensitive). See [Binding a Sign-In Email](#binding-a-sign-in-email-trinity-enterprise720). |
@@ -34,6 +35,7 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **UI**: `src/frontend/src/views/Settings.vue:291-390` - Email Whitelist management section
 - **API**: `POST /api/auth/email/request` - Request verification code (lines 140-198 in auth.py)
 - **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py)
+- **API**: `POST /api/auth/email/handoff` - Redeem the Workspace code page's one-time hand-off instead of a second code (`routers/auth.py::redeem_email_login_handoff`, #4157)
 - **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
 - **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (`routers/settings/whitelist.py::list_email_whitelist`)
 - **API**: `POST /api/settings/email-whitelist` - Add email to whitelist, signed-in admin session only (`routers/settings/whitelist.py::add_email_to_whitelist`, trinity-enterprise#717)
