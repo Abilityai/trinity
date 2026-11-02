@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1066_secret_paste_guard.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "A secret pasted as a plain Workspace chat message is refused by both chat routes (sync and stream) with 422 `secret_in_message` BEFORE admission: no service call, no Idempotency-Key consumed, the SHAPE named and never the text. `utils/credential_sanitizer.secret_shape` over `SECRET_VALUE_PATTERNS` (gaining `ops_` and `dop_v1_` service-token shapes in both the backend and agent-image copies, so logs redact them too), `Bearer`/`Basic` excluded as prose, a sensitive `KEY=value` pair counted only with an 8+ character value and the #3311 harmless-word blanking; the partition of the list into named and excluded pinned complete."
+    },
+    {
       "file": "unit/test_ent1066_credential_sink.py",
       "feature": "trinity-enterprise#1066",
       "added": "2026-11-02",

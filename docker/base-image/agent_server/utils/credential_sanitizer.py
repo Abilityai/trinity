@@ -110,6 +110,11 @@ SECRET_VALUE_PATTERNS = [
     r'xoxa-[a-zA-Z0-9\-]+',           # Slack app token
     r'AKIA[A-Z0-9]{16}',              # AWS access key
     r'trinity_mcp_[a-zA-Z0-9]{16,}',  # Trinity MCP keys
+    # trinity-enterprise#1066: two service-token shapes a person is likely to
+    # hand an agent — added to the list the redaction runs, not to a
+    # guard-private one, so logs learn them in the same change.
+    r'ops_[A-Za-z0-9_-]{20,}',        # 1Password service-account token
+    r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
 ]
