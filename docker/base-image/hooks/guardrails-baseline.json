@@ -49,6 +49,12 @@
       "reason": "interactive root shell"
     }
   ],
+  "gated_bash_deny": [
+    {
+      "pattern": "(?m)(?:^|[;&|(]|\\b(?:ba|z|k|da)?sh[ \\t]+-[a-zA-Z]*c[ \\t]+[\"'])[ \\t]*(?:(?:do|then|else|elif|if|while|until|!|\\{|command|[A-Za-z_]\\w*=(?:\"[^\"\\n]*\"|'[^'\\n]*'|[^\\s;&|()'\"]*)|(?:env|exec|nohup|setsid|time|timeout|nice|stdbuf|sudo|xargs)(?:[ \\t]+(?:-u[ \\t]+[^\\s;&|()]+|-(?!u[ \\t])[^\\s;&|()]+|\\d[^\\s;&|()]*|\\{\\}))*)[ \\t]+)*(?:[^\\s=;&|()'\"]*/)?(?:gemini|(?:claude|codex)(?![ \\t]+plugin(?=[\\s;&]|$)(?!(?:(?![ \\t]--[ \\t])[^\\n;&|()]){0,512}[ \\t](?:-p|--print)(?=[\\s;&|)]|$))))(?=[\\s;&]|$)(?![ \\t]*[-+*/]?=)(?![ \\t]+(?:--version|--help|mcp)(?=[\\s;&]|$)(?!(?:(?![ \\t]--[ \\t])[^\\n;&|()]){0,512}[ \\t](?:-p|--print)(?=[\\s;&|)]|$)))",
+      "reason": "starting a coding-agent CLI (claude, codex, gemini) on an agent with gated skills: a nested run escapes Trinity's execution ledger and skill gates. Use your own tools, your Agent subagent tool where you have it, or chat_with_agent; do not script around this. If the match was only text in a quoted string or heredoc, put that text in a file with the Write tool"
+    }
+  ],
   "path_deny": [
     ".env",
     ".env.*",

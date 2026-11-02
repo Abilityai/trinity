@@ -117,6 +117,46 @@ permissions:
   preset: orchestrator-workers
 ```
 
+### Target-state keys (apply and deploy)
+
+A manifest can also carry the configuration each member should have, so one file describes the whole system. Every key is optional and per member unless noted. Both **deploy** (create mode) and **apply** (`apply_system`, `POST /api/systems/apply`, which reconciles a live system and previews by default) read them.
+
+```yaml
+name: content-production
+naming: bare                      # top level: optional, default `prefixed`
+agents:
+  content-lead:                   # under `bare` the key is the agent's full name
+    template: github:YourOrg/lead-agent
+    skills: [research, publish]   # library skills
+    skill_sets: [ops-core]        # skill sets
+    gates:                        # approval map: which skills need a person's approval
+      publish: { approver: primary, deadline_hours: 24 }
+    grants: [agents.manage]       # admin grants (capabilities)
+    seat: content-lead            # the canon role this AGENT holds
+    person_seats:                 # seats a PERSON must fill: role and kind only
+      - { role: content-owner, kind: approver }
+  style-guide:
+    template: github:YourOrg/style-guide
+    deploy: false                 # named in the system, never created
+```
+
+| Key | What it does |
+|-----|--------------|
+| `naming` | `prefixed` (default): members are named `<system>-<key>`. `bare`: the key is the full agent name, and apply adopts an existing untagged agent of that name by adding the system tag (listed in `adopted`). |
+| `skills`, `skill_sets` | Assigned when missing. An unknown skill or set is a blocker. |
+| `gates` | `{<skill>: {approver, deadline_hours}}`. Written when missing or different; `approver` is `primary`, `approver`, or `role:<id>`. The preview reports the same refusal the write would give. A gate is written before its skill: if the gate does not land, that skill, or a skill set carrying it, is held back and named, never delivered without its approval. If the gate's write fails on a skill the member already holds, that skill stays assigned and the result says what is running: `skill_runs_ungated` when no gate is in force (also one line in `warnings`), or `previous_gate_stands` when the gate stored before still applies. Apply never unassigns a skill: fix the gate and re-apply, set it by hand, or unassign the skill by hand. |
+| `grants` | Capabilities from the admin grant list. **Written only when the caller is an admin in a signed-in session.** Any other caller (an agent key, an admin's own MCP key, a non-admin) gets the grant reported as held back (`grant_requires_interactive_admin`, plus one warning line), and the rest of the manifest still applies. |
+| `seat` | The canon role the agent itself holds. Written only when an installed assignment module provides a seat writer; otherwise reported `seat_unobserved` and nothing is written. On apply and on deploy alike, a seat is written only for an admin in a signed-in session, the same gate as a grant; any other caller gets it reported as held back (`seat_requires_interactive_admin` on apply, `seats_require_interactive_admin` on deploy). |
+| `person_seats` | `[{role, kind}]`, where `kind` is `primary`, `approver`, `collaborator` or `viewer`. **Report-only**: apply says whether each seat is filled, vacant or unobserved and never fills one. A person seat names the role and the kind, **never a person**: an email address anywhere in `seat` or `person_seats` (or an extra key such as `person:`) is refused, because the manifest is meant to be committed to git. |
+| `deploy: false` | A declared-only member. Apply gives it the verdict `declared_only` and reports whether its template is in the catalog and whether an agent already holds its name. That agent is never created, changed or deleted. An explicit permission edge or `folders:` naming a declared-only member is refused; a preset skips it with a warning. Any other key it carries is ignored, and validation says which in one warning. `deploy: false` governs apply only: if that agent carries the system tag, restarting the system restarts it and a teardown removes it, and apply says so (`declared_only_member_tagged`); remove the tag to keep it out. In a prefixed system an untagged agent whose name starts with `<system>-` is reached the same way, by name (`declared_only_member_prefixed`); rename it to keep it out. |
+
+Rules that hold for every key:
+
+- **An absent key is never a revoke.** Leaving a key out, or omitting an item a member already has, changes nothing. Apply reports what the member holds beyond the manifest (`skill_extra`, `grant_extra`, `gate_undeclared`, …) and never unassigns, revokes or clears it. Removing something is a human act in the agent's own settings.
+- **`summary`** in the apply result counts, per group (`skills`, `grants`, `gates`, `roles`, `members`), what is written, what is only reported, and what is **`unobserved`**. Unobserved means this install has nothing that can answer for that group (each member lists its unobserved groups). It is never shown as "in sync". A failed read is different: it blocks the member with the retryable `member_reads_unavailable`. A dry run counts what apply *would* write; a real run counts only the writes that actually landed (a skill held back for its gate, or a write that failed, is not counted), and a refused run counts none. Likewise `adopted` lists only agents whose system tag was actually added.
+- **Export** writes each member's skills, skill sets, gates, grants and held seat back out, so the file re-applies unchanged. Person seats and declared-only members are not stored on the platform and are not exported. The first lines of every export are `# unobserved:` comments that say so (and name anything that could not be read — including every member's seat on an install with no assignment module). Grants, gates and seats appear only where the caller could read them directly: grants and seats for the agent's owner or an admin, and gates for anyone the Skills tab's gate read admits. An export names what was withheld from this caller. `resources` are the member's effective values, so re-applying an export keeps a limit that is waiting for a restart. A dry run of an export on the system it came from shows nothing to create, nothing to write and no drift: something an agent already holds stays in sync even if it has since left the library (a skill or skill set, a retired capability, a gate whose approver can no longer be resolved). Person seats in a manifest, and a seat the assignment module did not answer for, read back as `unobserved`. Exporting the same system twice gives the same text.
+- The deploy preview shows one line under **Agents to create** that totals what the created agents will be configured with. Anything held back is listed under the notes.
+
 ## Deploy Result (best-effort by default)
 
 Deploy is **best-effort / continue-on-error by default**: if one agent fails to create, the rest still deploy. Read the response `status` field, not just the HTTP code:
@@ -127,8 +167,9 @@ Deploy is **best-effort / continue-on-error by default**: if one agent fails to 
 | `partial` | Some agents failed; the survivors were still created and configured. | 200 |
 | `failed` | Zero agents created. | 500 (the full report is the response body) |
 | `valid` | Dry-run validation passed (nothing created). | 200 |
+| (refused) `nothing_to_deploy` | Every member is `deploy: false`, so deploy has nothing to create. Refused on the dry run and the real deploy; use apply to report on declared-only members. | 400 |
 
-A `partial` deploy returns the survivors **plus** a `failed[]` list. Each entry carries `{name, short_name, template, reason, status_code}` so you can see exactly which agents failed and why. A **total** failure returns HTTP 500 with the same full report as the body -- so always inspect `status` / `failed[]` rather than trusting the HTTP status alone.
+Members marked `deploy: false` are listed by name in `agents_declared_only[]`. A `partial` deploy returns the survivors **plus** a `failed[]` list. Each entry carries `{name, short_name, template, reason, status_code}` so you can see exactly which agents failed and why. A **total** failure returns HTTP 500 with the same full report as the body -- so always inspect `status` / `failed[]` rather than trusting the HTTP status alone.
 
 Two deploy options control this:
 
@@ -141,7 +182,7 @@ Two deploy options control this:
 
 Deploy is a one-shot recipe, but the deployed agents remain addressable as a system:
 
-- **Membership is by tag, not by name.** Deploy tags every member with the system name, and the post-deploy routes resolve membership from that tag. Only agents deployed before tagging existed fall back to the `<system>-*` name prefix, and even then an agent whose own tag claims a longer prefix is excluded — so restarting `acme` never touches the agents of a system named `acme-extra`.
+- **Membership is by tag, not by name.** Deploy tags every member with the system name, and the post-deploy routes resolve membership from that tag. Only agents deployed before tagging existed fall back to the `<system>-*` name prefix, and even then an agent whose own tag claims a longer prefix is excluded — so restarting `acme` never touches the agents of a system named `acme-extra`. A system whose tagged members all lack the `<system>-` prefix is bare-named, and then an untagged `<system>-*` agent is not a member at all.
 - **Get** (`GET /api/systems/{name}`) returns the members you can access with their permissions, shared folders, and real schedules.
 - **Restart** (`POST /api/systems/{name}/restart`, `restart_system`) stops and starts every member. It requires the **creator** role or above and is **human-only**: an agent-scoped API key is refused, because the per-agent start/stop routes only let an agent touch agents it spawned and a bulk restart would bypass that.
 - **Export** (`GET /api/systems/{name}/manifest`, `get_system_manifest`) writes a manifest you can deploy again. Permission edges pointing outside the system are dropped rather than exported as broken names, and the instance-wide platform prompt is never embedded as the manifest's `prompt:` — deploying the export elsewhere would otherwise overwrite that instance's prompt for every agent.
@@ -164,6 +205,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | `list_systems()` | List all deployed systems |
 | `restart_system(name)` | Restart all agents in a system (creator role, human callers only — refused for an agent key) |
 | `get_system_manifest(name)` | Export the system as a redeployable YAML manifest |
+| `apply_system(manifest, dry_run?)` | Reconcile a live system to a manifest (previews unless `dry_run` is `false`). Human-only, creator role. Never deletes, revokes or restarts; see [Target-state keys](#target-state-keys-apply-and-deploy). An MCP key never writes `grants` or `seat`: they are only reported. They are written when an admin applies the manifest in a signed-in session; otherwise grant them in the agent's **Settings** |
 | `teardown_system(system_name, dry_run?, agents?)` | Remove a deployed system's agents. Previews by default (`dry_run` is `true` unless you set it to `false`). Needs a matching entitlement; without it the tool reports that the capability is not available (`404`/`403`) instead of failing |
 
 ### API Endpoints
@@ -171,6 +213,7 @@ On a **fresh install** (no non-system agents yet), Trinity auto-seeds a bundled 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/systems/deploy` | POST | Deploy a system from a YAML manifest (`dry_run`, `strict` in the body); creator role |
+| `/api/systems/apply` | POST | Reconcile a live system to a manifest (`dry_run` defaults to `true`); creator role, human-only |
 | `/api/systems/manifests` | GET | The bundled manifest catalogue shown under **Pick a system** (creator role) |
 | `/api/systems/manifests/{manifest_id}` | GET | One bundled manifest's YAML and preview (creator role) |
 | `/api/systems` | GET | List all deployed systems |

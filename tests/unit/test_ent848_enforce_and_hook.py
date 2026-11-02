@@ -240,7 +240,8 @@ class TestRefusals:
 
 
 # ---------------------------------------------------------------------------
-# The ask sink — agents stay on kinds; only a gate pre-lists addressees
+# The ask sink — an agent's own `to` resolves on the ask side (a role id since
+# trinity-enterprise#1007); only a gate pre-lists addressees
 # ---------------------------------------------------------------------------
 
 
@@ -249,12 +250,19 @@ class TestAskSink:
         return {"request_id": rid, "type": "question", "title": "Which budget?",
                 "question": "Which budget line?", "to": "primary", **over}
 
-    async def test_an_agent_addressing_a_role_id_is_still_invalid_to(self, gate):
+    async def test_an_agent_addressing_a_role_id_resolves_on_the_ask_side_and_is_refused_by_name(self, gate):
+        """Before trinity-enterprise#1007 this was `invalid_to`. Now the sink
+        resolves the role id itself (`resolve_role_id_for_ask`, the agent's own
+        roster, ent#881 reachability): Dana is seated but cannot open this
+        agent, so the ask is refused by that arm's name — the role, never Dana —
+        and nothing is pre-listed the way a gate's raise is."""
         import services.ask_service as ask
         _seat(role_people={"finance": {"emails": [DANA]}})
         with pytest.raises(ask.AskRejected) as info:
             ask.raise_ask("fin-848-k1", self._body("ask-k1", to=FINANCE), raised_by="agent", channel="mcp")
-        assert (info.value.status_code, info.value.code) == (422, "invalid_to")
+        assert (info.value.status_code, info.value.code) == (422, "role_cannot_open_agent")
+        assert info.value.extra["role"] == FINANCE.lower()
+        assert DANA not in info.value.message
 
     @pytest.mark.parametrize("kw", [
         {"addressees": [DANA]},

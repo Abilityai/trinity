@@ -8,13 +8,17 @@
       "fastapi": "0.115.14",
       "pydantic": "2.13.2"
     },
-    "rule": "Never regenerate to make a red run green: a difference is a create-mode behaviour change and needs its own issue. See the test module docstring."
+    "rule": "Never regenerate to make a red run green: a difference is a create-mode behaviour change and needs its own issue. See the test module docstring.",
+    "regenerated_by": [
+      "trinity-enterprise#1022 agent_ownership.memory_opt_out",
+      "#4130 SystemDeployResponse.agents_declared_only"
+    ]
   },
   "cases": {
     "dry_run_valid": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead\":[\"gold-helper\",\"gold-watcher\",\"gold-lead\"],\"gold-helper\":[\"gold-lead\"]},\"schedules_preview\":[{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
+      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead\":[\"gold-helper\",\"gold-watcher\",\"gold-lead\"],\"gold-helper\":[\"gold-lead\"]},\"schedules_preview\":[{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
       "create_calls": [],
       "start_calls": [],
       "fleet_writes": {}
@@ -22,7 +26,7 @@
     "dry_run_invalid": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"invalid\",\"system_name\":\"broken\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\"},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\"},{\"name\":\"broken-fine\",\"short_name\":\"fine\",\"template\":\"local:default\"}],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\",\"reason\":\"Local template 'no-such-template-ent695' was not found. Check the id against GET /api/templates — note that hidden templates are omitted from that listing but remain creatable by id. To create an agent with no template at all, omit the 'template' field.\",\"status_code\":404},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\",\"reason\":\"Invalid cpu '1.0': must be one of 1, 2, 4, 8, 16 (integer processor count — not a fractional or Kubernetes-style value)\",\"status_code\":null}],\"permission_edges\":{},\"schedules_preview\":[],\"system_view_requested\":false}",
+      "body": "{\"status\":\"invalid\",\"system_name\":\"broken\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\"},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\"},{\"name\":\"broken-fine\",\"short_name\":\"fine\",\"template\":\"local:default\"}],\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"broken-ghost\",\"short_name\":\"ghost\",\"template\":\"local:no-such-template-ent695\",\"reason\":\"Local template 'no-such-template-ent695' was not found. Check the id against GET /api/templates — note that hidden templates are omitted from that listing but remain creatable by id. To create an agent with no template at all, omit the 'template' field.\",\"status_code\":404},{\"name\":\"broken-heavy\",\"short_name\":\"heavy\",\"template\":\"github:example-org/example-agent\",\"reason\":\"Invalid cpu '1.0': must be one of 1, 2, 4, 8, 16 (integer processor count — not a fractional or Kubernetes-style value)\",\"status_code\":null}],\"permission_edges\":{},\"schedules_preview\":[],\"system_view_requested\":false}",
       "create_calls": [],
       "start_calls": [],
       "fleet_writes": {}
@@ -30,7 +34,7 @@
     "dry_run_name_conflict": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead_2\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead_2\":[\"gold-helper\",\"gold-watcher\",\"gold-lead_2\"],\"gold-helper\":[\"gold-lead_2\"]},\"schedules_preview\":[{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
+      "body": "{\"status\":\"valid\",\"system_name\":\"gold\",\"agents_created\":[],\"agents_to_create\":[{\"name\":\"gold-lead_2\",\"short_name\":\"lead\",\"template\":\"local:default\"},{\"name\":\"gold-helper\",\"short_name\":\"helper\",\"template\":\"local:scout\"},{\"name\":\"gold-watcher\",\"short_name\":\"watcher\",\"template\":\"local:default\"}],\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":{\"gold-watcher\":[],\"gold-lead_2\":[\"gold-helper\",\"gold-watcher\",\"gold-lead_2\"],\"gold-helper\":[\"gold-lead_2\"]},\"schedules_preview\":[{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"daily-report\",\"cron\":\"0 9 * * *\",\"message\":\"Write the daily report\",\"enabled\":true,\"timezone\":\"UTC\",\"description\":null},{\"agent\":\"gold-lead_2\",\"short_name\":\"lead\",\"name\":\"weekly-sync\",\"cron\":\"30 8 * * 1\",\"message\":\"Run the weekly sync\",\"enabled\":false,\"timezone\":\"Europe/Berlin\",\"description\":\"Monday sync\"}],\"system_view_requested\":true}",
       "create_calls": [],
       "start_calls": [],
       "fleet_writes": {}
@@ -38,7 +42,7 @@
     "deployed": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
+      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
       "create_calls": [
         {
           "config": {
@@ -178,6 +182,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -226,6 +231,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -274,6 +280,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -483,7 +490,7 @@
     "partial": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"partial\",\"system_name\":\"part\",\"agents_created\":[\"part-worker-a\",\"part-worker-b\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":1,\"tags_configured\":5,\"system_view_created\":null,\"warnings\":[\"Partial deploy: 1 agent(s) failed to create: ['part-orchestrator']. Re-deploying this manifest will create suffixed duplicates of the already-created agents — fix the cause and create the missing agents individually.\",\"Orchestrator agent failed to create; the deployed workers have no inter-agent permissions — the system may be non-functional.\",\"Failed to start 1 agents: ['part-worker-a']\"],\"failed\":[{\"name\":\"part-orchestrator\",\"short_name\":\"orchestrator\",\"template\":\"local:default\",\"reason\":\"Template could not be cloned\",\"status_code\":400}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
+      "body": "{\"status\":\"partial\",\"system_name\":\"part\",\"agents_created\":[\"part-worker-a\",\"part-worker-b\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":0,\"schedules_created\":1,\"tags_configured\":5,\"system_view_created\":null,\"warnings\":[\"Partial deploy: 1 agent(s) failed to create: ['part-orchestrator']. Re-deploying this manifest will create suffixed duplicates of the already-created agents — fix the cause and create the missing agents individually.\",\"Orchestrator agent failed to create; the deployed workers have no inter-agent permissions — the system may be non-functional.\",\"Failed to start 1 agents: ['part-worker-a']\"],\"failed\":[{\"name\":\"part-orchestrator\",\"short_name\":\"orchestrator\",\"template\":\"local:default\",\"reason\":\"Template could not be cloned\",\"status_code\":400}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
       "create_calls": [
         {
           "config": {
@@ -622,6 +629,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -670,6 +678,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -785,7 +794,7 @@
     "failed": {
       "status_code": 500,
       "content_type": "application/json",
-      "body": "{\"status\":\"failed\",\"system_name\":\"doomed\",\"agents_created\":[],\"agents_to_create\":null,\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"doomed-one\",\"short_name\":\"one\",\"template\":\"local:default\",\"reason\":\"git clone failed: https://***@git.example.com/org/agent.git\",\"status_code\":null},{\"name\":\"doomed-two\",\"short_name\":\"two\",\"template\":\"github:example-org/missing-repo\",\"reason\":\"Template repository not found\",\"status_code\":404},{\"name\":\"doomed-three\",\"short_name\":\"three\",\"template\":\"local:default\",\"reason\":\"quota exceeded: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"status_code\":null}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
+      "body": "{\"status\":\"failed\",\"system_name\":\"doomed\",\"agents_created\":[],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"doomed-one\",\"short_name\":\"one\",\"template\":\"local:default\",\"reason\":\"git clone failed: https://***@git.example.com/org/agent.git\",\"status_code\":null},{\"name\":\"doomed-two\",\"short_name\":\"two\",\"template\":\"github:example-org/missing-repo\",\"reason\":\"Template repository not found\",\"status_code\":404},{\"name\":\"doomed-three\",\"short_name\":\"three\",\"template\":\"local:default\",\"reason\":\"quota exceeded: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"status_code\":null}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
       "create_calls": [
         {
           "config": {
@@ -998,6 +1007,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -1035,7 +1045,7 @@
     "deployed_by_creator_over_foreign_name": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead_2\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
+      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead_2\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
       "create_calls": [
         {
           "config": {
@@ -1175,6 +1185,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 2,
@@ -1223,6 +1234,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 2,
@@ -1271,6 +1283,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 2,
@@ -1576,6 +1589,14 @@
               ],
               "title": "Agents To Create"
             },
+            "agents_declared_only": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array",
+              "title": "Agents Declared Only",
+              "default": []
+            },
             "prompt_updated": {
               "type": "boolean",
               "title": "Prompt Updated"
@@ -1789,7 +1810,7 @@
           "kwargs": {
             "strict": false
           },
-          "result": "{\"status\":\"deployed\",\"system_name\":\"acme\",\"agents_created\":[\"acme-scout\",\"acme-sage\",\"acme-scribe\"],\"agents_to_create\":null,\"prompt_updated\":false,\"permissions_configured\":6,\"schedules_created\":0,\"tags_configured\":3,\"system_view_created\":null,\"warnings\":[],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}"
+          "result": "{\"status\":\"deployed\",\"system_name\":\"acme\",\"agents_created\":[\"acme-scout\",\"acme-sage\",\"acme-scribe\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":6,\"schedules_created\":0,\"tags_configured\":3,\"system_view_created\":null,\"warnings\":[],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}"
         }
       ],
       "create_calls": [
@@ -1931,6 +1952,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -1979,6 +2001,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,
@@ -2027,6 +2050,7 @@
               "max_parallel_tasks": 3,
               "mcp_exposed": 0,
               "memory_limit": null,
+              "memory_opt_out": 0,
               "open_access": 0,
               "operator_resume_enabled": 0,
               "owner_id": 1,

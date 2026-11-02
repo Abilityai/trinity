@@ -145,6 +145,26 @@ async def broadcast_collaboration_event(
         print("[Warning] WebSocket manager not set, skipping collaboration broadcast")
 
 
+async def release_admission(name: str, *, execution_id: str, capacity, idem) -> None:
+    """Undo an admission whose turn never reached ``run_chat_turn`` (#3998).
+
+    ``admit_chat_request`` acquires the capacity slot (keyed on the admission's
+    execution id) and claims the Idempotency-Key; only ``run_chat_turn``'s
+    ``finally`` releases them. When the execution setup between the two raises
+    (the row insert, an activity, the session), neither was released: the slot
+    stayed held until the cleanup sweep or its TTL, and a retry with the same
+    key answered 409 until the claim expired. ``capacity`` is None for a pull
+    pilot's admission, which holds no slot. Never raises.
+    """
+    if capacity is not None:
+        try:
+            await capacity.release(name, execution_id)
+        except Exception:  # noqa: BLE001 — the caller re-raises the real error
+            logger.exception("[Chat] releasing the slot of %s after a failed setup raised",
+                             execution_id)
+    idempotency_service.fail(idem)
+
+
 async def prepare_chat_execution(
     *,
     name: str,
@@ -2454,6 +2474,32 @@ _SYNC_BACKLOG_TERMINAL = (
 )
 
 
+# #3993: a terminal failure stored as the idempotency snapshot. A turn limit is
+# deterministic (#3988), so a replay of the same key must answer the same 422
+# rather than run the task again. Neither receipt-shaped (#3245 never reclaims
+# it) nor a success body: the routers' replay branches re-raise it.
+_STORED_ERROR_KEY = "stored_error"
+
+
+def _stored_error_snapshot(result, status_code: int) -> dict:
+    code = getattr(result, "error_code", None)
+    return {_STORED_ERROR_KEY: {
+        "status_code": status_code,
+        "detail": result.error,
+        "error_code": getattr(code, "value", code),
+    }}
+
+
+def stored_error(snapshot) -> Optional[dict]:
+    """The stored terminal error a replay must re-raise, or None (#3993)."""
+    if not isinstance(snapshot, dict):
+        return None
+    stored = snapshot.get(_STORED_ERROR_KEY)
+    if not isinstance(stored, dict) or not isinstance(stored.get("status_code"), int):
+        return None
+    return stored
+
+
 def _map_task_failure(name, result, *, idem):
     """Shared /task failure translation (#679): a non-success terminal maps to
     422 (turn limit, #3988) / 429 (at-capacity) / 504 (timed out) / 400 (model
@@ -2462,6 +2508,9 @@ def _map_task_failure(name, result, *, idem):
     #3988: the turn limit answers 422 — the agent's own status — and always
     carries ``X-Trinity-Error-Code: max_turns``, which is what tells it apart
     from the 422 this route already answers for invalid input (#2806).
+
+    #3993: a turn limit completes the claim with the stored 422 instead; every
+    other failure releases it.
 
     #2661: releases the idempotency claim before raising. Both sync branches
     call this AFTER `begin()` and BEFORE `complete()`, and nothing else covered
@@ -2477,7 +2526,6 @@ def _map_task_failure(name, result, *, idem):
     wedge is invisible until someone retries a full day later.
     """
     if result.status in ("failed", "cancelled"):
-        idempotency_service.fail(idem)
         # #2889: the producer-side code. The backlog-reconstruct path reads it
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
         # and the at-capacity branch below fills `capacity` (#2919).
@@ -2485,10 +2533,16 @@ def _map_task_failure(name, result, *, idem):
         if getattr(getattr(result, "error_code", None), "value", None) == (
             TaskExecutionErrorCode.MAX_TURNS.value
         ):
+            # #3993: terminal, not released. A retry of the same key would burn
+            # a full turn budget on the same failure, so the claim completes
+            # with the 422 and a replay answers it without running again.
+            idempotency_service.complete(
+                idem, getattr(result, "execution_id", None), _stored_error_snapshot(result, 422))
             # #3988: checked before the prose matches below — the detail carries
             # the CLI's raw text, and a "timed out" in it would answer 504, which
             # the MCP client reads as its own wait running out.
             raise ChatDispatchError(422, result.error, headers=code_headers)
+        idempotency_service.fail(idem)
         if "at capacity" in (result.error or "") or getattr(
             getattr(result, "error_code", None), "value", None
         ) == TaskExecutionErrorCode.CAPACITY.value:
@@ -2556,17 +2610,30 @@ async def _dispatch_async(
     )
 
     if cap_result.state == "queued_persistent":
-        logger.info(
-            f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
-        )
+        # #3625: on a pull pilot the queue is the only route, so "queued" says
+        # nothing about load. Reserve "at capacity" for a push overflow.
+        if cap_result.pull:
+            logger.info(
+                f"[Task Async] Agent '{name}' (pull) — execution {execution_id} "
+                f"queued for worker claim"
+            )
+            queued_message = (
+                f"Task queued for the worker pool of agent '{name}'. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
+        else:
+            logger.info(
+                f"[Task Async] Agent '{name}' at capacity — execution {execution_id} queued to backlog"
+            )
+            queued_message = (
+                f"Agent at capacity; task queued. Poll GET "
+                f"/api/agents/{name}/executions/{execution_id} for results."
+            )
         _queued_payload = {
             "status": "queued",
             "execution_id": execution_id,
             "agent_name": name,
-            "message": (
-                f"Agent at capacity; task queued. Poll GET "
-                f"/api/agents/{name}/executions/{execution_id} for results."
-            ),
+            "message": queued_message,
             "async_mode": True,
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
@@ -2618,14 +2685,16 @@ async def _dispatch_async(
     return _accepted_payload
 
 
-async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem):
+async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, idem, pull=False):
     """Sync backlog long-poll (#498): wait for the drain terminal, or reconstruct
     a minimal result from the row (non-drain terminal flip), translate failure,
     and build the response. Side effects were handled inside the drain — not repeated.
     """
     sync_wait_cap = 2 * sync_effective_timeout
+    # #3625: a pull pilot always queues; "at capacity" only on a push overflow.
+    queued_how = "(pull) —" if pull else "at capacity —"
     logger.info(
-        f"[Task Sync] Agent '{name}' at capacity — execution {execution_id} "
+        f"[Task Sync] Agent '{name}' {queued_how} execution {execution_id} "
         f"queued to backlog; long-polling up to {sync_wait_cap}s"
     )
     try:
@@ -2829,6 +2898,7 @@ async def _dispatch_sync(
             execution_id=execution_id,
             sync_effective_timeout=sync_effective_timeout,
             idem=idem,
+            pull=cap_result.pull,
         )
     return await _dispatch_sync_immediate(
         request=request,
@@ -3074,7 +3144,8 @@ async def _record_cancel_event(name, current_user, task_execution_id, details):
 
 
 async def _cancel_queued_if_queued(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """BACKLOG-001: if the execution is still queued in the backlog, cancel it
     directly (no container interaction, no slot to release) and return the
@@ -3123,6 +3194,8 @@ async def _cancel_queued_if_queued(
                     "actor_kind": actor_kind,
                 },
             )
+            if on_ended is not None:
+                await on_ended("cancelled_while_queued")
             return {"status": "cancelled_while_queued", "execution_id": execution_id}
     return None
 
@@ -3166,7 +3239,8 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
 
 
 async def _proxy_terminate_and_finalize(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """Proxy the terminate to the agent container, force-release capacity on a
     terminal outcome, write the #679 CANCELLED CAS (only when we actually
@@ -3207,6 +3281,13 @@ async def _proxy_terminate_and_finalize(
         # the agent's own terminal already ran its own release, and firing an
         # emergency clear on a no-op branch was the part with no defensible
         # reading at all.
+        # #3180: set only by the CANCELLED CAS below, and the audit hook reads
+        # it rather than the agent's answer. The agent answers `terminated`
+        # again for a turn it accepted but has not started (its pending entry
+        # is kept), and two terminates of a live process may both get it, so
+        # only the call that wins the CAS ended the turn. Cost, accepted: a kill
+        # of a process whose row is already terminal writes no row.
+        cancel_won = False
         if result.get("status") == "terminated" and task_execution_id:
             try:
                 capacity = get_capacity_manager()
@@ -3260,6 +3341,8 @@ async def _proxy_terminate_and_finalize(
                 "actor_kind": actor_kind,
             },
         )
+        if cancel_won and on_ended is not None:
+            await on_ended("terminated")
         return result
 
     except httpx.ConnectError:
@@ -3269,7 +3352,8 @@ async def _proxy_terminate_and_finalize(
 
 
 async def terminate_execution(
-    *, name, execution_id, task_execution_id, current_user=None, actor_kind="operator"
+    *, name, execution_id, task_execution_id, current_user=None, actor_kind="operator",
+    on_ended=None,
 ):
     """Terminate a running execution: cancel-if-queued (BACKLOG-001), else
     container-gate then proxy-terminate + finalize. Returns the result dict
@@ -3287,6 +3371,14 @@ async def terminate_execution(
     FAILED (#679/#1332), neutral for the dispatch breaker, and CAS-guarded — a
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
+
+    #3180: `on_ended`, when given, is awaited once with the arm's status, and
+    only when THIS call ended work: the queued cancel won its CAS, the parked
+    cancel won its CAS, or the agent answered `terminated` and the CANCELLED CAS
+    that follows was won. A repeat terminate (of a still-parked turn, or one the
+    agent answers `terminated` again) gives the same answer but does not call
+    it, and neither does `already_finished` or any error arm. The response is
+    unchanged either way.
     """
     # ent#551 QA: two voice-dispatched turns were cancelled ~3 s after their
     # call ended and nothing in the log said by whom — uvicorn access logging
@@ -3326,7 +3418,8 @@ async def terminate_execution(
             raise ChatDispatchError(404, "Execution not found in agent")
 
     queued = await _cancel_queued_if_queued(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
     if queued is not None:
         return queued
@@ -3337,7 +3430,8 @@ async def terminate_execution(
     # refuses to POST, and finalize CANCELLED now. Before this the only
     # "cancel" a parked row ever got was the watchdog's wrong one.
     parked = await _cancel_inflight_if_parked(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
     if parked is not None:
         return parked
@@ -3349,12 +3443,14 @@ async def terminate_execution(
         raise ChatDispatchError(503, "Agent is not running")
 
     return await _proxy_terminate_and_finalize(
-        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind
+        name, execution_id, task_execution_id, current_user, actor_kind=actor_kind,
+        on_ended=on_ended,
     )
 
 
 async def _cancel_inflight_if_parked(
-    name, execution_id, task_execution_id, current_user, actor_kind="operator"
+    name, execution_id, task_execution_id, current_user, actor_kind="operator",
+    on_ended=None,
 ):
     """#2433: cancel an execution whose backend dispatcher is still PARKED in
     the agent-call queue (never dispatched). Returns the cancelled payload, or
@@ -3438,4 +3534,8 @@ async def _cancel_inflight_if_parked(
             "actor_kind": actor_kind,
         },
     )
+    # #3180: only the call that won the CANCELLED CAS ended the turn; a repeat
+    # while the dispatcher is still parked answers the same but ended nothing.
+    if cancel_won and on_ended is not None:
+        await on_ended("cancelled_while_parked")
     return {"status": "cancelled_while_parked", "execution_id": execution_id}

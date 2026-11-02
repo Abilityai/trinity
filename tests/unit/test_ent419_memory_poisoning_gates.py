@@ -56,6 +56,7 @@ def _execution(**over):
         id="e1", agent_name="analyst", triggered_by="public",
         source_user_email="person@example.com", source_channel=None,
         source_channel_chat_id=None, source_channel_client=None, schedule_id=None,
+        status="running",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -65,6 +66,7 @@ def _router(monkeypatch, execution=None, *, recorded, previous=""):
     import routers.public_memory as pm
     monkeypatch.setattr(pm, "assert_agent_access", lambda *a, **k: None)
     monkeypatch.setattr(pm.db, "get_execution", lambda _id: execution or _execution())
+    monkeypatch.setattr(pm.db, "get_running_turn_attribution", lambda _agent: [])  # #4121: alone on the agent
     monkeypatch.setattr(pm.db, "get_public_user_memory_agent_notes",
                         lambda agent, email: previous, raising=False)
 
@@ -594,7 +596,8 @@ def _run_summarizer(monkeypatch, *, summary_out, messages, existing="- likes tea
             captured["prompt"] = json["messages"][0]["content"]
             return _Resp()
 
-    monkeypatch.setattr(pps.httpx, "AsyncClient", _Client)
+    from services import model_gateway as gw   # the summarizer's call goes through the one model door (ent#1027)
+    monkeypatch.setattr(gw.httpx, "AsyncClient", _Client)
     asyncio.run(pps.summarize_user_memory_background("analyst", "p@example.com", "s1"))
     return updates, captured
 
@@ -923,7 +926,9 @@ def test_the_screen_is_bounded_on_adversarial_input(text):
     guard.prepare_write(text)
     guard.prepare_write(text, previous=text)
     guard.envelope(text, text)
-    assert time.perf_counter() - start < 2.0
+    # #4113: [0] NFKC-expands to 144k characters and costs up to 2.1s of linear
+    # work on the slowest CI runners. 10s still fails a quadratic screen there.
+    assert time.perf_counter() - start < 10.0
 
 
 @settings(max_examples=200, deadline=None)

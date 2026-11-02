@@ -413,6 +413,36 @@ def narrow_to_agent(
     return [agent] if agent in agent_names else []  # non-admin: access-gate
 
 
+# `agent_names` on a fleet read (#3300, the trinity-enterprise#815 shape): the
+# MCP passes its own permit set, one query parameter per name. Bounded so a
+# request line stays well inside every HTTP server's limit.
+AGENT_NAMES_MAX = 500
+
+
+def narrow_to_names(
+    agent_names: Optional[List[str]], wanted: Optional[List[str]]
+) -> Optional[List[str]]:
+    """Narrow an accessible-agent set to the names a caller asked for.
+
+    Only ever NARROWS: intersected with what the caller may see, or taken as
+    given when the caller sees every agent (``agent_names is None``, an admin).
+    ``wanted is None`` passes through. Narrowing for COMPLETENESS, not an
+    authorization point: the cut a route makes at ``limit`` is then made over
+    exactly the rows the caller will keep, so a short page means nothing else
+    matched. Raises ``ValueError`` (the route's 422) for more than
+    ``AGENT_NAMES_MAX`` names or a blank one.
+    """
+    if wanted is None:
+        return agent_names
+    if len(wanted) > AGENT_NAMES_MAX:
+        raise ValueError(f"agent_names: at most {AGENT_NAMES_MAX} names")
+    if any(not name or not name.strip() for name in wanted):
+        raise ValueError("agent_names: a blank name is not allowed")
+    if agent_names is None:
+        return sorted(set(wanted))
+    return sorted(set(agent_names) & set(wanted))
+
+
 def sanitize_and_validate_name(name: str) -> str:
     """
     Sanitize and validate an agent name.
