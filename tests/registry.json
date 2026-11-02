@@ -7426,30 +7426,6 @@
       "description": "A cron's next fire time never goes backwards at a DST transition: tests/requirements-test.txt pins the scheduler image's exact APScheduler and the installed version equals it (a floor let CI pass on a fixed release while the image ran 3.11.0), the pin is past the fold bug; the pinned CronTrigger strictly advances for */N crons across the 2026 EU and US fall-backs in Lisbon, London, Berlin, New York and Los Angeles with pytz and zoneinfo zones (spring-forward, hour-pinned and UTC controls); MonotonicCronTrigger matches CronTrigger when APScheduler is right, replaces a backwards answer with previous + 1 minute computed in UTC, compares instants rather than wall clocks (a fold=0 01:30 after a fold=1 01:00), logs once per trigger, passes a finished trigger's None through, and is what _add_job registers."
     },
     {
-      "file": "unit/test_937_projection.py",
-      "feature": "abilityai/trinity-enterprise#781",
-      "added": "2026-10-21",
-      "categories": [
-        "backend",
-        "evaluations",
-        "security",
-        "unit"
-      ],
-      "description": "Grader identity on an evaluation read (ent#781). The issue's failing test adopted verbatim and kept byte-identical with the evaluation integration branch's file of the same name: the real admin POST route stores admin:<email> for an email-login admin, and _to_response projects it as the kind 'admin' to the graded agent's key, to the system scope and to a shared non-operator human, while an operator (admin JWT, owner JWT, owner's own user key) reads the full value; redact_evaluator's allowlist table pinned directly. Red on clean dev: both machine cases and the non-operator case (the full grader address survives); the allowlist table fails on clean dev only by ImportError. Mutation: a service that reverts to the old two-prefix denylist turns 7 of the 10 allowlist rows red."
-    },
-    {
-      "file": "unit/test_937_ent781_census.py",
-      "feature": "abilityai/trinity-enterprise#781",
-      "added": "2026-10-21",
-      "categories": [
-        "backend",
-        "evaluations",
-        "security",
-        "unit"
-      ],
-      "description": "ent#781 writer census. An AST walk of src/backend (enterprise/tests/node_modules/__pycache__ excluded, unparseable or undecodable files raise) names every statically named call to create_agent_evaluation / upsert_workspace_rating / create_evaluation as path::qualified_function::method#ordinal, module-level and keyword-less calls included, and must equal the registered drivers exactly (missing and stale both reported). Each driver runs the real writer down to the ops-layer boundary (admin POST route + DatabaseManager facade; real submit_rating as client and as operator preview + facade) and the captured row is read back through _to_response by agent, system, connector and admin-owned agent keys carrying operator membership: only the kind may survive, no identity and no '@'. Red on clean dev: the 8 admin-writer cases. Negative controls pin that an unregistered site, a second call in a registered function, a removed site, an empty inventory and malformed or undecodable source all fail the census. Covers statically named calls to the three known APIs only, not dynamic dispatch or newly named writers."
-    },
-    {
       "file": "unit/test_ent781_read_routes.py",
       "feature": "abilityai/trinity-enterprise#781",
       "added": "2026-10-21",
@@ -8242,6 +8218,17 @@
         "unit"
       ],
       "description": "Tier-0 trigger widening (ent#940 CP-D2, TD-2): fan_out, loop and reminder runs are graded when source_agent_name is set and stay ungraded without it (user stays ungraded); one rule (tier0_eligible) for the candidate query and evaluate_execution; budget_vs_baseline series keyed on (agent_name, triggered_by, source_agent_name, playbook) for every sourced non-schedule run, unsourced agent runs keep the ent#935 key; a fan-out of three yields three pair rows with no duplicate_dispatch fail."
+    },
+    {
+      "file": "unit/test_936_tier1_review.py",
+      "feature": "abilityai/trinity-enterprise#936",
+      "added": "2026-11-01",
+      "categories": [
+        "backend",
+        "unit",
+        "migrations"
+      ],
+      "description": "Review fixes on the Tier-1 row: one judge row per run whatever the model (partial unique index on both migration tracks, a run already holding two keeps the finished one); the judge_json guard over the whole document (top-level allowlist, findings as closed tokens with a null reason and a shared cap, other string leaves capped); a finished document may not carry the claim marker the finish/reclaim compare-and-set matches."
     }
   ]
 }
