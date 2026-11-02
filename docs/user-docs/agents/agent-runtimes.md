@@ -1,6 +1,6 @@
 # Agent Runtimes
 
-Trinity is model-agnostic: each agent runs on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports three runtimes: Claude Code (the default), Gemini CLI, and OpenAI Codex.
+Trinity is model-agnostic: each agent runs on a pluggable runtime — the CLI harness that executes the agent inside its container. Trinity supports four runtimes: Claude Code (the default), Gemini CLI, OpenAI Codex, and OpenCode.
 
 ## Concepts
 
@@ -14,7 +14,7 @@ A template selects the runtime in `template.yaml`:
 
 ```yaml
 runtime:
-  type: codex          # claude-code (default) | gemini-cli | codex
+  type: codex          # claude-code (default) | gemini-cli | codex | opencode
   model: gpt-5.6-sol   # optional model override
 ```
 
@@ -83,6 +83,48 @@ A chat turn resumes only the agent's own chat session, never the newest session 
 - **Claude Code chat:** a turn that ends with an error is recorded as **failed**, even when it produced some text first. The one exception is when the session transcript on disk proves the turn finished. The answer is then kept and marked as recovered.
 - **Codex:** a failure counts as a rate limit only when the error says so ("rate limit", "quota", "too many requests") or reports an HTTP `429` status. A bare `429` inside a timestamp, port or process id is not misread as a rate limit.
 
+### OpenCode agents
+
+OpenCode runs models from many sources through one runtime. The model id names its source with a `provider/` prefix, so `runtime.model` on an OpenCode agent is always `provider/model`:
+
+```yaml
+runtime:
+  type: opencode
+  model: openrouter/anthropic/claude-sonnet-4.5   # or ollama/gemma4:12b, lmstudio/<model>, ...
+```
+
+A model without a provider prefix is refused with a 400 that says what a valid id looks like, both when the agent is created and when a turn asks for it.
+
+**OpenRouter.** Give the agent an OpenRouter key in one of two ways:
+
+- set `OPENROUTER_API_KEY` in the agent's `.env`, or
+- have an admin save a platform key with `PUT /api/settings/api-keys/openrouter`. Trinity stores it encrypted as the `openrouter_api_key` setting and passes it to OpenCode agents only, as `OPENROUTER_API_KEY`, when the container is created or recreated.
+
+With no key anywhere, an `openrouter/…` turn is refused before OpenCode starts. The turn fails with a 400 and this message:
+
+```
+OpenCode model 'openrouter/<model>' is on provider 'openrouter' but no key is configured: OPENROUTER_API_KEY is unset in the agent's .env, and the platform setting 'openrouter_api_key' is empty. Set one of them; the turn is refused rather than run on another provider's credentials.
+```
+
+**Ollama and other OpenAI-compatible endpoints.** Declare a provider in the agent's `.env` with `OPENCODE_PROVIDER_<ID>_*` variables. `<ID>` becomes the lower-case provider id in the model prefix:
+
+| Variable | Meaning |
+|---|---|
+| `OPENCODE_PROVIDER_<ID>_BASE_URL` | The endpoint, an absolute `http(s)` URL |
+| `OPENCODE_PROVIDER_<ID>_API_KEY` | The endpoint's key, if it needs one |
+| `OPENCODE_PROVIDER_<ID>_MODELS` | Extra models a turn may switch to, comma-separated (the agent's own model is always included) |
+| `OPENCODE_PROVIDER_<ID>_IMAGES` | `true` or `false`: whether the provider's models accept images (see below) |
+
+For example, `OPENCODE_PROVIDER_LMSTUDIO_BASE_URL=http://your-host:1234/v1` makes `lmstudio/<model>` usable. For Ollama, the base URL is taken from `OPENCODE_PROVIDER_OLLAMA_BASE_URL` in `.env`, then from the platform's default (`PUT /api/settings/opencode-provider/base-url`), then from the container's network gateway. `.env` changes apply on the next turn, without a restart.
+
+**Default model.** A turn that names no model runs on the platform's OpenCode default, the `platform_default_model_opencode` setting (a `provider/model` id). It never falls back to the fleet's Claude default. With the setting unset, the agent's own `runtime.model` applies.
+
+**Images.** An image reaches the model only if the model accepts image input. Models on OpenRouter, Anthropic and OpenAI follow their published capabilities. Models on Ollama or any endpoint you declare are treated as text-only until you set `OPENCODE_PROVIDER_<ID>_IMAGES=true`; set it to `false` to turn images off for a provider.
+
+**Safety.** Read-only mode blocks OpenCode's edit and shell tools, and the agent's disallowed tools are passed to OpenCode. Session sharing is always off. Read-only and sharing are enforced through the environment, so an `opencode.json` in the agent's workspace cannot turn them back on. Disallowed tools are passed only through configuration, so a workspace `opencode.json` can override them. Claude Code's guardrail hooks do not run on OpenCode. Long messages are passed on standard input, so their size is not limited by the command line.
+
+OpenCode resumes its own chat session from turn to turn and in the Session tab, reports cost from the provider, reads its instructions from `AGENTS.md` like Codex, and calls Trinity's MCP tools as `trinity_<tool>`; Trinity adjusts the platform prompt for that spelling.
+
 ### Headless runs on Claude Code
 
 A task, schedule, loop, or MCP call runs the agent as a one-shot turn: nothing the agent starts survives the end of that turn. Claude Code's built-in tools that promise a *later* event — a scheduled wake-up, a cron entry, a workflow or task-output notification, a message to another local session, a push notification, a remote trigger — would let the agent plan around an event that will never arrive, so Trinity withholds that tool family from headless runs (`ScheduleWakeup`, `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`/`CronList`/`CronDelete`, `SendMessage`, `ListAgents`, `PushNotification`, `RemoteTrigger`). The agent is told the same thing in its platform prompt and pointed at the platform's own mechanisms instead: `run_agent_loop` for repetition, `set_reminder` for a deferred self-trigger, and `chat_with_agent` for talking to another agent — see [Agent Loops](../automation/agent-loops.md) and [Agent Reminders](../automation/agent-reminders.md). Subagents are unaffected: the turn waits for them. A background shell command that is still running when the turn ends is killed, and the execution records that it was, instead of reporting a clean success.
@@ -93,8 +135,8 @@ Set the runtime in the template's `template.yaml`:
 
 | Field | Values | Default | Notes |
 |-------|--------|---------|-------|
-| `runtime.type` | `claude-code`, `gemini-cli`, `codex` | `claude-code` | Selects the harness |
-| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`) | runtime default | Optional override — pin it, so recorded cost is attributable |
+| `runtime.type` | `claude-code`, `gemini-cli`, `codex`, `opencode` | `claude-code` | Selects the harness |
+| `runtime.model` | runtime-specific model id (e.g. `gpt-5.6-sol`; on OpenCode always `provider/model`) | runtime default | Optional override — pin it, so recorded cost is attributable |
 
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
@@ -114,6 +156,7 @@ There is no API or MCP endpoint to switch an agent's runtime after creation. See
 - **Codex cost is estimated**, not metered exactly.
 - **Each CLI is pinned in the base image.** A model newer than the pinned Claude Code version is refused, and the run fails with `model_unsupported` rather than an auth error (see [Model Selection](agent-configuration.md#model-selection)). Rebuild the base image after upgrading Trinity so agents pick up the newer CLIs.
 - **Codex vision/image input and SSE streaming are out of scope** for the current release (planned).
+- **OpenCode needs the rebuilt base image.** The pinned OpenCode CLI ships in the agent base image; rebuild it and recreate the agent. Its settings (OpenRouter key, Ollama base URL, default model) are API-only for now.
 
 ## See Also
 
