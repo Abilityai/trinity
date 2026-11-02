@@ -412,6 +412,31 @@ hold-to-dictate (#2212) and spoken replies (#2157) stay as composer affordances.
 by the standing ruling, deliberately ungated.** See
 [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
 
+**Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046).** The
+second call mode, chosen from the Call control's menu (remembered per browser; Live stays
+the default). No model is in the conversational path: the browser endpoints an utterance
+(`utils/voiceEndpointing.js`), the backend transcribes it, and the browser sends the text
+through the **same `POST …/chat/stream` a typed message uses**, carrying the call's `vd_`
+id — so limits, idempotency, skill gates, attachments and attribution are the typed
+path's, and `turn_may_join_call` refuses any id that is not the caller's live call on this
+agent and thread (uniform 404). The browser then sends `speak{execution_id}`; the bridge
+(`services/direct_voice_service.py`, on the shared `/ws/voice/{id}` door, owner-only, no
+admin attach) reads the turn's stream through `client_portal.router.direct_call_stream`
+and speaks it sentence by sentence. **Harness-agnostic by construction:** every reply is
+spoken from the persisted row (`db.get_turn_reply_row`); a runtime whose stream carries
+messages (`normalize_stream_entry`: Claude Code, Codex; Gemini CLI publishes none) only
+starts sooner, and `unspoken_tail` reconciles so nothing repeats. The socket never starts
+a turn and never answers an ask: an ask the turn raised is read aloud (`speak_ask`), and a
+whole-utterance yes/no that starts ≥300 ms after the prompt finished is posted by the
+browser on the person's own `POST /asks/{id}/answer`; an approved run is spoken only if it
+is the caller's own execution. Speech providers sit behind `services/speech/`
+(`SpeechProvider`: Gemini REST STT/TTS, ElevenLabs), resolved per call from
+`GET/PUT /api/settings/direct-voice` (admin, audit-logged). One call per thread across
+both modes: `portal_direct_active:{thread}` is claimed atomically when the socket opens.
+The Direct reply is the agent's own session answering, so it moves the #2694 delta cursor
+(the call's label row stays out of the delta). Flow:
+[workspace-direct-voice.md](../feature-flows/workspace-direct-voice.md).
+
 **Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
 `components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
 `v-html`, the one `.prose-portal` stylesheet, the one delegated code-copy handler — and

@@ -1107,6 +1107,43 @@ spoken replies (#2157) stay as composer affordances.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
 
+### 48.5 Workspace Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046)
+
+A second way to take a Workspace call. Today's call (§48.3) has a realtime model
+answering and consulting the agent; a **Direct** call has no model in the path:
+speech-to-text, the agent's ordinary Workspace turn, text-to-speech of the agent's
+own reply. Live stays the default and is unchanged.
+
+- **FR-1 — Mode**: the composer's Call control is a split button: the main part starts
+  the remembered mode (default Live), the menu offers Live and Direct, an unavailable
+  one disabled with its reason. Per browser.
+- **FR-2 — Same turn as typing**: a spoken turn goes through the route a typed message
+  uses (`POST …/chat/stream`), so its limits, idempotency, gates, attachments and
+  attribution are the typed path's. The call's socket only hears and speaks.
+- **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
+  every runtime. Where a runtime streams its messages, speech starts earlier and the
+  persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
+  without a stream says so in the status line.
+- **FR-4 — The live thread stays live**: during a Direct call the thread and composer
+  work. A typed message is sent normally and spoken back. Rows land as they happen;
+  after the call they fold into one call block.
+- **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
+  running turn is cancelled through the terminate primitive and the new words run next.
+  Echo of the agent's own voice resumes playback.
+- **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
+  normal chat card and is read aloud. A whole short yes or no answers it through the
+  person's own answer route, so the Inbox is the record. Anything else runs as the next
+  turn and the ask stays open. Per-tool prompts are out of scope.
+- **FR-7 — Words on failure**: no speech key, speech-to-text failure, speech failure and
+  turn failure each have a fixed line. Nothing spoken is a paraphrase of the agent.
+- **FR-8 — One call per thread**: a Live call and a Direct call cannot overlap on a thread.
+- **FR-9 — Settings**: admin toggle (default on) and provider (`auto`, `gemini`,
+  `elevenlabs`) under Settings → Voice, resolved at call time, with a readiness line
+  and a disclosure that audio and transcripts go to the chosen provider.
+- **FR-10 — Timing**: each turn reports transcription time and time to first audio.
+- **FR-11 — Out of scope**: portal-token clients (no platform JWT, same as §48.3), mobile
+  layout, rooms, and a hosted speech path, for which `SpeechProvider` instances are the seam.
+
 ### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
 
 **Description**: An internal user runs sustained work as a **project**: a

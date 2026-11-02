@@ -4671,6 +4671,36 @@
       "description": "ent#537 canvas design kit + starter layouts: the four templates and their slot map are one set across models.py, canvas.ts and canvasLayouts.js and every layout/slot has a grid-area rule in CanvasKit.vue; `slot` survives the REST round trip (CanvasBlock field + validate_blocks) and a malformed slot is a named 400 while an unknown slot is not refused; an unknown template is refused by the Literal and by name in the service; write_canvas stores the template and defaults to None, patch_canvas and the voice panel write carry the stored one, and a voice verb leaves a slotted block untouched; CanvasSummary/empty_canvas carry template; _SUMMARY_COLUMNS appends template LAST and _row_to_summary/_row_to_full read stable positions; the DDL pair exists on both tracks (schema.py, tables.py, migrations.py, Alembic 0054 revising 0053); every class the prompt and the voice HTML rule teach is in KIT_CLASSES and every KIT_CLASSES entry has a rule in the stylesheet; the prompt teaches each layout with its slots, one worked example, the skill and the <style> rule; the MCP tool advertises template + slot; canvas components use only the canvas-mode sanitiser entry points, every markdown/html path forbids <style> via BASE_CONFIG, the hook reads the per-call canvasKit flag from its third argument, and only the SVG path keeps DOMPurify's default tag list."
     },
     {
+      "file": "unit/test_ent1046_speech_providers.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent1046_direct_voice.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent1046_direct_voice_db.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
       "file": "unit/test_ent534_workspace_voice.py",
       "feature": "ent#534",
       "added": "2026-09-07",
