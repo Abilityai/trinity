@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent871_capability_used_audit.py",
+      "feature": "trinity-enterprise#871",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "An agent key a grant admits writes one capability_used row, read back from the real audit_log through the real routers with real keys: every fence shape, the file routes, agent create, the private projects.manage call, manifest deploy and an honoured skill-set probe. A refused call writes only capability_refused (a holder outside its owner's agents included, same 404); people, the system key and the exemptions write none; one request is one row per capability and target. skills.manage grants log capability_grant / capability_revoke through both routes."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",

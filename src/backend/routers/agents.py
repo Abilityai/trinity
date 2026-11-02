@@ -869,6 +869,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         target_type="agent",
         target_id=agent_name,
         endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
     )
 
     if manager:

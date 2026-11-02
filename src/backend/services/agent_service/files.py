@@ -509,17 +509,18 @@ def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool
 
 
 async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
-    from dependencies import enforce_agent_capability
+    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+    from dependencies import capability_refusal, enforce_agent_capability
+    needed = []
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_SKILLS_MANAGE)
     if _touches_instructions(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    # A capability the key lacks goes first, so a refused call never records a
+    # use of the other one (trinity-enterprise#871).
+    needed.sort(key=lambda cap: capability_refusal(current_user, cap) is None)
+    for capability in needed:
+        await enforce_agent_capability(request, current_user, capability, target=agent_name)
 
 
 # trinity-enterprise#820: a hard link to a credential file (made by the agent

@@ -38,7 +38,7 @@ Bounds on a holder:
 - **Reach** (every capability): on every fenced route that names a target —
   the five reconfigure routes, the schedule writes, `PUT /model`, delete and
   `git/reset-to-main-preserve-state` — the target must be an agent its owner
-  **owns** (`owner_username` equality, `dependencies._refuse_unless_owners_agent`).
+  **owns** (`owner_username` equality, `enforce_agent_capability`'s `owner_bound`).
   The handlers authorise through `can_user_access_agent` / `can_user_share_agent`,
   which admit any admin, and an agent key carries its owner's role — so without
   this bound one grant on an admin-owned install reached every agent on the
@@ -76,9 +76,10 @@ services/capability_grant_service.set_grant
   │         ephemeral       → 422 ephemeral_agent_not_grantable
   ▼
 db/capability_grants  agent_capability_grants(agent_name, capability, granted_by, granted_at)
-                       audit: capability_grant | capability_revoke
-                       (skills.manage: skill_manager_grant | skill_manager_revoke,
-                        the same verb as PUT /api/skills/agents/{name}/skill-manager)
+                       audit: capability_grant | capability_revoke, details.capability
+                       (every capability, every door; rows written before
+                        ent#871 use skill_manager_grant | skill_manager_revoke
+                        for skills.manage)
 
 ── the use ────────────────────────────────────────────────────────────────────
 route-level   dependencies=[Depends(capability_fence(cap, ...))]   (dependencies.py)
@@ -98,12 +99,53 @@ file routes   services/agent_service/files._require_skill_capability
               └─ _touches_instructions   → instructions.manage
   ▼
 enforce_agent_capability → capability_refusal(user, cap)
-  holder / human → pass
-  else           → 403 {code: <class>_management_not_permitted, capability,
+  person, user key, system key → pass, no row
+  holder (agent key) → owner bound, where the route names a target
+       not owned or nonexistent → the same 404
+                                                  audit: capability_refused
+                                                  (code capability_target_not_owned)
+       owned or no bound        → pass
+                                                  audit: capability_used
+  else → 403 {code: <class>_management_not_permitted, capability,
                    message: "... raise an ask (type 'question') whose title includes
                    '<capability>' ... Settings → Permissions to change itself"}
                                                   audit: capability_refused
 ```
+
+## The audit trail of a grant (trinity-enterprise#871)
+
+Each row is `event_type=authorization`. The agent is the actor, the owner rides as
+`actor_email`, and the row names `mcp_key_id`, `target_id`, `endpoint` and, in
+`details`, the `capability` and the `method`.
+
+| Call | Rows |
+|---|---|
+| A holder clears the fence | `capability_used` |
+| A holder aims outside its owner's agents | `capability_refused`, code `capability_target_not_owned`, and the same 404 |
+| A key without the grant | `capability_refused` |
+| A key holding one of two capabilities a path needs | `capability_refused` only |
+| A person, a `user` key, the system key, an event-loopback token | none: no grant decided the call |
+| An agent on its own schedules, or discarding a ghost | none: no grant was used |
+| One request passing the same capability twice (a metric declaration write) | one row |
+| One file path needing two capabilities, both held | one row each |
+| A manifest deploy | `agents.manage` with no target, plus `skills.manage` per created member with gates, skills or sets |
+| `GET .../skill-sets?probe=true`, when a holder's probe is honoured | `capability_used`: the probe runs inside the target |
+
+**`capability_used` means the grant cleared the call, not that the change landed.**
+A handler can still refuse afterwards: deleting a sibling the agent did not spawn
+writes `capability_used` and answers 403, a malformed body answers 422, and a
+dry-run deploy changes nothing. Schedule writes, the timeout `PUT` and the files
+`PUT` have no outcome row for any caller (item 3 of the issue, out of scope), so
+for those the use row is the only trace and says nothing about the result. The
+agent `delete` row carries `request_id`, which joins it to the use row. A join
+is only as good as that value: `X-Request-ID` is honoured from the caller, and an
+agent can call the backend directly.
+
+**Reads.** A fenced route writes a row whatever its method. A question answered by
+a predicate writes none: `can_manage_agent_skills`, `person_or_capability_admits`,
+`_may_reach_for_path`, and a holder reading a sibling's skill gate map through
+`assert_skill_gates_readable`. A deploy that holds a gate or skill back, for want of
+`skills.manage`, writes no refusal: the deploy succeeds and warns.
 
 ## Reading grants over MCP (trinity-enterprise#991)
 
@@ -153,6 +195,7 @@ The fence covers the platform routes listed above, and nothing else:
 
 ## Tests
 
+- `tests/unit/test_ent871_capability_used_audit.py`: every audit-trail row above, with real keys through the real routers, read back from `audit_log`. `projects.manage` is exercised by a direct `enforce_agent_capability` call.
 - `tests/unit/test_ent164_self_change_grants.py`: the fences, read off FastAPI's dependant graph; behavior for each capability class; the ghost and own-schedule exemptions; the calibrating refusal.
 - `tests/unit/test_2996_owner_config_person_only.py`: real keys against the real grant table, plus the grant route.
 - `tests/unit/test_2996_human_only_routes.py`: the `person_or_grant` census class.

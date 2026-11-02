@@ -2551,6 +2551,16 @@ async def deploy_manifest(
             logger.exception(f"Tag configuration failed for system '{manifest.name}'")
             all_warnings.append(f"Failed to configure tags: {reason}")
 
+        # The two phases below judge skills.manage themselves, with no fence to
+        # record it: one `capability_used` per member the grant decides for
+        # (trinity-enterprise#871). A caller without it writes none and is told.
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from dependencies import record_capability_use
+        for short, cfg in manifest.agents.items():
+            if short in created_map and (cfg.gates or cfg.skills or cfg.skill_sets):
+                await record_capability_use(request, current_user, CAPABILITY_SKILLS_MANAGE,
+                                            target=created_map[short])
+
         # 10a. The approval map (trinity-enterprise#1030 CP3), BEFORE the
         # skills: a gate is in place before the skill it governs is delivered
         # (ent#753). Written only by a caller holding skills.manage (T8);

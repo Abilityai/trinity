@@ -300,7 +300,7 @@ class TestExecute:
         from services.platform_audit_service import AuditEventType
         verbs = {a["details"]["capability"]: a["event_action"] for a in world.audit}
         assert verbs == {"agents.manage": "capability_grant",
-                         "skills.manage": "skill_manager_grant"}  # #3236: one verb per door
+                         "skills.manage": "capability_grant"}  # ent#871: one verb for every capability
         for row in world.audit:
             assert row["event_type"] == AuditEventType.AUTHORIZATION
             assert row["target_type"] == "agent" and row["target_id"] == LEAD
