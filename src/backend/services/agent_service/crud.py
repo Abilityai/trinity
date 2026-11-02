@@ -50,7 +50,7 @@ from services.template_plugins import normalize_declared_plugins
 from services import metric_registry
 from services import agent_model_seed
 from services import git_service
-from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
+from services.settings_service import apply_opencode_provider_env, get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from services import template_source_policy
@@ -2288,6 +2288,10 @@ def _build_base_env(config: AgentConfig) -> dict:
         # The dir is created at container start by startup.sh.
         'TMPDIR': AGENT_DEFAULT_TMPDIR,
     }
+
+    # Abilityai/lilu#653: the platform OpenCode provider tier (OpenRouter key,
+    # default Ollama base URL) — `runtime == opencode` only; a no-op otherwise.
+    apply_opencode_provider_env(env_vars, config.runtime)
 
     # #1369: operator-configurable headless per-tool stall-watchdog ceiling.
     # Only propagate when the backend env sets it — an unset value leaves the

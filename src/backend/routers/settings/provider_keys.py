@@ -8,8 +8,9 @@ catch-all would otherwise swallow (Invariant #4).
 """
 import logging
 import os
+from urllib.parse import urlparse
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 
 from models import ApiKeyTest, ApiKeyUpdate, ResendKeyRequest, User
 from database import db
@@ -172,3 +173,103 @@ async def test_gemini_key(
     if error:
         return {"valid": False, "error": error}
     return await platform_keys_service.check_gemini_key(key)
+
+
+# ---------------------------------------------------------------------------
+# OpenCode provider tier (Abilityai/lilu#653)
+# ---------------------------------------------------------------------------
+#
+# Platform defaults injected into `runtime == opencode` agents at
+# create/recreate (`settings_service.apply_opencode_provider_env`). A per-agent
+# value in the agent's `.env` or `template.yaml runtime.env` always wins.
+# Takes effect on the agent's next recreate, like the platform Anthropic key.
+
+_OPENCODE_BASE_URL_SETTING = 'opencode_default_provider_base_url'
+
+
+@router.get("/opencode-provider")
+async def get_opencode_provider_settings(current_user: User = Depends(get_current_user)):
+    """Status of the platform OpenCode provider tier. Admin-only; key masked."""
+    assert_admin(current_user)
+    key = settings_service.get_openrouter_api_key()
+    return {
+        "openrouter": {
+            "configured": bool(key),
+            "masked": credentials.mask_api_key(key) if key else None,
+            "source": ("settings" if settings_service.has_secret_setting('openrouter_api_key')
+                       else ("env" if key else None)),
+        },
+        "default_provider_base_url": settings_service.get_opencode_default_provider_base_url() or None,
+    }
+
+
+@router.put("/api-keys/openrouter")
+async def update_openrouter_key(
+    body: ApiKeyUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Set the platform OpenRouter key for OpenCode agents.
+
+    Admin-only. Stored AES-256-GCM encrypted (`openrouter_api_key_encrypted`).
+    Injected as `OPENROUTER_API_KEY` into `runtime == opencode` agents only —
+    never into a Claude, Gemini or Codex agent's env.
+    """
+    assert_admin(current_user)
+    key = body.api_key.strip()
+    if not key or any(ch.isspace() for ch in key):
+        raise HTTPException(
+            status_code=400,
+            detail="openrouter_api_key must be a non-empty key with no whitespace.",
+        )
+    set_secret_setting('openrouter_api_key', key)
+    await _audit_key_change(request, current_user, "openrouter_api_key", "update")
+    return {"success": True, "masked": credentials.mask_api_key(key)}
+
+
+@router.delete("/api-keys/openrouter")
+async def delete_openrouter_key(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Remove the stored OpenRouter key — falls back to `OPENROUTER_API_KEY` env."""
+    assert_admin(current_user)
+    deleted = clear_secret_setting('openrouter_api_key')
+    if deleted:
+        await _audit_key_change(request, current_user, "openrouter_api_key", "delete")
+    return {
+        "success": True,
+        "deleted": deleted,
+        "fallback_configured": bool(os.getenv('OPENROUTER_API_KEY', '')),
+    }
+
+
+@router.put("/opencode-provider/base-url")
+async def update_opencode_default_base_url(
+    request: Request,
+    base_url: str = Body(..., embed=True),
+    current_user: User = Depends(get_current_user)
+):
+    """Set the platform default Ollama base URL for OpenCode agents.
+
+    Admin-only. Injected as `OPENCODE_DEFAULT_PROVIDER_BASE_URL`; the agent
+    side uses it for `ollama/…` turns when the agent declares no
+    `OPENCODE_PROVIDER_OLLAMA_BASE_URL` / `OPENCODE_OLLAMA_BASE_URL` of its
+    own, and before the derived container gateway. An empty value clears it.
+    """
+    assert_admin(current_user)
+    value = (base_url or '').strip()
+    if not value:
+        deleted = db.delete_setting(_OPENCODE_BASE_URL_SETTING)
+        await _audit_key_change(request, current_user, _OPENCODE_BASE_URL_SETTING, "delete")
+        return {"success": True, "deleted": bool(deleted), "default_provider_base_url": None}
+    parsed = urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{_OPENCODE_BASE_URL_SETTING} must be an absolute http(s) URL, "
+                   "e.g. 'http://10.0.0.5:11434'.",
+        )
+    db.set_setting(_OPENCODE_BASE_URL_SETTING, value)
+    await _audit_key_change(request, current_user, _OPENCODE_BASE_URL_SETTING, "update")
+    return {"success": True, "default_provider_base_url": value}
