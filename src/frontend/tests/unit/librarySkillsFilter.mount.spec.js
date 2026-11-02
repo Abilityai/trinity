@@ -138,6 +138,9 @@ describe('the bounded grid (trinity#3448)', () => {
     const region = tid(w, 'library-skills-region')
     expect(region.attributes('role')).toBe('region')
     expect(region.attributes('aria-label')).toBe('Skills in the library')
+    // Each card's sr-only label is absolute: an unpositioned box lets them grow the
+    // page in Chromium. Only e2e/skills-bounded-lists.spec.js can see the geometry.
+    expect(region.classes()).toContain('relative')
     expect(region.find('[data-testid="library-skill-backlog"]').exists()).toBe(true)
     expect(region.find('[data-testid="library-skills-filter"]').exists()).toBe(false)
     expect(region.find('[data-testid="library-skills-total"]').exists()).toBe(false)

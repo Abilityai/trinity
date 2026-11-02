@@ -67,7 +67,7 @@
     <BoundedRegion
       ref="region"
       label="Skills"
-      class="-mx-1 px-1 pb-1 scroll-pt-14 sm:scroll-pb-20"
+      class="-mx-1 px-1 scroll-pt-14 sm:scroll-pb-20"
       data-testid="skills-region"
     >
       <!-- ===================== Own skills ===================== -->
@@ -230,7 +230,10 @@
           </template>
         </div>
 
-        <div class="mt-3">
+        <!-- The box's bottom inset lives here, never on the box: the docked
+             heading stops at the box's padding edge, and cards would show
+             through any padding under it. -->
+        <div class="mt-3 pb-1">
           <SkeletonLoader v-if="sharedView.state === 'loading'" :count="1" height="240px" />
           <LoadFailed
             v-else-if="sharedView.state === 'failed'"

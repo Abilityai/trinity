@@ -364,6 +364,11 @@ describe('one bounded box (trinity#3448)', () => {
     expect(section.element.parentElement).toBe(region(w).element)
   })
 
+  it('the box has no vertical padding: a dock stops at its padding edge, and cards would show under it', async () => {
+    const { w } = await mountTab()
+    expect(region(w).classes().filter((c) => /^(sm:|md:|lg:)?(p|py|pb|pt)-/.test(c))).toEqual([])
+  })
+
   it('a card tabbed to is never left under a sticky heading', async () => {
     const { w } = await mountTab()
     expect(region(w).classes()).toEqual(expect.arrayContaining(['scroll-pt-14', 'sm:scroll-pb-20']))
