@@ -36,7 +36,9 @@ agent untouched:
    workers. The owner's Credentials-tab inject (`routers/credentials.py`) is a
    whole-file overwrite that does not take the lease and keeps its existing
    last-writer-wins contract — a documented residual, not closed here;
-5. read `.env`, set ONE line through `agent_env_patch.set_keys` (the #2023
+5. read `.env` — only a file the agent proves absent counts as empty; one
+   it could not hand back as text is `env_unreadable` (409) and left as it
+   is — set ONE line through `agent_env_patch.set_keys` (the #2023
    quoting the agent's reader reverses, in place, duplicates collapsed, every
    other byte kept), refuse a result over `ENV_MAX_BYTES` (`env_too_large`,
    422 — the agent's reader ignores a file over its own 1 MiB cap, so a file
@@ -153,7 +155,21 @@ def _agent_unreachable(what: str) -> CredentialSinkError:
         {"step": what})
 
 
+def _env_unreadable(reason: str) -> CredentialSinkError:
+    return CredentialSinkError(
+        409, "env_unreadable",
+        "The agent's credential file could not be read as text, so it was left exactly as "
+        "it is and nothing was stored. Ask whoever runs the agent to check its .env file.",
+        {"reason": reason})
+
+
 async def _read_env(client: httpx.AsyncClient, agent_name: str) -> str:
+    """The agent's `.env` as text, or "" ONLY when the agent proved there is no
+    file. The write that follows replaces the whole file, so a file the agent
+    did not hand back as text — non-UTF-8 bytes (`files_b64`), a read error,
+    or an agent image too old to say "absent" (all three omit the path from
+    `files`) — is refused, never treated as empty: an empty read here would
+    delete every other credential on the agent."""
     try:
         response = await client.get(
             f"http://agent-{agent_name}:8000/api/credentials/read", params={"paths": ".env"},
@@ -163,10 +179,19 @@ async def _read_env(client: httpx.AsyncClient, agent_name: str) -> str:
     if response.status_code != 200:
         raise _agent_unreachable("read")
     try:
-        content = response.json().get("files", {}).get(".env")
-    except (ValueError, AttributeError):
+        body = response.json()
+        content = (body.get("files") or {}).get(".env")
+        binary = ".env" in (body.get("files_b64") or {})
+        missing = ".env" in (body.get("missing") or [])
+    except (ValueError, AttributeError, TypeError):
         raise _agent_unreachable("read") from None
-    return content if isinstance(content, str) else ""
+    if isinstance(content, str):
+        return content
+    if binary:
+        raise _env_unreadable("not_utf8")
+    if missing:
+        return ""
+    raise _env_unreadable("unconfirmed")
 
 
 async def _inject_env(client: httpx.AsyncClient, agent_name: str, env_text: str) -> None:

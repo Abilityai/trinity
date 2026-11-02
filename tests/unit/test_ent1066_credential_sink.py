@@ -109,6 +109,7 @@ class _AgentServer:
         self.read_status = 200
         self.inject_status = 200
         self.read_error = None
+        self.legacy_read = False
 
     def client(self, agent_name):
         server = self
@@ -128,8 +129,13 @@ class _AgentServer:
             raise self.read_error
         if self.read_status != 200:
             return _Resp(self.read_status, {"detail": "nope"})
-        files = {} if self.env_text is None else {".env": self.env_text}
-        return _Resp(200, {"files": files, "files_b64": {}})
+        if self.env_text is None:
+            # the agent positively confirms there is no file (ent#1066)
+            body = {"files": {}, "files_b64": {}, "missing": [".env"]}
+            if self.legacy_read:
+                body.pop("missing")   # an image older than the `missing` list
+            return _Resp(200, body)
+        return _Resp(200, {"files": {".env": self.env_text}, "files_b64": {}, "missing": []})
 
     async def post(self, url, json=None, **kw):
         self.calls.append(("POST", url))
@@ -255,6 +261,19 @@ class TestTheWrite:
         _provide(uid)
         assert world.agent.env_text.startswith(f'{NAME}="')
 
+    def test_an_omitted_env_the_agent_did_not_confirm_absent_is_never_treated_as_empty(self, world):
+        """An agent image older than the read endpoint's `missing` list omits a
+        file it could not read exactly as it omits one that is not there; the
+        sink cannot tell them apart, so it writes nothing."""
+        world.agent.env_text = None
+        world.agent.legacy_read = True
+        uid = _pending(world.db, "w-3-legacy")
+        err = _refused(uid, 409, "env_unreadable")
+        assert err.data == {"reason": "unconfirmed"}
+        assert [c[0] for c in world.agent.calls] == ["GET"]
+        assert world.agent.env_text is None
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+
     def test_the_ask_ends_answered_by_name_and_the_agent_is_told_where_to_read(self, world):
         from services import operator_resume_service as ors
         uid = _pending(world.db, "w-4")
@@ -283,6 +302,87 @@ class TestTheWrite:
         uid = _pending(world.db, "w-6")
         _provide(uid)
         assert world.fake.get(f"credential_sink:lock:{AGENT}") is None
+
+
+# ===========================================================================
+# 1b. The agent's own read + inject endpoints, over a real file
+# ===========================================================================
+
+
+@pytest.fixture
+def real_agent(world, tmp_path, monkeypatch):
+    """The sink talking to the agent image's REAL `/api/credentials/read` and
+    `/api/credentials/inject` (the base-image router, mounted over a tmp home),
+    so what reaches the file is decided by the code that ships, not a stand-in."""
+    from fastapi import FastAPI
+    from agent_server.routers import credentials as cred_router
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cred_router, "_HOME", home)
+    monkeypatch.setattr(cred_router, "sync_process_env", lambda path: None)
+    monkeypatch.setattr(cred_router, "refresh_credential_values", lambda: None)
+    app = FastAPI()
+    app.include_router(cred_router.router)
+
+    def client(agent_name):
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+
+    monkeypatch.setattr(world.sink, "_agent_client", client)
+    return SimpleNamespace(home=home, env=home / ".env")
+
+
+class TestTheFileIsNeverAssumedEmpty:
+    """The write is read-modify-write of the whole file. Only a file the agent
+    positively reports absent may be treated as empty; a file it could not
+    hand back as text is refused by name, and every byte of it is kept."""
+
+    OTHERS = b'OTHER="keep me"\n# a comment\nFOO=bar\nLATIN1=caf\xe9\n'
+
+    def test_a_non_utf8_env_with_other_keys_keeps_every_byte(self, world, real_agent):
+        real_agent.env.write_bytes(self.OTHERS)
+        uid = _pending(world.db, "ne-latin1")
+        err = _refused(uid, 409, "env_unreadable")
+        assert err.data == {"reason": "not_utf8"}
+        assert real_agent.env.read_bytes() == self.OTHERS
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert not [a for a in world.audit if a.get("event_action") == "chat_provide"]
+
+    def test_an_env_the_agent_could_not_read_keeps_every_byte(self, world, real_agent, monkeypatch):
+        good = b'OTHER="keep me"\nFOO=bar\n'
+        real_agent.env.write_bytes(good)
+        real_agent.env.chmod(0o000)
+        if os.geteuid() == 0:   # root reads through a 000 mode; fail the read the same way
+            real_read = Path.read_bytes
+
+            def denied(self):
+                if self == real_agent.env:
+                    raise PermissionError(13, "Permission denied", str(self))
+                return real_read(self)
+            monkeypatch.setattr(Path, "read_bytes", denied)
+        try:
+            uid = _pending(world.db, "ne-unreadable")
+            err = _refused(uid, 409, "env_unreadable")
+            assert err.data == {"reason": "unconfirmed"}
+        finally:
+            real_agent.env.chmod(0o600)
+        assert real_agent.env.read_bytes() == good
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+
+    def test_a_file_the_agent_reports_absent_is_created(self, world, real_agent, agent_reader):
+        assert not real_agent.env.exists()
+        uid = _pending(world.db, "ne-absent")
+        _provide(uid)
+        assert agent_reader.parse_env_file(real_agent.env) == {NAME: VALUE}
+
+    def test_a_readable_file_is_patched_in_place_through_the_real_endpoints(self, world, real_agent,
+                                                                            agent_reader):
+        real_agent.env.write_bytes(b'OTHER="keep me"\nFOO=bar\n')
+        uid = _pending(world.db, "ne-text")
+        _provide(uid)
+        assert real_agent.env.read_bytes().startswith(b'OTHER="keep me"\nFOO=bar\n')
+        assert agent_reader.parse_env_file(real_agent.env) == {
+            "OTHER": "keep me", "FOO": "bar", NAME: VALUE}
 
 
 # ===========================================================================

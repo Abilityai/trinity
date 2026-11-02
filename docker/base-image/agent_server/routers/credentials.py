@@ -220,9 +220,14 @@ async def read_credential_files(paths: str = Query(..., description="Comma-separ
         paths: Comma-separated list of file paths relative to /home/developer
                e.g., ".env,.mcp.json"
     """
-    home_dir = Path("/home/developer")
+    home_dir = _HOME
     files = {}
     files_b64 = {}
+    # ent#1066: a path is listed here ONLY when the agent proved it does not
+    # exist. A path left out of all three maps was NOT read (a read error, a
+    # link out of the home, not a regular file) — a caller that rewrites the
+    # whole file must refuse it, never treat it as empty.
+    missing = []
 
     path_list = [p.strip() for p in paths.split(",") if p.strip()]
 
@@ -238,6 +243,15 @@ async def read_credential_files(paths: str = Query(..., description="Comma-separ
             filepath = home_dir / rel_path
         else:
             filepath = home_dir / clean_path
+
+        try:
+            os.lstat(filepath)
+        except FileNotFoundError:
+            missing.append(rel_path)
+            continue
+        except OSError as e:
+            logger.warning(f"Failed to stat {rel_path}: {e}")
+            continue
 
         try:
             if filepath.exists() and filepath.is_file():
@@ -257,7 +271,7 @@ async def read_credential_files(paths: str = Query(..., description="Comma-separ
         except Exception as e:
             logger.warning(f"Failed to read {rel_path}: {e}")
 
-    return CredentialReadResponse(files=files, files_b64=files_b64)
+    return CredentialReadResponse(files=files, files_b64=files_b64, missing=missing)
 
 
 @router.get("/api/credentials/list", response_model=CredentialListResponse)
