@@ -7931,6 +7931,18 @@
         "agents"
       ],
       "description": "trinity-enterprise#1055: purge_agent_now hard-purges an agent at once on the real schema — audit row written while the agent exists and kept; ownership, sharing, permissions (both directions) and MCP key rows gone; container, Redis state and volumes (both identities of a renamed agent, never a base another agent claims) removed; a Docker fault still purges rows; no audit row → 503 and nothing destroyed; non-admin and agent-key callers, system and ephemeral agents refused; no row → no-op."
+    },
+    {
+      "file": "unit/test_4123_auth_prefix_wins.py",
+      "feature": "#4123",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "agent",
+        "subscriptions",
+        "unit"
+      ],
+      "description": "#4123: a genuine auth failure whose detail also carries the 'prompt is too long' sentence is still auth. The agent's own 'Authentication failure:' prefix outranks the prompt-length marker in is_prompt_too_long, in both failure_classifier copies. Two details: the real _finalize_headless_result 503 for one stderr line holding both an auth pattern and the sentence (driven through the stderr auth-abort branch, as read_stderr does), and the issue's probe string. classify_switch_failure returns auth for both body shapes; execute_task walks and codes AUTH; /chat switches and codes auth; the pull refusal walk, terminal switch and recode keep auth; the #1083 callback keeps auth. A bare prompt-length rejection is still not auth (#3849 unchanged), and the prefix list is pinned to the agent's source."
     }
   ]
 }
