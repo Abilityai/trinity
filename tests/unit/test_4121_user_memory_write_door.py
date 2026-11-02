@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import update
 
 from database import db
+from db.agents import SYSTEM_AGENT_NAME
 from db.engine import get_engine
 from db.tables import mcp_api_keys
 from db.write_params import ExecutionResult, TaskExecutionFields
@@ -262,15 +263,32 @@ class TestItIsTheAgentsDoor:
         refused(write(client, agent, ann, key=user_key), 403, "agent_only")
         assert notes(agent) == ""
 
-    def test_the_system_key_is_refused(self, client, agent):
-        """`trinity-system` carries no `agent_name`: the same answer as search.
-        Its key is an agent key re-scoped, as `_set_system_scope` does it."""
-        ann = run(agent.name)
-        system = db.create_agent_mcp_api_key(f"{agent.name}-system", agent.owner)
+    @staticmethod
+    def _system_key(name, owner):
+        """An agent key re-scoped, as `_set_system_scope` does it."""
+        system = db.create_agent_mcp_api_key(name, owner)
         with get_engine().begin() as conn:
             conn.execute(update(mcp_api_keys).where(mcp_api_keys.c.id == system.id).values(scope="system"))
-        refused(write(client, agent, ann, key=system.api_key), 403, "agent_only")
+        return system.api_key
+
+    def test_the_system_key_is_stopped_by_the_self_gate_on_another_agent(self, client, agent):
+        """The system key acts as `trinity-system` (ent#719), so naming any other
+        agent is the self-gate's refusal, before this door's own check."""
+        ann = run(agent.name)
+        resp = write(client, agent, ann, key=self._system_key(f"{agent.name}-system", agent.owner))
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["detail"] == "Agent-scoped key may only write its own agent's user memory"
         assert notes(agent) == ""
+
+    def test_the_system_key_is_refused_on_its_own_agent(self, client, agent):
+        """`trinity-system` carries no `agent_name`: the self-gate admits it on its
+        own agent, and this door gives the same answer as search."""
+        system_agent = SimpleNamespace(name=SYSTEM_AGENT_NAME, owner=agent.owner, key=None)
+        db.register_agent_owner(SYSTEM_AGENT_NAME, agent.owner)
+        ann = run(SYSTEM_AGENT_NAME)
+        refused(write(client, system_agent, ann, key=self._system_key(SYSTEM_AGENT_NAME, agent.owner)),
+                403, "agent_only")
+        assert notes(system_agent) == ""
 
     def test_a_sibling_agents_key_is_still_stopped_by_the_self_gate(self, client, agent):
         ann = run(agent.name)
