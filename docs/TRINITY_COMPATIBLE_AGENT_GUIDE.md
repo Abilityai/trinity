@@ -2378,6 +2378,7 @@ pip install --user opencv-python moviepy
 3. **Minimize apt-get**: Each install adds startup time
 4. **Document dependencies**: List required packages in README.md
 5. **Do not `exec` the last step**: the platform protects the running `setup.sh` from the orphan sweep by its command line, and `exec` replaces that command line, so a long final install can be killed
+6. **Never write credentials or shell-init files from setup.sh**: `setup.sh` installs packages and system dependencies. Don't put a token in it, and don't have it write `~/.profile`, `~/.bashrc` or another shell startup file to make a variable survive restarts. `$HOME` is the repo root, so that file lands in the working tree and runs in any shell that reads it at startup. The platform's own credential writes refuse shell startup files for that reason (`DENY_GLOBS` in `src/backend/services/credential_paths.py`). For a credential that has to persist, put it in `.env` through [Credential Management](#credential-management)
 
 ---
 
