@@ -595,6 +595,52 @@
   so every mint is attributable. Guard:
   `tests/unit/test_mcp_key_creation_requires_session.py`.
 
+### 20.11 A Credential Handed in the Chat — the Secret Field and the Paste Guard (trinity-enterprise#1066)
+- **Status**: ✅ Implemented (OSS core). Capability: `credentials.md` §3.10.
+- **One door for the value**: `POST /api/enterprise/client-portal/asks/{id}/credential`
+  — `get_portal_principal` with `is_person` (an agent, system or connector key
+  is refused before the row is read), the asks router's roster re-check and
+  uniform 404 (an ask of another kind is the same 404), rate-limited 30/min per
+  person. Every refusal is a named code; neither it nor a validation error on
+  the body echoes the value.
+- **One leaf handles it**: `services/credential_sink.py` stages the value in the
+  runtime identity scrub FIRST and fails closed (503 `scrub_unavailable`), then
+  checks the agent is running, takes a short per-agent Redis lease (`env_busy`),
+  reads `.env`, sets one line (`agent_env_patch.set_keys`: quoted, duplicates
+  collapsed, every other byte kept), refuses a file over 256 KiB, injects it
+  back and audits `credentials` / `chat_provide` with the name and ask id only.
+  An AST guard in `tests/unit/test_ent1066_credential_sink.py` refuses any use
+  of the value in this module other than measuring, staging, patching or
+  passing it on. Values with a line break or NUL, or over 32 KiB, are refused.
+- **Only the field answers the kind**: `ask_service.answer(..., via_credential_sink=True)`
+  is set by the sink alone; any other answer raises `CredentialAnswerRefused`
+  → 422 `credential_answer_via_field` on the operator and Workspace doors, so a
+  secret never lands in `response`, the write-back or the wake prompt.
+- **Name policy**: `services/credential_ask_policy.py` refuses a name outside the
+  agent reader's charset, over 64 characters, or reserved — the agent runtime's
+  protected and routing names (mirrored from `execution_env`, parity-tested) and
+  the platform-written ones (MCP key, backend URL, agent name, model credential,
+  subscription token).
+- **Paste guard**: both Workspace chat routes refuse a message that looks like a
+  credential with 422 `secret_in_message` before admission — no reply context,
+  title, session row, execution row or idempotency key. The detector
+  (`utils/credential_sanitizer.secret_shape`) runs over `SECRET_VALUE_PATTERNS`,
+  which gained the `ops_…` and `dop_v1_…` service-token shapes in both the
+  backend and the agent-image copy; `Bearer`/`Basic` are excluded (prose), and a
+  sensitive `KEY=value` counts only with a value of 8+ characters. The refusal
+  names the shape, never the text. The composer then keeps no copy: the failed
+  message is dropped, not offered for Retry, never handed back to the composer,
+  and any draft holding it is cleared.
+- **Residuals (stated, not closed here)**: the guard is not wired into channel
+  adapters (Slack, Telegram, voice); the owner's Credentials-tab inject and the
+  other non-sink `.env` writers are whole-file and do not take the sink's lease,
+  so they stay last-writer-wins against it; the live stream is not scrubbed
+  (ent#279).
+- **Tests**: `tests/unit/test_ent1066_credential_ask_kind.py`,
+  `test_ent1066_credential_sink.py`, `test_ent1066_credential_route_gates.py`,
+  `test_ent1066_secret_paste_guard.py`; `src/mcp-server/src/operator_queue.test.ts`;
+  `src/frontend/tests/unit/{portalCredentialField,credentialAskSurfaces,portalSecretInMessage}.mount.spec.js`.
+
 ---
 
 ## 26. Operator Queue & Operating Room (OPS-001)

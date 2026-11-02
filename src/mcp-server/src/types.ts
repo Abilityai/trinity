@@ -580,7 +580,7 @@ export interface OperatorAskCreate {
   request_id: string;
   title: string;
   question?: string;
-  type?: "approval" | "question" | "alert";
+  type?: "approval" | "question" | "alert" | "credential";   // credential: trinity-enterprise#1066, raised by ask_for_credential only
   priority?: "critical" | "high" | "medium" | "low";
   options?: string[];
   context?: Record<string, unknown> | null;

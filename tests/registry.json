@@ -1,6 +1,52 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1066_secret_paste_guard.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "A secret pasted as a plain Workspace chat message is refused by both chat routes (sync and stream) with 422 `secret_in_message` BEFORE admission: no service call, no Idempotency-Key consumed, the SHAPE named and never the text. `utils/credential_sanitizer.secret_shape` over `SECRET_VALUE_PATTERNS` (gaining `ops_` and `dop_v1_` service-token shapes in both the backend and agent-image copies, so logs redact them too), `Bearer`/`Basic` excluded as prose, a sensitive `KEY=value` pair counted only with an 8+ character value and the #3311 harmless-word blanking; the partition of the list into named and excluded pinned complete."
+    },
+    {
+      "file": "unit/test_ent1066_credential_sink.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The secret sink behind the Workspace secret field (`client_portal.asks.service.provide_credential` -> `services/credential_sink.set_env_value`): one line of the agent's `.env` set through its own read + inject (round-tripped against the agent image's reader, duplicates collapsed, every other byte kept); staged into the runtime identity scrub FIRST and fail-closed (503 `scrub_unavailable`); a stopped or missing agent a named 409 `agent_not_running`; one writer per agent (`env_busy`); the 256 KiB file cap (`env_too_large`); every refusal names the step and never the value; the value absent from logs, audit, the ask row, the response and the wake; the ask answered `provided` by name; a compare-and-set lost after the write is 409 `already_resolved` with `credential_written: true`; an AST guard that the module never formats, logs, concatenates or raises the value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_route_gates.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "Who may reach `POST /api/enterprise/client-portal/asks/{id}/credential` (the ent#719 shape, through the real router and the real `get_portal_principal`): an agent-scoped key refused 403 before the row is read; a system or ops key 403 `person_required`; a JWT person, a user-scoped key, a Workspace-only `user` and a portal session admitted; a stranger the uniform 404; no credential 401; the typed-answer route refuses the kind 422 `credential_answer_via_field`; a malformed body never echoes the value; the list shows `credential_name` to the addressee."
+    },
+    {
+      "file": "unit/test_ent1066_credential_ask_kind.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The `credential` ask kind: raised by name with no options and exactly one resolved person (`no_person`), the name validated against the agent runtime's protected/routing sets and the platform-written keys (parity-tested), answered ONLY through the secret field's sink (`via_credential_sink`) — the operator respond box, the Workspace typed answer and a direct `answer()` are refused 422 `credential_answer_via_field`; the projection carries `credential_name` only; the wake names the variable, never a value."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",
@@ -7775,6 +7821,39 @@
         "channels"
       ],
       "description": "trinity-enterprise#1059 (re-review N1): a refused turn's completion report (Workspace, Slack, Telegram) shows the policy's sentence without the stored [usage_share] code; an unknown [...] and every success report are left as the agent wrote them."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalCredentialField.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalAsks mounted with a credential ask: masked secret field (show/hide), one POST to /asks/{id}/credential with the value in the body only, field empty on submit, nothing in storage/logs/URL, every refusal in words, no typed-answer box or Discuss."
+    },
+    {
+      "file": "../src/frontend/tests/unit/credentialAskSurfaces.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "queueResponseKind names the credential kind; history row reads 'NAME provided'; QueueCard and QueueItemDetail mounted show no respond box, only where the ask is answered."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalSecretInMessage.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalConversation mounted: a 422 secret_in_message (streaming and sync fallback) drops the bubble, offers no Retry, never restores the text to the composer or a draft, and shows the server's pointer."
     }
   ]
 }

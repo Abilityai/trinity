@@ -36,6 +36,11 @@ SECRET_VALUE_PATTERNS = [
     r'xoxa-[a-zA-Z0-9\-]+',           # Slack app token
     r'AKIA[A-Z0-9]{16}',              # AWS access key
     r'trinity_mcp_[a-zA-Z0-9]{16,}',  # Trinity MCP keys
+    # trinity-enterprise#1066: two service-token shapes a person is likely to
+    # hand an agent — added to the list the redaction runs, not to a
+    # guard-private one, so logs learn them in the same change.
+    r'ops_eyJ[A-Za-z0-9_-]{40,}',     # 1Password service-account token (ops_ + base64url JSON)
+    r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
 ]
@@ -447,6 +452,75 @@ def sanitize_text(text: str) -> str:
     result = _redact_kv_pairs(result)
 
     return result
+
+
+# --- trinity-enterprise#1066: does this message LOOK like a credential? ---------
+# The Workspace composer refuses a message that is a secret before admission
+# (422 `secret_in_message`, `client_portal/router.py`); the secret field is
+# where a credential goes. The shapes are the list above — one source — with
+# two deliberate differences from redaction:
+#
+#   * `Bearer` / `Basic` are EXCLUDED. In a log line they are a header being
+#     echoed; in a chat message they are a person writing prose about an API
+#     ("add a Bearer token header"), and a false refusal there teaches people
+#     to route around the guard.
+#   * a `KEY=value` pair counts only when the value is at least
+#     `_GUARD_MIN_PAIR_VALUE` characters (the identity scrub's own floor — a
+#     shorter value could not be staged as a secret anyway), and the key is
+#     tested with the harmless-word blanking of #3311 (`author=…` is not a
+#     credential). Redaction may over-redact safely; a refusal may not.
+#
+# Every pattern in `SECRET_VALUE_PATTERNS` is either NAMED here or EXCLUDED
+# here — `tests/unit/test_ent1066_secret_paste_guard.py` pins the partition,
+# so a shape added to the list cannot silently escape the guard.
+_GUARD_SHAPES = {
+    r'sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}': "sk",
+    r'ghp_[a-zA-Z0-9]{36,}': "github",
+    r'github_pat_[a-zA-Z0-9_]{22,}': "github",
+    r'gho_[a-zA-Z0-9]{36,}': "github",
+    r'ghs_[a-zA-Z0-9]{36,}': "github",
+    r'ghr_[a-zA-Z0-9]{36,}': "github",
+    r'xoxb-[a-zA-Z0-9\-]+': "slack",
+    r'xoxp-[a-zA-Z0-9\-]+': "slack",
+    r'xoxa-[a-zA-Z0-9\-]+': "slack",
+    r'AKIA[A-Z0-9]{16}': "aws",
+    r'trinity_mcp_[a-zA-Z0-9]{16,}': "trinity_mcp",
+    r'ops_eyJ[A-Za-z0-9_-]{40,}': "ops",
+    r'dop_v1_[a-f0-9]{20,}': "dop",
+}
+_GUARD_EXCLUDED = frozenset({
+    r'Bearer\s+[a-zA-Z0-9\-_.]+',
+    r'Basic\s+[a-zA-Z0-9+/=]+',
+})
+_guard_shape_re = [(re.compile(p), name) for p, name in _GUARD_SHAPES.items()]
+_GUARD_MIN_PAIR_VALUE = 8
+
+
+def secret_shape(text: Optional[str]) -> Optional[str]:
+    """The name of the credential shape ``text`` carries, or None.
+
+    The name is a short label for the client (`sk`, `github`, `slack`, `aws`,
+    `trinity_mcp`, `ops`, `dop`, `env_pair`) — never the matched text, which is
+    the thing the caller is refusing to repeat.
+    """
+    if not text:
+        return None
+    for pattern, name in _guard_shape_re:
+        if pattern.search(text):
+            return name
+    # A `KEY=value` whose key names a credential: the same forward walk as
+    # `_redact_kv_pairs`, with the harmless-word blanking applied to every key.
+    pos = 0
+    while True:
+        key = _KV_LINE_RE.search(text, pos)
+        if key is None:
+            return None
+        pos = key.end()
+        if not _is_sensitive_chained_key(key.group(1)):
+            continue
+        pair = _KV_PAIR_RE.match(text, key.start())
+        if pair is not None and len(pair.group(3)) >= _GUARD_MIN_PAIR_VALUE:
+            return "env_pair"
 
 
 def sanitize_dict(data: Dict[str, Any], depth: int = 0, max_depth: int = 10) -> Dict[str, Any]:

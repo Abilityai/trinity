@@ -116,6 +116,11 @@ export function decidedByOptions(item) {
  */
 export function queueResponseKind(item) {
   const type = item?.type
+  // trinity-enterprise#1066: a credential ask is answered ONLY through the
+  // secret field in the person's Workspace. Its own kind, so no surface falls
+  // through to a typed answer or an acknowledge — either would put text into
+  // `response`, which the backend refuses (`credential_answer_via_field`).
+  if (type === 'credential') return 'credential'
   if (type === 'approval') {
     return optionsOf(item).length > 0 ? 'approval' : 'question'
   }
@@ -177,6 +182,8 @@ export const QUEUE_TYPE_LABELS = Object.freeze({
   alert: 'Heads up',
   // #3130: the flood alarm became a budgeted platform type; it is still an alert.
   queue_flood: 'Heads up',
+  // trinity-enterprise#1066: an agent asking for a secret by name.
+  credential: 'Needs a credential',
 })
 
 /**
@@ -517,6 +524,11 @@ export function workspaceEndingText(ask) {
 const VERDICT_PAST = { approve: 'approved', reject: 'rejected' }
 export function workspaceOwnAnswer(ask) {
   if (!ask || ask.ended_by !== 'you' || !ask.answer) return null
+  // trinity-enterprise#1066: a credential ask's answer is the word `provided`
+  // (the value went to the agent, not to the row) — say it by name.
+  if (ask.kind === 'credential') {
+    return { past: null, text: `You provided ${ask.credential_name || 'the credential'}` }
+  }
   const past = ask.kind === 'approval'
     ? VERDICT_PAST[String(ask.answer).trim().toLowerCase()] || null
     : null
