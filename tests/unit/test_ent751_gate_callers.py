@@ -430,6 +430,13 @@ class _LoopDB:
         self.loops[lid]["next_run_at"] = next_run_at
 
     def start_loop_run(self, lid, run_number, *, execution_id=None):
+        # #3317: inserting run K is a claim, as the real one.
+        row = self.loops.get(lid)
+        if (row is None or row["status"] in _LOOP_TERMINAL
+                or row["runs_completed"] != run_number - 1
+                or any(r["run_number"] >= run_number for r in self.runs[lid])):
+            return None
+        row["next_run_at"] = None
         rid = f"lr_{lid}_{run_number}"
         self.runs[lid].append({
             "id": rid, "loop_id": lid, "run_number": run_number, "execution_id": execution_id,
@@ -511,7 +518,8 @@ def loop_env(monkeypatch):
     return ls, db, calls, script
 
 
-def _loop_with_closed_run(db, *, held: bool, on_failure: str) -> tuple:
+def _loop_with_closed_run(db, *, held: bool, on_failure: str,
+                          error: str = "Not run: held") -> tuple:
     """A running loop whose run 1 points at an execution already closed SKIPPED."""
     loop = db.create_loop(
         agent_name=AGENT, message_template="Run /pay-invoice {{run}}", max_runs=3,
@@ -523,7 +531,7 @@ def _loop_with_closed_run(db, *, held: bool, on_failure: str) -> tuple:
     db.mark_loop_running(loop["id"])
     execution = db.create_task_execution(agent_name=AGENT, message="Run /pay-invoice 1",
                                          triggered_by="loop")
-    execution.status, execution.error = "skipped", "Not run: held"
+    execution.status, execution.error = "skipped", error
     if held:
         db.held[execution.id] = {"request_id": REQUEST_ID}
     db.start_loop_run(loop["id"], 1, execution_id=execution.id)
@@ -545,6 +553,27 @@ class TestLoop:
         assert (loop["status"], loop["stop_reason"]) == ("stopped", "approval_required")
         assert calls == []
         # The held run reads `skipped`, never `failed`, and the loop counts no failure.
+        assert [r["status"] for r in db.list_loop_runs(lid)] == ["skipped"]
+        assert loop["failed_runs"] == 0
+
+    @pytest.mark.parametrize("on_failure", ["abort", "continue"])
+    def test_a_policy_refused_iteration_stops_the_loop_skipped_not_failed(self, loop_env, on_failure):
+        """trinity-enterprise#1059 (review H1): an iteration an admission policy
+        refused — SKIPPED `[usage_share] …`, no gate record — is not a task
+        failure either: the run reads `skipped`, nothing counts against
+        `on_failure`, and the loop stops with the policy's code as the reason
+        rather than ticking through `max_runs` meeting the same refusal."""
+        ls, db, calls, _script = loop_env
+        stop = "finance has used 15 of its 15 usage budget for the last 5 hours."
+        lid, eid = _loop_with_closed_run(db, held=False, on_failure=on_failure,
+                                         error=f"[usage_share] {stop}")
+
+        assert _drain(ls.LoopService().advance_on_terminal(eid)) is True
+
+        loop = db.get_loop(lid)
+        assert (loop["status"], loop["stop_reason"]) == ("stopped", "usage_share")
+        assert loop["error"] == stop
+        assert calls == []
         assert [r["status"] for r in db.list_loop_runs(lid)] == ["skipped"]
         assert loop["failed_runs"] == 0
 

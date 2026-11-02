@@ -58,7 +58,7 @@ Some heads-ups describe a *condition* rather than an event — for example a sub
 - A row that nobody acts on expires 14 days after its last reading (`OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS`). An expired heads-up reads **Expired — nobody acted on it**.
 - After a person ends one, the same reading files nothing for 7 days (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`), unless its priority rises (for example a headroom warning turning critical).
 
-Other platform heads-ups still file one row per event; they move onto the same model in a later release.
+Every platform heads-up now follows this model. Four need a person and never expire: a poisoned execution, a collided Workspace inbox, a gitignore change notice and a Workspace problem report. The platform never ends them; only a person does. See [Operating Room](../operations/operating-room.md).
 
 **Permission requests.** An agent refused for lacking a permission an admin grants (such as changing another agent's schedules) is told to raise a question whose title includes the permission id, for example `schedules.manage`. Answering it grants nothing: an admin grants the permission on the agent's Settings tab, where the open requests are listed. See [Permissions to Change Itself](../agents/agent-configuration.md#permissions-to-change-itself).
 
@@ -66,7 +66,15 @@ WebSocket events fired along the way: `operator_queue_new` when the item arrives
 
 ### Asks addressed to a Workspace user
 
-An item raised with `ask_operator` is addressed by role: `primary` (the default for approvals and questions) goes to the agent's owner, and `operator` (the default for alerts) goes to the operators with no single person. `approver` and `viewer` are refused until someone fills those roles. A queue-file entry can instead address an item to one person the agent is shared with by setting `addressed_to_email`. The address is checked at ingestion against the agent's own roster: someone the agent is not shared with, or a malformed value, turns the item into an ordinary operator ask rather than being refused. The `context` block of an ask is never shown to the addressee.
+An item raised with `ask_operator` is addressed by role: `primary` (the default for approvals and questions) goes to the agent's owner, and `operator` (the default for alerts) goes to the operators with no single person. `approver` and `viewer` are refused until someone fills those roles. Only a person seated as approver can answer an `approver` item: anyone else, an admin included, is refused (`403 not_addressee`) and may only cancel it. An item raised before the approver's seat was recorded with it stays answerable by anyone with access to the agent. A queue-file entry can instead address an item to one person the agent is shared with by setting `addressed_to_email`. The address is checked at ingestion against the agent's own roster: someone the agent is not shared with, or a malformed value, turns the item into an ordinary operator ask rather than being refused. The `context` block of an ask is never shown to the addressee.
+
+**A canon role (`role:<id>`).** Where your install provides roles, an ask may name a role from the agent's canon, such as `role:finance-lead`. It reaches every person seated in that role on the agent's own roster who can open the agent, and nobody else: there is no fallback to the owner or the operators. When it cannot reach anyone, the ask is refused with a `422` that names the role (never a person) and the remedy:
+
+- `role_unavailable` — roles cannot be answered on this install right now. Address the ask to `primary` or `operator` instead.
+- `role_unassigned` — nobody is seated in the role for this agent yet. Ask the agent's owner to seat someone, or address the ask to `primary` or `operator`.
+- `role_cannot_open_agent` — the people seated in the role cannot open the agent, so they would never see the ask. Ask the agent's owner to share the agent with them.
+
+Reports and messages cannot be addressed to a role id; they refuse it with `invalid_to`.
 
 **A role several people fill.** When the role an ask is addressed to resolves to more than one person, the one ask reaches every one of them — it is in each person's Inbox, and the receipt reports `resolved: true`. The first answer wins: the others see the ask as ended, with **Answered · {name}** naming who answered it. **Dismiss** and **Discuss** are not offered on a shared ask, and the Workspace route refuses both with `422 shared_ask`, because one person's dismissal or discussion would end or redirect it for everyone.
 

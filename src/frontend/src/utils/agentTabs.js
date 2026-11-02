@@ -61,7 +61,11 @@ export function buildTabs({
   // show and no dashboard file to show them in. Both flags come from ONE
   // DB-only probe (`GET /api/agent-dashboard/{name}/exists`), so neither half
   // needs the agent to be running.
-  if (hasDashboardFlag || hasDeclaredMetrics) {
+  //
+  // trinity-enterprise#1006: an owner sees it with neither, because the
+  // Dashboard tab is where metrics are declared from the UI — hiding it until
+  // one exists would hide the only door to the first one.
+  if (hasDashboardFlag || hasDeclaredMetrics || (canShare && !isSystem)) {
     tabs.push({ id: 'dashboard', label: 'Dashboard' })
   }
 

@@ -115,6 +115,18 @@ def _sanitized_detail(summary_or_error: Optional[str]) -> str:
     return body
 
 
+def _person_text(status: str, summary_or_error: Optional[str]) -> Optional[str]:
+    """A failure's text without the ``[code]`` prefix a terminal stores for
+    machines (trinity-enterprise#1059: a refused turn reads ``[usage_share] …``
+    on the row). Only a known code is removed; a success is the agent's own
+    words and is never rewritten."""
+    if status == "success":
+        return summary_or_error
+    from services.execution_envelope import split_error_code
+
+    return split_error_code(summary_or_error)[1]
+
+
 def _summarize(
     status: str,
     summary_or_error: Optional[str],
@@ -132,7 +144,7 @@ def _summarize(
     # Sanitise-then-truncate lives in `_sanitized_detail`, shared with the
     # portal leg — a channel is a persistent, externally hosted, human-visible
     # surface, so this is the last place to skip it.
-    body = _sanitized_detail(summary_or_error)
+    body = _sanitized_detail(_person_text(status, summary_or_error))
     if status == "success":
         head = "✅ Task finished"
     else:
@@ -337,17 +349,16 @@ def _resolve_portal(
     Delivery is a persisted assistant message, so it renders through the same
     history the client already reads.
 
-    **Durable, but not immediately visible** (review finding). An earlier
-    version of this docstring claimed the Workspace polls its threads. It does
-    not: `PortalConversation.vue` loads history only on mount and on an
-    agent/session prop change, `stores/clientPortal.js` states outright that
-    `refreshThreads()` is event-driven rather than periodic, and the only
-    interval in the Workspace is the 20s asks poll on a different surface. So a
-    client sitting on the thread sees the report at their next reload or thread
-    switch — the row is never lost, but "it appears while they watch" was not
-    true, and AC #7's "degrades to poll" does not hold by construction here. An
-    idle history poll is the obvious follow-up (the asks poll is the precedent);
-    this docstring stops asserting it in the meantime.
+    **Durable, and visible within one tick** (trinity#3439). The Workspace has
+    no history poll of its own; what it has is the shell's 20s tick, which
+    re-reads every thread row (`message_count`, `last_message_at`) for the
+    sidebar. Since #3439 the open conversation watches its own row in that list
+    and, when it moves, reads the thread's newest rows and appends what it has
+    not seen — so a report written here appears to a client sitting on the
+    thread within one tick (or at once when they return to the tab), and the
+    row is marked read because they are looking at it. The `touch_portal_session`
+    below is what makes the row move; a writer that skipped it would still be
+    durable and would wait for the next reload, which is the gap this closes.
 
     **Known limitation — a report landing mid-turn can be read as that turn's
     answer.** `PortalConversation` decides a reply arrived with
@@ -590,7 +601,7 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     # The same sanitise-then-truncate rule the other channels use. A Workspace
     # thread is a persistent, client-visible surface — if anything, MORE exposed
     # than a Slack channel, since the reader is an external client.
-    detail = _sanitized_detail(summary_or_error)
+    detail = _sanitized_detail(_person_text(status, summary_or_error))
     return f"{head}\n\n{detail}" if detail else head
 
 

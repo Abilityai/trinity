@@ -15,6 +15,7 @@ MCP API Keys enable authentication for the Trinity MCP server, allowing Claude C
 | MCP-005 | As a user, I want to copy my MCP configuration so that I can easily configure Claude Code | Implemented |
 | MCP-006 | As a first-time user, I want a default key created automatically so that I can start using MCP immediately | Implemented |
 | MCP-007 | As an operator, I want a **read-only machine credential** for monitoring and ops tooling, so that enabling enforced 2FA does not cost me observability and I never have to hand a dashboard an unlimited admin key (#2323) | Implemented |
+| MCP-008 | As an operator, I want a **bounded write credential** for ops automation (reset a breaker, start or stop an agent, terminate an execution), so that enforced 2FA does not force me onto an unlimited admin key for those writes (#3180) | Implemented |
 
 ## Key scopes — and which one is a machine identity (#2323)
 
@@ -24,6 +25,7 @@ A key's `scope` decides what it can reach. The two an operator mints by hand:
 |---|---|---|
 | `user` | **The owner's full role.** On an admin owner that is every admin gate in the platform, plus every write. Never expires. Already exempt from interactive 2FA — the MFA gate sits on the two login routes and key validation never passes through it | any user, for themselves |
 | `ops` | **Read-only, route-fenced**: fleet health, host/container telemetry, the agent roster and capacity, execution history and the live log relay, subscription reads. Every write 403s | admin only, and human-only (an interactive session — a key cannot mint one) |
+| `ops_write` | **Four writes, route-fenced (#3180)**: reset an agent's circuit breaker, start or stop an agent (never the system agent or an ephemeral agent), terminate an execution. No reads — pair it with an `ops` key. Refused everywhere once its owner is not an admin | admin only, and human-only, like `ops` |
 
 Trinity always had a machine identity for admin/ops surfaces: `user` is one. What
 it lacked was bounds, attribution and expiry, so the only 2FA-surviving option was
@@ -44,7 +46,9 @@ Two properties make `ops` a machine identity rather than a human's proxy:
 **It does not survive its owner's offboarding, and an earlier revision of this
 document said it did.** The opt-in ADMITS the scope; `role == "admin"` is still
 enforced afterwards, so demoting the owner 403s the key at every admin-gated ops
-read — and `get_current_user` rejects a principal whose owner carries
+read, and the resolver checks the owner's role ahead of the route fence (403
+`ops_owner_not_admin`, #3180), so the reads with no admin gate of their own
+refuse it too — and `get_current_user` rejects a principal whose owner carries
 `suspended_at` (#995), so suspension kills the key at the auth entry point
 before any of this runs. Dropping the role check for an opted-in scope was
 considered and refused: it would make this bounded tier *harder* to revoke than
@@ -66,6 +70,29 @@ credential unable to run the dashboard it exists for.
 The keys page badges the scope, because an unbadged ops key is visually identical
 to an unbounded personal one on the page where credentials are audited.
 
+### `ops_write` — the write tier (#3180)
+
+`POST /api/mcp/keys {scope: "ops_write"}` (the **Ops (operational writes)** choice)
+→ `routers/mcp_keys.py` runs the `ops` ladder → `db/mcp_keys.py` writes the row
+with `agent_name` NULL. On every request the resolver
+(`dependencies.resolve_platform_user_unfloored`) calls
+`_enforce_ops_write_key_fence(request, owner)`, which admits only when the owner
+row is `role == "admin"`, the (method, `scope["path"]`) full-matches
+`_OPS_WRITE_ALLOWED_ROUTES`, and `scope["route"].endpoint` carries the
+`@ops_write_route` mark. The four marked handlers are
+`routers/agents.py::{reset_circuit_breaker_endpoint, start_agent_endpoint,
+stop_agent_endpoint}` and `routers/chat.py::terminate_agent_execution`. Reset
+then runs `require_admin_allowing("ops_write")`; start and stop run
+`enforce_agent_spawn_scope`, which refuses the system agent and ephemeral agents
+for this scope. Start passes `allow_key_mint=False` to `start_agent_internal`,
+which refuses with 409 `ops_write_would_mint_key` before any side effect when
+the start would mint the agent a key: the #1854 drift heal (`reason:
+key_drift`) or the #1559 rebuild of a missing container (`reason:
+container_missing`). A person's start still heals and rebuilds, so a person's
+revocation of the agent's key is never undone by this key. A password change with "revoke keys" revokes the key
+(`services/password_service.PERSON_KEY_SCOPES`), and an `ops_write` key found in
+an agent's `.mcp.json` reports the verify verdict `foreign_ops_write_key`.
+
 ## Attribution (#2323)
 
 Every key-authenticated call now records **which** key acted (`mcp_key_id`,
@@ -77,6 +104,9 @@ did that key touch?" answerable.
 
 `actor_type` stays `user`: the owner is the accountable party, is the only branch
 that yields an email, and the enterprise user-activity view matches on it.
+
+An `ops_write` key is attributed the same way (#3180): the agent start and stop
+rows it causes carry its `mcp_key_id` and `mcp_scope=ops_write`.
 
 ## Entry Points
 
@@ -260,7 +290,7 @@ async def create_mcp_api_key_endpoint(
     request: Request,
     current_user: User = Depends(require_interactive)
 ):
-    # scope != "user": ops/portal_delegate only, admin-only (see Key scopes)
+    # scope != "user": ops/ops_write/portal_delegate only, admin-only (see Key scopes)
     api_key = db.create_mcp_api_key(current_user.username, key_data)
     if not api_key:
         raise HTTPException(status_code=400, detail="Failed to create API key")

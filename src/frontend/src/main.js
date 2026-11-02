@@ -8,7 +8,7 @@ import './style.css'
 import { useAuthStore } from './stores/auth'
 import { useClientPortalStore } from './stores/clientPortal'
 import {
-  applyRequestCredential, notifyPlatformUnauthorized, pathForVerdict,
+  applyRequestCredential, fullPathForVerdict, notifyPlatformUnauthorized, pathForVerdict,
   reactToPlatformUnauthorized, reactToStorageEvent, setPlatformUnauthorizedHandler,
 } from './utils/platformSession'
 import { installConsoleBuffer } from './utils/consoleBuffer'
@@ -72,10 +72,12 @@ function handlePlatformUnauthorized(error) {
     // #3406 — the address being loaded until the first navigation settles;
     // `currentRoute` reads "/" (START_LOCATION) until then.
     path: pathForVerdict(router, START_LOCATION, window.location.pathname),
+    // #3444 — the page to come back to after signing in, query and hash included.
+    returnPath: fullPathForVerdict(router, START_LOCATION, window.location),
     portalTokenPresent,
     adoptStoredSession: () => authStore.adoptStoredSession(),
     logout: () => authStore.logout(),
-    goToLogin: () => router.push('/login'),
+    goToLogin: (location) => router.push(location),
   })
   // RETURNED, so `notifyPlatformUnauthorized` can absorb a rejected redundant
   // navigation. The first version of this handler dropped the promise on the

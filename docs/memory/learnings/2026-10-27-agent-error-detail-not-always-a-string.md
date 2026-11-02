@@ -1,0 +1,4 @@
+## 2026-10-27 — pitfall — An agent error body's `detail` is not always a string
+
+**Context**: `execution_classification._extract_agent_error` (#3988). It returned `error_data["detail"]` as-is when it was not a dict. FastAPI's own request-validation 422 carries a **list** `detail`, so a 422 from the agent server's validator reached `is_turn_limit` / `is_auth_failure` / `is_model_rejection` as a list, and the first `.lower()` / `.lstrip()` crashed the `execute_task` except-handler into its generic "Unexpected error executing task" path. No test sent anything but a string or the #678 dict.
+**Lesson**: normalise a foreign error body to `str` at the one extraction seam, before any substring classifier runs, and give each new classifier a test with the framework's non-string shapes (a list `detail`, `null`). A classifier that assumes `str` is only as safe as the narrowest body shape its tests send.

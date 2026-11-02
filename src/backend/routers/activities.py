@@ -41,8 +41,15 @@ async def get_activity_timeline(
     # intentional (admins should see complete history). The prior code filtered
     # admins to Docker-present agents only via get_accessible_agents(); that
     # incidental narrowing is dropped on purpose, not by accident.
-    from services.agent_service.helpers import accessible_agent_names
+    from services.agent_service.helpers import accessible_agent_names, viewer_own_rows
     allowed = accessible_agent_names(current_user)
+
+    # trinity-enterprise#875: an activity's details carry the first 100 characters
+    # of the prompt that started it. On every agent the caller does not own, the
+    # timeline is the activity they started, narrowed in SQL before the LIMIT.
+    own_uid, own_exempt = viewer_own_rows(current_user)
+    own_rows = {} if own_uid is None else {
+        "own_rows_user_id": own_uid, "own_rows_exempt_agents": own_exempt}
 
     activities = db.get_activities_in_range(
         start_time=start_time,
@@ -50,6 +57,7 @@ async def get_activity_timeline(
         activity_types=types_list,
         limit=limit,
         agent_names=allowed,
+        **own_rows,
     )
 
     return {

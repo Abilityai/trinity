@@ -391,12 +391,17 @@ Auth is enforced through the shared #1310 imperative guards (`assert_agent_*` in
 with other routers. #1710 migrated these off the inline `if not db.can_user_*: raise`
 shape and retired the `# noqa: inv8` carve-out; the 403 + detail is unchanged.
 
+Each of these routes is also a person's act (trinity-enterprise#719): its decorator
+carries `Depends(require_person)`, so only a signed-in session or the person's own
+`user` key passes, and every machine principal (an agent key at any access level,
+the system key) gets 403 before the ownership or access check runs.
+
 | Endpoint | Check | Method | File:Line |
 |----------|-------|--------|-----------|
-| Connect Slack | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:249` |
-| Disconnect | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:338` |
-| Update | Owner or admin | `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:360` |
-| Get status | Any access level | `assert_agent_access()` → `db.can_user_access_agent()` | `routers/slack.py:214` |
+| Connect Slack | A person who is the owner or an admin | `Depends(require_person)`, then `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:254`, `:267` |
+| Disconnect | A person who is the owner or an admin | `Depends(require_person)`, then `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:351`, `:359` |
+| Update | A person who is the owner or an admin | `Depends(require_person)`, then `assert_agent_owner()` → `db.can_user_share_agent()` | `routers/slack.py:375`, `:384` |
+| Get status | A person at any access level | `Depends(require_person)`, then `assert_agent_access()` → `db.can_user_access_agent()` | `routers/slack.py:217`, `:229` |
 
 ## Error Handling
 

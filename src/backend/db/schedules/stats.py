@@ -10,6 +10,32 @@ from utils.helpers import iso_cutoff
 from ._common import _norm_ts
 from .analytics import _BUCKET_ORDER, _bucket_for_trigger
 
+
+def _own_rows_condition(own_uid, own_email, exempt, bind: Dict, prefix: str = "") -> str:
+    """The trinity-enterprise#875 own-rows predicate, or "" for no narrowing.
+
+    A row is the caller's when it carries their id, or (with `own_email`) their
+    email as the requester or as the Workspace client a run was spawned for.
+    Every agent is narrowed except the `exempt` ones (the caller's own). Any of
+    the two identities being given turns narrowing on; `=` against NULL is never
+    true, so rows with no requester stay hidden (fail closed)."""
+    email = (own_email or "").strip().lower() or None
+    if own_uid is None and email is None:
+        return ""
+    mine = []
+    if own_uid is not None:
+        mine.append(f"{prefix}source_user_id = :own_uid")
+        bind["own_uid"] = own_uid
+    if email is not None:
+        mine.append(f"LOWER({prefix}source_user_email) = :own_email")
+        mine.append(f"LOWER({prefix}source_channel_client) = :own_email")
+        bind["own_email"] = email
+    if exempt:
+        xkeys = [f"ox{i}" for i in range(len(exempt))]
+        bind.update(dict(zip(xkeys, exempt)))
+        mine.insert(0, f"{prefix}agent_name IN (%s)" % ",".join(f":{k}" for k in xkeys))
+    return "(" + " OR ".join(mine) + ")"
+
 class ScheduleStatsMixin:
     """Execution stat rollups + fleet queries."""
 
@@ -354,12 +380,20 @@ class ScheduleStatsMixin:
         search: Optional[str] = None,
         limit: int = 50,
         offset: int = 0,
+        own_rows_user_id: Optional[int] = None,
+        own_rows_exempt_agents: Optional[List[str]] = None,
+        own_rows_email: Optional[str] = None,
     ) -> List[Dict]:
         """Cross-fleet execution list for the Unified Executions Dashboard.
 
-        Returns summary rows (no large text fields: response, tool_calls,
-        execution_log). The error column is truncated to 200 chars for the
-        failed-row one-liner.
+        `own_rows_user_id` (trinity-enterprise#875) narrows the list to the rows
+        that user started, on EVERY agent except `own_rows_exempt_agents` (the
+        agents the caller owns, which keep every row). Narrowing is the default
+        and the exemption the exception, so an agent missing from the list is
+        narrowed, never shown in full. In the WHERE, so it applies before the
+        LIMIT/OFFSET and the `search` LIKE cannot reach another person's text.
+        `own_rows_email` also counts the rows stamped with that email (a
+        Workspace turn carries the email, not the id) — see `_own_rows_condition`.
 
         agent_names=None → admin path, no agent_name filter applied.
         agent_names=[]   → non-admin with zero accessible agents, returns [].
@@ -375,6 +409,10 @@ class ScheduleStatsMixin:
             keys = [f"an{i}" for i in range(len(agent_names))]
             conditions.append("agent_name IN (%s)" % ",".join(f":{k}" for k in keys))
             bind.update(dict(zip(keys, agent_names)))
+
+        own = _own_rows_condition(own_rows_user_id, own_rows_email, own_rows_exempt_agents, bind)
+        if own:
+            conditions.append(own)
 
         if status:
             conditions.append("status = :status")
@@ -438,8 +476,15 @@ class ScheduleStatsMixin:
         self,
         agent_names: Optional[List[str]],  # None = admin (no agent filter)
         hours: int = 24,
+        *,
+        own_rows_user_id: Optional[int] = None,
+        own_rows_exempt_agents: Optional[List[str]] = None,
+        own_rows_email: Optional[str] = None,
     ) -> Dict:
         """Aggregate stats for the fleet executions stat cards.
+
+        The `own_rows_*` narrowing is `get_fleet_executions`'s (ent#875), so a
+        count over the same rows agrees with the list it summarises.
 
         Returns total/success/failed/cost within the time window, plus a
         current running + queued count (not time-windowed — a run that started
@@ -460,6 +505,10 @@ class ScheduleStatsMixin:
             # Qualified: the #1743 LEFT JOIN puts agent_name in both tables.
             agent_where = "WHERE se.agent_name IN (%s)" % ",".join(f":{k}" for k in keys)
             bind.update(dict(zip(keys, agent_names)))
+        own = _own_rows_condition(
+            own_rows_user_id, own_rows_email, own_rows_exempt_agents, bind, prefix="se.")
+        if own:
+            agent_where = (agent_where + " AND " + own) if agent_where else ("WHERE " + own)
 
         # Single-pass query: windowed totals via conditional aggregation +
         # live running/queued counts without a time filter, all in one scan.

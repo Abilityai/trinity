@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
+# mcp: files.ts (share_file → /shared-files) + permissions.ts (get_agent_permissions → /permissions?strict=true, ent#991; the permission writes are deliberately unexposed — granting an edge is human-only) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -21,7 +21,7 @@ from services import (
     peer_skill_policy,
     rate_limiter,
 )
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
 from services.agent_service import (
     agent_reach_logic,
@@ -46,6 +46,7 @@ from models import (
     CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
+    MetricDeclarationRequest,
     ObjectiveJoinRead,
     ShareFileMcpRequest,
     ShareFileResponse,
@@ -130,6 +131,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "stopped",
             "message": "Agent is stopped. Start the agent to see full template info."
         }
@@ -145,6 +147,8 @@ async def get_agent_info_endpoint(
                 # `type` read from template.yaml — strip it here so the retired
                 # field never reaches the UI/MCP without forcing image rebuilds.
                 data.pop("type", None)
+                # trinity-enterprise#1007: the label is the record, not the template.
+                data["kind"] = kind_from_labels(container.labels)
                 return data
             else:
                 labels = container.labels
@@ -156,6 +160,7 @@ async def get_agent_info_endpoint(
                         "cpu": labels.get("trinity.cpu", ""),
                         "memory": labels.get("trinity.memory", "")
                     },
+                    "kind": kind_from_labels(labels),
                     "status": "running",
                     "message": "Template info endpoint not available in this agent version"
                 }
@@ -171,6 +176,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "running",
             "message": f"Could not fetch template info: {str(e)}"
         }
@@ -295,7 +301,7 @@ async def get_agent_reach(
     return agent_reach_logic(agent_name, target, current_user)
 
 
-@router.put("/{agent_name}/permissions")
+@router.put("/{agent_name}/permissions", dependencies=[Depends(require_person)])
 async def set_agent_permissions(
     agent_name: str,
     request: Request,
@@ -317,12 +323,12 @@ async def set_agent_permissions(
         target_id=agent_name,
         endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
-        details={"targets": body.get("permissions") or body.get("targets")},
+        details={"targets": body.get("permitted_agents", [])},
     )
     return result
 
 
-@router.post("/{agent_name}/permissions/{target_agent}")
+@router.post("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def add_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -348,7 +354,7 @@ async def add_agent_permission(
     return result
 
 
-@router.delete("/{agent_name}/permissions/{target_agent}")
+@router.delete("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def remove_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -583,8 +589,11 @@ async def get_agent_objectives(
     `source.*`, and `findings[]` sentences an operator can act on. An objective
     naming an undeclared metric comes back with that finding, never a blank.
     """
-    # --- self-gate (after access, before any read: the `/metrics` spelling,
-    # so the two reads agree on who "itself" is) ----------------------------
+    # --- self-gate (after access, before any read) --------------------------
+    # For an agent key this is the `/metrics` spelling, so the two reads agree
+    # on who "itself" is. The system key is held to `trinity-system` here
+    # (trinity-enterprise#719); `/metrics` reads it as it reads any principal
+    # that is not an agent key, through the access dependency alone.
     assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own objectives")
 
     objectives_read_budget.enforce(
@@ -805,6 +814,113 @@ async def refresh_agent_metric_definitions(
 
 
 # ============================================================================
+# Declaring metrics from the UI (trinity-enterprise#1006)
+# ============================================================================
+# The form edits the agent's `template.yaml` `metrics:` block — the template
+# stays the single source of truth — and the registry is refreshed from the
+# file it wrote. Owner tier: a person who owns the agent (or an admin), or an
+# agent key holding `instructions.manage` bounded to its owner's agents. The
+# write itself goes through the Files write, which applies the same tier to
+# `template.yaml` (an instruction file, ent#820) and writes the audit row.
+
+def _declaration_error(e) -> HTTPException:
+    return HTTPException(
+        status_code=e.status,
+        detail={"code": e.code, "message": e.message, **e.extra},
+    )
+
+
+@router.get("/{agent_name}/metrics/declarations",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_declarations(agent_name: OwnedAgentByName):
+    """What `template.yaml` declares, as written, for the declaration form.
+
+    Unlike `/metrics/definitions` (the reconciled registry), this reads the
+    live file, because the form edits the file. Carries `template_hash`, the
+    compare-and-swap token every write must send back, and `editable` — a
+    `metrics:` block in a layout the form cannot change safely says so here,
+    before anyone fills in a form that could never be saved.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.read_editor(agent_name)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.post("/{agent_name}/metrics/declarations",
+             dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def declare_metric(
+    agent_name: OwnedAgentByName,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Declare a metric: append one entry to `template.yaml metrics:`."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.declare(agent_name, fields, body.base_hash,
+                                 current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.put("/{agent_name}/metrics/declarations/{metric_name}",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def update_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Edit one declared metric. Name and type cannot change."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.update(agent_name, metric_name, fields, body.base_hash,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.get("/{agent_name}/metrics/declarations/{metric_name}/references",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_references(agent_name: OwnedAgentByName, metric_name: str):
+    """What still uses this metric: recorded points, objectives, dashboard
+    widgets and anything a registered provider reports. `unchecked` names
+    the sources that could not be read — not evidence of no use."""
+    from services import metric_declaration_service as svc
+    return await svc.references(agent_name, metric_name)
+
+
+@router.delete("/{agent_name}/metrics/declarations/{metric_name}",
+               dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def retire_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    request: Request,
+    base_hash: str = Query(..., min_length=64, max_length=64),
+    acknowledge_references: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+):
+    """Retire a metric: remove its entry from `template.yaml metrics:`.
+
+    Recorded points are kept. A metric still in use (or whose use could not be
+    checked) is refused as `metric_in_use` with the list, unless
+    `acknowledge_references=true`.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.retire(agent_name, metric_name, base_hash,
+                                acknowledge_references=acknowledge_references,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+# ============================================================================
 # Shared Folders Endpoints
 # ============================================================================
 
@@ -818,7 +934,7 @@ async def get_agent_folders(
     return await get_agent_folders_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/folders")
+@router.put("/{agent_name}/folders", dependencies=[Depends(require_person)])
 async def update_agent_folders(
     agent_name: str,
     request: Request,
@@ -873,7 +989,7 @@ async def get_agent_file_sharing(
     return await get_file_sharing_status_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/file-sharing")
+@router.put("/{agent_name}/file-sharing", dependencies=[Depends(require_person)])
 async def set_agent_file_sharing(
     agent_name: str,
     body: dict,

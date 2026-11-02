@@ -657,7 +657,10 @@ def _sharing(monkeypatch):
 
     monkeypatch.setattr(sharing.platform_audit_service, "log", _no_audit)
     request = SimpleNamespace(client=None, scope={"path": "/api/agents/atlas/share"}, state=SimpleNamespace())
-    owner = SimpleNamespace(username="owner", agent_name=None, connector_agent=None)
+    # A signed-in session: the share route's inline check is the INTERACTIVE
+    # allowlist (trinity-enterprise#719), which fails closed on a stand-in
+    # without `mcp_scope`.
+    owner = SimpleNamespace(username="owner", agent_name=None, connector_agent=None, mcp_scope=None)
     return sharing, fake, request, owner
 
 

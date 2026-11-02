@@ -573,16 +573,16 @@ async def verify_email_login_code(request: Request):
 **Business Logic:**
 1. Check if setup is completed (lines 210-215)
 2. Check if email auth is enabled (lines 217-223)
-3. Parse request, extract `client_ip` from request
-4. Call `check_login_rate_limit(client_ip)` — IP-based rate limit (raises 429 if exceeded)
+3. Read `client_ip = request.client.host` — the canonical client address `utils/client_ip.ClientAddressMiddleware` already resolved (trusted-proxy forwarding only; ent#873), then parse the body (a malformed body still records a per-IP failure)
+4. Call `check_login_rate_limit(client_ip, account=email)` — per-IP `login_attempts_ip:{ip}` and per-account `login_attempts_acct:{email}` buckets (#591; raises 429 if either is exhausted)
 5. Parse and lowercase email
 6. Call `check_otp_rate_limit(email)` — per-email OTP rate limit (raises 429 after 5 failures)
 7. Verify code
    - `db.verify_login_code(email, code)`
    - Checks: code exists, not already used, not expired
-8. If invalid: call `record_login_attempt(client_ip, False)` and `record_otp_attempt(email, False)`, return 401
-9. On success: call `record_login_attempt(client_ip, True)` and `record_otp_attempt(email, True)`
-   - Clears both the IP and per-email attempt counters
+8. If invalid: call `record_login_attempt(client_ip, False, account=email)` and `record_otp_attempt(email, False)`, return 401
+9. On success: call `record_login_attempt(client_ip, True, account=email)` and `record_otp_attempt(email, True)`
+   - Clears the IP, account and per-email OTP counters
 10. Mark code as verified with `used_at` timestamp
 11. Get or create user
     - `db.get_or_create_email_user(email)`
@@ -617,8 +617,8 @@ async def verify_email_login_code(request: Request):
 Used by the public-facing verification flow (separate from the main email login). As of 2026-03-26 this endpoint also enforces IP-based rate limiting.
 
 **Business Logic:**
-1. Extract `client_ip` from request
-2. Call `check_login_rate_limit(client_ip)` — raises 429 if IP is locked out
+1. `client_ip = _get_client_ip(request)` — the canonical client address (a wrapper over `request.client.host` since ent#873)
+2. Call `check_login_rate_limit(client_ip)` — raises 429 if that address's bucket is exhausted
 3. Parse and verify the code
 4. On failure: call `record_login_attempt(client_ip, False)`
 5. On success: call `record_login_attempt(client_ip, True)`

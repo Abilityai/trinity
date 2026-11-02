@@ -1082,6 +1082,21 @@ broken endpoint. There is no third write path.
 
 No backend hook covers an agent that runs `git pull` **itself** without restarting. The remedy is the explicit refresh route, reachable by the agent as the `refresh_metric_definitions` MCP tool (ent#478) — which is what the undeclared-metric 422's hint names, so the hint points at something the reader can actually call.
 
+### 47.12 Declaring from the UI — the template stays the one source (trinity-enterprise#1006)
+
+Before ent#1006 a metric could only be declared by editing `template.yaml`, which ruled out anyone who does not edit agent repos. The agent's Dashboard tab now declares, edits and retires metrics from a form. Operator ruling 2026-10-28: **the template stays the single source of truth; there is no second registry in the database.**
+
+- **One definition, two doors.** A form write edits the agent's `template.yaml` `metrics:` block through the audited Files write and then runs the existing reconcile (`source = "ui"`). The registry, `record_metrics`, git auto-sync and a later pull all see the same definition a hand edit would produce. Nothing exists only in the database.
+- **Only the target entry changes.** The editor replaces, appends or removes one `metrics:` item by its lines; every other byte of the file — other keys, other entries, comments — is untouched. Before writing, the new text is parsed again: every top-level key other than `metrics` must equal the old parse and the `metrics:` list must equal the intended one, or the write is refused as `template_not_editable` (flow-style blocks, anchors/aliases/tags, duplicate `metrics:` keys). Nothing is written in that case.
+- **Same named errors as the loader.** A candidate is validated by `template_metrics` itself (one parser, so the form and a hand edit cannot disagree), plus three form-only rules: `cadence` is **required** on a form write (every metric declared here is stale-checkable from day one; the template door is unchanged), a name already declared is refused before the parser sees it, and the 50-metric cap is refused rather than truncated. Errors come back keyed by field for inline display.
+- **Name and type are immutable on edit.** Points are stored by name and read in the type's units; a rename is a retire plus a new declaration. `x-` keys the form does not own are preserved across an edit; `x-recorded-by` is the form's free-text "recorded by" note, stored on the definition and shown on the tile, read by nothing else.
+- **Compare-and-swap.** Every write carries the template hash the editor read returned; the file is re-read just before the write and a mismatch is `template_changed` (409). An agent editing its own template is never overwritten.
+- **Never on absence of evidence (#2196).** `agent_not_running` (409) and `template_unreadable` (503) refuse the write and change nothing; no metric is ever retired because a read failed.
+- **Retire names what still uses it.** Before retiring, the platform counts recorded points and finds objectives naming the metric, `dashboard.yaml` widgets bound to it, and anything a registered private provider reports (a generic `metric_references` provider seam). A retire with any reference is refused as `metric_in_use` (409, with the list) unless the request acknowledges it. Points are kept; re-declaring the name revives the row.
+- **Permission.** Owner tier (owner or admin, a person) — the same tier that edits the agent's instruction files. An agent key needs the `instructions.manage` capability and is bounded to its owner's agents. `template.yaml` joins the instruction file class in the Files path policy, so the generic Files route applies the same tier and capability; without that the form's gate would have a back door.
+- **Discoverability.** The Dashboard tab shows for an owner even with no `dashboard.yaml` and no declared metrics, so the empty state ("Declare a metric") is reachable; the Workspace project "Add a metric" empty state names the same action.
+- No MCP tool: an agent edits its own `template.yaml` in-container and calls `refresh_metric_definitions`.
+
 ### Acceptance
 
 - [x] `template.yaml metrics:` has a backend reader that is total, bounded, and names every malformed entry

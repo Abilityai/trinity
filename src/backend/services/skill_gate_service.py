@@ -337,24 +337,12 @@ def _resolved_people(agent_name: str, role: str) -> List[str]:
 
 
 def _can_open(agent_name: str, email: str) -> bool:
-    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
-
-    A decision is made in the Workspace (the agent on the person's roster:
-    owned or shared) or in Operations (an operator or admin with access to the
-    agent). A platform account is asked `can_user_access_agent` — owner, shared
-    or admin, which covers both doors; an email with no account only has the
-    Workspace, so the agent must be shared with it. Fails closed: an unreadable
-    lookup is "cannot open", which refuses by name rather than waits silently."""
-    try:
-        user = db.get_user_by_email(email)
-        if user:
-            return bool(db.can_user_access_agent(user["username"], agent_name))
-        from client_portal.service import agent_on_roster
-        return bool(agent_on_roster(agent_name, email, include_owned=False))
-    except Exception:  # noqa: BLE001
-        logger.warning("[SkillGate] could not tell whether an approver can open %s",
-                       agent_name, exc_info=True)
-        return False
+    """Can this approver reach a gated approval on `agent_name`? The rule is
+    `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
+    trinity-enterprise#1007 so an ask to a canon role applies the same one).
+    This name stays the gate's seam: `_approvers` reads it, and the tests
+    patch it."""
+    return role_addressing.can_open_agent(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
@@ -1325,9 +1313,9 @@ _marker_locks: Dict[Tuple[int, str], Any] = {}
 
 def spawn_gate_marker_sync(agent_name: str, *, only_if_gated: bool = True) -> bool:
     """Fire-and-forget `sync_gate_marker`; True when a sync was scheduled.
-    `only_if_gated` (start and recreate) skips the exec for an agent with no
-    gates, and for an unreadable map, so an agent start costs nothing while
-    the gate is unused. A heal passes False. Never raises."""
+    `only_if_gated` (a recreate, whose fresh layer has no marker to remove)
+    skips the exec for an agent with no gates, and for an unreadable map. A
+    start and a heal pass False. Never raises."""
     import asyncio
 
     if only_if_gated:
@@ -1376,6 +1364,9 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity#2328: the caller's per-task turn cap is a property of the task,
+    # like its model and timeout — the approved run keeps it.
+    "max_turns": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1691,6 +1682,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         system_prompt=system_prompt,
         timeout_seconds=frozen.get("timeout_seconds"),
         async_mode=True,
+        max_turns=frozen.get("max_turns"),
     )
     row = db.create_task_execution(
         agent_name=agent,

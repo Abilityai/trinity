@@ -123,6 +123,7 @@ from routers.aauth_resource import router as aauth_resource_router  # ent#879 AA
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
+from routers.agent_memory import router as agent_memory_router  # MEM-002 retrieval memory (trinity-enterprise#1022)
 from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
@@ -577,6 +578,15 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error starting log archive service: {e}")
 
+    # trinity-enterprise#1022: warm the retrieval-memory embedding model on a
+    # daemon thread when the platform switch is on, so the first turn never
+    # pays the load. A no-op (and no import of the model) while it is off.
+    try:
+        from services import memory_service
+        memory_service.on_startup()
+    except Exception as e:
+        logger.debug(f"Retrieval memory warm skipped: {e}")
+
     # Initialize audit retention service (#552)
     try:
         audit_retention_service.start()
@@ -675,7 +685,10 @@ async def _schedule_staggered_services() -> None:
     async def _start_skills_sync_delayed():
         await asyncio.sleep(11)
         try:
+            from services import skill_service as _skill_service_boot
             from services.skills_sync_service import skills_sync_service
+            # ent#529: before the first cycle, so it fetches the new pin. Never raises.
+            await _skill_service_boot.follow_bundled_pin()
             skills_sync_service.start()
             logger.info("Skills library sync service started (staggered +11s)")
         except Exception as e:
@@ -1321,7 +1334,8 @@ async def add_security_headers(request: Request, call_next):
 
     # HSTS only when we know the wire is HTTPS — checking both the
     # direct scheme and the X-Forwarded-Proto header set by upstream
-    # reverse proxies (uvicorn launched with --proxy-headers honours it).
+    # reverse proxies. uvicorn runs with --no-proxy-headers (ent#873), so
+    # the scheme is always the raw hop's and the header is what carries it.
     is_https = (
         request.url.scheme == "https"
         or request.headers.get("x-forwarded-proto", "").lower() == "https"
@@ -1334,6 +1348,20 @@ async def add_security_headers(request: Request, call_next):
 
     return response
 
+
+# trinity-enterprise#873 — one canonical client address per request, before any
+# route, limiter or audit writer reads `request.client`. Registered just before
+# the Host guard so it runs immediately INSIDE it and outside everything else;
+# it rewrites `scope["client"]` in place and leaves every header untouched.
+# The proxy-trust configuration is validated here, at import: an invalid
+# TRUSTED_PROXIES stops the backend with the offending entry named rather than
+# serving with a partial list. uvicorn's own forwarded-header processing is
+# switched OFF in every launcher (`--no-proxy-headers`), so this is the only
+# place a forwarded address is ever believed.
+from utils.client_ip import ClientAddressMiddleware, get_config as _client_ip_config
+
+_client_ip_config()
+app.add_middleware(ClientAddressMiddleware)
 
 # #3102 — reject a Host header that would shift the Host-built request URL.
 # Registered LAST so it runs FIRST (add_middleware prepends); keep every other
@@ -1403,6 +1431,7 @@ app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal
 app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
+app.include_router(agent_memory_router)  # MEM-002 retrieval memory (trinity-enterprise#1022)
 app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
@@ -1970,4 +1999,6 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # proxy_headers=False: client addresses are resolved by ClientAddressMiddleware
+    # from explicitly trusted proxies only (trinity-enterprise#873).
+    uvicorn.run(app, host="0.0.0.0", port=8000, proxy_headers=False)

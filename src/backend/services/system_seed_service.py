@@ -40,9 +40,10 @@ multi-agent shape opens):
     arrives set-but-empty; empty ⇒ bundled). An explicitly-set-but-unreadable
     path fails LOUDLY (ERROR + operator alert) and never silently falls back
     to the bundled manifest.
-  * **Honest status**: partial / failed / unreadable-override emit a
-    platform-path operator-queue alert (direct DB create on `trinity-system`,
-    #1632-exempt by construction, best-effort).
+  * **Honest status**: partial / failed / unreadable-override report through
+    the platform alert seam (`platform_alerts.observe`, kind `system_seed`, one
+    pending row per seed kind on `trinity-system`), and the pass that proves a
+    condition over ends its row as the platform (#3254).
   * **Fail-open**: never raises, never blocks boot or setup completion.
 """
 import hashlib
@@ -57,6 +58,7 @@ from utils.admin_identity import admin_username
 from models import User
 from services.docker_service import docker_client
 from services.cornelius_agent_service import cornelius_agent_service
+from services import platform_alerts
 from redis_breaker_util import get_breaker_redis, SingleFlightLock
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from utils.helpers import utc_now_iso
@@ -104,6 +106,19 @@ _PASS_LOCK_TTL = 900  # seconds
 MANIFEST_ENV_VAR = "TRINITY_DEFAULT_SYSTEM_MANIFEST"
 BUNDLED_MANIFEST_PATH = "config/manifests/default-system.yaml"
 _DISABLE_SENTINELS = {"disabled", "none", "off", "0", "false"}
+
+# #3254: the seed alarms are one `system_seed` subject per seed kind on
+# `trinity-system`. A clear needs positive evidence the condition is over:
+# * a Cornelius result that shows the agent exists. Every other result
+#   (`docker_unavailable`, a `skipped_*` / `deferred` / `none` skip, a
+#   `create_*` failure, no result at all) says nothing about that;
+# * a seed pass that concluded with agents present — the deploy reported
+#   `deployed` / `partial`, or the existence backstop found reserved names —
+#   ends the alarms that say no fleet was seeded;
+# * only a complete fleet ends `partial`. A partial fleet completed by hand is
+#   seen by nothing (the flag is set), so the kind's 30-day lifetime ends it.
+_CORNELIUS_PRESENT = frozenset({"created", "already_exists"})
+_ENDED_BY_A_CONCLUDED_SEED = ("failed", "error", "override-unreadable")
 
 
 def _resolve_first_run_verdict() -> Optional[bool]:
@@ -182,13 +197,12 @@ def _acquire_pass_lock():
 
 def _notify_cornelius_failure(message) -> None:
     """#2215 AC#3: a failed Cornelius creation was log-only — the partial/failed
-    system-seed alerts cover only the manifest deploy. Deterministic id under
-    the reserved `system-seed-` prefix (#1632: an agent can't pre-create-and-
-    silence it). Dedup semantics: `create_item` is ON CONFLICT DO NOTHING, so
-    while any prior row exists — even resolved — later distinct failures are
-    swallowed until the retention delete; correct for an ALARM (#1644: the
-    queue item is never load-bearing — the unset seed flag's next-boot retry
-    is the actual recovery mechanism). Context carries the seeder's message +
+    system-seed alerts cover only the manifest deploy. One pending row for the
+    subject `system_seed:cornelius-failed` (#3254): a later failure updates it
+    in place, a person's ending holds it for the snooze window, and a pass
+    whose Cornelius result shows the agent exists ends it as the platform. The
+    queue item is never load-bearing (#1644): the unset seed flag's next-boot
+    retry is the actual recovery mechanism. Context carries the seeder's message +
     a logs pointer, identifiers only (crud flattens the underlying cause to a
     generic 500 string, so the alert names THAT seeding failed and where to
     look for WHY). The message is credential-sanitized and URL-userinfo-
@@ -248,6 +262,10 @@ async def ensure_first_run_seeded() -> dict:
             "create_blocked",
         ):
             _notify_cornelius_failure(cornelius_result.get("message"))
+        elif isinstance(cornelius_result, dict) and (
+            cornelius_result.get("action") in _CORNELIUS_PRESENT
+        ):
+            SystemSeedService._clear_operator_alarms("cornelius-failed")
         try:
             result = await system_seed_service.ensure_seeded(fresh=fresh)
         except Exception as e:  # belt: keeps the entry point's never-raises contract
@@ -397,7 +415,10 @@ class SystemSeedService:
                         manifest_name, manifest_yaml, source, "converged",
                         len(reserved), len(short_names) - len(reserved),
                     )
-                    if len(reserved) < len(short_names):
+                    self._clear_operator_alarms(*_ENDED_BY_A_CONCLUDED_SEED)
+                    if len(reserved) == len(short_names):
+                        self._clear_operator_alarms("partial")
+                    else:
                         # Crash-mid-create partial fleet: honest status — the
                         # deploy-reported "partial" path would have alerted, so
                         # the converge path must too.
@@ -446,7 +467,10 @@ class SystemSeedService:
                 self._store_seed_info(
                     deploy.system_name, manifest_yaml, source, deploy.status, created, failed
                 )
-                if deploy.status == "partial":
+                self._clear_operator_alarms(*_ENDED_BY_A_CONCLUDED_SEED)
+                if deploy.status == "deployed":
+                    self._clear_operator_alarms("partial")
+                else:
                     failed_names = [f.name for f in deploy.failed]
                     logger.warning(
                         "Default system seeded PARTIALLY: %d/%d agents created; failed: %s",
@@ -599,27 +623,27 @@ class SystemSeedService:
 
     @staticmethod
     def _notify_operator(kind: str, title: str, question: str, context: dict) -> None:
-        """Platform-path operator alert (direct DB create, #1632-exempt by
-        construction — never routed through an agent queue file). Hosted on
+        """Report a seed alarm through the platform alert seam (#3254): kind
+        `system_seed`, keyed by the seed kind, so each kind is one pending row
+        that a repeat reading updates in place. Platform-raised (never routed
+        through an agent queue file, and the `system-seed-` prefix is reserved,
+        so an agent can't pre-create-and-silence it). Hosted on
         `trinity-system`, which has an ownership row on every install where the
         system agent deployed (canary L-03 stays green; the residual — a fresh
         install whose base image is broken enough that the system agent never
-        registered — fails the seed for the same reason anyway). Deterministic
-        `system-seed-<kind>` id (a #1632 reserved prefix, so an agent can't
-        pre-create-and-silence it) ⇒ at most one open row per kind. Best-effort."""
-        try:
-            db.create_operator_queue_item("trinity-system", {
-                "id": f"system-seed-{kind}",
-                "type": "alert",
-                "priority": "high",
-                "status": "pending",
-                "title": title,
-                "question": question,
-                "context": context,
-                "created_at": utc_now_iso(),
-            })
-        except Exception as e:
-            logger.debug("Seed operator alert failed (non-fatal): %s", e)
+        registered — fails the seed for the same reason anyway). Never raises."""
+        platform_alerts.observe(
+            "trinity-system", "system_seed", kind,
+            title=title, question=question, priority="high", context=context,
+        )
+
+    @staticmethod
+    def _clear_operator_alarms(*kinds: str) -> None:
+        """The pass proved these seed alarms' conditions over: the platform ends
+        their pending rows (#3254). A row a person ended first is untouched.
+        Never raises."""
+        for kind in kinds:
+            platform_alerts.clear("trinity-system", "system_seed", kind)
 
     def _acquire_lock(self):
         """Take the provisioning lock via the shared ownership-checked
