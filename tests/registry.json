@@ -7854,6 +7854,61 @@
         "security"
       ],
       "description": "PortalConversation mounted: a 422 secret_in_message (streaming and sync fallback) drops the bubble, offers no Retry, never restores the text to the composer or a draft, and shows the server's pointer."
+    },
+    {
+      "file": "unit/test_4165_github_ref_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: github:owner/repo@ref takes a dotted tag whole (v1.2.0, releases/v1.2.0) and pins the clone; branch names parse unchanged; '..', a leading-dot component, a trailing '.' or '.lock', a leading '-', whitespace and shell metacharacters are a named 400 instead of a silent fall-back to main."
+    },
+    {
+      "file": "unit/test_4165_ref_existence_checks.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: a tag accepted by the parser survives the three ref-existence checks — provisioning.check_remote_branch_exists, ref_probes (anonymous and tokened), and the REST branch check with its tag fallback — driven through _validate_github_access on all three paths against a fake ls-remote that filters like git; the ref is always a value after the URL; a branch wins over a same-named tag; an annotated tag peels to its commit."
+    },
+    {
+      "file": "unit/test_4165_pull_cycle_pinned_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4165: an agent cloned -b <tag> (detached HEAD) runs the real pull cycle as a named skip every cycle, never a failure streak, and stays on the tag while origin moves on; a detached HEAD from a rebase stopped part-way is still a failure."
+    },
+    {
+      "file": "unit/test_4165_ref_probes_real_git.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: ref_probes against a REAL bare git remote over file:// (no fake ls-remote) holding a lightweight tag, an annotated tag and a branch sharing a name with an annotated tag: an annotated tag resolves to its commit, never the tag object (the probe asks for refs/tags/<r>^{} by name); a branch wins over the same-named tag; anonymous and tokened probes agree."
+    },
+    {
+      "file": "unit/test_ent1055_purge_agent_now.py",
+      "feature": "trinity-enterprise#1055",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity-enterprise#1055: purge_agent_now hard-purges an agent at once on the real schema — audit row written while the agent exists and kept; ownership, sharing, permissions (both directions) and MCP key rows gone; container, Redis state and volumes (both identities of a renamed agent, never a base another agent claims) removed; a Docker fault still purges rows; no audit row → 503 and nothing destroyed; non-admin and agent-key callers, system and ephemeral agents refused; no row → no-op."
     }
   ]
 }
