@@ -3306,8 +3306,8 @@ to localStorage in the clear.
   every such row read NULL) is filled at its terminal write with the model the
   runtime reported answering (`metadata.model_name`, #678), through
   `ExecutionResult.model_used`, which the writer applies as `COALESCE(existing,
-  reported)` — a requested model is never replaced. The judge reads the column to
-  tell the run's family, and skipped every such run as `model_unknown`. The last
+  reported)` — a requested model is never replaced. A consumer that reads the column
+  for the run's model family saw NULL on every such run. The last
   rung reads `settings_service.get_platform_default_model()`, the same function
   `execute_task` calls, so the row and the turn hold one opinion rather than two;
   stopping at `None` (the shape reviewed out) recorded NULL for the default state

@@ -1163,11 +1163,12 @@ column, judge–human agreement tile, the rating affordance) are enterprise (rul
   another agent delegated — the ent#940 `fan_out`/`loop`/`reminder` runs — graded about a
   minute after they finish) and links to the Executions tab.
 - **FR-16 — Operator rating from the run page** (ruling T2, built after the placement
-  answer): human-only `POST|GET /api/agents/{name}/executions/{id}/rating` behind
-  `require_interactive` + the owner-tier agent gate, a small service into the existing
-  rating upsert, evaluator `operator:<identity>`, `target_kind='execution'`, no schema
-  change; the ent#935 write-fence tests are amended additively and an AST guard pins that
-  every Tier-0 reader keys on the evaluator. Never `quality` on a `platform:*` row.
+  answer): the rating write is a private-module route; the OSS run page shows the
+  control only where that module is entitled, and the rating lands in the existing
+  `agent_evaluations` rating upsert as an `operator:<identity>` row with
+  `target_kind='execution'` — no OSS schema change. The ent#935 write-fence tests are
+  amended additively and an AST guard pins that every Tier-0 reader keys on the
+  evaluator. Never `quality` on a `platform:*` row.
 - **FR-17 — Fleet trend** (ruling T3): a nightly fleet series under the reserved
   `platform:eval` owner with `dims={"scope":"fleet"}` (never `{}`, which the dims reader
   cannot select), written only by the unscoped nightly pass, and only for completed UTC days (never today,
