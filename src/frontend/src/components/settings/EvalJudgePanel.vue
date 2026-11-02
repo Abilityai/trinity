@@ -12,6 +12,11 @@
           failed a platform check, plus a few passing runs per agent per day. Each graded run costs a
           provider call, capped per agent per day.
         </p>
+        <p class="mt-2 max-w-2xl text-sm text-gray-600 dark:text-gray-300" data-testid="eval-judge-credential">
+          An agent on a subscription is judged on its own subscription, by the one model a subscription
+          serves. Any other agent, or a subscription that is rate-limited, is judged on the platform key by
+          the models below.
+        </p>
       </div>
       <BaseToggle v-if="form" v-model="form.enabled" label="Enabled" data-testid="eval-judge-enabled" />
     </div>
@@ -37,7 +42,7 @@
             <option value="on">Judged</option>
             <option value="off">Not judged (opt in per agent)</option>
           </BaseSelect>
-          <BaseSelect v-model="form.primary" label="Judge model" data-testid="eval-judge-primary">
+          <BaseSelect v-model="form.primary" label="Judge model on the platform key" data-testid="eval-judge-primary">
             <option v-for="m in store.allowlist" :key="m" :value="m">{{ m }}</option>
           </BaseSelect>
           <BaseSelect v-model="form.fallback" label="Fallback for runs in the same family" data-testid="eval-judge-fallback">

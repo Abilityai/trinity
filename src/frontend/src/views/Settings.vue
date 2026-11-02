@@ -2250,8 +2250,8 @@ Example:
             </div>
           </div>
 
-          <!-- Info Box -->
-          <div class="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
+          <!-- Info Box: the Trinity Prompt's help, so it belongs to the tab that edits it. -->
+          <div v-if="activeTab === 'general'" class="bg-blue-50 dark:bg-blue-900/30 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
             <div class="flex">
               <div class="flex-shrink-0">
                 <svg class="h-5 w-5 text-blue-400" fill="currentColor" viewBox="0 0 20 20">

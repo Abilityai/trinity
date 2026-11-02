@@ -83,6 +83,16 @@ describe('EvalJudgePanel', () => {
     expect(w.find('select[data-testid="eval-judge-fallback"]').element.value).toBe('claude-sonnet-5')
   })
 
+  it('says a subscription agent is judged on its own subscription, and the models are the key\'s', async () => {
+    const w = mountPanel()
+    await flush()
+    const credential = w.find('[data-testid="eval-judge-credential"]')
+    expect(credential.exists()).toBe(true)
+    expect(credential.text()).toContain('its own subscription')
+    expect(credential.text()).toContain('platform key')
+    expect(w.text()).toContain('Judge model on the platform key')
+  })
+
   it('a failed first load is LoadFailed, not an empty form', async () => {
     const w = mountPanel({ get: async () => { throw new Error('boom') } })
     await flush()
