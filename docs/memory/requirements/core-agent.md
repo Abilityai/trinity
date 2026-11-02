@@ -100,6 +100,11 @@
 - **Description**: Delete agents and cleanup resources
 - **Key Features**: Container cleanup, network cleanup, cascade delete sharing records
 
+#### 1.4.1 Immediate purge primitive (abilityai/trinity-enterprise#1055)
+- **Status**: ✅ Implemented (primitive; no route of its own)
+- **Description**: A delete is a soft delete (#834) whose rows, volumes and key are kept for the retention window. Where an agent must not outlive the decision to remove it — an invited member is removed, or a half-created agent is rolled back — `services/agent_service/purge.py::purge_agent_now(agent_name, *, actor)` hard-purges it at once: container, queued and in-flight work, per-agent Redis state, every row the #816 cascade covers (sharing, permissions in both directions, the agent's MCP key), and the data volumes under both identities of a renamed agent (#1664), never a base another agent still claims.
+- **Acceptance**: the `agent_lifecycle:purge` audit row is written while the agent still exists and survives the purge; if it cannot be written nothing is destroyed (503). A person caller must pass `assert_admin` (an agent key carrying an admin owner's role is refused); `actor=None` is the platform acting on its own behalf. System agents (403) and ephemeral agents (409, they have their own discard) are refused. A Docker fault never stops the row purge; a residual volume is reclaimed by the orphan sweep (#1581). An agent with no row is a no-op. Edition-agnostic enforcement primitive: an entitled module or a later admin surface calls it. Test: `tests/unit/test_ent1055_purge_agent_now.py`.
+
 ### 1.5 Agent Logs Viewing
 - **Status**: ✅ Implemented
 - **Description**: View container logs for debugging
@@ -176,6 +181,7 @@
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
 - **Description**: Clone via `github:Org/repo` format with PAT authentication
+- **Ref pinning (trinity#4165)**: `github:owner/repo@ref` takes the ref whole — a branch or a tag, dots included (`v1.2.0`, `releases/v1.2.0`) — and pins the clone to it. The ref is interpolated into startup.sh's eval-built clone command, so the charset stays a shell-safety barrier (`[A-Za-z0-9_./-]`) and the git ref-format shapes a dotted ref cannot take (`..`, a component starting with `.`, a trailing `.` or `.lock`) are refused. An unusable ref is a named 400, never a silent fall-back to `main`. A tag never pulls; re-pinning is a recreate. Test: `tests/unit/test_4165_github_ref_tag.py`.
 
 ### 4.2.1 Admin-Configurable GitHub Templates (TMPL-001)
 - **Status**: ✅ Implemented
