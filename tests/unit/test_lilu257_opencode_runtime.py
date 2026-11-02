@@ -747,3 +747,74 @@ def test_reset_session_clears_opencode_fields():
 
     assert agent_state.opencode_chat_session_id is None
     assert agent_state.opencode_chat_session_model is None
+
+
+# ---------------------------------------------------------------------------
+# a model is always resolvable (Abilityai/lilu#652) — the backend now sends
+# none when no OpenCode platform default is set; the CLI must never pick.
+# ---------------------------------------------------------------------------
+
+def _spy_stall_retry(monkeypatch, runtime):
+    seen = []
+
+    async def _spy(**kwargs):
+        from agent_server.models import ExecutionMetadata
+        seen.append(kwargs.get("model"))
+        return ("response", [], ExecutionMetadata(), [], "ses_x")
+
+    monkeypatch.setattr(runtime, "_execute_with_stall_retry", _spy)
+    return seen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("isolated", [False, True])
+async def test_lilu652_chat_with_no_model_uses_the_agent_default(monkeypatch, isolated):
+    from agent_server.state import agent_state
+
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    seen = _spy_stall_retry(monkeypatch, runtime)
+    agent_state.current_model = None
+    agent_state.session_started = False
+    agent_state.opencode_chat_session_id = None
+    agent_state.opencode_chat_session_model = None
+
+    await runtime.execute("prompt", model=None, isolated_session=isolated)
+
+    assert seen == [opencode_runtime.DEFAULT_OPENCODE_MODEL]
+    # Not written back: a platform default set later must still win next turn.
+    assert agent_state.current_model is None
+
+
+@pytest.mark.asyncio
+async def test_lilu652_chat_default_honours_agent_runtime_model(monkeypatch):
+    from agent_server.state import agent_state
+
+    monkeypatch.setenv("AGENT_RUNTIME_MODEL", "ollama/gemma4:12b")
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    seen = _spy_stall_retry(monkeypatch, runtime)
+    agent_state.current_model = None
+
+    await runtime.execute("prompt", model=None)
+
+    assert seen == ["ollama/gemma4:12b"]
+
+
+@pytest.mark.asyncio
+async def test_lilu652_headless_with_no_model_uses_the_agent_default(monkeypatch):
+    monkeypatch.delenv("AGENT_RUNTIME_MODEL", raising=False)
+    monkeypatch.delenv("CLAUDE_MODEL", raising=False)
+    runtime = OpenCodeRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+    seen = []
+
+    async def _spy(**kwargs):
+        seen.append(kwargs.get("model"))
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(runtime, "_execute_opencode", _spy)
+    with pytest.raises(HTTPException):
+        await runtime.execute_headless("task", model=None)
+    assert seen == [opencode_runtime.DEFAULT_OPENCODE_MODEL]

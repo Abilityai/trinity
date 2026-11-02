@@ -1250,7 +1250,9 @@ class OpenCodeRuntime(AgentRuntime):
             # Fresh session per claude_code.py:779-787 pattern
             # (trinity-enterprise#752). No capture, no shared-model or stat
             # change — the next caller resumes the chat's own session untouched.
-            turn_model = model or agent_state.current_model
+            # Abilityai/lilu#652: never let the CLI pick — the backend sends no
+            # model when no OpenCode platform default is set.
+            turn_model = model or agent_state.current_model or self.get_default_model()
             try:
                 response, log, metadata, raw, _session_id = await self._execute_with_stall_retry(
                     prompt=prompt,
@@ -1283,7 +1285,11 @@ class OpenCodeRuntime(AgentRuntime):
         # -- continuity hygiene (claude_code.py:796-814 pattern) --
         if model:
             agent_state.current_model = model
-        effective_model = agent_state.current_model
+        # Abilityai/lilu#652: a turn with nothing resolved used to hand `None`
+        # to the CLI, which picked its own model. Fill the slot with the
+        # agent's default instead. Not written back to `current_model`, so a
+        # later operator-set platform default still reaches the next turn.
+        effective_model = agent_state.current_model or self.get_default_model()
 
         resume_session_id: Optional[str] = None
         if (
@@ -1365,9 +1371,12 @@ class OpenCodeRuntime(AgentRuntime):
         # configured runtime_model rather than the CLI default, and the log
         # names which resolution level won.
         model, model_source = resolve_runtime_model_with_source(model)
+        if not model:
+            # Abilityai/lilu#652: same fallback as the chat path.
+            model = self.get_default_model()
         logger.info(
             "[Headless Task] Using model: %s (resolved from: %s)",
-            model or "<CLI default>", model_source,
+            model, model_source,
         )
         if not self.is_available():
             raise HTTPException(
