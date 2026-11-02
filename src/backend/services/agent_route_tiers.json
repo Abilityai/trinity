@@ -466,6 +466,48 @@
   "path": "/api/agents/{agent_name}/mcp-key/verify",
   "tier": "owner"
  },
+ "agent_memory.py::extract_preview_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/retrieval-memory/extract-preview",
+  "tier": "owner"
+ },
+ "agent_memory.py::forget_retrieval_memory_fact_endpoint": {
+  "method": "DELETE",
+  "path": "/api/agents/{agent_name}/retrieval-memory/facts/{fact_id}",
+  "tier": "owner"
+ },
+ "agent_memory.py::get_retrieval_memory_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/retrieval-memory",
+  "reason": "trinity-enterprise#1022: on/off and can-it-run status only, no memory content; a person the agent is shared with may see whether it remembers, and an agent key reads only its own (assert_own_agent)",
+  "tier": "accessor"
+ },
+ "agent_memory.py::list_retrieval_memory_events_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/retrieval-memory/events",
+  "tier": "owner"
+ },
+ "agent_memory.py::list_retrieval_memory_facts_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/retrieval-memory/facts",
+  "tier": "owner"
+ },
+ "agent_memory.py::search_retrieval_memory_agent_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/retrieval-memory/search",
+  "reason": "the agent's own key only (assert_own_agent, then the agent_only refusal); a person searches through the owner GET door",
+  "tier": "self"
+ },
+ "agent_memory.py::search_retrieval_memory_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/retrieval-memory/search",
+  "tier": "owner"
+ },
+ "agent_memory.py::set_retrieval_memory_opt_out_endpoint": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/retrieval-memory",
+  "tier": "owner"
+ },
  "agent_rename.py::rename_agent_endpoint": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/rename",
@@ -1543,7 +1585,7 @@
   "path": "/api/agents/{agent_name}/skill-gates",
   "reason": "legacy",
   "tier": "accessor",
-  "via": "get_skill_gate_readable_agent_by_name"
+  "via": "assert_skill_gates_readable"
  },
  "skill_gate.py::set_agent_skill_gate": {
   "method": "PUT",

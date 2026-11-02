@@ -294,7 +294,9 @@ def test_a_person_the_agent_is_shared_with_cannot_emit_in_its_name():
 def test_the_owner_and_an_agent_key_reach_the_emit():
     with pytest.raises(_Stop):                                   # past the gate, into the emit
         _emit(_person("owner"), can_share=True)
-    key = SimpleNamespace(id=1, username="owner", role="user", mcp_scope="agent", agent_name="sibling",
+    # The agent's own key: since trinity-enterprise#719 an agent key emits only
+    # as its own agent, so a sibling's key is refused before the owner tier.
+    key = SimpleNamespace(id=1, username="owner", role="user", mcp_scope="agent", agent_name=AGENT,
                           connector_agent=None, portal_delegate=False, is_event_loopback=False,
                           vouched_source_agent=None)
     with pytest.raises(_Stop):
