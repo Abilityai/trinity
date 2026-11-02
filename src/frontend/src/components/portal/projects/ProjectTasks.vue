@@ -11,6 +11,8 @@
   (or the steward agent) confirms it — and each such row carries Confirm for
   people who may (contributors on a live project). Objectives and task-log
   bodies render as markdown through the shared renderer (#3692).
+
+  #867: contributors change a task's owner here — free text, blank clears it.
 -->
 <template>
   <div class="space-y-4" data-testid="project-tasks">
@@ -125,6 +127,16 @@
               <option value="p1">P1</option><option value="p2">P2</option><option value="p3">P3</option>
             </BaseSelect>
           </div>
+          <BaseInput
+            id="task-owner-edit"
+            v-model="edit.owner"
+            label="Owner"
+            placeholder="name@your-company.com"
+            maxlength="320"
+            :disabled="task.status === 'done'"
+            :help="task.status === 'done' ? 'Reopen the task to change its owner.' : 'Leave blank for no owner.'"
+            data-testid="project-task-owner"
+          />
           <BaseTextarea id="task-note" v-model="edit.note" label="Note (optional — added to the task's log)" :rows="2" />
           <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
           <div class="flex justify-end">
@@ -185,7 +197,7 @@ const busy = ref(false)
 const actionError = ref('')
 const form = reactive({ title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
 const formError = ref({})
-const edit = reactive({ status: '', priority: 'p2', note: '' })
+const edit = reactive({ status: '', priority: 'p2', owner: '', note: '' })
 
 const state = computed(() => store.tasks[props.projectId] || { rows: [], loaded: false, error: null })
 const view = computed(() => viewState({ hasLoaded: state.value.loaded, error: state.value.error, count: state.value.rows.length }))
@@ -201,7 +213,8 @@ const canConfirm = computed(() => props.canContribute && !props.archived)
 const confirming = ref('')
 const confirmError = ref('')
 const dirty = computed(() => task.value && (
-  edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''))
+  edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''
+  || (task.value.status !== 'done' && edit.owner.trim() !== (task.value.owner || ''))))
 
 function load() { return store.fetchTasks(props.projectId) }
 watch(() => props.projectId, load, { immediate: true })
@@ -250,7 +263,7 @@ async function openTask(id) {
   taskOpen.value = true
   try {
     task.value = await store.fetchTask(props.projectId, id)
-    Object.assign(edit, { status: task.value.status, priority: task.value.priority, note: '' })
+    Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
   } catch (err) {
     taskOpen.value = false
     actionError.value = projectErrorMessage(err)
@@ -261,13 +274,15 @@ async function saveTask() {
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status
   if (edit.priority !== task.value.priority && task.value.status !== 'done') body.priority = edit.priority
+  const owner = edit.owner.trim()
+  if (task.value.status !== 'done' && owner !== (task.value.owner || '')) body.owner = owner || null
   if (edit.note.trim()) body.note = edit.note.trim()
   busy.value = true
   actionError.value = ''
   try {
     await store.updateTask(props.projectId, task.value.id, body)
     task.value = await store.fetchTask(props.projectId, task.value.id)
-    Object.assign(edit, { status: task.value.status, priority: task.value.priority, note: '' })
+    Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
   } catch (err) {
     actionError.value = projectErrorMessage(err)
   } finally {

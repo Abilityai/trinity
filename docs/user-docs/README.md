@@ -21,6 +21,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step
 - [Local Development](guides/deploying/local-development.md) — Docker Desktop, dev compose, hot reload, base image build
 - [Single Server](guides/deploying/single-server.md) — VPS or bare metal: prebuilt images or source, `.env` reference, database backend, Vultr
+- [Sizing Your Server](guides/deploying/capacity-planning.md) — How much RAM, CPU and disk a fleet needs, how to recommend a size, and when to grow
 - [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl and an optional domain; you connect Claude on first sign-in
 - [Deploy on AWS](guides/deploying/aws.md) — Script install or CloudFormation stack, the instance-ID claim, IP refresh
 - [Public Access](guides/deploying/public-access.md) — Cloudflare Tunnel, the public webhook surface, DNS
@@ -111,7 +112,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 168 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 175 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
 - [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, outbound calls to external agents, x402 payments
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 

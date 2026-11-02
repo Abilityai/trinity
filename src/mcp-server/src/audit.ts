@@ -121,6 +121,26 @@ async function postAudit(entry: AuditEntry): Promise<void> {
 }
 
 /**
+ * #4060: a keyed MCP session was revived after the server lost it (restart or
+ * idle reap). Carries the key identity `authenticate` resolved and only the
+ * 8-character prefix of the outer session id — never the full id.
+ */
+export function logSessionRevival(auth: McpAuthContext, sessionPrefix: string): void {
+  void postAudit({
+    event_type: "mcp_operation",
+    event_action: "session_revived",
+    source: "mcp",
+    mcp_key_id: auth.keyId,
+    mcp_key_name: auth.keyName,
+    mcp_scope: auth.scope,
+    actor_agent_name: auth.agentName,
+    target_type: "mcp_session",
+    target_id: sessionPrefix,
+    details: { session_id_prefix: sessionPrefix, outcome: "revived" },
+  });
+}
+
+/**
  * Log an MCP tool call. Called by the audit wrapper in server.ts.
  */
 export function logToolCall(

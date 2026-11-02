@@ -271,6 +271,7 @@ class TestFlagOnQueuesScheduledWork:
             allowed_tools=["Bash", "Read"],
             system_prompt="be brief",
             resume_session_id="sess-9",
+            max_turns=7,
         )
         req = _acquire_kwargs(m["capacity"])["overflow_payload"].request
         assert req.message == "do the thing"
@@ -278,6 +279,7 @@ class TestFlagOnQueuesScheduledWork:
         assert req.allowed_tools == ["Bash", "Read"]
         assert req.timeout_seconds == 300
         assert req.resume_session_id == "sess-9"
+        assert req.max_turns == 7  # #2328: the claim reads it into task_overrides
         # The CALLER's prompt, uncomposed — the claim path rebuilds the platform
         # prompt around it (#1629), so composing here would double it.
         assert req.system_prompt == "be brief"

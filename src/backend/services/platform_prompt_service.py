@@ -9,7 +9,7 @@ import logging
 import re
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 import httpx
 
@@ -226,6 +226,14 @@ Both default to yourself; pass `agent_name` only to drive another agent you have
 
 The same is true of the whole family of harness tools that promise a future event or a peer session — `Workflow`, `Monitor`, `TaskOutput`, `CronCreate`, `CronList`, `CronDelete`, `SendMessage`, `ListAgents`, `PushNotification` and `RemoteTrigger`. None of them can deliver here: a wakeup, cron job, workflow, monitor stream, peer message or desktop notification dies with this process. The platform removes them where it can, so if one of those tools seems to be missing, that is this rule and not a permissions problem — reach for the Trinity tools above instead.
 
+### Stay inside Trinity's execution ledger
+
+Your credentials are turn-scoped by design: they authorize the coding-agent turns Trinity runs, not ones you start. Do not run `claude`, `codex`, `gemini` or any other coding-agent CLI as a subprocess, directly or through scripts or wrappers, even if a credential is visible or authentication succeeds. Trinity's execution ledger is the audit trail; a nested CLI escapes it, bypassing cost attribution, autonomy gates and permission enforcement.
+
+__CLI_IN_TURN_ALTERNATIVE__
+
+For delegated, batch or second-model work, call `mcp__trinity__chat_with_agent` with `parallel=true` to target yourself or choose a `model` (add `async=true` for long work), or use `mcp__trinity__fan_out`, which also takes `model` and can target you. The delegation contract applies: a receipt is not completion; never re-send on silence.
+
 ### Nothing survives the end of your turn
 
 Your turn is a process. When you stop writing it exits, and **anything still running is killed a few seconds later** — a backgrounded command, a `sleep`, a build, a download. No completion notification will ever reach you, and even where a conversation resumes later, that later turn is a fresh process in which your background work is already dead.
@@ -390,6 +398,31 @@ PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
     "__PATH_DENY_SENTENCE__", _PATH_DENY_SENTENCE_HOOKED
 )
 
+# ent#643: always-tier coding-agent subprocess boundary. Register this entry
+# with the prompt-injection registry when ent#140 lands; composed preview and
+# disabled-entry visibility belong there.
+#
+# The in-turn alternative is runtime-conditional, the same honesty rule as the
+# protected-paths sentence above: only Claude Code has a subagent launcher. Its
+# model-visible name is `Agent` and `Task` is an alias (hooks/_skill_gate.py
+# `_AGENT_TOOLS`; agent_server/services/_runtime_config.py keeps `Task`), and a
+# per-agent deny list or a task's `allowed_tools` can remove it for a turn, so
+# the offer is qualified. Every other runtime is offered its own tools.
+# "Turn-scoped" is stated as authorization, never as storage: credentials can
+# be readable in the container and a nested CLI can authenticate, and a claim
+# an agent can disprove with one command invites it to hunt for the exception.
+_CLI_IN_TURN_ALTERNATIVE_SUBAGENT = (
+    "For work inside this turn, use your `Agent` subagent tool (also named "
+    "`Task`) where you have it, or your other tools directly."
+)
+_CLI_IN_TURN_ALTERNATIVE_DIRECT = (
+    "For work inside this turn, use your available tools directly; delegate "
+    "through the Trinity tools below."
+)
+PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace(
+    "__CLI_IN_TURN_ALTERNATIVE__", _CLI_IN_TURN_ALTERNATIVE_SUBAGENT
+)
+
 
 # ---------------------------------------------------------------------------
 # Model-conditional prompt tiers (ent#243)
@@ -430,6 +463,7 @@ _KNOWN_SECTION_HEADINGS = frozenset({
     "Your Canvas",
     "Operator Communication",
     "Repeating Work and Deferred Ticks",
+    "Stay inside Trinity's execution ledger",
     "Nothing survives the end of your turn",
     "Your environment",
     "Package Persistence",
@@ -460,6 +494,13 @@ _KNOWN_SECTION_HEADINGS = frozenset({
 #     stop. #2468 widened the rule to the whole denied family, phrased as a
 #     capability fact ("dies with this process") rather than a policy fact, so
 #     the sentence stays true on fleet images the deny has not reached yet.
+#   * Stay inside Trinity's execution ledger — trinity-enterprise#643. A
+#     security boundary, not tool-usage guidance: do not run a coding-agent
+#     CLI (`claude`, `codex`, `gemini`) as a subprocess, because a nested
+#     run escapes the execution ledger. It corrects what no tool description
+#     can (the shell is not our tool), so dropping it at MINIMAL would
+#     remove the boundary itself. Advisory; registers with the
+#     prompt-injection registry once ent#140 exists.
 #   * Nothing survives the end of your turn — #2468. The counterweight to a
 #     tool result the platform cannot edit: backgrounding a Bash command
 #     answers "You will be notified when it completes", which is true
@@ -526,6 +567,14 @@ _CODEX_RUNTIMES = frozenset({"codex"})
 # Gemini, anything new — is told nothing blocks the protected paths.
 _GUARDRAIL_HOOK_RUNTIMES = frozenset({"claude-code", "claude", ""})
 
+# Runtimes with the `Agent`/`Task` subagent launcher (trinity-enterprise#643).
+# Claude Code only: agent_service/helpers.py `CLAUDE_RUNTIME_NAMES` plus the
+# empty default. A separate set from the hook runtimes above, though equal
+# today: subagents and the file hook have different owners. Not imported from
+# agent_service, whose package import is heavy; the equality is pinned by
+# tests/unit/test_ent643_platform_cli_boundary.py.
+_CLAUDE_SUBAGENT_RUNTIMES = frozenset({"claude-code", "claude", ""})
+
 # Prepended to the Codex variant. Intentionally avoids the literal
 # ``mcp__trinity__`` token so the stripped prompt contains it nowhere.
 _CODEX_MCP_ORIENTATION = (
@@ -550,6 +599,8 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
     orientation note. Claude/Gemini/unknown keep the canonical naming (the
     plan's ``default claude-code`` behavior). Any runtime without the file
     guardrail hook gets the honest protected-paths sentence (trinity-enterprise#945).
+    Any runtime without the Claude Code subagent launcher is offered its own
+    tools instead of `Agent`/`Task` (trinity-enterprise#643).
     Pure — never mutates the input.
     """
     runtime_key = (runtime or "").lower()
@@ -557,13 +608,46 @@ def _adapt_instructions_for_runtime(instructions: str, runtime: str) -> str:
         instructions = instructions.replace(
             _PATH_DENY_SENTENCE_HOOKED, _PATH_DENY_SENTENCE_UNHOOKED
         )
+    if runtime_key not in _CLAUDE_SUBAGENT_RUNTIMES:
+        instructions = instructions.replace(
+            _CLI_IN_TURN_ALTERNATIVE_SUBAGENT, _CLI_IN_TURN_ALTERNATIVE_DIRECT
+        )
     if runtime_key in _CODEX_RUNTIMES:
         return _CODEX_MCP_ORIENTATION + instructions.replace("mcp__trinity__", "")
     return instructions
 
 
-def format_user_memory_block(memory_record: dict) -> Optional[str]:
+AGENT_MEMORY_BLOCK_HEADING = "## What you remember from earlier work"   # trinity-enterprise#1022
+
+
+def format_agent_memory_block(retrieved: Optional[Sequence[str]]) -> Optional[str]:
+    """The agent-scope retrieval block for a headless run (trinity-enterprise#1022).
+
+    Same envelope, same margin, same "reference, not instructions" framing as
+    the per-user block — only the retrieved section, under its own heading, so
+    a copy-back cannot mistake it for a person's notes. None when empty.
+    """
+    if not retrieved:
+        return None
+    try:
+        memory = user_memory_guard.envelope("", "", retrieved=retrieved, agent_scope=True)
+    except Exception:  # noqa: BLE001 — leave the memory out, never inject it raw
+        logger.warning("[ent#1022] agent memory envelope failed; memory left out of this run", exc_info=True)
+        return None
+    if not memory:
+        return None
+    return "\n".join([AGENT_MEMORY_BLOCK_HEADING, "", memory, "", "---"])
+
+
+def format_user_memory_block(
+    memory_record: dict, *, retrieved: Optional[Sequence[str]] = None,
+) -> Optional[str]:
     """Format a user-memory record into a system-prompt block for injection.
+
+    ``retrieved`` (trinity-enterprise#1022) is the retrieval memory's answer for
+    this request — `memory_service.recall(...)`, awaited by the caller off the
+    event loop — rendered as a third section inside the same envelope. A caller
+    that passes nothing gets exactly the pre-#1022 block.
 
     ``memory_record`` is the dict returned by
     :py:meth:`Database.get_or_create_public_user_memory` — it carries two
@@ -593,6 +677,7 @@ def format_user_memory_block(memory_record: dict) -> Optional[str]:
         memory = user_memory_guard.envelope(
             memory_record.get("agent_notes") or "",
             memory_record.get("conversation_summary") or "",
+            retrieved=retrieved or (),
         )
     except Exception:  # noqa: BLE001 — leave the memory out, never inject it raw
         logger.warning("[ent#419] memory envelope failed; memory left out of this turn", exc_info=True)
@@ -627,7 +712,6 @@ def _seat_decisions_block(memory_record: dict) -> Optional[str]:
 # Background user-memory summarization (#895)
 # ---------------------------------------------------------------------------
 
-_SUMMARIZATION_MODEL = "claude-haiku-4-5-20251001"
 
 _SUMMARIZATION_PROMPT = """\
 You are a memory system. Given this conversation, extract a concise bullet list of facts \
@@ -667,14 +751,12 @@ async def summarize_user_memory_background(
     # Local imports to avoid an import cycle at module load:
     # platform_prompt_service is imported by routers that the settings
     # service may transitively pull in.
-    from services.settings_service import get_anthropic_api_key
+    from services import model_gateway
 
     try:
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            logger.warning(
-                "[MemSummarize] No ANTHROPIC_API_KEY configured, skipping summarization"
-            )
+        credential = model_gateway.resolve(agent_name)
+        if not credential.usable:
+            logger.warning("[MemSummarize] nobody to summarize for %s (%s), skipping", agent_name, credential.reason)
             return
 
         memory_record = db.get_or_create_public_user_memory(agent_name, user_email)
@@ -716,30 +798,13 @@ async def summarize_user_memory_background(
             conversation=conversation_text,
         )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": _SUMMARIZATION_MODEL,
-                    "max_tokens": 512,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-
-        if response.status_code != 200:
-            logger.error(
-                f"[MemSummarize] Anthropic API error {response.status_code}: "
-                f"{response.text[:200]}"
-            )
+        # The platform's one model door (trinity-enterprise#1027): the agent's
+        # own subscription when it runs on one, the platform key otherwise.
+        new_summary = await model_gateway.complete(
+            "user_memory_summary", prompt, agent_name=agent_name, max_tokens=512, timeout=30.0,
+        )
+        if new_summary is None:
             return
-
-        data = response.json()
-        new_summary = (data.get("content", [{}])[0].get("text", "") or "").strip()
         # ent#419: the summary is the second writer of the injected block, with
         # no agent in the loop to rephrase — the same screen as
         # `write_user_memory`, but a line that trips it is dropped and the rest

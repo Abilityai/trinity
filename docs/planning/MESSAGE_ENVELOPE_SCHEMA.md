@@ -404,7 +404,7 @@ Value semantics (from the code enum + postcard):
 | `RECONCILED` | Terminal write lost the CAS; row reflects another writer's terminal (#671/H4). |
 | `LEASE_EXPIRED` | Lease expired — no result before the lease deadline (#1083). |
 | `OOM` | Out-of-memory kill mid-turn (**contract addition**). |
-| `MAX_TURNS` | `--max-turns` guardrail hit (**contract addition**). |
+| `MAX_TURNS` | `--max-turns` guardrail hit (**contract addition** — shipped as `TaskExecutionErrorCode.MAX_TURNS`, #3988). |
 
 ---
 

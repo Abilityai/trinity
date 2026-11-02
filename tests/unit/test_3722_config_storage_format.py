@@ -33,7 +33,7 @@ def test_registration_records_transport_atomically_and_never_upgrades_existing(d
         from db.engine import get_engine
         from sqlalchemy.exc import DBAPIError
         spec = importlib.util.spec_from_file_location('migration_3722', Path(__file__).parents[2] /
-            'src/backend/migrations/versions/0104_agent_config_storage_format.py')
+            'src/backend/migrations/versions/0113_agent_config_storage_format.py')
         revision = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(revision)
         # Simulate an existing legacy database, then run the actual revision.
@@ -126,3 +126,22 @@ def test_current_upstream_and_published_config_histories_converge():
     }
     assert len(scripts.get_heads()) == 1
     assert convergence.revision in {r.revision for r in scripts.walk_revisions()}
+
+
+def test_loop_hygiene_and_published_config_heads_converge_without_reparenting():
+    """#3722: upgrades from either published head retain their full history."""
+    from pathlib import Path
+    from alembic.script import ScriptDirectory
+
+    scripts = ScriptDirectory(str(Path(__file__).parents[2] / "src/backend/migrations"))
+    assert scripts.get_revision("0112_loop_runs_stale_duplicates").down_revision == "0111_platform_alert_resweep"
+    assert set(scripts.get_revision("0107_merge_config_a2a_identity").down_revision) == {
+        "0103_merge_config_admin_email", "0103_a2a_caller_identity",
+    }
+    convergence = scripts.get_revision("0117_merge_config_loop_hygiene")
+    assert set(convergence.down_revision) == {
+        "0107_merge_config_a2a_identity", "0112_loop_runs_stale_duplicates",
+    }
+    assert scripts.get_heads() == [convergence.revision]
+    for starting_revision in convergence.down_revision:
+        assert convergence in list(scripts.iterate_revisions("head", starting_revision))

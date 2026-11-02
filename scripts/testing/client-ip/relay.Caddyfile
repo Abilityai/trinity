@@ -1,0 +1,47 @@
+# Stand-in for the bundled cloudflared (trinity-enterprise#873 proof harness).
+# Runs at the reserved tunnel address on the ingress network with the same
+# `backend` / `trinity-backend` host mappings the compose service carries, and
+# forwards the way a tunnel's ingress rules do: to the frontend (catch-all) or
+# straight to the backend. Each port is one header shape.
+{
+	auto_https off
+	admin off
+}
+
+# Catch-all rule -> nginx, with the edge's client header.
+:9001 {
+	reverse_proxy trinity-frontend:8080 {
+		header_up CF-Connecting-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+# Direct-to-backend rule, with the edge's client header.
+:9002 {
+	reverse_proxy backend:8000 {
+		header_up CF-Connecting-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+	}
+}
+
+# Direct-to-backend rule, client header ABSENT (only a forged XFF prefix).
+:9003 {
+	reverse_proxy backend:8000 {
+		header_up -CF-Connecting-IP
+		header_up X-Forwarded-For 10.66.0.1
+	}
+}
+
+# Direct-to-backend rule, client header MALFORMED.
+:9004 {
+	reverse_proxy backend:8000 {
+		header_up CF-Connecting-IP not-an-address
+	}
+}
+
+# Catch-all rule -> nginx, client header ABSENT.
+:9005 {
+	reverse_proxy trinity-frontend:8080 {
+		header_up -CF-Connecting-IP
+	}
+}

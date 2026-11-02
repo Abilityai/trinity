@@ -99,6 +99,20 @@
         </template>
 
         <p v-if="error" class="mt-3 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
+
+        <!-- #3466: this card is the door for people an agent was shared with.
+             An operator whose platform session ended here (signed out in
+             another tab, back after it expired) gets the platform login too,
+             on both steps. Not while a platform session is held: the
+             "Continue as" card above is the way back then. -->
+        <p v-if="!authStore.isAuthenticated" :class="[HELP_CLASS, 'mt-6 text-center']">
+          Have a Trinity account?
+          <router-link
+            :to="platformLoginLocation"
+            data-testid="workspace-platform-login"
+            class="font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Sign in</router-link>
+        </p>
       </div>
     </div>
 
@@ -302,6 +316,7 @@
           @open-menu="mobileNav = true"
           @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
+          @read="(id) => markRead('room', id)"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
@@ -448,6 +463,7 @@
           @session-adopted="onSessionAdopted"
           @thread-missing="onThreadMissing"
           @sessions-changed="onConversationTurnDone"
+          @thread-caught-up="onThreadCaughtUp"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -906,6 +922,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
+import { loginLocation } from '@/utils/platformSession'
+import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
@@ -1041,6 +1059,11 @@ const route = useRoute()
 const router = useRouter()
 
 // ---- Sign-in ------------------------------------------------------------------
+// #3466: the card's platform-login line returns to this page, or to the shared
+// canvas a visitor came from (the same return the code sign-in honours).
+const platformLoginLocation = computed(() =>
+  loginLocation(canvasReturnPath(route.query.redirect) || route.fullPath)
+)
 const step = ref('email')
 const email = ref('')
 const code = ref('')
@@ -1870,7 +1893,10 @@ function openRoom(roomId) {
   if (!roomId) return
   if (guardLeaveCall(() => openRoom(roomId))) return   // ent#551: ask, then leave
   unreachableAgent.value = null
-  markRead('room', roomId)
+  // trinity-enterprise#959 fix round 1: no read here. The room reads itself
+  // (`PortalRoom` → `read`) once its whole transcript is on screen; a write at
+  // the click cleared it before anything was fetched, and kept it cleared when
+  // the open failed.
   activeRoomId.value = roomId
   pendingSession.value = null
   // ent#451 review: every site that nulls `pendingSession` also settles the
@@ -2260,6 +2286,17 @@ async function refreshThreads() {
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
   // bump and re-sort the sidebar under the cursor.
   store.seedAgentRecency(threads.value)
+}
+
+// #3439: the open conversation appended rows the agent wrote on its own (a
+// report, an approval outcome, a background task's reply) — what the person is
+// looking at is read. Mark-read only: unlike a finished turn this neither
+// re-reads the list (the 20 s tick that surfaced the row already did) nor
+// touches the #2579 title-settle cycle, which an agent-initiated row must not
+// cancel or arm. Same "still here?" question as a turn, for the same reason.
+function onThreadCaughtUp(sessionId) {
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by
@@ -3130,10 +3167,23 @@ function startAsksPoll() {
     // enough to ride here.
     refreshThreads()
   }, ASKS_POLL_MS)
+  // #3439: coming back to the tab is the moment the person wants to know what
+  // happened while they were away — catch up now rather than at the next tick
+  // (up to 20 s of a transcript the badge already contradicts). One tick body,
+  // on the same visibility rule the interval skips on.
+  document.addEventListener('visibilitychange', onTabVisible)
+}
+
+function onTabVisible() {
+  if (document.visibilityState !== 'visible' || !asksTimer) return
+  store.fetchAsks()
+  store.fetchMentions()
+  refreshThreads()
 }
 
 function stopAsksPoll() {
   if (asksTimer) { clearInterval(asksTimer); asksTimer = null }
+  document.removeEventListener('visibilitychange', onTabVisible)
 }
 
 async function bootstrap() {

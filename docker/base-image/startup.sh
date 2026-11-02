@@ -12,6 +12,18 @@ if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
         echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
 fi
 
+# === Routing env: pin it to this container's own values (trinity-enterprise#1001) ===
+# Claude Code applies `env` from the agent-writable user and workspace settings,
+# so the endpoint, proxy and TLS-trust names are pinned in a root-owned policy
+# drop-in. Written here, before the agent server starts and before anything
+# below exports a variable, so the values are the container baseline. On
+# failure the image's all-empty pins stay: a proxy set on the container then
+# stops applying to Claude Code, which this line names.
+if [ -f /opt/trinity/hooks/write-routing-env.py ]; then
+    sudo -E /usr/local/bin/python3 -I -S /opt/trinity/hooks/write-routing-env.py || \
+        echo "GUARDRAILS: ERROR — could not pin the routing env to this container's values; Claude Code keeps the image's empty pins (trinity-enterprise#1001)"
+fi
+
 # === Guardrails: assert the registration is where the agent cannot reach (ent#345) ===
 # The hooks are registered in root-owned /etc/claude-code/managed-settings.json,
 # outside the agent's HOME and outside the git-synced tree. This checks the two
@@ -71,6 +83,24 @@ fi
 AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
 mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
     echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
+# #4002: the default TMPDIR is platform scratch on the persistent volume; build
+# leftovers (pip/npm/CUDA wheels) would otherwise pile up across restarts. Empty
+# it here, before the agent server or setup.sh can use it. A custom TMPDIR is
+# operator-chosen and may hold data, so it is left alone. `codex` is kept: it is
+# the default CODEX_HOME, which holds a ChatGPT-plan `codex login` and the
+# thread store `codex exec resume` reads.
+if [ "${AGENT_TMPDIR}" = "/home/developer/.tmp" ]; then
+    _tmp_n=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_tmp_n:-0}" -gt 0 ]; then
+        _tmp_size=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec du -sk {} + 2>/dev/null \
+            | awk '{s += $1} END {print s "K"}')
+        find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec rm -rf {} + 2>/dev/null || true
+        echo "TMPDIR: cleared ${_tmp_n} entries (${_tmp_size:-?}) from ${AGENT_TMPDIR}"
+    fi
+    unset _tmp_n _tmp_size
+else
+    echo "TMPDIR: custom ${AGENT_TMPDIR} not cleared"
+fi
 
 # ent#123: a per-agent PAT configured AFTER creation is live-injected into the
 # workspace .env (#1264) while the baked env stays tokenless until the next
@@ -713,7 +743,22 @@ fi
 if [ -f "/home/developer/.trinity/setup.sh" ]; then
     echo "Running persistent setup script to restore packages..."
     chmod +x /home/developer/.trinity/setup.sh
-    bash /home/developer/.trinity/setup.sh 2>&1 || echo "Warning: setup.sh had errors (continuing startup)"
+    _setup_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # #4002: keep this exact invocation — the orphan-sweep allowlist
+    # (_PLATFORM_TREE_PATTERNS) protects it and its children by cmdline.
+    bash /home/developer/.trinity/setup.sh 2>&1
+    _setup_rc=$?
+    [ "$_setup_rc" -ne 0 ] && echo "Warning: setup.sh had errors (continuing startup)"
+    # #4002: record the outcome for the compatibility report (F-014). Atomic.
+    if printf '{"exit_code": %d, "started_at": "%s", "finished_at": "%s"}\n' \
+        "$_setup_rc" "$_setup_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > /home/developer/.trinity/setup-status.json.tmp 2>/dev/null; then
+        mv -f /home/developer/.trinity/setup-status.json.tmp /home/developer/.trinity/setup-status.json 2>/dev/null || true
+    fi
+    unset _setup_started _setup_rc
+else
+    # #4002: no hook, no run — drop a stale status so the report does not show an old one.
+    rm -f /home/developer/.trinity/setup-status.json 2>/dev/null || true
 fi
 
 # === Encrypted credentials without a .env (#3510) ===
@@ -727,7 +772,7 @@ if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc but no .env: this script does not decrypt it."
     echo "  The platform imports it once the agent is ready (not when no encryption"
     echo "  key is configured). If .env is still missing,"
-    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
+    echo "  the owner imports it, signed in, once a key is set: Settings > Credentials > Import from Git."
 fi
 
 # === Render .mcp.json.template (#2007) ===

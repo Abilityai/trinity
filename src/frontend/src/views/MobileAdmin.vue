@@ -280,7 +280,12 @@
                 <!-- trinity-enterprise#755: a gated-skill approval offers its
                      controls only to a person it is addressed to; anyone else
                      reads who it is waiting on, in the card above. -->
-                <template v-if="gateReadOnly(item)" />
+                <!-- trinity-enterprise#980: any approval addressed to someone else
+                     — who it waits on, and no controls (desktop parity). -->
+                <p v-if="addressedWaitingOn(item)" class="ops-card-type" data-testid="queue-addressed-waiting">
+                  Waiting on {{ addressedWaitingOn(item) }}. Only they can decide this, from their Workspace Inbox.
+                </p>
+                <template v-if="gateReadOnly(item) || addressedReadOnly(item)" />
                 <template v-else-if="queueResponseKind(item) === 'approval'">
                   <div class="ops-options" role="group" aria-label="Options">
                     <button
@@ -694,7 +699,7 @@ import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
 import QueueProposal from '../components/operator/QueueProposal.vue'
 import GatedSkillRequest from '../components/operator/GatedSkillRequest.vue'
-import { gateReadOnly, gateRejecting } from '../utils/skillGateCard'
+import { gateReadOnly, gateRejecting, addressedReadOnly, addressedWaitingOn } from '../utils/skillGateCard'
 
 const route = useRoute()
 const authStore = useAuthStore()

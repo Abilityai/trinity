@@ -46,6 +46,17 @@ Safety controls are not the same on every runtime. Platform controls (which cred
 
 See [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md#coverage-by-runtime) for where the boundary sits.
 
+### Endpoints and proxies
+
+Every runtime talks to its provider's own API. The endpoint, proxy and TLS trust come from the platform or the container, never from the agent's files:
+
+- The agent's `.env` cannot set proxy or TLS-trust variables on any runtime, or the endpoint variables its own runtime reads. The agent log names each ignored variable.
+- Claude Code's endpoint and proxy variables are pinned in its managed settings, so a `settings.json` `env` block cannot change them.
+- Every Codex turn runs with the built-in `openai` provider and its default URLs, whatever `config.toml` says, and Trinity removes proxy, TLS and other protected lines from Codex's own `.env` before each turn.
+- A Gemini turn starts with those variables already set, so the `.env` the Gemini CLI loads itself cannot set them.
+
+A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Behind such a proxy, list the platform's internal hosts (`mcp-server`, `backend`, `localhost`) in the container's `NO_PROXY`, or Trinity MCP calls go through the proxy too. Using a self-hosted model or an alternative endpoint is not supported.
+
 ### Codex authentication
 
 A Codex agent authenticates in one of two ways, and Trinity handles the file the CLI reads its credential from:
@@ -62,6 +73,8 @@ A Gemini agent uses the platform's Gemini key. Trinity reads the key saved in **
 ### Gemini CLI turns
 
 Trinity pins `gemini-cli` in the base image, and the image build checks that the pinned CLI accepts every argument Trinity passes. A new CLI release that drops a flag therefore fails the image build instead of every turn. Gemini CLI has no system-prompt flag, so Trinity puts the platform instructions in front of each turn's input. The execution log still shows only your message as the user turn.
+
+Gemini CLI sends Google usage statistics by default. Trinity turns them off: it writes `privacy.usageStatisticsEnabled: false` to the agent's `~/.gemini/settings.json` at startup and again before every turn, keeping the rest of the file. An agent's own setting cannot turn them back on. The settings file holds the agent's Trinity MCP key, so it is never committed by Git sync, like `.mcp.json`.
 
 A chat turn resumes only the agent's own chat session, never the newest session on disk, so a scheduled or headless run never leaks into the chat. Changing the model or resetting the chat history starts a fresh session. If the saved session is gone, the turn retries once from a fresh session.
 
@@ -86,6 +99,8 @@ Set the runtime in the template's `template.yaml`:
 A Codex agent reads its identity and instructions from `AGENTS.md`. At startup Trinity copies the template's `CLAUDE.md` to `AGENTS.md` when the workspace has none, so a single instruction file works across runtimes; an `AGENTS.md` you ship yourself is left as it is.
 
 Trinity's MCP tools are available to Codex agents. Codex references tools by their bare name (no `mcp__trinity__` prefix); Trinity adjusts the platform prompt automatically so the agent calls them correctly. The prompt's protected-paths sentence is adjusted per runtime too: only Claude Code runs the file guardrail hook on its Write and Edit tools, so a Codex or Gemini agent is told plainly that nothing in its runtime blocks writes to credential and platform paths and that the rule is its own to keep (see [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is)).
+
+The platform prompt also tells every agent not to run a coding-agent CLI (`claude`, `codex`, `gemini` or similar) as a subprocess, because a nested run escapes Trinity's execution ledger (see [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is)). That sentence is adjusted per runtime as well. A Claude Code agent is pointed to its `Agent` subagent tool (also named `Task`) for work inside the turn, when the agent has that tool. A Codex or Gemini agent has no such tool and is pointed to its own tools. Every runtime is pointed to `chat_with_agent` with `parallel=true` (which can target the agent itself and take a `model`) or `fan_out` for delegated, batch or second-model work.
 
 There is no API or MCP endpoint to switch an agent's runtime after creation. See the full API reference at `http://localhost:8000/docs`.
 

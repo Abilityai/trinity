@@ -126,3 +126,14 @@ class TestAgentCreationRoleGates:
             "POST /api/systems/deploy must use "
             "Depends(require_role(\"creator\")) — fleet-spawning bypass"
         )
+
+    def test_post_systems_apply_requires_creator(self):
+        """POST /api/systems/apply (trinity-enterprise#695) creates the
+        manifest's absent members through ``create_agent_internal``, so it
+        carries the same gate as deploy (plus ``require_person``)."""
+        systems_py = _BACKEND / "routers" / "systems.py"
+        handler = _find_route(systems_py, "/apply")
+        assert _has_require_role_creator_dep(handler), (
+            "POST /api/systems/apply must use "
+            "Depends(require_role(\"creator\")) — fleet-spawning bypass"
+        )

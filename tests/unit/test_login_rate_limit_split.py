@@ -1,13 +1,10 @@
 """Regression tests for #591: split per-account / per-IP login rate limit.
 
-The previous design used a single per-IP bucket at 5 fails / 10 min. Any
-user behind a corporate NAT / VPN / CDN locked out everyone else at the
-same egress IP after just four bad attempts, and a rotating-proxy
-attacker could keep an organisation locked out continuously.
-
-The fix splits the bucket: a tight per-account bucket (5 / 15 min) limits
-credential stuffing on one account, and a loose per-IP bucket (30 / 5 min)
-catches single-source abuse without locking shared-IP users.
+Policy: two independent failure counters. A per-account bucket
+(5 failures / 15 min) bounds guessing against one account wherever it comes
+from; a per-IP bucket (30 failures / 5 min), keyed on the client address the
+trusted proxy saw (trinity-enterprise#873), bounds a single source. Each bucket
+counts only its own key's attempts, and a success clears both.
 
 Module under test: src/backend/routers/auth.py — `check_login_rate_limit`
 and `record_login_attempt` only. Heavy cascading deps are stubbed so the
@@ -169,6 +166,15 @@ def auth_module(monkeypatch):
     audit_mod.AuditEventType = types.SimpleNamespace(AUTHENTICATION="authentication")
     stubs["services"] = services_pkg
     stubs["services.platform_audit_service"] = audit_mod
+    # auth.py grew `from services import login_policy_gate` (ent#849). The stub
+    # `services` package has no __path__ entries, so that import resolves ONLY
+    # through sys.modules — without this stub the file passed solely when an
+    # earlier test had already cached the real module, and errored when run on
+    # its own. Not exercised by the rate-limit paths.
+    policy_mod = types.ModuleType("services.login_policy_gate")
+    policy_mod.email_code_allowed = lambda: True
+    services_pkg.login_policy_gate = policy_mod
+    stubs["services.login_policy_gate"] = policy_mod
 
     routers_pkg = types.ModuleType("routers")
     routers_pkg.__path__ = []
@@ -244,15 +250,14 @@ class TestPerIpBucket:
     """The per-IP bucket is the loose secondary protection."""
 
     def test_per_ip_threshold_loose_enough_for_shared_nat(self, auth_module, fake_redis):
-        """29 fails (under the 30 limit) from a NAT egress IP must not lock
-        out a legitimate user behind that NAT."""
+        """Below the per-IP limit, that address may still sign in."""
         ip = "203.0.113.10"
         for i in range(auth_module.LOGIN_IP_LIMIT - 1):
             auth_module.record_login_attempt(ip, success=False, account=f"user{i}@x.com")
         assert auth_module.check_login_rate_limit(ip, account="legit@example.com") is True
 
     def test_per_ip_lockout_when_threshold_crossed(self, auth_module, fake_redis):
-        """Once 30 fails accumulate from one IP, that IP is locked out."""
+        """At the per-IP limit, that address's bucket refuses further attempts."""
         from fastapi import HTTPException
 
         ip = "203.0.113.10"

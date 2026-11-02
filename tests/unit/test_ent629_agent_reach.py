@@ -390,6 +390,9 @@ def test_dispatch_routes_resolve_the_target_through_the_access_gate(module, rout
 #: the reason its principal is never an agent key, or its reach is decided
 #: otherwise.
 _EXEMPT = {
+    ("services/turn_tier_service.py", "turn_tier"):
+        "ent#926: rates the PERSON who started a turn (from the execution row), "
+        "never the requesting principal, so no agent-key reach is involved",
     ("dependencies.py", "can_manage_agent_skills"):
         "the skills.manage capability is the explicit grant to the owner's agents (ent#596)",
     ("routers/agent_files.py", "_can_view"):
@@ -404,8 +407,10 @@ _EXEMPT = {
         "portal principals are people; agent keys never reach the client portal",
     ("services/skill_gate_service.py", "_openable_run"):
         "takes a person's username: the operator queue calls it for person principals only, the Workspace for a platform person (#3708)",
-    ("services/skill_gate_service.py", "_can_open"):
-        "takes an approver's email resolved from a role, a person, never a principal (ent#881)",
+    ("services/role_addressing.py", "can_open_agent"):
+        "takes an email resolved from a role — a gate's approver (ent#881) or an ask's "
+        "canon-role addressee (ent#1007) — a person, never a principal; "
+        "skill_gate_service._can_open delegates here",
 }
 _PREDICATES = {"can_user_access_agent", "can_user_share_agent"}
 #: `_may_reach_for_path` is files.py's reach plus the ent#596 skills-holder case.
@@ -528,12 +533,15 @@ def test_a_schedules_holder_enables_a_siblings_schedule_through_the_real_route(f
 
 
 def test_credential_export_refuses_an_agent_key_by_name_before_the_owner_fence(fleet):
-    """Review point 4: without the route-level `human_only`, the narrowed owner
-    fence answers a sibling with 404 and the agent never learns the rule."""
+    """Review point 4: without the route-level gate, the narrowed owner fence
+    answers a sibling with 404 and the agent never learns the rule. The gate is
+    `require_person` since trinity-enterprise#719, so the rule is named in an
+    object detail."""
     import routers.credentials as rc
     r = _real_app(rc).post(f"/api/agents/{C}/credentials/export")
     assert r.status_code == 403
-    assert "human-only" in r.json()["detail"]
+    assert r.json()["detail"] == dependencies.HUMAN_ONLY_DETAIL
+    assert "human-only" in r.json()["detail"]["message"]
 
 
 def test_the_queue_reach_stays_inside_a_non_admin_owners_agents(db_backend, monkeypatch):

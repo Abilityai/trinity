@@ -307,6 +307,7 @@ _EXPECTED_UPDATE_SITES = {
     "set_execution_subscription",          # #3470: re-points SUB-004 `subscription_id` to the credential that SERVED a walked turn (NULL for the platform key); `status` untouched and not read — written by the dispatcher that owns the turn, before its terminal write
     "rotate_claim_token",                  # #3487: wins one SUB-003 walk attempt on a pulled turn — writes `claim_token` only; CAS on status == RUNNING + the old token, `status` untouched, so a row is never moved between states (in-place retry, not a re-delivery)
     "set_backlog_metadata_for_token",      # #3487: saves a pulled turn's walk state (never the secret) in `backlog_metadata`; gated on the claim token that owns the row; `status` untouched and not read
+    "set_execution_chat_session",          # #3380: names the /chat thread a turn answers (`chat_session_id`), written once by prepare_chat_execution; `status` untouched and not read
 }
 
 

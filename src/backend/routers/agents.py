@@ -36,7 +36,7 @@ from models import (
     User,
 )
 from database import db
-from dependencies import get_current_user, decode_token, require_role, require_admin, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence
+from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE, require_admin, require_person
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -479,6 +479,8 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
             "template": None,
             "runtime": "claude-code",
             "base_image_version": None,
+            # trinity-enterprise#1007: no container, no `trinity.kind` label.
+            "kind": None,
             # Signal to the UI that this agent has no container yet —
             # recovered (or otherwise container-less). Drives a
             # "Start to bring online" affordance instead of the normal
@@ -884,13 +886,24 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
 # ============================================================================
 
 @router.post("/{agent_name}/start")
+@ops_write_route(
+    "#3180: starts one agent; the target policy refuses the system agent and "
+    "ephemeral agents, and a start that would mint the agent a key is refused"
+)
 async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Start an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
     # they spawned (interim until #948 capability tokens).
     enforce_agent_spawn_scope(current_user, agent_name)
     try:
-        result = await start_agent_internal(agent_name)
+        # #3180: an ops_write key may not undo a person's containment, so its
+        # start never mints the agent a key (409 ops_write_would_mint_key).
+        # `getattr(..., None)` as in `enforce_agent_spawn_scope`: the default can
+        # only mean "not an ops_write key", and the resolver always sets it.
+        result = await start_agent_internal(
+            agent_name,
+            allow_key_mint=getattr(current_user, "mcp_scope", None) != OPS_WRITE_SCOPE,
+        )
         invalidate_context_stats_cache()  # PERF-269
         credentials_status = result.get("credentials_injection", "unknown")
         credentials_result = result.get("credentials_result", {})
@@ -973,6 +986,10 @@ async def start_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reque
 
 
 @router.post("/{agent_name}/stop")
+@ops_write_route(
+    "#3180: stops one agent; the target policy refuses the system agent and "
+    "ephemeral agents"
+)
 async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request, current_user: CurrentUser):
     """Stop an agent."""
     # trinity-enterprise#69 Part 2: agent-scoped callers manage only agents
@@ -1030,9 +1047,12 @@ async def stop_agent_endpoint(agent_name: AuthorizedAgentByName, request: Reques
 async def get_agent_logs_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request,
+    current_user: CurrentUser,
     tail: int = 100
 ):
     """Get agent container logs."""
+    # ent#875: the container's raw output interleaves every user's turns.
+    assert_not_share_viewer(current_user, agent_name)
     container = get_agent_container(agent_name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -1108,8 +1128,13 @@ async def force_release_agent(
 
 
 @router.post("/{agent_name}/circuit-breaker/reset")
+@ops_write_route(
+    "#3180: re-closes one agent's breakers, which re-open on the next failure; "
+    "the admin gate still runs"
+)
 async def reset_circuit_breaker_endpoint(
     agent_name: AuthorizedAgentByName,
+    request: Request,
     # ent#293/ent#297: was `require_role("admin")` — the THIRD spelling of an
     # admin gate, and the one this PR's first pass missed. `require_role`
     # rejects connector principals but NOT agent ones, deliberately: agent
@@ -1123,7 +1148,10 @@ async def reset_circuit_breaker_endpoint(
     # ROLE_HIERARCHY, so ">= admin" is "== admin") and additionally rejects
     # agent principals. Swapping this ONE call site is the fix; adding the
     # rejection to `require_role` itself would break ghost spawning.
-    current_user: User = Depends(require_admin),
+    #
+    # #3180: `require_admin_allowing("ops_write")` is the same gate with that one
+    # bounded scope opted in (census ADMIN_WIDENED); `role == "admin"` still runs.
+    current_user: User = Depends(require_admin_allowing("ops_write")),
 ):
     """Force the agent's circuit breakers to closed (#921, #526).
 
@@ -1140,6 +1168,26 @@ async def reset_circuit_breaker_endpoint(
     prior_dispatch = DispatchBreaker(agent_name).to_dict().get("state", "closed")
     reset_circuit(agent_name)
     reset_dispatch(agent_name)
+    # #3180: the most-run operator write had no audit row. Written only once
+    # both resets have returned, for every principal that reaches this route;
+    # `log` derives the key fields from the principal (#2389), so a key's reset
+    # names the key. Not conditional on DISPATCH_BREAKER_ENABLED or the
+    # per-agent toggle: the transport breaker trips with both off. Both resets
+    # are fail-open (when Redis refuses they log and return), so the row
+    # records the request, not a confirmed reset.
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="circuit_breaker_reset",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        details={
+            "prior_transport_state": prior_transport,
+            "prior_dispatch_state": prior_dispatch,
+        },
+    )
     return {
         "agent_name": agent_name,
         "prior_state": prior_transport,  # back-compat field (transport breaker)
@@ -1166,7 +1214,7 @@ async def get_circuit_breaker_endpoint(
     return {"agent_name": agent_name, **build_circuit_breaker_block(agent_name)}
 
 
-@router.put("/{agent_name}/circuit-breaker")
+@router.put("/{agent_name}/circuit-breaker", dependencies=[Depends(require_person)])
 async def set_circuit_breaker_endpoint(
     agent_name: OwnedAgentByName,
     body: CircuitBreakerConfigUpdate,
@@ -1232,7 +1280,7 @@ async def get_agent_label_endpoint(
     }
 
 
-@router.put("/{agent_name}/label")
+@router.put("/{agent_name}/label", dependencies=[Depends(require_person)])
 async def set_agent_label_endpoint(
     agent_name: OwnedAgentByName,
     body: AgentLabelUpdate,
@@ -1318,7 +1366,7 @@ async def get_mcp_exposed_endpoint(
     }
 
 
-@router.put("/{agent_name}/mcp-exposed")
+@router.put("/{agent_name}/mcp-exposed", dependencies=[Depends(require_person)])
 async def set_mcp_exposed_endpoint(
     agent_name: OwnedAgentByName,
     body: McpExposedUpdate,
@@ -1377,7 +1425,7 @@ async def get_operator_resume_endpoint(
     }
 
 
-@router.put("/{agent_name}/operator-resume")
+@router.put("/{agent_name}/operator-resume", dependencies=[Depends(require_person)])
 async def set_operator_resume_endpoint(
     agent_name: OwnedAgentByName,
     body: OperatorResumeUpdate,
@@ -1442,7 +1490,7 @@ async def get_voice_replies_endpoint(
     }
 
 
-@router.put("/{agent_name}/voice-replies")
+@router.put("/{agent_name}/voice-replies", dependencies=[Depends(require_person)])
 async def set_voice_replies_endpoint(
     agent_name: OwnedAgentByName,
     body: VoiceRepliesUpdate,

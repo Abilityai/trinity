@@ -137,6 +137,24 @@ class SchedulerDatabase:
             conn.close()
 
     @staticmethod
+    def _agent_subscription_id(cursor, agent_name: str) -> Optional[str]:
+        """The subscription assigned to the agent now, snapshotted onto the row
+        at INSERT (SUB-004, #4085), like the backend's
+        `db.get_agent_subscription_id`: a live (not soft-deleted) ownership row.
+
+        Usage windows aggregate by `schedule_executions.subscription_id`, and
+        the #3470 walk re-points a row only when another credential served it,
+        so a cron or reminder turn the assigned subscription served stayed NULL
+        and fell out of that subscription's spend."""
+        cursor.execute(
+            "SELECT subscription_id FROM agent_ownership "
+            "WHERE agent_name = ? AND deleted_at IS NULL",
+            (agent_name,),
+        )
+        row = cursor.fetchone()
+        return row["subscription_id"] if row else None
+
+    @staticmethod
     def _generate_id() -> str:
         """Generate a unique ID."""
         return secrets.token_urlsafe(16)
@@ -415,13 +433,14 @@ class SchedulerDatabase:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            subscription_id = self._agent_subscription_id(cursor, agent_name)
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, message, triggered_by,
                     model_used, attempt_number, retry_of_execution_id,
                     source_user_id, source_user_email, source_agent_name,
-                    source_mcp_key_id, source_mcp_key_name, chain_depth
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    source_mcp_key_id, source_mcp_key_name, chain_depth, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -439,6 +458,7 @@ class SchedulerDatabase:
                 source_mcp_key_id,
                 source_mcp_key_name,
                 chain_depth,
+                subscription_id,
             ))
             conn.commit()
 
@@ -571,11 +591,12 @@ class SchedulerDatabase:
 
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            subscription_id = self._agent_subscription_id(cursor, agent_name)
             cursor.execute("""
                 INSERT INTO schedule_executions (
                     id, schedule_id, agent_name, status, started_at, completed_at,
-                    duration_ms, message, triggered_by, error
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    duration_ms, message, triggered_by, error, subscription_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 execution_id,
                 schedule_id,
@@ -586,7 +607,8 @@ class SchedulerDatabase:
                 0,    # duration_ms = 0 for skipped
                 message,
                 triggered_by,
-                skip_reason
+                skip_reason,
+                subscription_id,
             ))
             conn.commit()
 

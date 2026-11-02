@@ -298,3 +298,39 @@ describe("ent#588 — an agent starts or imports a project (projects.manage)", (
     assert.equal(out.code, "already_imported");
   });
 });
+
+describe("ent#980 — the steward proposes people; the creator approves once", () => {
+  it("propose_project_changes forwards only what was given, without the project id", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      proposeProjectChanges: async (projectId: string, body: Record<string, unknown>) => {
+        calls.push([projectId, body]);
+        return { proposal_id: "ppr_1", state: "pending", waiting_on: "alice@example.com" };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.propose_project_changes.execute({
+      project_id: PROJECT.id,
+      members: ["bob@example.com", "role:compliance-lead"],
+      task_owners: [{ task_id: "T-001", owner: "bob@example.com" }],
+    }));
+    assert.equal(out.success, true);
+    assert.equal(out.waiting_on, "alice@example.com");
+    assert.deepEqual(calls, [[PROJECT.id, {
+      members: ["bob@example.com", "role:compliance-lead"],
+      task_owners: [{ task_id: "T-001", owner: "bob@example.com" }],
+    }]]);
+  });
+
+  it("a pending proposal and a missing grant come back as named refusals", async () => {
+    for (const [status, code] of [[409, "already_pending"], [403, "project_management_not_permitted"]] as const) {
+      const tools = makeTools({
+        proposeProjectChanges: async () => {
+          throw apiError(status, { code, message: "refused" });
+        },
+      } as Partial<TrinityClient>);
+      const out = JSON.parse(await tools.propose_project_changes.execute({ project_id: PROJECT.id, members: ["b@example.com"] }));
+      assert.equal(out.success, false);
+      assert.equal(out.code, code);
+    }
+  });
+});

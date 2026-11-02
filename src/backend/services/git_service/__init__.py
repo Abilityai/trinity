@@ -81,8 +81,6 @@ from .token_scrub import (  # noqa: F401
     _scrub_semaphore,
     sweep_fleet_git_remote_tokens,
     SCRUB_TIMEOUT_S,
-    _SCRUB_ALARM_ID_PREFIX,
-    _SCRUB_UNREADABLE_ALARM_ID_PREFIX,
     _alarm_git_token_scrub_refused,
     _alarm_git_token_scrub_unreadable,
     _fleet_scrub_task,
