@@ -165,7 +165,11 @@ def _mapped(result):
     with patch("services.chat_execution_service.idempotency_service") as idem_svc:
         with pytest.raises(ChatDispatchError) as exc:
             _map_task_failure("agent1", result, idem=MagicMock())
-    idem_svc.fail.assert_called_once()
+    # #3993: a turn limit completes the claim with its 422 (a replay must not
+    # run it again); every other failure releases it so a retry can run.
+    turn_limit = getattr(result.error_code, "value", None) == "max_turns"
+    (idem_svc.complete if turn_limit else idem_svc.fail).assert_called_once()
+    (idem_svc.fail if turn_limit else idem_svc.complete).assert_not_called()
     return exc.value
 
 

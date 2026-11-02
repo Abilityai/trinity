@@ -98,13 +98,18 @@ def get_room(room_id: str) -> Optional[dict]:
 
 
 def list_rooms_for_participant(kind: str, identity: str) -> list[dict]:
-    """Rooms this participant is (or was) in — membership IS the visibility rule."""
+    """Rooms this participant is ACTIVELY in — membership IS the visibility rule.
+
+    A participant who left (`left_at` set — today only a removed agent) is not a
+    member: it no longer lists the room (trinity-enterprise#959 fix round 1).
+    Their row stays (`remove_participant` is soft) so the transcript's sender
+    label still resolves; `get_participant` reads it unfiltered for that."""
     stmt = text(
         "SELECT r.id, r.name, r.topic, r.status, r.stop_reason, r.created_at, "
         "       r.expires_at, r.max_messages, r.max_cost_usd "
         "FROM enterprise_rooms r "
         "JOIN enterprise_room_participants p ON p.room_id = r.id "
-        "WHERE p.kind = :kind AND p.identity = :identity "
+        "WHERE p.kind = :kind AND p.identity = :identity AND p.left_at IS NULL "
         "ORDER BY r.created_at DESC"
     )
     with get_engine().connect() as conn:
@@ -143,21 +148,36 @@ def close_room(room_id: str, stop_reason: str, now: str) -> bool:
 
 # --- participants ------------------------------------------------------------
 
-def add_participant(room_id: str, kind: str, identity: str, role: str, now: str) -> None:
-    """Idempotent — re-adding an existing participant is a no-op (the UNIQUE
-    triple is the claim), so a retried create doesn't 500."""
+def add_participant(room_id: str, kind: str, identity: str, role: str, now: str,
+                    *, rejoin: bool = False) -> None:
+    """Idempotent — re-adding an ACTIVE participant is a no-op (the UNIQUE
+    triple is the claim), so a retried create doesn't 500.
+
+    A participant who LEFT holds that triple too. ``rejoin=True`` (the
+    moderator's explicit add only) clears `left_at` and takes the new role and
+    join time, keeping the row; without it they stay out, so an @mention cannot
+    undo a moderator's removal (ent#959)."""
     from sqlalchemy.exc import IntegrityError
     stmt = text(
         "INSERT INTO enterprise_room_participants "
         "(room_id, kind, identity, role, joined_at, last_read_seq) "
         "VALUES (:room, :kind, :identity, :role, :now, 0)"
     )
+    reactivate = text(
+        "UPDATE enterprise_room_participants "
+        "SET left_at = NULL, role = :role, joined_at = :now "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity "
+        "AND left_at IS NOT NULL"
+    )
+    params = {"room": room_id, "kind": kind, "identity": identity,
+              "role": role, "now": now}
     try:
         with get_engine().begin() as conn:
-            conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
-                                "role": role, "now": now})
+            conn.execute(stmt, params)
     except IntegrityError:
-        pass
+        if rejoin:
+            with get_engine().begin() as conn:
+                conn.execute(reactivate, params)
 
 
 def list_participants(room_id: str) -> list[dict]:
