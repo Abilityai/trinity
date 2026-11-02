@@ -115,6 +115,18 @@ def _sanitized_detail(summary_or_error: Optional[str]) -> str:
     return body
 
 
+def _person_text(status: str, summary_or_error: Optional[str]) -> Optional[str]:
+    """A failure's text without the ``[code]`` prefix a terminal stores for
+    machines (trinity-enterprise#1059: a refused turn reads ``[usage_share] …``
+    on the row). Only a known code is removed; a success is the agent's own
+    words and is never rewritten."""
+    if status == "success":
+        return summary_or_error
+    from services.execution_envelope import split_error_code
+
+    return split_error_code(summary_or_error)[1]
+
+
 def _summarize(
     status: str,
     summary_or_error: Optional[str],
@@ -132,7 +144,7 @@ def _summarize(
     # Sanitise-then-truncate lives in `_sanitized_detail`, shared with the
     # portal leg — a channel is a persistent, externally hosted, human-visible
     # surface, so this is the last place to skip it.
-    body = _sanitized_detail(summary_or_error)
+    body = _sanitized_detail(_person_text(status, summary_or_error))
     if status == "success":
         head = "✅ Task finished"
     else:
@@ -589,7 +601,7 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     # The same sanitise-then-truncate rule the other channels use. A Workspace
     # thread is a persistent, client-visible surface — if anything, MORE exposed
     # than a Slack channel, since the reader is an external client.
-    detail = _sanitized_detail(summary_or_error)
+    detail = _sanitized_detail(_person_text(status, summary_or_error))
     return f"{head}\n\n{detail}" if detail else head
 
 

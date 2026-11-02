@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 
 @dataclass
@@ -49,6 +49,22 @@ class TaskExecutionErrorCode(str, Enum):
     # agent's share of its subscription is used up (trinity-enterprise#1059).
     # Closes the row SKIPPED, never FAILED: it is not the agent's failure.
     USAGE_SHARE = "usage_share"
+
+
+ERROR_CODE_VALUES = {code.value: code for code in TaskExecutionErrorCode}
+
+
+def split_error_code(
+    error: Optional[str],
+) -> Tuple[Optional[TaskExecutionErrorCode], Optional[str]]:
+    """``(code, text)`` from an error the pull sink stored as ``[code] text``
+    (``apply_task_result``). The prefix is removed only when it names a
+    ``TaskExecutionErrorCode``; channel adapters post ``text`` to people."""
+    if not error or not error.startswith("["):
+        return None, error
+    head, sep, rest = error[1:].partition("]")
+    code = ERROR_CODE_VALUES.get(head.strip().lower()) if sep else None
+    return (code, rest.strip()) if code else (None, error)
 
 
 @dataclass

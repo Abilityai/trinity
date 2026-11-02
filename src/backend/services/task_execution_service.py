@@ -24,7 +24,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import Any, Optional
 from types import SimpleNamespace
 
 import httpx
@@ -74,9 +74,11 @@ from utils.helpers import utc_now_iso
 # `from services.task_execution_service import TaskExecutionResult`, and a
 # decomposition that renames the import surface is not a pure refactor.
 from services.execution_envelope import (  # noqa: F401  (re-export)
+    ERROR_CODE_VALUES,
     TaskExecutionErrorCode,
     TaskExecutionResult,
     TerminalEnvelope,
+    split_error_code,
 )
 
 from services.platform_prompt_service import (
@@ -1019,20 +1021,10 @@ def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str
 # Values `mark_execution_dispatched` writes into `claude_session_id` before a
 # real session id exists. Never a resumable session.
 _DISPATCH_SESSION_SENTINELS = frozenset({"dispatched", "dispatched_async"})
-_ERROR_CODE_VALUES = {code.value: code for code in TaskExecutionErrorCode}
-
-
-def _split_error_code(
-    error: Optional[str],
-) -> Tuple[Optional[TaskExecutionErrorCode], Optional[str]]:
-    """``(code, text)`` from an error the pull sink stored as ``[code] text``
-    (``apply_task_result``). The prefix is removed only when it names a
-    ``TaskExecutionErrorCode``; channel adapters post ``text`` to people."""
-    if not error or not error.startswith("["):
-        return None, error
-    head, sep, rest = error[1:].partition("]")
-    code = _ERROR_CODE_VALUES.get(head.strip().lower()) if sep else None
-    return (code, rest.strip()) if code else (None, error)
+# Moved to the cycle-free leaf so the completion report can read the same
+# prefix (trinity-enterprise#1059); the old names stay importable from here.
+_ERROR_CODE_VALUES = ERROR_CODE_VALUES
+_split_error_code = split_error_code
 
 
 def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult]:
