@@ -47,7 +47,7 @@ All platform operations are available through the REST API and the MCP server.
 |-----------|-----------|------|---------|
 | Frontend | Vue.js 3 + Tailwind CSS | 80 | Web dashboard and chat UI |
 | Backend | FastAPI (Python) | 8000 | REST API, 600+ endpoints across 80+ routers |
-| MCP Server | FastMCP, Streamable HTTP | 8080 | 176 tools for agent-to-agent and agent-to-platform communication |
+| MCP Server | FastMCP, Streamable HTTP | 8080 | 177 tools for agent-to-agent and agent-to-platform communication |
 | Vector | Log aggregation | 8686 | Structured logging from all containers |
 | Redis | Event bus and cache | 6379 | Real-time event stream, rate limits, transient secrets |
 | Database | SQLite or PostgreSQL | -- | Platform state. A local `start.sh` install uses SQLite, which reached end-of-support on 2026-09-01; a fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL |
