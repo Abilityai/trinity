@@ -70,6 +70,7 @@ def test_capabilities_to_dict_is_serializable_for_callers():
         "mcp_support": True,
         "cost_reporting": "estimated",
         "async_dispatch": False,
+        "image_input": None,  # not reported by Codex (Abilityai/lilu#660)
     }
 
 

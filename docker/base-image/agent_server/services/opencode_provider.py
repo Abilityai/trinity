@@ -100,7 +100,16 @@ import struct
 from typing import Dict, Iterable, List, Mapping, Optional
 from urllib.parse import urlparse
 
+from ._runtime_config import opencode_images_override
+
 logger = logging.getLogger(__name__)
+
+#: Abilityai/lilu#660 — the per-model field the 1.18.32 binary gates image
+#: parts on. A config-declared model's `capabilities.input.image` is
+#: `modalities.input.includes("image")`, else models.dev, else false; and
+#: `input.text` is `modalities.input.includes("text")` once `modalities` is
+#: set at all, so "text" MUST be listed too or text input is switched off.
+IMAGE_MODALITIES = {"input": ["text", "image"], "output": ["text"]}
 
 #: Provider id as it appears in ``-m ollama/<model>``.
 OLLAMA_PROVIDER_ID = "ollama"
@@ -513,8 +522,8 @@ def _merge_entry(existing: Optional[Mapping[str, object]], generated: Dict[str, 
         entry["options"] = options
     declared = entry.get("models")
     declared = dict(declared) if isinstance(declared, Mapping) else {}
-    for name in generated.get("models") or {}:
-        declared.setdefault(name, {})
+    for name, spec in (generated.get("models") or {}).items():
+        declared.setdefault(name, spec)
     entry["models"] = declared
     return entry
 
@@ -559,6 +568,20 @@ def _build_env_provider(
         )
     }
     return entry
+
+
+def _apply_image_modalities(
+    provider_id: str, generated: Dict[str, object], env: Mapping[str, str]
+) -> None:
+    """Declare image input on every generated model when
+    ``OPENCODE_PROVIDER_<ID>_IMAGES=true`` (Abilityai/lilu#660). An operator's
+    own model entry in opencode.json still wins (``_merge_entry``)."""
+    if opencode_images_override(provider_id, env) is not True:
+        return
+    models = generated.get("models")
+    if isinstance(models, dict):
+        for name in models:
+            models[name] = {"modalities": {k: list(v) for k, v in IMAGE_MODALITIES.items()}}
 
 
 def apply_provider_config(
@@ -607,6 +630,7 @@ def apply_provider_config(
             generated["options"]["apiKey"] = ollama_key
         if not base_url:
             generated["options"].pop("baseURL", None)
+        _apply_image_modalities(OLLAMA_PROVIDER_ID, generated, source)
         entry = _merge_entry(existing, generated)
         if not (entry.get("options") or {}).get("baseURL"):
             raise OpenCodeProviderConfigError(_unresolvable_base_url_reason(route_path))
@@ -621,6 +645,7 @@ def apply_provider_config(
         if provider_id == OLLAMA_PROVIDER_ID:
             continue
         generated = _build_env_provider(provider_id, fields, model=model, env=source)
+        _apply_image_modalities(provider_id, generated, source)
         entry = _merge_entry(providers.get(provider_id), generated)
         providers[provider_id] = entry
         logger.info(

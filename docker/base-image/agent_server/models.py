@@ -182,6 +182,10 @@ class ExecutionMetadata(BaseModel):
     # is recorded as a plain success. Additive: the backend reads metadata as
     # a plain dict, so an older backend simply ignores the key.
     stall_retries: int = 0
+    # Abilityai/lilu#660: things the runtime could not honour on this turn
+    # but did not fail it for — e.g. image attachments a provider cannot
+    # receive. Empty on every healthy turn. Additive, like ``stall_retries``.
+    warnings: List[str] = []
 
 
 # ============================================================================

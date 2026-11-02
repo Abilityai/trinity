@@ -106,6 +106,9 @@ from ._runtime_config import (
     _load_guardrails,
     map_disallowed_to_opencode,
     merged_disallowed_tools,
+    opencode_images_env_name,
+    opencode_images_override,
+    opencode_provider_images,
 )
 from .activity_tracking import complete_tool_execution, start_tool_execution
 from .agents_md_mirror import refresh_agents_md
@@ -115,6 +118,7 @@ from .opencode_mcp import apply_mcp_config
 from .opencode_provider import (
     OpenCodeProviderConfigError,
     apply_provider_config,
+    model_provider,
     provider_env_name,
     require_ollama_base_url,
     require_openrouter_key,
@@ -636,6 +640,32 @@ _IMAGE_EXTENSIONS = {
 }
 
 
+def images_deliverable(
+    model: Optional[str], env: Dict[str, str], turn_config: Optional[Dict] = None
+) -> bool:
+    """Whether an image attached to this turn reaches the model (Abilityai/lilu#660).
+
+    ``OPENCODE_PROVIDER_<ID>_IMAGES`` wins; else a ``modalities.input`` that
+    lists ``"image"`` on this model's entry in the turn's ``opencode.json``
+    (the field the 1.18.32 binary itself gates on); else the provider default
+    in ``_runtime_config.opencode_provider_images``.
+    """
+    provider = model_provider(model=model, env=env)
+    override = opencode_images_override(provider, env)
+    if override is not None:
+        return override
+    name = (model or env.get("AGENT_RUNTIME_MODEL") or "").partition("/")[2].strip()
+    providers = (turn_config or {}).get("provider")
+    entry = providers.get(provider) if isinstance(providers, dict) and provider else None
+    models = entry.get("models") if isinstance(entry, dict) else None
+    declared = models.get(name) if isinstance(models, dict) else None
+    modalities = declared.get("modalities") if isinstance(declared, dict) else None
+    inputs = modalities.get("input") if isinstance(modalities, dict) else None
+    if isinstance(inputs, list) and "image" in inputs:
+        return True
+    return opencode_provider_images(provider, env)
+
+
 def _safe_token(execution_id: str) -> str:
     """Filesystem-safe token. ``execution_id`` is system-generated today, but a
     path is never built from it unguarded (the Codex ``_safe_result_token``
@@ -799,6 +829,20 @@ def _event_text(event: dict) -> str:
     return ""
 
 
+def _payload(event: dict) -> dict:
+    """The dict carrying an event's fields: ``part`` on 1.18.32, else the event.
+
+    The pinned 1.18.32 binary nests every step/tool payload one level down —
+    ``{"type": "step_finish", "part": {"type": "step-finish", "tokens": {...},
+    "cost": 0}}`` and ``{"type": "tool_use", "part": {"tool": "bash", "state":
+    {...}}}`` (Abilityai/lilu#659). Reading the top level alone saw no tokens
+    and no tool id, so every turn reported 0 tokens and a tool called "Tool".
+    The top-level read stays as the fallback for the older flat shape.
+    """
+    part = event.get("part")
+    return part if isinstance(part, dict) and part else event
+
+
 def _tool_name(event: dict) -> str:
     for key in ("tool", "name", "toolName"):
         value = event.get(key)
@@ -816,9 +860,13 @@ def _tool_id(event: dict) -> str:
 
 
 def _record_tool(state: _OpenCodeParseState, event: dict) -> None:
+    event = _payload(event)
     tool_id = _tool_id(event)
     name = _tool_name(event)
-    tool_input = event.get("input") or event.get("args") or event.get("arguments") or {}
+    tool_input = event.get("input") or event.get("args") or event.get("arguments")
+    if tool_input is None and isinstance(event.get("state"), dict):
+        tool_input = event["state"].get("input")
+    tool_input = tool_input or {}
     if not isinstance(tool_input, dict):
         tool_input = {"value": tool_input}
 
@@ -884,7 +932,21 @@ def _accumulate_usage(state: _OpenCodeParseState, event: dict) -> None:
     ``tokens.reasoning`` ⊂ ``tokens.output`` and ``tokens.cache.read`` ⊂
     ``tokens.input``. Both are recorded separately and NEITHER is added to any
     total — adding them is the double-count this runtime must not commit.
+
+    A reported ``cost: 0`` (Ollama, free OpenRouter models) is kept as
+    ``0.0``, not ``None``: it is the binary's own native figure, and ``None``
+    stays reserved for a stream that carried no cost field at all
+    (Abilityai/lilu#659).
     """
+    event = _payload(event)
+    for key in ("modelID", "model", "modelId"):
+        value = event.get(key)
+        if isinstance(value, str) and value:
+            provider = event.get("providerID")
+            state.metadata.model_name = (
+                f"{provider}/{value}" if isinstance(provider, str) and provider and "/" not in value else value
+            )
+            break
     tokens = event.get("tokens")
     if not isinstance(tokens, dict):
         tokens = (event.get("usage") or {}) if isinstance(event.get("usage"), dict) else {}
@@ -1018,6 +1080,8 @@ def parse_opencode_jsonl(
             _process_opencode_event(event, state)
     metadata.tool_count = len([e for e in state.execution_log if e.type == "tool_use"])
     metadata.session_id = state.session_id
+    # Observed model id when the stream names one, else the `-m` it was run on.
+    metadata.model_name = metadata.model_name or state.model
     response_text, outcome = finalize_response(state)
     return response_text, state.execution_log, metadata, raw_messages, outcome
 
@@ -1129,6 +1193,9 @@ class OpenCodeRuntime(AgentRuntime):
             mcp_support=True,           # MCP servers via opencode.json
             cost_reporting="native",    # step_finish carries a real cost
             async_dispatch=True,        # #1083 202 + callback (#655)
+            # Per provider on OpenCode (#660): reported for the agent's
+            # configured model; a per-turn `-m` is re-checked at dispatch.
+            image_input=opencode_provider_images(model_provider(env=os.environ)),
         )
 
     def is_available(self) -> bool:
@@ -1276,6 +1343,24 @@ class OpenCodeRuntime(AgentRuntime):
                 turn_config = json.load(fh)
         except (OSError, json.JSONDecodeError):
             turn_config = None
+        # Abilityai/lilu#660: an image the provider cannot receive is NOT
+        # passed and the turn is NOT silently text-only — the model is told,
+        # and the caller gets a warning plus a prepended sentence.
+        images_note: Optional[str] = None
+        if images and not images_deliverable(model, env, turn_config):
+            provider = model_provider(model=model, env=env) or "default"
+            images_note = (
+                f"Note: {len(images)} attached image(s) were not delivered to the "
+                f"model — OpenCode provider '{provider}' is not configured for image "
+                f"input (set {opencode_images_env_name(provider)}=true for a vision model)."
+            )
+            logger.warning("[OpenCode] %s execution_id=%s", images_note, execution_id)
+            if not command_name:
+                prompt = (
+                    f"[{len(images)} image attachment(s) were sent with this message "
+                    f"but could not be delivered to you.]\n\n{prompt}"
+                )
+            images = None
         image_paths = _write_image_attachments(turn_dir, images)
         cmd = self._build_command(
             model=model, session_id=session_id, directory=_AGENT_HOME,
@@ -1529,6 +1614,7 @@ class OpenCodeRuntime(AgentRuntime):
                 [e for e in state.execution_log if e.type == "tool_use"]
             )
             metadata.session_id = state.session_id
+            metadata.model_name = metadata.model_name or state.model
             response_text, outcome = finalize_response(state)
 
             if outcome in _FAILED_FINALS:
@@ -1541,6 +1627,9 @@ class OpenCodeRuntime(AgentRuntime):
                 )
 
             response_text = sanitize_text(response_text)
+            if images_note:
+                metadata.warnings.append(images_note)
+                response_text = f"{images_note}\n\n{response_text}"
             metadata.status = "success"
             logger.info(
                 "[OpenCode] done execution_id=%s outcome=%s cost=$%s tokens=%s/%s "

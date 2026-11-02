@@ -44,6 +44,10 @@ class RuntimeCapabilities:
     # Claude is gated by name (`result_callback.is_claude_runtime`), so it does
     # not need to set this; OpenCode opts in (Abilityai/lilu#655).
     async_dispatch: bool = False
+    # Abilityai/lilu#660: whether an image attached to a turn reaches the
+    # model. ``None`` = not reported by this runtime. OpenCode reports it for
+    # the agent's configured provider, because there it is per provider.
+    image_input: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, object]:
         return asdict(self)
