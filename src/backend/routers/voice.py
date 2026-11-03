@@ -333,6 +333,39 @@ async def voice_websocket(
         await refuse_voice_socket(websocket, refused)
         return
 
+    # trinity-enterprise#1046: a Direct call shares this door and everything above it.
+    # Its session is the person's alone, with no admin attach: the socket speaks a
+    # person's private turns, and their thread is theirs.
+    from services import direct_voice_service
+    if voice_session_id.startswith(direct_voice_service.DIRECT_PREFIX):
+        direct = direct_voice_service.get_session(voice_session_id)
+        if not direct:
+            await refuse_voice_socket(websocket, VoiceAuthRefused(
+                CLOSE_NOT_FOUND, MSG_SESSION_GONE, "Voice session not found"))
+            return
+        if user.id != direct.user_id:
+            logger.warning("voice_ws: user_id=%s refused on a Direct call owned by user_id=%s",
+                           user.id, direct.user_id)
+            await refuse_voice_socket(websocket, VoiceAuthRefused(
+                CLOSE_FORBIDDEN, MSG_NOT_OWNER, "Not authorized for this voice session"))
+            return
+        # trinity-enterprise#595: the transport was accepted before the auth
+        # frame; the client starts its microphone only on this.
+        try:
+            await websocket.send_json({"type": "auth_ok"})
+        except Exception:  # noqa: BLE001 — the client left before the call began
+            logger.info("Direct call socket closed before authentication was acknowledged: %s",
+                        voice_session_id)
+            direct_voice_service.discard_session(voice_session_id)
+            return
+        from client_portal.router import direct_call_stream
+        from services.docker_service import get_agent_runtime
+        await direct_voice_service.run_bridge(
+            websocket, direct, stream_attach=direct_call_stream,
+            runtime=get_agent_runtime(direct.agent_name),
+        )
+        return
+
     session = await voice_service.get_session(voice_session_id)
     if not session:
         await refuse_voice_socket(websocket, VoiceAuthRefused(

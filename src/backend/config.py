@@ -385,6 +385,14 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 # (Telegram voice messages). Both default to the same model today.
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
+# Workspace Direct calls (trinity-enterprise#1046). The speech model transcribes only:
+# on a silent clip it returns nothing, where a general model has been seen to invent
+# text. TTS tries the models in order.
+GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL") or "gemini-3.5-transcribe"
+GEMINI_TTS_MODELS = tuple(
+    m.strip() for m in (os.getenv("GEMINI_TTS_MODELS") or "gemini-3.8-flash-lite-tts,gemini-3.8-flash-tts").split(",")
+    if m.strip()
+)
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
 # Default OFF. The feature also requires a per-agent voip_bindings row to

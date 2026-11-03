@@ -180,9 +180,49 @@ def add_participant(room_id: str, kind: str, identity: str, role: str, now: str,
                 conn.execute(reactivate, params)
 
 
+def seat_person(room_id: str, kind: str, identity: str, role: str,
+                visible_from_seq: int, now: str) -> None:
+    """Seat a PERSON in a room, or seat them again (trinity-enterprise#701).
+
+    Unlike ``add_participant`` this is an upsert that clears ``left_at``: a
+    person who left can be seated again, and the new seat sets their role and
+    their read floor afresh. People only — agents keep ``add_participant``'s
+    no-op-on-conflict, which ``list_active_claude_session_ids`` relies on
+    ("nothing clears ``left_at``" for an agent).
+    """
+    if kind == "agent":
+        raise ValueError("seat_person seats people, not agents")
+    params = {"room": room_id, "kind": kind, "identity": identity, "role": role,
+              "floor": int(visible_from_seq), "now": now}
+    # One statement, so two concurrent seats of the same person can't both miss
+    # the UPDATE and race the INSERT into the UNIQUE(room_id, kind, identity).
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO enterprise_room_participants "
+            "(room_id, kind, identity, role, joined_at, last_read_seq, visible_from_seq) "
+            "VALUES (:room, :kind, :identity, :role, :now, 0, :floor) "
+            "ON CONFLICT (room_id, kind, identity) DO UPDATE SET "
+            "role = excluded.role, visible_from_seq = excluded.visible_from_seq, "
+            "joined_at = excluded.joined_at, left_at = NULL"
+        ), params)
+
+
+def set_visible_from(room_id: str, kind: str, identity: str, visible_from_seq: int) -> bool:
+    """Move a person's read floor (trinity-enterprise#701: a backscroll grant
+    sets it to 0). True iff an active seat was updated."""
+    stmt = text(
+        "UPDATE enterprise_room_participants SET visible_from_seq = :floor "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity AND left_at IS NULL"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
+                                    "floor": int(visible_from_seq)}).rowcount or 0) > 0
+
+
 def list_participants(room_id: str) -> list[dict]:
     stmt = text(
-        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id "
+        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id, "
+        "       visible_from_seq "
         "FROM enterprise_room_participants WHERE room_id = :room "
         "ORDER BY kind, identity"
     )
@@ -204,7 +244,7 @@ def list_participants_for_rooms(room_ids: list[str]) -> dict[str, list[dict]]:
     keys = [f"r{i}" for i in range(len(room_ids))]
     stmt = text(
         "SELECT room_id, kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id "
+        "       cached_session_id, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id IN (%s) ORDER BY room_id, kind, identity"
         % ",".join(f":{k}" for k in keys)
@@ -272,7 +312,7 @@ def last_message_for_rooms(room_ids: list[str]) -> dict[str, str]:
 def get_participant(room_id: str, kind: str, identity: str) -> Optional[dict]:
     stmt = text(
         "SELECT kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id, consecutive_resume_failures "
+        "       cached_session_id, consecutive_resume_failures, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id = :room AND kind = :kind AND identity = :identity"
     )
@@ -478,6 +518,14 @@ def gate_held_seqs(room_id: str, agent_name: str) -> set[int]:
     stmt = text("SELECT seq FROM room_gate_holds WHERE room_id = :room AND agent_name = :agent")
     with get_engine().connect() as conn:
         return {int(r[0]) for r in conn.execute(stmt, {"room": room_id, "agent": agent_name})}
+
+
+def max_seq(room_id: str) -> int:
+    """The room's newest message seq (0 for an empty room)."""
+    stmt = text("SELECT COALESCE(MAX(seq), 0) FROM enterprise_room_messages WHERE room_id = :room")
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id}).first()
+        return int(row[0]) if row else 0
 
 
 def count_messages(room_id: str) -> int:

@@ -71,7 +71,8 @@
     "/home/developer/.tmp/codex/*",
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
-    "/etc/claude-code/*"
+    "/etc/claude-code/*",
+    "/var/lib/trinity/*"
   ],
   "path_allow": [
     ".env.example"

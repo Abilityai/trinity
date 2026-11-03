@@ -542,13 +542,9 @@ def _a2a_state_for(status: str) -> str:
 
     A cancelled execution is `canceled`, not `failed` — the A2A spec treats them
     as distinct terminal states and a caller that cancelled its own task should
-    not be told the task errored. A `skipped` execution (gate-refused, held, or
-    stopped by an admission policy — trinity-enterprise#1059) is `rejected`,
-    the same state `_ROW_STATE` gives the row, with its message as the error.
+    not be told the task errored.
     """
-    status = getattr(status, "value", status)
-    return {"success": "completed", "cancelled": "canceled",
-            "skipped": "rejected"}.get(status, "failed")
+    return {"success": "completed", "cancelled": "canceled"}.get(status, "failed")
 
 
 # #3749: how long `message/send` holds the HTTP request for the turn before
@@ -1607,7 +1603,7 @@ async def _finish_send(agent_name: str, text: str, current_user: Optional[User],
     task = _task_object(
         result.execution_id, state,
         text=result.response if state == "completed" else None,
-        error=result.error if state in ("failed", "rejected") else None,
+        error=result.error if state == "failed" else None,
     )
     idempotency_service.complete(decision, result.execution_id, task)
     details = {"execution_id": result.execution_id, "state": state}
@@ -1854,7 +1850,7 @@ async def _stream_task(agent_name: str, text: str, current_user: Optional[User],
         task = _task_object(
             result.execution_id, state,
             text=result.response if state == "completed" else None,
-            error=result.error if state in ("failed", "rejected") else None,
+            error=result.error if state == "failed" else None,
         )
         idempotency_service.complete(decision, result.execution_id, task)
         await platform_audit_service.log(

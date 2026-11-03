@@ -50,7 +50,7 @@ vi.mock('@/utils/audio', () => ({
   },
 }))
 
-vi.mock('axios', () => ({ default: { post: vi.fn(() => Promise.resolve({ data: {} })) } }))
+vi.mock('@/api', () => ({ default: { post: vi.fn(() => Promise.resolve({ data: {} })) } }))
 
 import {
   useVoiceSession,

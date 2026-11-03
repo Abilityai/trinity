@@ -795,6 +795,47 @@ but was never surfaced. This is the read surface; per-client controls
   join filters by `agent_name` through the channel binding, so a client of
   another agent never appears.
 
+### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
+
+**Description**: The owner approves a person, not a bare email. A channel access
+request records who asked, as the channel saw them, and the owner's pending list
+shows that person, plus where the same channel identity has been seen before.
+
+- **FR-1 — Capture**: `access_requests` gains `requester_channel_id` (the
+  channel's stable user id: Telegram id, Slack member id, WhatsApp number),
+  `requester_handle`, `requester_name`, `requester_chat_id` and
+  `requester_thread_id`. All nullable, and filled only from what the channel
+  exposes (`ChannelAdapter.requester_identity`):
+  - **Telegram:** id, @username and first/last name.
+  - **WhatsApp:** number and profile name.
+  - **Slack:** member id, handle, display name, channel and thread.
+
+  Nothing is guessed. Values are trimmed and bounded at 256 characters.
+- **FR-2 — Every path**: the per-message router gate and the Telegram and
+  WhatsApp `/login` flows pass the identity. Extraction is best-effort: a
+  failure records the request without identity rather than losing it. The
+  public link has no channel identity and records none.
+- **FR-3 — One request, one identity**: a refreshed request replaces the whole
+  identity, so a request from a channel that exposes less never inherits
+  another's. A decision keeps the identity on the decided row.
+- **FR-4 — The owner's view**: `GET /api/agents/{name}/access-requests` returns
+  the identity fields, `identity_captured` (False for the public link and for
+  rows older than this change), and `known_as`. `known_as` lists the same
+  channel identity seen before: an earlier request (approved / denied / asked)
+  or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
+  the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
+  request itself, and is capped at 10.
+- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+  @handle, or the email), then the handle, the channel and its id, then the
+  email. Up to three "seen before" chips are shown, with a counted rest. A
+  public-link request reads "Email only — public link", and an older one reads
+  "Identity not captured".
+- **FR-6 — Personal data**: the list is owner/admin only, as before. The rows
+  are removed with the agent (`access_requests` is CASCADE in
+  `db/agent_cleanup.py`). Not done: the agent data export (#1169) carries the
+  container's `data/` only, with no platform records of any kind, so there is
+  no export these rows could join without a new export format.
+
 ---
 
 ## 47. Public & Channel Custom Instructions (#1205)
@@ -1118,6 +1159,65 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.5 Workspace Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046)
+
+A second way to take a Workspace call. Today's call (§48.3) has a realtime model
+answering and consulting the agent; a **Direct** call has no model in the path:
+speech-to-text, the agent's ordinary Workspace turn, text-to-speech of the agent's
+own reply. Live stays the default and is unchanged.
+
+- **FR-1 — Entry**: two buttons in the composer, one per call: Live (waveform) and
+  Direct (handset). An unavailable one is disabled with its reason; while one call is
+  on, its button ends it and the other says so. During a Direct call, one fixed-height
+  strip shows four bars (the state), one short word, one detail line (a notice, what was
+  heard, the tool at work, or the slow-runtime wait), a mute icon and a red hang-up.
+- **FR-2 — Same turn as typing**: a spoken turn goes through the route a typed message
+  uses (`POST …/chat/stream`), so its limits, idempotency, gates, attachments and
+  attribution are the typed path's. The call's socket only hears and speaks.
+- **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
+  every runtime. Where a runtime streams its messages, speech starts earlier and the
+  persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
+  without a stream says so in the strip's detail line. A reply with nothing to read
+  aloud (only code, a table or links) says "The reply is in the chat." rather than
+  nothing.
+- **FR-4 — The live thread stays live**: during a Direct call the thread and composer
+  work. A typed message is sent normally and spoken back. Rows land as they happen;
+  after the call they fold into one call block.
+- **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
+  running turn is cancelled through the terminate primitive and the new words run next.
+  Echo of the agent's own voice resumes playback.
+- **FR-5a — Stopping the agent (trinity-enterprise#1087)**: the person can stop the agent
+  mid-reply without hanging up, by voice or by hand, and the call returns to listening.
+  - A whole short stop phrase ("stop", "wait", "hold on", "never mind", …) said while
+    there is something to stop silences the agent, cancels its turn, and is never sent
+    as a turn. With nothing to stop the same words go to the agent. While an approval
+    waits, "stop" and "cancel" answer it **no**.
+  - Over playback, the speech bar follows the agent's own output level (linear RMS), so a
+    normal voice is heard over a quiet passage and the agent's echo is not taken for speech.
+  - The call strip carries a Stop control, always present, disabled with "Nothing to
+    stop" when idle. The composer's Stop on a Direct call silences the voice too.
+  - Escape silences the agent while its voice is playing and never cancels a turn;
+    with nothing playing it ends the call (a running turn keeps going, as on hang-up).
+  - A stop reaches the run being spoken, including an approved run that is not the
+    composer's own turn. Words queued behind it, a transcript already in flight and audio
+    already on the wire are dropped. An approval prompt cut off by a stop is answered on
+    its card, never by a later spoken yes.
+  - The strip says "Stopped." or, when the reply had finished and only its audio was cut,
+    "Stopped. The full reply is in the chat."
+- **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
+  normal chat card and is read aloud. A whole short yes or no answers it through the
+  person's own answer route, so the Inbox is the record. Anything else runs as the next
+  turn and the ask stays open. Per-tool prompts are out of scope.
+- **FR-7 — Words on failure**: no speech key, speech-to-text failure, speech failure and
+  turn failure each have a fixed line. Nothing spoken is a paraphrase of the agent.
+- **FR-8 — One call per thread**: a Live call and a Direct call cannot overlap on a thread.
+- **FR-9 — Settings**: admin toggle (default on) and provider (`auto`, `gemini`,
+  `elevenlabs`) under Settings → Voice, resolved at call time, with a readiness line
+  and a disclosure that audio and transcripts go to the chosen provider.
+- **FR-10 — Timing**: each turn reports transcription time and time to first audio.
+- **FR-11 — Out of scope**: portal-token clients (no platform JWT, same as §48.3), mobile
+  layout, rooms, and a hosted speech path, for which `SpeechProvider` instances are the seam.
 
 ### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
 

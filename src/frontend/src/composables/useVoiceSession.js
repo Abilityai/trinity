@@ -22,8 +22,7 @@
  */
 
 import { ref, computed } from 'vue'
-import axios from 'axios'
-import { useAuthStore } from '../stores/auth'
+import api from '@/api'
 import { startMicCapture, createAudioPlayer } from '../utils/audio'
 import {
   PANEL_TOOL_NAMES,
@@ -53,12 +52,13 @@ export const VOICE_CANCELLED_REASON = 'The call was cancelled before it connecte
 // `vs_` + `token_urlsafe(16)`. Anything else is not a start this client made.
 const TICKET_SHAPE = /^[A-Za-z0-9_-]{43}$/
 const SESSION_ID_SHAPE = /^[A-Za-z0-9_-]{1,128}$/
+// Shared with the Direct call composable (trinity-enterprise#1046), one shape for both doors.
+export { TICKET_SHAPE as VOICE_TICKET_SHAPE, SESSION_ID_SHAPE as VOICE_SESSION_ID_SHAPE }
 
 /**
  * @param {string} agentName - The agent to voice-chat with
  */
 export function useVoiceSession(agentName) {
-  const authStore = useAuthStore()
 
   // State
   const active = ref(false)
@@ -372,10 +372,9 @@ export function useVoiceSession(agentName) {
 
   async function _restStop(sid) {
     try {
-      await axios.post(
+      await api.post(
         `/api/agents/${agentName}/voice/stop`,
-        { voice_session_id: sid },
-        { headers: authStore.authHeader }
+        { voice_session_id: sid }
       )
     } catch (e) {
       // Fixed words only: the error object carries the request's headers.

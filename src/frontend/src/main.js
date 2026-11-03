@@ -16,6 +16,7 @@ import { reconnectWebSocket } from './utils/websocket'
 import {
   notifyWorkspaceOnly, reactToWorkspaceOnly, setWorkspaceOnlyHandler,
 } from './utils/workspaceOnly'
+import { notifyTermsRefusal, reactToTermsRefusal, setTermsRefusalHandler } from './utils/termsGate'
 
 // #1116: capture recent console errors/warnings from the very start so the
 // in-app bug reporter can attach them (scrubbed) to a report. Runs before the
@@ -102,6 +103,14 @@ setWorkspaceOnlyHandler(() => reactToWorkspaceOnly({
   replace: (path) => router.replace(path),
 }))
 
+// trinity-enterprise#1054 — the terms gate refused this person (403
+// `terms_required`, or an invitation no longer live): open the terms page,
+// carrying the page to come back to. Never from /terms itself or a sign-in page.
+setTermsRefusalHandler((error) => reactToTermsRefusal(error, {
+  currentPath: () => fullPathForVerdict(router, START_LOCATION, window.location),
+  push: (location) => router.push(location),
+}))
+
 // #2791 — every bare-`axios` caller gets the CURRENT credential, per request.
 //
 // There are ~368 `axios.get/post/...` call sites outside `api.js`, and they used
@@ -127,6 +136,7 @@ axios.interceptors.response.use(
   error => {
     if (error.response?.status === 401) notifyPlatformUnauthorized(error)
     else notifyWorkspaceOnly(error)
+    notifyTermsRefusal(error)
     return Promise.reject(error)
   }
 )

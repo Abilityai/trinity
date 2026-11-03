@@ -245,8 +245,10 @@ def test_the_workspace_start_keeps_its_service_result_and_user_binding(world):
     assert r.status_code == 200, r.text
     kwargs = world.start_ws.await_args.kwargs
     assert kwargs["user_id"] == 12 and kwargs["portal_session_id"] == THREAD
+    # The four trailing fields are trinity-enterprise#1046's Direct-call fields, at their defaults.
     assert set(r.json()) == {"voice_session_id", "websocket_url", "portal_session_id",
-                             "max_duration_seconds", "websocket_ticket", "websocket_ticket_expires_in"}
+                             "max_duration_seconds", "websocket_ticket", "websocket_ticket_expires_in",
+                             "mode", "provider", "runtime", "early_speech"}
 
 
 # ---------------------------------------------------------------------------
