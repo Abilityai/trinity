@@ -366,6 +366,22 @@ class TelegramChannelOperations:
         link = self.get_chat_link(binding_id, telegram_user_id)
         return link["verified_email"] if link else None
 
+    def list_verified_links_for_user(self, user_id: str) -> List[dict]:
+        """Every agent this channel user has verified an email on
+        (trinity-enterprise#737): ``agent_name`` + ``verified_email``. A bot is
+        per agent, but the user id is the person's own, so the same id on two
+        bindings is the same person. The caller filters to what its viewer may see."""
+        stmt = (
+            select(telegram_bindings.c.agent_name, telegram_chat_links.c.verified_email)
+            .select_from(telegram_chat_links.join(telegram_bindings, telegram_chat_links.c.binding_id == telegram_bindings.c.id))
+            .where(telegram_chat_links.c.telegram_user_id == str(user_id))
+            .where(telegram_chat_links.c.verified_email.isnot(None))
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [{"agent_name": r["agent_name"], "verified_email": r["verified_email"]}
+                for r in rows if r["verified_email"]]
+
     def list_clients_for_agent(self, agent_name: str) -> List[dict]:
         """External Telegram clients who have messaged this agent (#20 roster).
 
