@@ -1,6 +1,28 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3894_account_has_no_email.py",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "A platform account with no email (the built-in admin) is refused by the Workspace with a 403 whose string detail names the remedy (Settings → General) and X-Trinity-Error-Code: account_has_no_email; an account with an email reaches its owned roster, through the real route and get_current_user."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceAccountHasNoEmail.mount.spec.js",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "fetchRoster reads account_has_no_email from X-Trinity-Error-Code (not the message), other 403s are not mistaken for it and a later success clears it; Portal renders the add-an-email state instead of the dead-end shell, and its buttons open Settings › General and retry."
+    },
+    {
       "file": "unit/test_ent701_room_people.py",
       "feature": "trinity-enterprise#701",
       "added": "2026-10-26",
