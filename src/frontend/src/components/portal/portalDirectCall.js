@@ -105,31 +105,32 @@ export function directBarsState(status) {
   }
 }
 
+// One short word per state, beside the bars. The bars carry the state; the word only
+// names it, so it never wraps and the strip never changes height.
 export const DIRECT_STATE_TEXT = Object.freeze({
-  connecting: 'Connecting…',
+  connecting: 'Connecting',
   listening: 'Listening',
-  transcribing: 'Catching that…',
-  thinking: 'The agent is working',
-  speaking: 'Speaking. Talk over it to stop.',
-  awaiting_approval: 'Say yes or no, or use the card',
-  ended: 'Call ended',
+  transcribing: 'Got it',
+  thinking: 'Thinking',
+  speaking: 'Speaking',
+  awaiting_approval: 'Yes or no?',
+  ended: 'Ended',
 })
 
-export function directStateText({ status, muted = false, tool = '' }) {
+export function directStateText({ status, muted = false }) {
   if (muted) return 'Muted'
-  if (status === 'thinking' && tool) return `The agent is working · ${tool}`
   return DIRECT_STATE_TEXT[status] || ''
 }
 
-// The line under the stage says what this call is, including when speech can only start
-// once the turn is over. Gemini CLI publishes no live stream today.
-export function directStatusLine({ runtime = '', provider = '', earlySpeech = true } = {}) {
-  const parts = ['Direct call']
-  if (runtime) parts.push(runtime)
-  if (provider) parts.push(`speech by ${provider}`)
+// The one detail line, one thing at a time: a notice, then what was heard, then the
+// tool the agent is using, then the honest wait on a runtime whose speech can only
+// start once the turn is over (Gemini CLI publishes no live stream today).
+export function directDetail({ notice = '', heard = '', status = '', tool = '', runtime = '', earlySpeech = true } = {}) {
+  if (notice) return notice
+  if (heard) return `“${heard}”`
+  if (status === 'thinking' && tool) return tool
   if (earlySpeech === false) {
-    parts.push(runtime === 'gemini-cli' ? 'replies take about 10 s' : 'speaks when the reply is finished')
+    return runtime === 'gemini-cli' ? 'Replies take about 10 s' : 'Speaks when the reply is finished'
   }
-  parts.push('Esc ends')
-  return parts.join(' · ')
+  return ''
 }

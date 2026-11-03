@@ -1114,16 +1114,20 @@ answering and consulting the agent; a **Direct** call has no model in the path:
 speech-to-text, the agent's ordinary Workspace turn, text-to-speech of the agent's
 own reply. Live stays the default and is unchanged.
 
-- **FR-1 — Mode**: the composer's Call control is a split button: the main part starts
-  the remembered mode (default Live), the menu offers Live and Direct, an unavailable
-  one disabled with its reason. Per browser.
+- **FR-1 — Entry**: two buttons in the composer, one per call: Live (waveform) and
+  Direct (handset). An unavailable one is disabled with its reason; while one call is
+  on, its button ends it and the other says so. During a Direct call, one fixed-height
+  strip shows four bars (the state), one short word, one detail line (a notice, what was
+  heard, the tool at work, or the slow-runtime wait), a mute icon and a red hang-up.
 - **FR-2 — Same turn as typing**: a spoken turn goes through the route a typed message
   uses (`POST …/chat/stream`), so its limits, idempotency, gates, attachments and
   attribution are the typed path's. The call's socket only hears and speaks.
 - **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
   every runtime. Where a runtime streams its messages, speech starts earlier and the
   persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
-  without a stream says so in the status line.
+  without a stream says so in the strip's detail line. A reply with nothing to read
+  aloud (only code, a table or links) says "The reply is in the chat." rather than
+  nothing.
 - **FR-4 — The live thread stays live**: during a Direct call the thread and composer
   work. A typed message is sent normally and spoken back. Rows land as they happen;
   after the call they fold into one call block.

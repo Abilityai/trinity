@@ -50,6 +50,9 @@ MARKER_TICK_SECONDS = 15.0
 
 LINE_NOT_HEARD = "I didn't catch that."
 LINE_TURN_FAILED = "The agent couldn't answer that."
+# A reply with no sentence to read aloud (only code, a table, links): said instead of
+# silence, which reads as a dead call.
+LINE_REPLY_IN_CHAT = "The reply is in the chat."
 LINE_STILL_WORKING = "Still working on it."
 LINE_APPROVED_LATER = "Approved. The reply will land in the chat."
 LINE_REJECTED = "Okay, not doing that."
@@ -518,6 +521,8 @@ class DirectBridge:
         elif row and (row.get("content") or "").strip():
             for sentence in unspoken_tail(row["content"], queued):
                 say(sentence)
+            if not queued:
+                self.enqueue(LINE_REPLY_IN_CHAT)
         elif status == "failed" and not queued:
             self.enqueue(LINE_TURN_FAILED)
 

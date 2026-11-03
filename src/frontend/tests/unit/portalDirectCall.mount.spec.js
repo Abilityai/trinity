@@ -125,6 +125,23 @@ describe('a Direct call in the conversation', () => {
     expect(wrapper.get('[data-testid="portal-agent-picker"]').attributes('disabled')).toBeDefined()
   })
 
+  it('the strip is one row: the bars, a word, one detail line, a mute icon and a red hang-up', async () => {
+    await startCall()
+    const stage = wrapper.get('[data-testid="direct-call-stage"]')
+    expect(stage.text()).not.toMatch(/Direct call ·|speech by|Esc ends|first word/)
+    expect(stage.findAll('[data-testid="direct-call-heard"]')).toHaveLength(1)
+    const mute = stage.get('[data-testid="direct-call-mute"]')
+    expect(mute.attributes('aria-label')).toBe('Mute')
+    expect(mute.find('svg').exists()).toBe(true)
+    await mute.trigger('click')
+    expect(mute.attributes('aria-label')).toBe('Unmute')
+    expect(mute.attributes('aria-pressed')).toBe('true')
+    const end = stage.get('[data-testid="direct-call-end"]')
+    expect(end.attributes('aria-label')).toBe('End call')
+    expect(end.classes().join(' ')).toContain('status-danger')
+    expect(end.find('svg').exists()).toBe(true)
+  })
+
   it('while the Direct call is on, its button ends it and the Live button is off', async () => {
     const socket = await startCall()
     const live = wrapper.get('[data-testid="portal-voice-call"]')

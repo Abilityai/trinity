@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import {
-  answersAsk, callButtons, cardOutcome, classifyAnswer, directBarsState, directStatusLine, isDirectCallId,
+  answersAsk, callButtons, cardOutcome, classifyAnswer, directBarsState, directDetail, directStateText, isDirectCallId,
   isEcho, looksUnfinished, optionForAnswer,
 } from '../../src/components/portal/portalDirectCall'
 import { groupVoiceBlocks, voiceTaskCaption } from '../../src/components/portal/portalVoiceMode'
@@ -89,9 +89,21 @@ describe('the two call buttons', () => {
     const onLive = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct, liveActive: true })
     expect([onLive.live.enabled, onLive.direct.enabled]).toEqual([true, false])
   })
-  it('states the honest wait on a runtime with no live stream', () => {
-    expect(directStatusLine({ runtime: 'gemini-cli', provider: 'gemini', earlySpeech: false })).toContain('replies take about 10 s')
-    expect(directStatusLine({ runtime: 'claude-code', provider: 'gemini', earlySpeech: true })).not.toContain('10 s')
+  it('states the honest wait on a runtime with no live stream, and nothing about the call otherwise', () => {
+    expect(directDetail({ runtime: 'gemini-cli', earlySpeech: false })).toBe('Replies take about 10 s')
+    expect(directDetail({ runtime: 'claude-code', earlySpeech: true })).toBe('')
+  })
+  it('the detail line shows one thing: a notice, then what was heard, then the tool at work', () => {
+    expect(directDetail({ notice: 'Use the card.', heard: 'yes', tool: 'Bash', status: 'thinking' })).toBe('Use the card.')
+    expect(directDetail({ heard: 'check the report', status: 'thinking', tool: 'Bash' })).toBe('“check the report”')
+    expect(directDetail({ status: 'thinking', tool: 'Bash' })).toBe('Bash')
+    expect(directDetail({ status: 'listening', tool: 'Bash' })).toBe('')
+  })
+  it('the state is one short word', () => {
+    const words = ['connecting', 'listening', 'transcribing', 'thinking', 'speaking', 'awaiting_approval', 'ended']
+      .map((status) => directStateText({ status }))
+    expect(words.every((w) => w && w.split(' ').length <= 3 && w.length <= 12)).toBe(true)
+    expect(directStateText({ status: 'speaking', muted: true })).toBe('Muted')
   })
 })
 

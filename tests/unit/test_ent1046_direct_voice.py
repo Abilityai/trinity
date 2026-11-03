@@ -228,6 +228,20 @@ def test_a_failed_turn_gets_the_fixed_line_and_nothing_invented(patched):
     assert provider.said == [dvs.LINE_TURN_FAILED]
 
 
+def test_a_reply_with_nothing_to_say_aloud_still_answers(patched):
+    # A reply that is only code (test-echo's fenced echo), a table or links has no
+    # speakable sentence. Silence there reads as a dead call; the fixed line says
+    # where the reply is.
+    _, provider = _turn(patched, runtime="claude-code",
+                        reply="```\nEcho: Tell me something please.\nWords: 4\n```")
+    assert provider.said == [dvs.LINE_REPLY_IN_CHAT]
+
+
+def test_a_spoken_reply_does_not_also_get_the_in_chat_line(patched):
+    _, provider = _turn(patched, runtime="claude-code", reply="Done.\n\n```\nls\n```")
+    assert provider.said == ["Done."]
+
+
 def test_a_cancelled_turn_is_silent(patched):
     _, provider = _turn(patched, runtime="claude-code", status="cancelled", reply=None)
     assert provider.said == []
