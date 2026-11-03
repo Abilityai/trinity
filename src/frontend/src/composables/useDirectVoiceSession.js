@@ -11,7 +11,7 @@
 import { computed, getCurrentInstance, onBeforeUnmount, ref } from 'vue'
 import { useAuthStore } from '../stores/auth'
 import { createAudioPlayer, startMicCapture } from '../utils/audio'
-import { createEndpointer, samplesToPcm16Base64, VAD } from '../utils/voiceEndpointing'
+import { createEndpointer, rmsOf, samplesToPcm16Base64, VAD } from '../utils/voiceEndpointing'
 import { startFailureReason, VOICE_INSECURE_REASON, VOICE_NO_MIC_REASON } from '../components/portal/portalVoiceMode'
 import { answersAsk, HOLD_UNFINISHED_MS, isEcho, looksUnfinished } from '../components/portal/portalDirectCall'
 
@@ -54,6 +54,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   let promptArmed = false
   let held = ''
   let holdTimer = null
+  // The person's own level, so the orb moves while they talk, not only while it does.
+  // Speech is a few hundredths RMS; scaled so a normal voice reads as most of the range.
+  let micLevel = 0
   const utterances = new Map()
   const recentSpoken = []
 
@@ -84,7 +87,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   }
 
   function onFrames(samples) {
-    if (muted.value || !endpointer) return
+    if (muted.value || !endpointer) { micLevel = 0; return }
+    micLevel = Math.min(1, rmsOf(samples) * 6)
     endpointer.push(samples, { playing: !!player?.isPlaying() })
   }
 
@@ -206,8 +210,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   function startPolling() {
     pollTimer = setInterval(() => {
       if (!player) return
-      amplitude.value = player.getAmplitude()
       const playing = player.isPlaying()
+      amplitude.value = playing ? player.getAmplitude() : micLevel
       if (wasPlaying && !playing && !pausedForSpeech) {
         if (promptArmed) promptEndedAt = now()
         if (!turnRunning && status.value === 'speaking') resting()
@@ -297,6 +301,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   function stopMedia() {
     if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null }
     amplitude.value = 0
+    micLevel = 0
     clearTimeout(holdTimer); holdTimer = null
     if (mic) { mic.stop(); mic = null }
     if (player) { player.stop(); player = null }

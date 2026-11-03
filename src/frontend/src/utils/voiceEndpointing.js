@@ -18,7 +18,8 @@ export const VAD = Object.freeze({
 const FLOOR_START = 0.008
 const FLOOR_RISE = 0.03
 
-function rmsOf(frame) {
+// Also the mic level the orb moves with while the person speaks.
+export function rmsOf(frame) {
   let sum = 0
   for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i]
   return frame.length ? Math.sqrt(sum / frame.length) : 0

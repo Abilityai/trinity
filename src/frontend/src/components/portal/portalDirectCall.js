@@ -2,8 +2,9 @@
 // tested without a microphone: what counts as a spoken yes, what is our own echo, what
 // is an unfinished sentence, and which call modes this person is offered.
 
+import { VOICE_UNAVAILABLE_FALLBACK } from './portalVoiceMode'
+
 export const DIRECT_PREFIX = 'vd_'
-export const CALL_MODE_KEY = 'trinity.portal.callMode'
 export const HOLD_UNFINISHED_MS = 3000
 // A yes that starts sooner than this after the prompt ended overlapped it.
 export const APPROVAL_GAP_MS = 300
@@ -71,33 +72,37 @@ export function answersAsk({ waiting, text, duringPlayback, startedAt, promptEnd
   return answer === 'other' ? null : answer
 }
 
-export function callModes({ isPlatform = false, realtimeVoice = null, directVoice = null, remembered = 'live' } = {}) {
-  if (!isPlatform) return { render: false, mode: 'live', enabled: false, reason: '', items: [] }
-  const live = {
-    mode: 'live', label: 'Voice call', hint: 'Fast and live. A voice model answers and asks the agent when needed.',
-    enabled: realtimeVoice?.available === true, reason: realtimeVoice?.reason || '',
-  }
-  const direct = {
-    mode: 'direct', label: 'Direct call', hint: 'The agent itself answers every turn. Slower, and in its own words.',
-    enabled: directVoice?.available === true, reason: directVoice?.reason || '',
-  }
-  const items = [live, direct]
-  const pick = items.find((i) => i.mode === remembered && i.enabled) || items.find((i) => i.enabled)
+// The two call buttons, each with its own availability. A disabled button carries the
+// reason (the "never a dead button" rule); while one call is on, the other button is
+// off for the call's duration and says which call is on.
+export function callButtons({ isPlatform = false, realtimeVoice = null, directVoice = null, liveActive = false, directActive = false } = {}) {
+  if (!isPlatform) return { render: false, live: null, direct: null }
+  const one = (voice, label, active, otherActive) => ({
+    active,
+    enabled: active || (voice?.available === true && !otherActive),
+    label: active ? 'End the call (Esc)' : otherActive ? 'Another call is on' : (voice?.available === true ? label : (voice?.reason || VOICE_UNAVAILABLE_FALLBACK)),
+  })
   return {
     render: true,
-    mode: pick ? pick.mode : 'live',
-    enabled: !!pick,
-    reason: pick ? '' : (live.reason || direct.reason),
-    items,
+    live: one(realtimeVoice, 'Start a voice call', liveActive, directActive),
+    direct: one(directVoice, 'Start a Direct call', directActive, liveActive),
   }
 }
 
-export function loadCallMode(storage = globalThis.localStorage) {
-  try { return storage?.getItem(CALL_MODE_KEY) === 'direct' ? 'direct' : 'live' } catch { return 'live' }
-}
-
-export function saveCallMode(mode, storage = globalThis.localStorage) {
-  try { storage?.setItem(CALL_MODE_KEY, mode === 'direct' ? 'direct' : 'live') } catch { /* private mode */ }
+// What the orb shows for each Direct status, in the Live orb's vocabulary
+// (`voiceOrbField.STATE_HUE`): green while it listens, amber while anything is being
+// worked on — a transcript, the agent's turn, an open question — and blue while it
+// speaks. Muted is the orb dimmed, which the orb does itself.
+export function directOrbState(status) {
+  switch (status) {
+    case 'listening': return 'listening'
+    case 'speaking': return 'speaking'
+    case 'transcribing':
+    case 'thinking':
+    case 'awaiting_approval': return 'tool_calling'
+    case 'connecting': return 'connecting'
+    default: return 'idle'
+  }
 }
 
 export const DIRECT_STATE_TEXT = Object.freeze({

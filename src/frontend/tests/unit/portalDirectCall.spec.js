@@ -1,19 +1,20 @@
 // @vitest-environment jsdom
 /**
  * trinity-enterprise#1046: Workspace Direct calls in the browser.
- * The rules, the endpointer, the fold, the composable's protocol, and the mounted mode menu.
+ * The rules, the endpointer, the fold, the composable's protocol, the two call buttons,
+ * and the mounted orb.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import {
-  answersAsk, callModes, cardOutcome, classifyAnswer, directStatusLine, isDirectCallId, isEcho,
-  looksUnfinished, optionForAnswer, saveCallMode, loadCallMode,
+  answersAsk, callButtons, cardOutcome, classifyAnswer, directOrbState, directStatusLine, isDirectCallId,
+  isEcho, looksUnfinished, optionForAnswer,
 } from '../../src/components/portal/portalDirectCall'
 import { groupVoiceBlocks, voiceTaskCaption } from '../../src/components/portal/portalVoiceMode'
 import { createEndpointer, samplesToPcm16Base64, VAD } from '../../src/utils/voiceEndpointing'
 import { useDirectVoiceSession } from '../../src/composables/useDirectVoiceSession'
-import CallModeMenu from '../../src/components/portal/CallModeMenu.vue'
+import VoiceOrb from '../../src/components/chat/VoiceOrb.vue'
 import DirectVoiceSettings from '../../src/components/settings/DirectVoiceSettings.vue'
 import { useSettingsStore } from '../../src/stores/settings'
 
@@ -67,28 +68,26 @@ describe('what was heard', () => {
   })
 })
 
-describe('the modes on offer', () => {
+describe('the two call buttons', () => {
   const live = { available: true }
   const direct = { available: true, provider: 'gemini' }
   it('renders nothing for a portal-token client', () => {
-    expect(callModes({ isPlatform: false, realtimeVoice: live, directVoice: direct }).render).toBe(false)
+    expect(callButtons({ isPlatform: false, realtimeVoice: live, directVoice: direct }).render).toBe(false)
   })
-  it('defaults to Live, and remembers a Direct choice', () => {
-    expect(callModes({ isPlatform: true, realtimeVoice: live, directVoice: direct }).mode).toBe('live')
-    expect(callModes({ isPlatform: true, realtimeVoice: live, directVoice: direct, remembered: 'direct' }).mode).toBe('direct')
+  it('offers each call on its own availability, with the reason when it is off', () => {
+    const both = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct })
+    expect([both.live.enabled, both.live.label]).toEqual([true, 'Start a voice call'])
+    expect([both.direct.enabled, both.direct.label]).toEqual([true, 'Start a Direct call'])
+    const noDirect = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: { available: false, reason: 'No speech key.' } })
+    expect([noDirect.live.enabled, noDirect.direct.enabled, noDirect.direct.label]).toEqual([true, false, 'No speech key.'])
+    expect(callButtons({ isPlatform: true, realtimeVoice: { available: false }, directVoice: direct }).live.label).toContain('not available')
   })
-  it('falls to the mode that works, with the reason when neither does', () => {
-    expect(callModes({ isPlatform: true, realtimeVoice: { available: false, reason: 'x' }, directVoice: direct }).mode).toBe('direct')
-    const none = callModes({ isPlatform: true, realtimeVoice: { available: false, reason: 'no key' }, directVoice: { available: false } })
-    expect(none.enabled).toBe(false)
-    expect(none.reason).toBe('no key')
-  })
-  it('remembers across visits and survives storage that throws', () => {
-    const store = new Map()
-    const storage = { getItem: (k) => store.get(k), setItem: (k, v) => store.set(k, v) }
-    saveCallMode('direct', storage)
-    expect(loadCallMode(storage)).toBe('direct')
-    expect(loadCallMode({ getItem: () => { throw new Error('private') } })).toBe('live')
+  it('while one call is on, its button ends it and the other says a call is on', () => {
+    const onDirect = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct, directActive: true })
+    expect([onDirect.direct.enabled, onDirect.direct.label]).toEqual([true, 'End the call (Esc)'])
+    expect([onDirect.live.enabled, onDirect.live.label]).toEqual([false, 'Another call is on'])
+    const onLive = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct, liveActive: true })
+    expect([onLive.live.enabled, onLive.direct.enabled]).toEqual([true, false])
   })
   it('states the honest wait on a runtime with no live stream', () => {
     expect(directStatusLine({ runtime: 'gemini-cli', provider: 'gemini', earlySpeech: false })).toContain('replies take about 10 s')
@@ -218,40 +217,72 @@ describe('the call protocol', () => {
   })
 })
 
-describe('the mode menu', () => {
-  const items = [
-    { mode: 'live', label: 'Voice call', hint: 'fast', enabled: true, reason: '' },
-    { mode: 'direct', label: 'Direct call', hint: 'own words', enabled: false, reason: 'No speech key.' },
-  ]
-  const open = async (props = {}) => {
-    const w = mount(CallModeMenu, { props: { items, mode: 'live', ...props }, attachTo: document.body })
-    await w.get('[data-testid="portal-call-mode"]').trigger('click')
-    return w
+describe('the small orb', () => {
+  it('maps every Direct status onto the Live orb\'s vocabulary', () => {
+    expect(directOrbState('listening')).toBe('listening')
+    expect(directOrbState('speaking')).toBe('speaking')
+    expect(['transcribing', 'thinking', 'awaiting_approval'].map(directOrbState)).toEqual(['tool_calling', 'tool_calling', 'tool_calling'])
+    expect(directOrbState('connecting')).toBe('connecting')
+    expect(directOrbState('ended')).toBe('idle')
+  })
+
+  // jsdom has no 2d context: a recording one stands in, so the test sees what the orb
+  // asked the canvas to do.
+  function fakeContext() {
+    const calls = []
+    return new Proxy({ calls }, {
+      get(t, k) {
+        if (k === 'calls') return calls
+        if (k === 'createRadialGradient') return () => ({ addColorStop() {} })
+        return (...args) => { calls.push([k, args]) }
+      },
+      set() { return true },
+    })
   }
-  it('says the provider receives the audio, and why a mode is off', async () => {
-    const w = await open()
-    expect(w.text()).toContain('go to the speech provider')
-    expect(w.text()).toContain('No speech key.')
+  function mountOrb(props = {}) {
+    const ctx = fakeContext()
+    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx)
+    const frames = []
+    const raf = vi.fn((cb) => { frames.push(cb); return frames.length })
+    const caf = vi.fn()
+    vi.stubGlobal('requestAnimationFrame', raf)
+    vi.stubGlobal('cancelAnimationFrame', caf)
+    const w = mount(VoiceOrb, { props: { state: 'listening', size: 48, ...props }, attachTo: document.body })
+    return { w, ctx, raf, caf, frames, getContext }
+  }
+
+  it('draws the field into a disc the size it was given, and runs on the animation frame', () => {
+    const { w, ctx, raf, frames } = mountOrb()
+    const canvas = w.get('[data-testid="voice-orb"]').element
+    expect(canvas.style.width).toBe('48px')
+    expect(canvas.getAttribute('aria-hidden')).toBe('true')
+    const names = (c) => c.calls.map(([k]) => k)
+    expect(names(ctx)).toContain('clip')
+    expect(names(ctx)).toContain('drawImage')
+    expect(raf).toHaveBeenCalledTimes(1)
+    frames[0]()
+    expect(raf).toHaveBeenCalledTimes(2)
     w.unmount()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
-  it('chooses an available mode and refuses a disabled one', async () => {
-    const w = await open()
-    await w.get('[data-testid="portal-call-mode-direct"]').trigger('click')
-    expect(w.emitted('choose')).toBeUndefined()
-    await w.get('[data-testid="portal-call-mode-live"]').trigger('click')
-    expect(w.emitted('choose')[0]).toEqual(['live'])
+
+  it('stops drawing when it leaves the page', () => {
+    const { w, caf } = mountOrb()
     w.unmount()
+    expect(caf).toHaveBeenCalledTimes(1)
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
-  it('Escape closes the menu without reaching the call beneath it', async () => {
-    const w = await open()
-    const reachedDocument = vi.fn()
-    document.addEventListener('keydown', reachedDocument)
-    document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-    await w.vm.$nextTick()
-    expect(w.find('[data-testid="portal-call-mode-menu"]').exists()).toBe(false)
-    expect(reachedDocument).not.toHaveBeenCalled()
-    document.removeEventListener('keydown', reachedDocument)
+
+  it('draws one still frame under reduced motion', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    const { w, ctx, raf } = mountOrb()
+    expect(ctx.calls.some(([k]) => k === 'drawImage')).toBe(true)
+    expect(raf).not.toHaveBeenCalled()
     w.unmount()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 })
 

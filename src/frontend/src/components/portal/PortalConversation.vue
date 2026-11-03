@@ -797,37 +797,49 @@
                 @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
-            <!-- ent#547: the call toggle stays LIVE while everything else goes
+            <!-- ent#547: the call buttons stay LIVE while everything else goes
                  inert, and the split is the point rather than a tidy-up. The
-                 same button starts and ends the call; inside a region carrying
+                 button that starts a call also ends it; inside a region carrying
                  `pointer-events-none` it would render pressed for the whole
                  call and refuse the click that ends it — a control that looks
                  live and does nothing. Two inert regions now, because the
                  stacked layout puts the field and the other controls on
-                 different rows and `opacity` needs a real box on each. -->
+                 different rows and `opacity` needs a real box on each.
+                 trinity-enterprise#1046: two buttons, one per call kind — a Live
+                 call (the waveform) and a Direct call (the handset). Each carries
+                 its own reason when it is off; while one call is on, the other
+                 button says so. -->
             <div class="mt-1 flex items-center gap-1">
               <button
-                v-if="callEntry.render"
+                v-if="callUi.render"
                 type="button"
                 class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
-                :class="anyCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750'"
-                :disabled="(!callEntry.enabled && !anyCallActive) || voiceStarting"
-                :title="anyCallActive ? 'End the call (Esc)' : (callEntry.enabled ? callButtonLabel : callEntry.reason)"
-                :aria-label="anyCallActive ? 'End the call' : (callEntry.enabled ? callButtonLabel : callEntry.reason)"
-                :aria-pressed="anyCallActive"
+                :class="voiceCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
+                :disabled="!callUi.live.enabled || voiceStarting"
+                :title="callUi.live.label"
+                :aria-label="callUi.live.label"
+                :aria-pressed="voiceCallActive"
                 data-testid="portal-voice-call"
-                @click="anyCallActive ? endVoiceCall() : startVoiceCall(callEntry.mode)"
+                @click="voiceCallActive ? endVoiceCall() : startVoiceCall('live')"
               >
-                <svg v-if="anyCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+                <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
                 <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
               </button>
-              <CallModeMenu
-                v-if="callEntry.render"
-                :items="callEntry.items"
-                :mode="callEntry.mode"
-                :disabled="anyCallActive || voiceStarting"
-                @choose="chooseCallMode"
-              />
+              <button
+                v-if="callUi.render"
+                type="button"
+                class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
+                :class="directCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
+                :disabled="!callUi.direct.enabled || voiceStarting"
+                :title="callUi.direct.label"
+                :aria-label="callUi.direct.label"
+                :aria-pressed="directCallActive"
+                data-testid="portal-direct-call"
+                @click="directCallActive ? endVoiceCall() : startVoiceCall('direct')"
+              >
+                <svg v-if="directCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+                <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg>
+              </button>
               <div class="flex-1 min-w-0 flex items-center gap-1" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
                 <button
                   type="button"
@@ -1010,9 +1022,8 @@ import { shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcom
 // no mount harness, so a rule kept in here is a rule no test can reach); this
 // component is the dispatcher over them and the composable.
 import DirectCallStage from './DirectCallStage.vue'
-import CallModeMenu from './CallModeMenu.vue'
 import { useDirectVoiceSession } from '../../composables/useDirectVoiceSession'
-import { callModes, cardOutcome, loadCallMode, optionForAnswer, saveCallMode } from './portalDirectCall'
+import { callButtons, cardOutcome, optionForAnswer } from './portalDirectCall'
 import VoiceOverlay from '../chat/VoiceOverlay.vue'
 import { useVoiceSession } from '../../composables/useVoiceSession'
 import {
@@ -3234,18 +3245,23 @@ watch(
     if (next) { pendingAsksPrompted.add(next.id); direct.promptAsk(next) }
   },
 )
-const callMode = ref(loadCallMode())
-const callEntry = computed(() => callModes({
+// The Direct button's own availability, the same shape as `voiceEntry` for the Live one.
+const directEntry = computed(() => voiceEntryState({
+  isPlatform: store.isPlatformSession,
+  realtimeVoice: store.directVoice,
+}))
+// One recipe for both call buttons (#2662: the state colour on mutually exclusive arms).
+const CALL_BUTTON_CLASS = Object.freeze({
+  on: 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300',
+  off: 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750',
+})
+const callUi = computed(() => callButtons({
   isPlatform: store.isPlatformSession,
   realtimeVoice: store.realtimeVoice,
   directVoice: store.directVoice,
-  remembered: callMode.value,
+  liveActive: voiceCallActive.value,
+  directActive: directCallActive.value,
 }))
-const callButtonLabel = computed(() => (callEntry.value.mode === 'direct' ? 'Start a Direct call' : 'Start a voice call'))
-function chooseCallMode(mode) {
-  callMode.value = mode
-  saveCallMode(mode)
-}
 watch(directCallActive, async (on, was) => {
   if (!was || on) return
   spokenQueue = ''
@@ -3350,9 +3366,7 @@ async function startVoiceCall(mode = 'live') {
   voiceEndNotice.value = ''
   // Re-checked at click even though the control is disabled when unavailable:
   // the roster refreshes in the background, so the answer has to be words.
-  const entry = mode === 'direct'
-    ? { render: store.isPlatformSession, enabled: store.directVoice?.available === true, reason: store.directVoice?.reason || '' }
-    : voiceEntry.value
+  const entry = mode === 'direct' ? directEntry.value : voiceEntry.value
   if (!entry.render || !entry.enabled) { voiceError.value = entry.reason || VOICE_UNAVAILABLE_FALLBACK; return }
   const pre = voicePreflight({
     canCapture: canRecord,

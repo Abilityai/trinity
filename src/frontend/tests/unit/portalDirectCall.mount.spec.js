@@ -55,6 +55,8 @@ class FakeSocket {
 }
 vi.stubGlobal('WebSocket', FakeSocket)
 vi.stubGlobal('MediaRecorder', class {})
+// jsdom has no 2d context; the strip's orb draws nothing here and says nothing about it.
+HTMLCanvasElement.prototype.getContext = () => null
 Object.defineProperty(globalThis.navigator, 'mediaDevices', { value: { getUserMedia: vi.fn() }, configurable: true })
 
 const { default: PortalConversation } = await import('@/components/portal/PortalConversation.vue')
@@ -89,7 +91,6 @@ beforeEach(async () => {
     voice_session_id: CALL, websocket_url: `/ws/voice/${CALL}`, portal_session_id: SID,
     max_duration_seconds: 1800, mode: 'direct', provider: 'gemini', runtime: 'claude-code', early_speech: true,
   }))
-  localStorage.setItem('trinity.portal.callMode', 'direct')
   wrapper = mount(PortalConversation, {
     props: { agent: AGENT, sessionId: SID },
     global: { renderStubDefaultSlot: true },
@@ -104,7 +105,7 @@ afterEach(() => {
 })
 
 async function startCall() {
-  await wrapper.get('[data-testid="portal-voice-call"]').trigger('click')
+  await wrapper.get('[data-testid="portal-direct-call"]').trigger('click')
   await flushPromises()
   await wait(0)
   await flushPromises()
@@ -117,22 +118,46 @@ const say = async (socket, seq, text) => {
 const composer = () => wrapper.get('textarea')
 
 describe('a Direct call in the conversation', () => {
-  it('starts in the remembered mode, shows the stage, and leaves the composer usable', async () => {
+  it('the Direct button starts a Direct call, shows the stage, and leaves the composer usable', async () => {
     await startCall()
     expect(store.startWorkspaceVoice).toHaveBeenCalledWith('scout', SID, null, 'direct')
     expect(wrapper.find('[data-testid="direct-call-stage"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="voice-orb"]').exists()).toBe(true)
     expect(composer().attributes('disabled')).toBeUndefined()
     expect(wrapper.get('[data-testid="portal-agent-picker"]').attributes('disabled')).toBeDefined()
   })
 
-  it('starts a Live call when that is the remembered mode', async () => {
-    localStorage.clear()
+  it('while the Direct call is on, its button ends it and the Live button is off', async () => {
+    const socket = await startCall()
+    const live = wrapper.get('[data-testid="portal-voice-call"]')
+    expect(live.attributes('disabled')).toBeDefined()
+    expect(live.attributes('title')).toBe('Another call is on')
+    const direct = wrapper.get('[data-testid="portal-direct-call"]')
+    expect(direct.attributes('aria-pressed')).toBe('true')
+    expect(direct.attributes('title')).toBe('End the call (Esc)')
+    await direct.trigger('click')
+    await flushPromises()
+    expect(socket.of('end')).toHaveLength(1)
+  })
+
+  it('the Live button starts a Live call, and the Direct button is off while it is on', async () => {
     wrapper.unmount()
     wrapper = mount(PortalConversation, { props: { agent: AGENT, sessionId: SID }, global: { renderStubDefaultSlot: true, stubs: { VoiceOverlay: true } } })
     await flushPromises()
     await wrapper.get('[data-testid="portal-voice-call"]').trigger('click')
     await flushPromises()
     expect(store.startWorkspaceVoice).toHaveBeenCalledWith('scout', SID)
+    await wait(0)
+    await flushPromises()
+    expect(wrapper.get('[data-testid="portal-direct-call"]').attributes('disabled')).toBeDefined()
+  })
+
+  it('a Direct button that cannot start says why', async () => {
+    store.directVoice = { available: false, reason: 'No speech key.' }
+    await flushPromises()
+    const direct = wrapper.get('[data-testid="portal-direct-call"]')
+    expect(direct.attributes('disabled')).toBeDefined()
+    expect(direct.attributes('title')).toBe('No speech key.')
   })
 
   it('sends spoken words as an ordinary turn with the call id, then asks for it to be spoken', async () => {
@@ -200,7 +225,7 @@ describe('a Direct call in the conversation', () => {
     let answerStart
     const started = store.startWorkspaceVoice()
     store.startWorkspaceVoice = vi.fn(() => new Promise((resolve) => { answerStart = () => resolve(started) }))
-    await wrapper.get('[data-testid="portal-voice-call"]').trigger('click')
+    await wrapper.get('[data-testid="portal-direct-call"]').trigger('click')
     await flushPromises()
     store.asks = [APPROVAL]
     await flushPromises()

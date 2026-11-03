@@ -413,8 +413,10 @@ by the standing ruling, deliberately ungated.** See
 [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
 
 **Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046).** The
-second call mode, chosen from the Call control's menu (remembered per browser; Live stays
-the default). No model is in the conversational path: the browser endpoints an utterance
+second call kind, its own button beside the Live call's in the composer (each button
+carries its own reason when it is off; while one call is on the other says so; the Direct
+strip's orb is the Live orb's field in a disc, `chat/VoiceOrb.vue` over the shared
+`chat/voiceOrbField.js`). No model is in the conversational path: the browser endpoints an utterance
 (`utils/voiceEndpointing.js`), the backend transcribes it, and the browser sends the text
 through the **same `POST …/chat/stream` a typed message uses**, carrying the call's `vd_`
 id — so limits, idempotency, skill gates, attachments and attribution are the typed

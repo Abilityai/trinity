@@ -4,12 +4,9 @@
     aria-label="Direct call"
     data-testid="direct-call-stage"
   >
-    <div
-      class="shrink-0 w-11 h-11 rounded-full bg-action-primary-600 dark:bg-action-primary-500 transition-transform duration-75 motion-reduce:transition-none"
-      :class="call.status.value === 'thinking' ? 'motion-safe:animate-pulse' : ''"
-      :style="{ transform: `scale(${orbScale})` }"
-      aria-hidden="true"
-    ></div>
+    <!-- The Live call's orb, in a disc: green listening, amber working, blue speaking,
+         moving with whoever is talking. -->
+    <VoiceOrb :state="orbState" :amplitude="call.amplitude.value || 0" :muted="call.muted.value" :size="48" />
     <div class="min-w-0 flex-1">
       <p class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate" role="status" aria-live="polite" data-testid="direct-call-state">{{ stateText }}</p>
       <p class="text-xs text-gray-600 dark:text-gray-300 truncate" data-testid="direct-call-heard">
@@ -29,7 +26,8 @@
 <script setup>
 import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
-import { directStateText, directStatusLine } from './portalDirectCall'
+import VoiceOrb from '@/components/chat/VoiceOrb.vue'
+import { directOrbState, directStateText, directStatusLine } from './portalDirectCall'
 
 const props = defineProps({ call: { type: Object, required: true } })
 defineEmits(['end'])
@@ -44,5 +42,5 @@ const firstWord = computed(() => {
   const ms = props.call.timing.value?.first_audio_ms
   return Number.isFinite(ms) ? ` · first word in ${(ms / 1000).toFixed(1)} s` : ''
 })
-const orbScale = computed(() => 1 + Math.min(0.35, (props.call.amplitude.value || 0) * 2))
+const orbState = computed(() => directOrbState(props.call.status.value))
 </script>
