@@ -19,7 +19,7 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
-import { notifyTermsRefusal } from '@/utils/termsGate'
+import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -399,6 +399,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // without it a hard-loaded /workspace/r/:id would flash a refusal it then
     // takes back on an entitled instance.
     rosterLoaded: false,
+    // trinity-enterprise#1082: the roster was refused by the terms gate — one
+    // of `TERMS_REFUSAL_CODES`, or null. The stage names the state and links to
+    // /terms; the HTTP interceptor stays the only thing that navigates there.
+    termsRefusal: null,
 
     // #2198 — the last successfully-loaded thread list, and whether the most
     // recent attempt failed.
@@ -670,6 +674,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      this.termsRefusal = null
       // #3894: the no-email verdict is this session's roster refusal — the next
       // client signing in must not see the "Add an email" page before its own
       // roster answers.
@@ -2725,6 +2730,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           ? data.model_options.filter((o) => o && o.id && o.tier)
           : []
         this.rosterLoaded = true
+        this.termsRefusal = null
         // #2163: fired HERE and not from `Portal.vue::bootstrap()`, because
         // both "Try again" buttons call this action directly — a
         // failed-then-retried first load would otherwise leave every
@@ -2750,10 +2756,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // operator whose entitlement had lapsed saw "No agents shared with you
         // yet" with no way to tell that from an actually-empty share list.
         this.unavailable = err.response?.status === 404
+        // trinity-enterprise#1082: the terms gate's `detail` is an object; the
+        // stage renders `error` as text, so keep its message, never the object.
+        this.termsRefusal = isTermsRefusal(err) ? err.response.data.detail.code : null
         this.accountHasNoEmail = refusalCode(err) === 'account_has_no_email'
         this.error = this.unavailable
           ? 'The workspace is not available on this instance.'
-          : (err.response?.data?.detail || 'Failed to load your agents.')
+          : this.termsRefusal
+            ? (err.response.data.detail.message || 'Accept the current terms to continue.')
+            : (err.response?.data?.detail || 'Failed to load your agents.')
         this.agents = []
         // #2128: the attempt reached a verdict — the room route may stop
         // showing its neutral placeholder and render the honest failure copy.
