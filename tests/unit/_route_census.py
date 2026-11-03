@@ -871,6 +871,9 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/seat_decisions.py::list_seat_decisions": (
         "GET /api/agents/{agent_name}/decisions",
         "MCP list_seat_decisions: the seat's standing decisions, read to reuse a criterion (trinity-enterprise#638)"),
+    "routers/seat_decisions.py::get_seat_autonomy": (
+        "GET /api/agents/{agent_name}/seat-autonomy",
+        "MCP get_autonomy: this companion's seat verdict, ask classes only, never a person (trinity-enterprise#641)"),
     "routers/agent_memory.py::search_retrieval_memory_agent_endpoint": (
         "POST /api/agents/{agent_name}/retrieval-memory/search",
         "MCP search_memory: the agent reads its own retrieval memory past the injected tail, the scope resolved from the "
@@ -959,6 +962,10 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/agents.py::agent_execution_result": (
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)",
+        _SIB_OWN_KEY),
+    "routers/agents.py::agent_execution_turn_tier": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+        "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)",
         _SIB_OWN_KEY),
     "routers/aauth_person.py::request_person_token": (
         "POST /api/agents/{agent_name}/aauth/person-token",
@@ -1127,6 +1134,11 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/git.py::get_pull_sync_config": (
         "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle",
         _SIB_READ + " — one boolean"),
+    # The autonomy dial (ent#641): the instance ceiling a companion reads to tell a person
+    # why it asks first. The write is the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    "routers/settings/autonomy_dial.py::get_autonomy_dial": (
+        "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant",
+        _SIB_NO_AGENT + ": one instance-wide level"),
     # trinity-enterprise#265 / #600: the agent keeps setting its own group's trigger mode and
     # welcome; the completion-report consent and group-context fields are a person's decision,
     # refused to every machine principal by assert_person inside the handler (trinity-enterprise#719).

@@ -376,6 +376,9 @@ REQUESTS = {
     "routers/reports.py::create_report": {
         "json": {"report_type": "ops.status", "title": "t", "payload": {}}
     },
+    "routers/seat_decisions.py::get_seat_autonomy": {
+        "params": {"execution_id": "exec-1"}
+    },
     "routers/seat_decisions.py::list_seat_decisions": {
         "params": {"execution_id": "exec-1"}
     },
