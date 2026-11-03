@@ -5,18 +5,18 @@ client.
 agent's owner has blocked; the channel access gate checks it on every message.
 ``client_id`` is the channel-native sender id the gate sees.
 
-Mirrors the SQLite ``channel_client_blocks`` migration. Chained after 0112 so
+Mirrors the SQLite ``channel_client_blocks`` migration. Chained after 0114 so
 the version-line keeps ONE head (#2068).
 
-Revision ID: 0113_channel_client_blocks
-Revises: 0112_loop_runs_stale_duplicates
+Revision ID: 0115_channel_client_blocks
+Revises: 0114_room_participant_visible_from
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0113_channel_client_blocks"
-down_revision = "0112_loop_runs_stale_duplicates"
+revision = "0115_channel_client_blocks"
+down_revision = "0114_room_participant_visible_from"
 branch_labels = None
 depends_on = None
 
