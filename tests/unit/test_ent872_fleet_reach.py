@@ -784,7 +784,7 @@ _ALLOW = {
         "maps a role to an agent-creation quota; selects no roster",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
-    ("services/person_mention_service.py", "_room_access"):
+    ("services/person_mention_service.py", "_room_access_row"):
         "decides about the PERSON row being mentioned (looked up by email), never a principal's fleet",
     ("services/ws_identity_service.py", "resolve_ws_identity"):
         "a /ws ticket subject is a person (the ticket route is require_person)",
@@ -814,7 +814,7 @@ _ALLOW = {
         "background cleanup loop: no principal",
     ("services/skills_sync_service.py", "_eligible_agents"):
         "background sweep, or the skills-library route behind require_admin + reject_agent_principal",
-    ("services/turn_tier_service.py", "turn_tier"):
+    ("services/turn_tier_service.py", "_user_tier"):
         "the role compared is the turn starter's user row (a person), never the caller's; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",

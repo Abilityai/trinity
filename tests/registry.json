@@ -23,6 +23,30 @@
       "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
     },
     {
+      "file": "unit/test_ent701_room_people.py",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "backend",
+        "unit",
+        "workspace",
+        "rooms"
+      ],
+      "description": "The edition-agnostic half of a room holding more than one person, over a real SQLite built from the platform DDL: a person seated mid-conversation reads from their join point (visible_from_seq, incremental reads too) until a backscroll grant moves the floor to 0; seat_person refuses an agent; a person who left gets the uniform 404 on read and post and the room drops out of their list, the roster keeps who left and the room says so, and they can be seated again; a moderator cannot strand other people; an agent cannot leave; a non-member gets the 404; the payload names the reader (you) and offers seating (can_seat_people) only to a platform moderator of an open room on an entitled install, never to a collaborator or an outside-client moderator; the turn prompt names two or more people present and the collaborator's limits, a departed person is not counted, and a seated colleague keeps the room internal; an @mention of a seated person becomes a tag, never a wake, and a mention that cannot be tagged never fails the message."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalRoomPeople.mount.spec.js",
+      "feature": "trinity-enterprise#701",
+      "added": "2026-10-26",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
+    },
+    {
       "file": "unit/test_ent871_capability_used_audit.py",
       "feature": "trinity-enterprise#871",
       "added": "2026-11-02",
@@ -5438,6 +5462,17 @@
       "description": "The seat-level decision record (ent#638, R25): the grammar and its receipts (prose-only per field, no-alternatives-is-a-note, decided-not-an-alternative, strict review_by with the equal-is-not-expired boundary), lifecycle over a real SQLite file (lower-cased seat, JSON lists, direction kept as routed, supersede chain + CAS refusal, close/reverse/reconfirm + their 409s, uniform 404 for another seat, cites within the seat, request_id must be the agent's queue item), the evidence (reused = later citations only, superseding does not cite, stable = 3 / one criterion / no reversal / expired excluded, the bounded email-free prompt block on the shared memory composer), readers (own seat, owner, provider kinds_for incl. absent/raise/bad-kind → None), the agent router (seat from a seat run or a verified channel email, refused triggers, foreign execution 403, receipt + idempotency release, replay snapshot, email-free list), the portal service (own seat vs owner vs shared platform user, named seat, direction hint), both migration tracks + registry + single head, facade signature parity, the mcp header + registration."
     },
     {
+      "file": "unit/test_ent641_autonomy_dial.py",
+      "feature": "trinity-enterprise#641",
+      "added": "2026-09-23",
+      "categories": [
+        "backend",
+        "workspace",
+        "mcp"
+      ],
+      "description": "The autonomy dial (ent#641, P12): the promotion rule as a table over #638's records (3 records / one normalized criterion / no reversal, each named block fired in isolation), the three read-time conjuncts proven to demote WITHOUT a write and restore on their own (level below L2, agent autonomy off, evidence expired at the earliest review_by with no event to hook), reversals counted over the window only (a lapsed reversal stops blocking — effective_status returns `reversed` unconditionally, so history-counting makes on_request the only reachable steady state), the rating window's three shapes (operator: as well as workspace:, COALESCE(updated_at, created_at) so an up→down flip counts, a fixed 30 days so expiry cannot promote), writes only on a real event with the evidence-hash CAS (unchanged verdict → no row, no event; a stale hash refused), the portal gates (seat isolation, hold by any reader of their own seat, release owner-only, no promote path at all), the instance level (admin AND interactive, validated, audited, refused by the generic /{key} catch-all), the companion's prompt lines, both migration tracks + cleanup CASCADE + single head, facade signature parity, and the MCP surface (get_autonomy registered with an access row, seat from execution_id, no email out)."
+    },
+    {
       "file": "../src/mcp-server/src/tools/self-acting-scope.test.ts",
       "feature": "#2975",
       "added": "2026-09-23",
@@ -7739,6 +7774,68 @@
         "unit"
       ],
       "description": "The pre-check hook is told which schedule is firing: through the real SchedulerService._apply_pre_check_gate each cron schedule reaches the backend with its own schedule_id/name/message, a schedule-less _run_pre_check stays bodyless, and the stdout contract (override / empty-skip) is unchanged; pre_check_service.run_pre_check exports exactly the fields sent as TRINITY_SCHEDULE_ID/NAME/MESSAGE in the hook exec's environment (verbatim, quotes and newlines included) and none without them; the internal endpoint hands the body to the service and still serves a bodyless request. Six of the nine fail on the pre-fix code."
+    },
+    {
+      "file": "unit/test_ent926_agent_route_census.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Every route that names an agent declares the tier it enforces (ent#926). Static AST census over routers/ against src/backend/services/agent_route_tiers.json (also read at runtime by services/route_tier_service.py): an agent-naming route with no row fails (the default is owner tier); a row with no live route fails; a row declared owner must show an owner/admin gate in the handler or its named helper, an accessor row must not; accessor rows tagged legacy are a shrink-only ratchet. Scanner self-tests on a synthetic router. Eight mutations (new undeclared route, owner dependency dropped, accessor given an owner gate, renamed handler, baseline raised, baseline left above reality, stale row path, gate regex emptied) each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_workspace_turn_tier.py",
+      "feature": "trinity-enterprise#926",
+      "added": "2026-10-22",
+      "categories": [
+        "backend",
+        "auth",
+        "unit"
+      ],
+      "description": "Found testing PR #3778 live: a Workspace turn (triggered_by=public, source_channel=portal, the signed-in email, no source_user_id) is rated as that person — owner/admin owner tier, a shared account a person (no shell even with visitor_shell on), an email-only client a person with no account — while a public-link or channel email never lifts a visitor and a schedule row keeps the creator rule; the route fence (restricted_agent_turn) meets the ledger, so a key with no header or naming an owner turn is fenced while a shared person's turn runs, only-owner or visitor-shell-on turns leave it open, an unreadable ledger fences, non-agent principals never are; the real SQLite ledger read carries source_channel/source_user_email. Mutations: dropping the Workspace rule turns 8 red; a header-only fence turns 3 red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "backend",
+        "security"
+      ],
+      "description": "Which tier a running turn acts for and who may ask (ent#926). turn_tier_service decides from the execution row: owner or admin and owner-configured turns (schedule, reminder, loop, webhook, event) act at owner tier; a shared person, a missing user row, a garbage user id and outside callers with no user (public link, paid, voice, another agent) act at share tier; an unknown execution or another agent's is unknown. The turn-tier route answers only the agent's own key (user, system, sibling-agent and missing keys 403 before any lookup) and 404s an unknown execution. Mutations: promoting a shared person, trusting a missing user row, counting a public trigger as owner configured and accepting any key each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_turn_tier_hook.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-16",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "The in-container guard holds a shared person's turn to the Files API's paths (ent#926). Driven as Claude Code drives a hook: an ordinary path is allowed with no lookup; instruction files, skills, shell startup files, the Python user-site, transcripts and credentials are refused for share, unknown and unreachable and allowed for owner; project memory stays readable; Grep/Glob aimed at owner-only paths are refused; tilde, dotdot and double-slash spellings and a link into an owner-only path are judged by where they land; no execution id means no platform turn. The lookup is exercised over real HTTP (key, route, percent-encoded ids, 404/403/500/garbage/unknown tier/unreachable). Hook policy copy byte-identical to the backend's; drop-in registers the guard in exec form; the image ships hook, policy and drop-in root-owned. Mutations: policy check skipped, fail-open on unreachable, fail-open on share/unknown, links not followed, no-run-id denied and policy copy drift each turn it red."
+    },
+    {
+      "file": "unit/test_ent926_runtime_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "agent",
+        "security"
+      ],
+      "description": "Gemini CLI and Codex refuse a shared person's turn before the CLI starts (ent#926, ruling 2026-10-19): agent_server/services/turn_scope.require_owner_tier lets an owner turn and a call with no execution id through, refuses share and unknown with a 403 naming the runtime, and refuses an unanswered lookup with a 503. The lookup is exercised over real HTTP (agent key, percent-encoded ids, 404 unknown, 500 and garbage unreachable, no key, refused connection). Wired at the top of GeminiRuntime and CodexRuntime execute and execute_headless: a share turn never reaches subprocess.Popen."
+    },
+    {
+      "file": "unit/test_ent926_agent_key_turn_scope.py",
+      "feature": "abilityai/trinity-enterprise#926",
+      "added": "2026-10-19",
+      "categories": [
+        "backend",
+        "auth",
+        "security"
+      ],
+      "description": "An agent's own key reads executions for the person whose turn it is (ent#926): the auth dependency records an agent key's X-Trinity-Execution-Id privately (never for a person, never serialized); an owner-tier turn, a scheduled turn, manual and no header keep the full view; a shared person's turn reads as share tier with that person's rows on every agent (fleet reads exempt none); a share turn with no platform user, another agent's execution and an unknown id read no rows; shared-state routes refuse it; system, ops and connector keys and persons are untouched."
     },
     {
       "file": "unit/test_4072_inbox_notice_wording.py",
