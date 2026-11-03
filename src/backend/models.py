@@ -500,7 +500,7 @@ class User(BaseModel):
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only
-    # writers are the two fences, after the grant check and the owner bound.
+    # writer is `enforce_agent_capability`, after the grant check and the owner bound.
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
@@ -2027,6 +2027,12 @@ class ProactiveRateLimitsUpdate(BaseModel):
 class AgentCapacityUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/capacity (CAPACITY-001, #506)."""
     max_parallel_tasks: int
+
+
+class DirectVoiceSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/direct-voice (trinity-enterprise#1046). Partial."""
+    enabled: Optional[bool] = None
+    provider: Optional[Literal["auto", "gemini", "elevenlabs"]] = None
 
 
 class BrainOrbSettingsUpdate(BaseModel):

@@ -129,7 +129,7 @@ class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
     person it was addressed to (an admin may cancel it, never approve it).
     trinity-enterprise#1042: so may an ask addressed to a canon role id —
-    `role` is that `role:<id>`, None for any other ask."""
+    `role` is that `role:<id>` (or `approver`, #1053), None for any other ask."""
 
     def __init__(self, item_id: str, *, role: Optional[str] = None):
         super().__init__("not_addressee")
@@ -220,20 +220,36 @@ def _role_id_of(row: Mapping[str, Any]) -> Optional[str]:
     return None if role_id is None else f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
 
 
+def _approver_seated(row: Mapping[str, Any]) -> bool:
+    """An ask addressed `to: approver` with a seat snapshot
+    (trinity-enterprise#1053). A new one always has one — an unfilled seat
+    refuses the raise — so an empty snapshot marks a legacy row, which stays
+    open as it was."""
+    return row.get("to_role") == "approver" and bool(_resolved_people(row))
+
+
+def _fenced_role_of(row: Mapping[str, Any]) -> Optional[str]:
+    """The role a refusal names (`AskNotAddressee.role`): the canon role id, or
+    `approver` for a seated approver ask; None keeps the door's own wording."""
+    return _role_id_of(row) or ("approver" if _approver_seated(row) else None)
+
+
 def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
     """Whether ending `row` this way belongs to the people it resolved to
     (`resolved_to`) — the one predicate `may_end` and `addressed_view` share,
     so a card never offers a control the sink would refuse.
 
     - A gated-skill approval (trinity-enterprise#751): its answer AND its cancel.
-    - An ask addressed to a canon role id (trinity-enterprise#1042): its answer
+    - An ask addressed to a canon role id (trinity-enterprise#1042), or to the
+      `approver` kind with a seat snapshot (trinity-enterprise#1053): its answer
       only — a cancel keeps the rule every ask has.
-    The four kinds are not fenced here."""
+    The other kinds, and a legacy `approver` row with no snapshot, are not
+    fenced here."""
     if row.get("raised_by") == "gate" and row.get("type") == "approval":
         return True
     if cancelling:
         return False
-    return _role_id_of(row) is not None
+    return _role_id_of(row) is not None or _approver_seated(row)
 
 
 def _resolved_people(row: Mapping[str, Any]) -> List[str]:
@@ -258,7 +274,9 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
     addressed to (`resolved_to`, written at raise time): a gated-skill approval,
     whose decision runs a business action, and the answer to an ask addressed to
     a canon role id (trinity-enterprise#1042 — the role addresses the ask, the
-    seat authorises the answer). An empty or unreadable snapshot is nobody. An
+    seat authorises the answer) or to the approver (#1053). An empty or
+    unreadable snapshot is nobody — except on an `approver` row, which is then
+    not fenced at all (a legacy row, open as it was). An
     admin may CANCEL a gate approval — the escalation — but never decide a
     fenced ask. Every other ending keeps the rule it had: any person with access
     to the agent, checked by the caller. Person-only endings stay the routes'
@@ -275,8 +293,8 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
 def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str, Any]]:
     """Who a seat-fenced ask waits on, and whether THIS person may decide it —
     `may_end`'s own answer, so a card never offers a control the sink would
-    refuse (trinity-enterprise#980, widened to role-id asks by #1042). None for
-    every other ask.
+    refuse (trinity-enterprise#980, widened to role-id asks by #1042 and to
+    seated approver asks by #1053). None for every other ask.
 
     The operator queue lists an ask to anyone who can use its agent, but a
     fenced ask belongs to the people it was addressed to; without this an admin
@@ -300,8 +318,16 @@ def answer(
     actor: Actor,
     responded_by_id: Optional[str] = None,
     divergence_acknowledged: bool = False,
+    via_credential_sink: bool = False,
 ) -> Ending:
     """A person answered `item` (the row the caller read and checked).
+
+    `via_credential_sink` (trinity-enterprise#1066) is set by exactly one
+    caller — the Workspace secret field's sink, after it wrote the value into
+    the agent's environment — and is what lets a `credential` row end as
+    answered. Any other answer to that kind raises `CredentialAnswerRefused`
+    before anything is checked or written: the value must never reach
+    `response`.
 
     Raises `ResponseNotOfferedError` (#2376), or a `ReservedAnswerError` for the
     reserved `SOMETHING_ELSE` decision (#3242), before anything is written, then
@@ -309,13 +335,15 @@ def answer(
     options are frozen at ingest, so validating against the caller's read is
     sound; the status is not, which is what the compare-and-set is for.
     """
+    if (item or {}).get("type") == "credential" and not via_credential_sink:
+        raise CredentialAnswerRefused(item["id"])
     # #3242: a platform-minted approval (a skill gate) counts only its own
     # options and no agent reads the instruction — refused, named.
     if response == SOMETHING_ELSE and decided_by_options(item):
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
-        raise AskNotAddressee(item["id"], role=_role_id_of(item))
+        raise AskNotAddressee(item["id"], role=_fenced_role_of(item))
     from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
@@ -352,7 +380,7 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     `AskNotAddressee` (a gate approval the actor may not end, #751)."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
-        raise AskNotAddressee(item_id, role=_role_id_of(current))
+        raise AskNotAddressee(item_id, role=_fenced_role_of(current))
     updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
     if not updated:
         raise AskNotFound(item_id)
@@ -520,6 +548,21 @@ def clear_platform(ids: Iterable[str], *, reason: str, batch_id: Optional[str] =
 # The one way an ask begins (PR B): an agent — or, later, a gate — raises it
 # ---------------------------------------------------------------------------
 
+class CredentialAnswerRefused(Exception):
+    """trinity-enterprise#1066: a `credential` ask is answered ONLY by the
+    Workspace secret field's sink — the one caller that wrote the value into
+    the agent's environment and answers by name. An operator's respond box, a
+    Workspace typed answer or a direct `answer(...)` would put the secret into
+    `response`, the row, the write-back and the wake prompt; refused before
+    anything is written. `code` is what both doors answer with."""
+
+    code = "credential_answer_via_field"
+
+    def __init__(self, item_id: str):
+        super().__init__(self.code)
+        self.item_id = item_id
+
+
 class AskRejected(Exception):
     """A create the sink refused: the HTTP status and the NAMED code the caller
     answers with (422 for a malformed ask, 429 for the caps). `extra` carries
@@ -534,7 +577,10 @@ class AskRejected(Exception):
         self.extra = extra
 
 
-ASK_TYPES = ("approval", "question", "alert")
+# trinity-enterprise#1066: `credential` — the agent asks for a secret BY NAME
+# (`context.credential_name`); the person fills it through the Workspace secret
+# field, whose sink is the only thing that may answer it (`CredentialAnswerRefused`).
+ASK_TYPES = ("approval", "question", "alert", "credential")
 ASK_ROLES = ("primary", "approver", "viewer", "operator")
 # trinity-enterprise#1007: beside the four kinds, an agent's `to` may name a
 # canon role by id. This is the form the `invalid_to` refusal teaches; the id
@@ -728,6 +774,16 @@ def raise_ask(
         people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
+    if norm["type"] == "credential" and not addressee:
+        # trinity-enterprise#1066: a secret field has exactly ONE reader. No
+        # resolved person (the operator role, an agent with no owner and no
+        # primary) or several (a role two people fill) is refused before
+        # anything is written — the value must not be typed by whoever
+        # answers first and recorded against everyone it was delivered to.
+        raise AskRejected(
+            422, "no_person",
+            "A credential ask must reach exactly one person; ask it from a conversation "
+            "with the person who holds the credential, addressed to primary.")
 
     context = dict(norm["context"])
     turn = _platform_turn(agent_name, platform_execution_id)
@@ -991,11 +1047,29 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if kind == "approval" and not options:
         raise AskRejected(422, "options_required",
                           "An approval needs the options a person can choose from.")
+    if kind == "credential" and options:
+        # trinity-enterprise#1066: the person types the value into the secret
+        # field; there is nothing to choose, and an option list would read as
+        # a place to put the value.
+        raise AskRejected(422, "invalid_options",
+                          "A credential ask offers no options; the person types the value "
+                          "into the secret field it opens.")
     context = ask.get("context")
     if context is None:
         context = {}
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
+    if kind == "credential":
+        from services import credential_ask_policy
+        problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
+        if problem is not None:
+            raise AskRejected(
+                422, "invalid_credential_name",
+                "A credential ask needs context.credential_name: the environment variable "
+                f"the person is filling — a variable name of at most "
+                f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
+                "and the agent runtime do not reserve.",
+                reason=problem)
     # The workspace thread is platform-written: an agent that could author it
     # would choose which conversation its ask claims to belong to (ent#429), and
     # whether it is drawn in that chat at all (ent#734).
@@ -1024,6 +1098,12 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     elif to not in ASK_ROLES:
         raise AskRejected(422, "invalid_to", "Unknown role.",
                           allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
+    if kind == "credential" and to != "primary":
+        # trinity-enterprise#1066: the secret field writes into the agent's
+        # environment, so it opens for the agent's primary person only — never
+        # a viewer, an approver or a canon role.
+        raise AskRejected(422, "invalid_to", "A credential ask is addressed to primary.",
+                          allowed=["primary"])
     expires_at = ask.get("expires_at")
     _deadline(expires_at, floor=False)
     supersedes = ask.get("supersedes_expired")

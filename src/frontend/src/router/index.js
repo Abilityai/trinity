@@ -45,6 +45,17 @@ export const routes = [
     meta: { requiresAuth: false, title: 'Chat' }
   },
   {
+    // trinity-enterprise#1054 — the terms a Workspace-only person accepts once.
+    // Signed in (a person is accepting), standalone (no help widget over the
+    // accept action), and a member page, so the operator-floor redirect leaves
+    // a Workspace-only person here rather than sending them to a Workspace
+    // whose every call the terms gate refuses.
+    path: '/terms',
+    name: 'TermsAcceptance',
+    component: () => import('../views/TermsAcceptance.vue'),
+    meta: { requiresAuth: true, title: 'Terms', hideHelpWidget: true }
+  },
+  {
     path: '/',
     name: 'Dashboard',
     component: () => import('../views/Dashboard.vue'),
