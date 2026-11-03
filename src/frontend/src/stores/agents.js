@@ -1235,21 +1235,6 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    // Usage share (trinity-enterprise#1059 — an agent's share of its
-    // subscription's usage; enterprise route, entitlement-gated). Both windows
-    // as used vs budget, the warn threshold and where each number comes from.
-    async getUsageShare(name) {
-      const { data } = await api.get(`/api/enterprise/agents/${name}/usage-share`)
-      return data
-    },
-
-    // Owner-only grant. Each field null = the platform default; all three null
-    // clears the agent's override. Takes effect on the next turn, no restart.
-    async setUsageShare(name, share) {
-      const { data } = await api.put(`/api/enterprise/agents/${name}/usage-share`, share)
-      return data
-    },
-
     // Capacity (CAPACITY-001 / #506 — per-agent max_parallel_tasks within the fleet ceiling)
     async getAgentCapacity(name) {
       const authStore = useAuthStore()
