@@ -78,3 +78,21 @@ def test_no_audio_reaches_the_browser_after_it_was_told_to_flush(cut_on):
     flush_at = next(i for i, f in enumerate(socket.frames) if f["type"] == "audio_flush")
     after = [f for f in socket.frames[flush_at + 1:] if f["type"] == "audio"]
     assert after == [], f"audio sent after audio_flush: {len(after)} chunk(s)"
+
+
+def test_an_interrupt_during_the_spoken_send_records_no_first_audio():
+    """First-audio time is the moment audio reaches the browser. An interrupt landing while
+    the `spoken` send is in flight means no audio was sent, so none may be recorded."""
+    socket = InterruptingSocket(on="spoken")
+    bridge = dvs.DirectBridge(socket, _session(), ChunkyProvider(), lambda *_: None)
+    socket.bridge = bridge
+
+    async def go():
+        bridge._turn_first_audio = asyncio.get_running_loop().create_future()
+        await bridge._speak_sentence(bridge._generation, "One sentence.")
+        await asyncio.gather(*socket.pending)
+        return bridge._turn_first_audio
+
+    first = asyncio.run(go())
+    assert socket.of("audio") == []
+    assert not first.done(), "first-audio time recorded for a sentence that sent no audio"
