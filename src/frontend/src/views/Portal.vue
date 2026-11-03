@@ -361,6 +361,13 @@
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
           </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
+          </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
             <p :class="STAGE_BODY">{{ store.error }}</p>
@@ -589,6 +596,13 @@
             <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
+          </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
           </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
@@ -923,6 +937,7 @@ import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } f
 import { useAuthStore } from '@/stores/auth'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { loginLocation } from '@/utils/platformSession'
+import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
 import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
@@ -1047,6 +1062,14 @@ const canContinueAsOperator = computed(
   () => store.platformFallbackSuppressed && authStore.isAuthenticated
 )
 const operatorEmail = computed(() => authStore.userEmail || 'your Trinity account')
+
+// trinity-enterprise#1082 — the stage's named state when the terms gate refused
+// the roster: a closed invitation says so, and the link goes exactly where the
+// refusal handler would send the person (one builder, `termsLocation`).
+const termsRefusalTitle = computed(
+  () => closedInviteMessage(store.termsRefusal) || 'Accept the terms to continue'
+)
+const termsRefusalLink = computed(() => termsLocation(route.fullPath, store.termsRefusal))
 
 function continueAsOperator() {
   store.continueAsPlatform()
