@@ -3789,6 +3789,9 @@ class DatabaseManager:
     def record_telegram_inbound(self, binding_id, telegram_user_id, telegram_username=None):
         return self._telegram_channel_ops.record_inbound(binding_id, telegram_user_id, telegram_username)
 
+    def list_telegram_verified_links_for_user(self, telegram_user_id):
+        return self._telegram_channel_ops.list_verified_links_for_user(telegram_user_id)
+
     def list_telegram_clients_for_agent(self, agent_name):
         return self._telegram_channel_ops.list_clients_for_agent(agent_name)
 
@@ -3898,6 +3901,9 @@ class DatabaseManager:
 
     def get_whatsapp_chat_link_by_verified_email(self, binding_id, email):
         return self._whatsapp_channel_ops.get_chat_link_by_verified_email(binding_id, email)
+
+    def list_whatsapp_verified_links_for_user(self, wa_user_phone):
+        return self._whatsapp_channel_ops.list_verified_links_for_user(wa_user_phone)
 
     def list_whatsapp_clients_for_agent(self, agent_name):
         return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
@@ -4308,8 +4314,11 @@ class DatabaseManager:
     # Access Requests (Issue #311)
     # =========================================================================
 
-    def upsert_access_request(self, agent_name: str, email: str, channel: str = None):
-        return self._access_request_ops.upsert_pending(agent_name, email, channel)
+    def upsert_access_request(self, agent_name: str, email: str, channel: str = None, identity: dict = None):
+        return self._access_request_ops.upsert_pending(agent_name, email, channel, identity)
+
+    def list_access_requests_by_requester(self, channel: str, channel_user_id: str):
+        return self._access_request_ops.list_by_requester(channel, channel_user_id)
 
     def list_access_requests(self, agent_name: str, status: str = "pending"):
         return self._access_request_ops.list_for_agent(agent_name, status)

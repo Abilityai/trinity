@@ -6012,6 +6012,18 @@ def _migrate_platform_alert_subjects_resweep(cursor, conn):
         logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
 
 
+def _migrate_access_requests_requester_identity(cursor, conn):
+    """trinity-enterprise#737 — an access request records who asked, as the
+    channel saw them: its stable user id, handle, display name, and the chat /
+    thread the request came from. All nullable. Schema is also in db/schema.py
+    for fresh installs; mirrored by Alembic revision
+    0113_access_requests_requester_identity.
+    """
+    for column in ("requester_channel_id", "requester_handle", "requester_name", "requester_chat_id", "requester_thread_id"):
+        _safe_add_column(cursor, "access_requests", column,
+                         f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6194,4 +6206,5 @@ MIGRATIONS = [
     ("agent_memory_provenance", _migrate_agent_memory_provenance),
     ("platform_alert_subjects_resweep", _migrate_platform_alert_subjects_resweep),
     ("loop_runs_stale_duplicates", _migrate_loop_runs_stale_duplicates),
+    ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
 ]

@@ -19,6 +19,7 @@ from dependencies import (
     reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
+from services import access_request_service
 from services.client_roster_service import get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
@@ -298,7 +299,9 @@ async def list_access_requests_endpoint(
     status: str = "pending",
 ):
     """List access requests for this agent (owner-only)."""
-    rows = db.list_access_requests(agent_name, status)
+    # trinity-enterprise#737: each request names who asked, as the channel saw
+    # them, and where the viewer has seen that identity before.
+    rows = access_request_service.list_access_requests(agent_name, status, current_user.username)
     return [AccessRequest(**r) for r in rows]
 
 
@@ -374,4 +377,4 @@ async def decide_access_request_endpoint(
         details={"email": existing["email"], "access_request_id": request_id},
     )
 
-    return AccessRequest(**updated)
+    return AccessRequest(**updated, identity_captured=bool(updated.get("requester_channel_id")))

@@ -1,6 +1,29 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent737_request_identity.py",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "channels",
+        "access-control"
+      ],
+      "description": "A channel access request names who asked: identity stored, replaced (never inherited) on refresh, kept on decision, blank/overlong values bounded; Telegram/WhatsApp/Slack requester_identity from real parsed messages; the router gate passes it and still records the request when extraction fails; the owner's list carries identity_captured and known_as limited to agents the viewer manages; the list route returns the person."
+    },
+    {
+      "file": "../src/frontend/tests/unit/sharingPanelRequestIdentity.mount.spec.js",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "channels"
+      ],
+      "description": "Sharing tab pending requests show the person: name, @handle, channel id, then email; seen-before chips capped at three with a counted rest; public-link requests read 'Email only', older rows 'Identity not captured'; Approve still decides by id."
+    },
+    {
       "file": "unit/test_ent1066_secret_paste_guard.py",
       "feature": "trinity-enterprise#1066",
       "added": "2026-11-02",

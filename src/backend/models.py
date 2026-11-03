@@ -4805,6 +4805,15 @@ class AccessPolicyUpdate(BaseModel):
     group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 
+class AccessRequestPriorContact(BaseModel):
+    """The same channel identity seen before (trinity-enterprise#737), on an
+    agent the viewer owns or administers: an earlier request (`approved` /
+    `denied` / `pending`) or a verified chat link (`verified`)."""
+    agent_name: str
+    status: str
+    email: Optional[str] = None
+
+
 class AccessRequest(BaseModel):
     id: str
     agent_name: str
@@ -4812,6 +4821,17 @@ class AccessRequest(BaseModel):
     channel: str | None = None
     requested_at: str
     status: str
+    # trinity-enterprise#737 — who asked, as the channel saw them. A field the
+    # channel does not expose was never captured. `identity_captured` is False
+    # for the public link (no channel identity) and for rows older than #737, so
+    # the UI says so instead of showing a blank.
+    requester_channel_id: Optional[str] = None
+    requester_handle: Optional[str] = None
+    requester_name: Optional[str] = None
+    requester_chat_id: Optional[str] = None
+    requester_thread_id: Optional[str] = None
+    identity_captured: bool = False
+    known_as: List[AccessRequestPriorContact] = []
 
 
 class AccessRequestDecision(BaseModel):
