@@ -47,7 +47,6 @@ from services.chat_title import (
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
-from services.chat_signals import AdmissionRefused, admission_refusal_of
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
 )
@@ -184,11 +183,6 @@ PORTAL_FAILURE_CATEGORIES = (
     # Not retryable: resending meets the same refusal. A request that WAS put up
     # for approval is not a failure at all — the turn answers with the notice.
     "gated",
-    # trinity-enterprise#1059 — an admission policy stopped the turn before it
-    # ran (today: the agent's share of its subscription is used up). Not
-    # retryable: re-sending meets the same refusal until the window frees or
-    # the share is raised; the policy's own sentence says which and when.
-    "limit",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -1123,13 +1117,14 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
-    from .voice import realtime_voice_capability
+    from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
         realtime_voice=realtime_voice_capability(include_owned),
+        direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
         # ROUTER is the control (a client that fabricated a `model` is refused
@@ -2394,8 +2389,12 @@ def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None
     this chat"), so the call could not run a single task. Its rows carry the
     call id, and `get_platform_rows_since_last_reply` skips them as a cursor,
     so the delta the guard protects stays whole.
+
+    trinity-enterprise#1046: a Direct call's `vd_` id DOES arrive on a request, so it
+    never passes here. The route checked it is the caller's own Direct call, and that
+    proves nothing about a Live call on the thread: only a dispatcher id is a bypass.
     """
-    if voice_call_id:
+    if voice_call_id and not voice_call_id.startswith("vd_"):
         return
     from .voice import voice_call_active
     if voice_call_active(session_id):
@@ -2617,6 +2616,15 @@ def _format_voice_delta(rows: list[dict], *, budget: int = _SPOKEN_CONTEXT_MAX_C
     if not lines:
         return ""
     return VOICE_DELTA_HEADER + "\n" + "\n".join(lines)
+
+
+DIRECT_CALL_ETIQUETTE = (
+    "The person is on a voice call. Their words were transcribed, so names and numbers may be "
+    "misheard: confirm them before acting on them. Your reply is read aloud. Usually use one to "
+    "three short sentences, unless asked for more. Avoid markdown, URLs and ids in what you say. "
+    "Put anything that must be seen in <screen>...</screen>, which is shown and not read. Say what "
+    "you are about to do before long work."
+)
 
 
 def _build_portal_system_prompt(agent_name: str, email: str, *, retrieved=()) -> str | None:
@@ -2907,7 +2915,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       resolved_model: str | None = None,
                       # ent#551 — a turn dispatched from a voice call carries the
                       # call's id on both its rows (typed rows, `source` NULL):
-                      # the attribution, and nothing else. Never from a request.
+                      # the attribution, and nothing else. From a request only for a
+                      # Direct call, validated at the router (ent#1046).
                       voice_call_id: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
@@ -3236,6 +3245,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # byte-identical to the pre-#1022 one while memory is off (the default).
     system_prompt = (_build_portal_system_prompt(agent_name, email, retrieved=retrieved)
                      if retrieved else _build_portal_system_prompt(agent_name, email))
+    # trinity-enterprise#1046: this reply will be read aloud. A prompt suffix, not a
+    # rewrite of what is said.
+    if voice_call_id and voice_call_id.startswith("vd_"):
+        system_prompt = f"{system_prompt}\n\n{DIRECT_CALL_ETIQUETTE}" if system_prompt else DIRECT_CALL_ETIQUETTE
 
     # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
     # `persist_session=True` → one cold retry if the JSONL is gone. Identical to
@@ -3359,15 +3372,6 @@ async def portal_chat(agent_name: str, message: str, email: str,
     result = turn.result
 
     status = getattr(result, "status", None)
-    # trinity-enterprise#1059: the attribute when the refusal happened in this
-    # worker, the row's `skipped` + `usage_share` shape when the turn was
-    # refused on another one (a drained backlog) — one predicate for both.
-    refusal = admission_refusal_of(result, agent_name)
-    if isinstance(refusal, AdmissionRefused):
-        # Nothing ran, and the policy's sentence is written for a person (the
-        # budget, when it frees, whether an ask is pending) — shown as is,
-        # never the internal copy.
-        raise ClientPortalError(429, refusal.message, category="limit", retryable=False)
     if status == "cancelled":
         # ent#155 review (NEW-1): a cancellation is not a failure, and saying so
         # only in the browser was not enough. The client-side suppression shields
@@ -4278,7 +4282,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # #3265 — see `portal_chat`.
                             attachments: str | None = None,
                             # trinity-enterprise#631 — see `portal_chat`.
-                            person_tags: tuple | None = None) -> dict:
+                            person_tags: tuple | None = None,
+                            # trinity-enterprise#1046 — already validated at the router.
+                            voice_call_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -4390,7 +4396,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               reply_context=reply_context,
                               gate_is_person=gate_is_person,
                               gate_credential=gate_credential,
-                              person_tags=person_tags)
+                              person_tags=person_tags,
+                              voice_call_id=voice_call_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written

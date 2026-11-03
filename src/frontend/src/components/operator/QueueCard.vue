@@ -232,6 +232,13 @@
           </div>
         </div>
 
+        <!-- trinity-enterprise#1066: a credential ask has no respond box here —
+             the value is typed into the masked field in the person's
+             Workspace, and the backend refuses any other answer. -->
+        <p v-else-if="responseKind === 'credential'" class="text-xs" data-testid="queue-credential-notice">
+          Answered in the person's Workspace, through the secret field. It can't be answered from here.
+        </p>
+
         <!-- Alert: acknowledge -->
         <div v-else class="flex justify-end">
           <button

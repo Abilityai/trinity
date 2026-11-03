@@ -273,18 +273,6 @@
 - **The fleet denominator comes from the roster, not the results** — a member whose sampling raised is `UNASSESSABLE`, not absent. Filtering results on truthiness dropped exactly the members the ent#100 rule requires to block the claim, and the early return suppressed the per-subscription alerts, so the false claim was the only emission. Found in review of PR #2410; the durable class is in `learnings.md` (2026-08-26).
 - **No schema change, no migration** — the state machine is the alert id, and the threshold is a `system_settings` row.
 
-### 20.5d Pre-Admission Policy Seam (SUB-005, trinity-enterprise#1059)
-- **Status**: 🔨 In progress (2026-11-02) — the OSS seam; no policy ships in OSS
-- **Requirement ID**: SUB-005
-- **Extends**: SUB-004 (the per-agent cost accounting a policy may read)
-- **Description**: One edition-agnostic point where a registered policy may stop an agent's turn **before** it is admitted, on every door. With nothing registered nothing changes. The intended first policy is an agent's share of its subscription's usage, registered by an optional module through the generic seam.
-- **Seam** (`services/admission_policy.py`): `register(policy)` / `enforce(agent_name, *, triggered_by, source)` / `notice(agent_name)`. A policy refuses by raising `chat_signals.AdmissionRefused(code, agent_name, message, frees_at=, retryable=False)`; any other exception from a policy is logged and the turn is admitted (fail-open).
-- **Placement**: `/chat` (`admit_chat_request`) and `/task` (`dispatch_parallel_task`) after the skill gate and before the idempotency claim (a refusal leaves nothing behind; the same key works later); every other door at step 1c of `execute_task`, after the skill-gate backstop and before the capacity acquire.
-- **Outcomes**: `/chat` and `/task` answer **429** with `X-Trinity-Error-Code: <code>` (`usage_share` is the vocabulary entry), the policy's plain-words `message`, and `Retry-After` when the policy knows `frees_at`. An `execute_task` door closes its row **`skipped`** with the message (never `failed` — not the agent's fault, so no schedule failure count, no breaker, and a loop iteration it stops reads `skipped`, counts against nothing and ends the loop with the code as `stop_reason`) and returns `error_code` + `admission_refusal`.
-- **The refusal is a property of the result, not of the worker**: `chat_signals.admission_refusal_of(result, agent_name)` reads the attribute or rebuilds the refusal from the row's `skipped` + code shape, and `result_from_execution_row` attaches it, so a turn refused on another worker (a drained backlog, a long-poll that read the row back) arrives the same way. Every door that answers a person branches on it before `failed`/`cancelled`, never success-shaped: the paid door releases its claim and neither attaches nor settles (no charge); MCP inline chat and the public link answer 429 with the sentence and the code header (the async public turn stores the sentence as the reply); a channel sends the sentence and persists no empty assistant turn; a room posts the sentence and keeps its resume handle and cursor; the Workspace shows it as category `limit`, not retryable; A2A reports `rejected` with the sentence; a validation turn is an `ERROR` verdict; the scheduler, fan-out and operator-resume doors record the `skipped` row with its message.
-- **Agent's view**: `notice()` is rendered as `- **Usage**: …` in the Execution Context (`compose_system_prompt` auto-fill), absent when no policy has anything to say.
-- **No schema change, no MCP surface.** Tests: `tests/unit/test_ent1059_admission_policy_seam.py`.
-
 ### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
 - **Status**: ✅ Implemented (2026-06-13)
 - **GitHub Issue**: #1089
@@ -594,6 +582,52 @@
   `ensure-default` writes the same `key_create` audit row as `POST /api/mcp/keys`,
   so every mint is attributable. Guard:
   `tests/unit/test_mcp_key_creation_requires_session.py`.
+
+### 20.11 A Credential Handed in the Chat — the Secret Field and the Paste Guard (trinity-enterprise#1066)
+- **Status**: ✅ Implemented (OSS core). Capability: `credentials.md` §3.10.
+- **One door for the value**: `POST /api/enterprise/client-portal/asks/{id}/credential`
+  — `get_portal_principal` with `is_person` (an agent, system or connector key
+  is refused before the row is read), the asks router's roster re-check and
+  uniform 404 (an ask of another kind is the same 404), rate-limited 30/min per
+  person. Every refusal is a named code; neither it nor a validation error on
+  the body echoes the value.
+- **One leaf handles it**: `services/credential_sink.py` stages the value in the
+  runtime identity scrub FIRST and fails closed (503 `scrub_unavailable`), then
+  checks the agent is running, takes a short per-agent Redis lease (`env_busy`),
+  reads `.env`, sets one line (`agent_env_patch.set_keys`: quoted, duplicates
+  collapsed, every other byte kept), refuses a file over 256 KiB, injects it
+  back and audits `credentials` / `chat_provide` with the name and ask id only.
+  An AST guard in `tests/unit/test_ent1066_credential_sink.py` refuses any use
+  of the value in this module other than measuring, staging, patching or
+  passing it on. Values with a line break or NUL, or over 32 KiB, are refused.
+- **Only the field answers the kind**: `ask_service.answer(..., via_credential_sink=True)`
+  is set by the sink alone; any other answer raises `CredentialAnswerRefused`
+  → 422 `credential_answer_via_field` on the operator and Workspace doors, so a
+  secret never lands in `response`, the write-back or the wake prompt.
+- **Name policy**: `services/credential_ask_policy.py` refuses a name outside the
+  agent reader's charset, over 64 characters, or reserved — the agent runtime's
+  protected and routing names (mirrored from `execution_env`, parity-tested) and
+  the platform-written ones (MCP key, backend URL, agent name, model credential,
+  subscription token).
+- **Paste guard**: both Workspace chat routes refuse a message that looks like a
+  credential with 422 `secret_in_message` before admission — no reply context,
+  title, session row, execution row or idempotency key. The detector
+  (`utils/credential_sanitizer.secret_shape`) runs over `SECRET_VALUE_PATTERNS`,
+  which gained the `ops_…` and `dop_v1_…` service-token shapes in both the
+  backend and the agent-image copy; `Bearer`/`Basic` are excluded (prose), and a
+  sensitive `KEY=value` counts only with a value of 8+ characters. The refusal
+  names the shape, never the text. The composer then keeps no copy: the failed
+  message is dropped, not offered for Retry, never handed back to the composer,
+  and any draft holding it is cleared.
+- **Residuals (stated, not closed here)**: the guard is not wired into channel
+  adapters (Slack, Telegram, voice); the owner's Credentials-tab inject and the
+  other non-sink `.env` writers are whole-file and do not take the sink's lease,
+  so they stay last-writer-wins against it; the live stream is not scrubbed
+  (ent#279).
+- **Tests**: `tests/unit/test_ent1066_credential_ask_kind.py`,
+  `test_ent1066_credential_sink.py`, `test_ent1066_credential_route_gates.py`,
+  `test_ent1066_secret_paste_guard.py`; `src/mcp-server/src/operator_queue.test.ts`;
+  `src/frontend/tests/unit/{portalCredentialField,credentialAskSurfaces,portalSecretInMessage}.mount.spec.js`.
 
 ---
 

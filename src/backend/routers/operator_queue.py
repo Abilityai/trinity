@@ -483,6 +483,15 @@ async def respond_to_queue_item(
         # #3242: the reserved "(something else)" decision — named so the caller
         # can act: `instruction_required`, `reserved_value` or `not_off_menu`.
         raise HTTPException(status_code=422, detail={"code": e.code, "message": str(e)})
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask is answered only through
+        # the secret field in the person's Workspace; the respond box would put
+        # the value into the row and the agent's wake. Nothing was written.
+        raise HTTPException(status_code=422, detail={
+            "code": e.code,
+            "message": "This ask is answered in the person's Workspace through the secret "
+                       "field it opened; a typed response cannot answer it.",
+        })
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
     except ask_service.AskNotAddressee as e:
