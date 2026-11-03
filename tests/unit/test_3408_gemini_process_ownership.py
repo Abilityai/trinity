@@ -41,6 +41,18 @@ from agent_server.utils import subprocess_pgroup
 
 pytestmark = pytest.mark.unit
 
+
+@pytest.fixture(autouse=True)
+def _owner_turn(monkeypatch):
+    """These tests are about the child process, not about whose turn it is: every
+    turn here is the owner's, so the ent#926 tier check (test_ent926_runtime_turn_scope.py)
+    passes without a platform to ask."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner", True, None
+    monkeypatch.setattr(turn_scope, "fetch_turn", owner)
+
 EXECUTION_ID = "abandoned-gemini"
 
 _ASSISTANT_LINE = json.dumps({"type": "message", "role": "assistant", "content": "done"})
