@@ -80,6 +80,30 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def _contained_read_target(rel_path: str):
+    """``(lexical, resolved)`` absolute paths for ``rel_path`` when both stay
+    strictly inside the agent home, else None (ent#1066).
+
+    Refused: an absolute path, any ``..`` component, and anything whose
+    lexical OR link-resolved location is not under the home — compared with a
+    trailing separator, so a sibling whose name extends the home's
+    (``/home/developer2``) is outside too. ``lexical`` is what ``lstat`` proves
+    absent; ``resolved`` is what is read, so a link is only followed to a
+    target that is itself inside.
+    """
+    if not rel_path or os.path.isabs(rel_path) or ".." in rel_path.split("/"):
+        return None
+    home_lexical = os.path.abspath(_HOME)
+    home_real = os.path.realpath(_HOME)
+    lexical = os.path.normpath(os.path.join(home_lexical, rel_path))
+    if not lexical.startswith(home_lexical + os.sep):
+        return None
+    resolved = os.path.realpath(lexical)
+    if not resolved.startswith(home_real + os.sep):
+        return None
+    return lexical, resolved
+
+
 # Writable-layer override path (#1089). Deliberately NOT under /home/developer —
 # that path is the persistent agent-{name}-workspace volume which
 # `recreate_container_with_updated_config` preserves, so a token written there
@@ -220,44 +244,48 @@ async def read_credential_files(paths: str = Query(..., description="Comma-separ
         paths: Comma-separated list of file paths relative to /home/developer
                e.g., ".env,.mcp.json"
     """
-    home_dir = Path("/home/developer")
+    home_dir = _HOME
     files = {}
     files_b64 = {}
+    # ent#1066: a path is listed here ONLY when the agent proved it does not
+    # exist. A path left out of all three maps was NOT read (a read error, a
+    # link out of the home, not a regular file) — a caller that rewrites the
+    # whole file must refuse it, never treat it as empty.
+    missing = []
 
     path_list = [p.strip() for p in paths.split(",") if p.strip()]
 
     for rel_path in path_list:
-        # Security: prevent path traversal
-        clean_path = rel_path.lstrip("/").lstrip(".")
-        if ".." in clean_path:
-            logger.warning(f"Path traversal attempt blocked: {rel_path}")
+        target = _contained_read_target(rel_path)
+        if target is None:
+            logger.warning(f"Credential read blocked: path escapes home '{rel_path}'")
             continue
-
-        # Handle paths starting with . (like .env, .mcp.json)
-        if rel_path.startswith("."):
-            filepath = home_dir / rel_path
-        else:
-            filepath = home_dir / clean_path
+        lexical, resolved = target
 
         try:
-            if filepath.exists() and filepath.is_file():
-                # Verify the resolved path is still under home_dir
-                resolved = filepath.resolve()
-                if str(resolved).startswith(str(home_dir.resolve())):
-                    raw = filepath.read_bytes()
-                    try:
-                        # Text files round-trip as-is; non-UTF-8 (binary) creds
-                        # come back base64 so cert/key bytes survive (#11).
-                        files[rel_path] = raw.decode("utf-8")
-                    except UnicodeDecodeError:
-                        files_b64[rel_path] = base64.b64encode(raw).decode("ascii")
-                    logger.debug(f"Read credential file: {rel_path} ({len(raw)} bytes)")
-                else:
-                    logger.warning(f"Path resolved outside home directory: {rel_path}")
+            os.lstat(lexical)
+        except FileNotFoundError:
+            missing.append(rel_path)
+            continue
+        except OSError as e:
+            logger.warning(f"Failed to stat {rel_path}: {e}")
+            continue
+
+        try:
+            if os.path.isfile(resolved):
+                with open(resolved, "rb") as fh:
+                    raw = fh.read()
+                try:
+                    # Text files round-trip as-is; non-UTF-8 (binary) creds
+                    # come back base64 so cert/key bytes survive (#11).
+                    files[rel_path] = raw.decode("utf-8")
+                except UnicodeDecodeError:
+                    files_b64[rel_path] = base64.b64encode(raw).decode("ascii")
+                logger.debug(f"Read credential file: {rel_path} ({len(raw)} bytes)")
         except Exception as e:
             logger.warning(f"Failed to read {rel_path}: {e}")
 
-    return CredentialReadResponse(files=files, files_b64=files_b64)
+    return CredentialReadResponse(files=files, files_b64=files_b64, missing=missing)
 
 
 @router.get("/api/credentials/list", response_model=CredentialListResponse)

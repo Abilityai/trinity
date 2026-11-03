@@ -146,7 +146,12 @@
       </div>
     </header>
 
-    <div class="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+    <!-- #4160: `relative`, as on the list's scroll box (PortalInboxList.vue).
+         Every agent bubble carries PortalMarkdown's `sr-only` live region,
+         which is `position: absolute`; with no positioned ancestor it resolved
+         against the page, escaped this box, and a long room stretched the
+         document so the whole Workspace scrolled. -->
+    <div class="relative flex-1 min-h-0 overflow-y-auto px-4 py-4">
       <!-- Capped at the conversation's reading width (§3g A13). -->
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto" data-testid="inbox-pane-body">
       <InlineError

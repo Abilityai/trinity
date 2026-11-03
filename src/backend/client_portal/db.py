@@ -210,6 +210,20 @@ def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> No
         conn.execute(stmt, {"gate_hold": gate_hold, "ids": ids})
 
 
+def get_turn_reply_row(execution_id: str) -> Optional[dict]:
+    """The assistant row one turn wrote, or None while it has not landed. Read by the
+    Direct call's speech (trinity-enterprise#1046): the row, not the execution, holds
+    what the thread shows."""
+    stmt = text(
+        "SELECT id, content, gate_hold FROM enterprise_portal_messages "
+        "WHERE execution_id = :execution AND role = 'assistant' "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"execution": execution_id}).mappings().first()
+    return dict(row) if row else None
+
+
 def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
     """#3166: name the turn a user row belongs to after the row was written —
     the synchronous path creates its execution after the user row, and a retry
@@ -370,6 +384,12 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
 
     trinity#3402: nor is a held turn's notice — the platform wrote it, the live
     session never saw that turn — for the same reason.
+
+    trinity-enterprise#1046: a Direct call's reply IS the cursor, carrying a call id or
+    not. Each one is the agent's own session answering, so nothing before it is
+    unheard. Without this every turn after a Direct call would be re-sent the whole
+    thread since the last typed reply. The call's label row stays out of the delta too:
+    it describes turns the session already holds.
     """
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
@@ -380,9 +400,11 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     stmt = text(
         f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
         f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
+        f"AND (voice_call_id IS NULL OR voice_call_id NOT LIKE 'vd\\_%' ESCAPE '\\') "
         f"AND created_at > COALESCE((SELECT MAX(r.created_at) FROM enterprise_portal_messages r "
         f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
-        f"                              AND voice_call_id IS NULL AND {_not_held('r')}), '') "
+        f"                              AND (voice_call_id IS NULL OR voice_call_id LIKE 'vd\\_%' ESCAPE '\\') "
+        f"                              AND {_not_held('r')}), '') "
         f"ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:

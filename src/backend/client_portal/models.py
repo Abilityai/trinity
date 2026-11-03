@@ -248,10 +248,21 @@ class PortalRealtimeVoice(BaseModel):
     reason: Optional[str] = None
 
 
+class PortalDirectVoice(BaseModel):
+    """Whether THIS principal may start a Direct call (trinity-enterprise#1046), why
+    not when not, and which speech provider it would use. Fail-closed, and None reason
+    for a portal-token client, for the reasons on `PortalRealtimeVoice`."""
+    available: bool = False
+    reason: Optional[str] = None
+    provider: Optional[str] = None
+
+
 class PortalVoiceStartRequest(BaseModel):
     """Start a voice call bound to a Workspace thread (ent#534)."""
     portal_session_id: str = Field(..., min_length=1, max_length=64)
     voice_name: Optional[str] = None
+    # trinity-enterprise#1046. Absent means today's call.
+    mode: Literal["live", "direct"] = "live"
 
 
 class PortalVoiceStartResponse(BaseModel):
@@ -259,6 +270,12 @@ class PortalVoiceStartResponse(BaseModel):
     websocket_url: str
     portal_session_id: str
     max_duration_seconds: int
+    # trinity-enterprise#1046: Direct only. `early_speech` is False on a runtime that
+    # speaks only once its turn has finished, and the status line says so.
+    mode: str = "live"
+    provider: Optional[str] = None
+    runtime: Optional[str] = None
+    early_speech: Optional[bool] = None
 
 
 class PortalRoster(BaseModel):
@@ -267,6 +284,8 @@ class PortalRoster(BaseModel):
     agents: list[PortalAgentCard]
     # ent#534 — see PortalRealtimeVoice. Resolved once per roster load.
     realtime_voice: PortalRealtimeVoice = Field(default_factory=PortalRealtimeVoice)
+    # trinity-enterprise#1046. Resolved once per roster load, like the field above.
+    direct_voice: PortalDirectVoice = Field(default_factory=PortalDirectVoice)
     # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
     # Named for the capability, never the module or the edition: this payload
     # goes to an operator's customer, who can neither buy a missing module nor
@@ -371,6 +390,9 @@ class PortalChatRequest(BaseModel):
     # conversation. Ignored when `session_id` names a thread: the id is a fact,
     # this is an intent. Defaults False so no existing caller changes behaviour.
     new_thread: bool = False
+    # trinity-enterprise#1046: this turn belongs to the caller's live Direct call on
+    # this thread. Honoured on the streaming route, after `turn_may_join_call`.
+    voice_call_id: Optional[str] = Field(default=None, max_length=64)
     # ent#555 — which canvas the client has open on screen, so "add a column to
     # this" resolves without asking. Client-supplied and therefore VALIDATED
     # server-side against the agent's own visible canvases; an unrecognised

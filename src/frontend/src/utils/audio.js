@@ -19,7 +19,7 @@ export const MIC_WORKLET_URL = '/mic-capture.worklet.js'
  * Start capturing audio from the microphone.
  * Tries AudioWorklet first, falls back to ScriptProcessor.
  *
- * @param {Function} onData - Called with base64-encoded PCM chunks
+ * @param {Function} onData - Called with base64-encoded PCM chunks and the raw samples
  * @returns {{ stop: Function }} Control object
  */
 export async function startMicCapture(onData) {
@@ -45,7 +45,7 @@ export async function startMicCapture(onData) {
     const workletNode = new AudioWorkletNode(audioContext, 'trinity-mic-capture')
     workletNode.port.onmessage = (e) => {
       const base64 = arrayBufferToBase64(float32ToPcm16(e.data).buffer)
-      onData(base64)
+      onData(base64, e.data)
     }
     source.connect(workletNode)
     processorNode = workletNode
@@ -60,7 +60,8 @@ export async function startMicCapture(onData) {
     processor.onaudioprocess = (event) => {
       const float32 = event.inputBuffer.getChannelData(0)
       const base64 = arrayBufferToBase64(float32ToPcm16(float32).buffer)
-      onData(base64)
+      // A copy: the browser reuses this buffer on the next callback.
+      onData(base64, float32.slice())
     }
     source.connect(processor)
     processor.connect(audioContext.destination)
@@ -87,6 +88,7 @@ export function createAudioPlayer() {
   let nextStartTime = 0
   let analyser = null
   let analyserData = null
+  let held = false
 
   function ensureContext() {
     if (!audioContext || audioContext.state === 'closed') {
@@ -98,7 +100,7 @@ export function createAudioPlayer() {
       analyserData = new Uint8Array(analyser.frequencyBinCount)
       analyser.connect(audioContext.destination)
     }
-    if (audioContext.state === 'suspended') {
+    if (audioContext.state === 'suspended' && !held) {
       audioContext.resume()
     }
     return audioContext
@@ -127,6 +129,22 @@ export function createAudioPlayer() {
       nextStartTime += buffer.duration
     },
 
+    /** Whether queued audio has not finished. A paused player still counts. */
+    isPlaying() {
+      return !!audioContext && nextStartTime > audioContext.currentTime
+    },
+
+    /** Hold playback without losing what is queued. */
+    pause() {
+      held = true
+      if (audioContext && audioContext.state === 'running') audioContext.suspend().catch(() => {})
+    },
+
+    resume() {
+      held = false
+      if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(() => {})
+    },
+
     /**
      * Get current output amplitude as 0–1 float.
      * Returns 0 if no audio is playing.
@@ -140,6 +158,7 @@ export function createAudioPlayer() {
     },
 
     stop() {
+      held = false
       if (audioContext) {
         audioContext.close().catch(() => {})
         audioContext = null

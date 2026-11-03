@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service, skill_gate_service
+from services import ask_service, credential_ask_policy, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # Only these reach a client. `alert` is included because an informational update
 # is one of the three things ent#364 asks for; anything else an agent invents is
 # not rendered rather than rendered as an unknown kind.
-_VISIBLE_KINDS = ("question", "approval", "alert")
+# trinity-enterprise#1066: `credential` — rendered as a masked secret field,
+# answered only through `provide_credential`.
+_VISIBLE_KINDS = ("question", "approval", "alert", "credential")
 
 
 class AsksUnavailable(Exception):
@@ -323,6 +325,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         agent_ending=agent_ending,
         ending_reason=(item.get("disposition_reason") or None)
         if agent_ending == ask_service.WITHDRAWN else None,
+        # trinity-enterprise#1066: the variable's NAME, for a credential ask only.
+        credential_name=(credential_ask_policy.credential_name_of(context)
+                         if item.get("type") == "credential" else None),
     )
 
 
@@ -652,6 +657,13 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     except ReservedAnswerError as e:
         # #3242: the reserved "(something else)" decision, refused by name.
         raise AskError(422, e.code, str(e))
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask takes its value through the
+        # secret field (`provide_credential`), never a typed answer — which
+        # would persist the secret on the row and in the agent's wake.
+        raise AskError(422, e.code,
+                       "This ask is answered through the secret field it opened, "
+                       "not with a typed answer.")
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
     except ask_service.AskNotAddressee as e:
@@ -687,6 +699,84 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # when one of them raised, so a spawn that failed reports false. Reading the
     # opt-in here is a report of intent — see `_resume_requested`.
     agent = updated.get("agent_name") or item.get("agent_name") or ""
+    dispatched = bool(ending.observers_ok and _resume_requested(agent))
+    return _project(updated, viewer_email=email, resume_requested=dispatched,
+                    is_platform=is_platform)
+
+
+async def provide_credential(item_id: str, email: str, is_platform: bool, value: str, *,
+                             actor_ip: Optional[str] = None,
+                             endpoint: Optional[str] = None,
+                             request_id: Optional[str] = None) -> WorkspaceAsk:
+    """The secret field's sink (trinity-enterprise#1066): store ``value`` as the
+    credential a `credential` ask names, then answer the ask BY NAME.
+
+    The same door checks as `answer_ask` — the viewer's own ask (uniform 404,
+    which also covers a kind other than `credential`), pending, not expired,
+    not diverged — all BEFORE the value is handled, so a refusal here has
+    touched nothing. Then `credential_sink.set_env_value` (the one leaf that
+    holds the value: staged into the scrub first and fail-closed, the agent
+    running, one line of its `.env` through its own read + inject, a name-only
+    audit row), and only then the ask sink with `via_credential_sink=True` and
+    the word `provided` as the answer — the row, the write-back and the wake
+    carry that word and the variable's name, never the value.
+
+    A compare-and-set lost AFTER the write — the ask was dismissed or ended
+    while the value was being stored — is 409 `already_resolved` with
+    `credential_written: true`: the audit row exists and nothing is rolled
+    back. Re-asking is cheap; un-writing is not.
+
+    A diverged ask (#2915) is refused outright here, with no acknowledge path:
+    the field posts once, and a credential typed for a question the agent has
+    since rewritten must be asked for again.
+
+    `async` because the sink talks to the agent; the ask sink's compare-and-set
+    is synchronous and runs on the loop like the operator routes run it.
+    """
+    from services import credential_sink
+
+    item = _owned_ask(item_id, email, is_platform)
+    if item.get("type") != "credential":
+        # the same refusal as "not yours": a typed answer belongs to the other
+        # route, and this one must not confirm which ids are credential asks
+        raise AskError(404, "not_found", "Ask not found")
+    if item.get("status") != "pending":
+        raise AskError(400, "already_resolved",
+                       f"This ask is already {item.get('status')}.")
+    if _is_expired(item):
+        raise AskError(409, "expired", "This ask expired before it was answered.")
+    if item.get("sync_state") in ("changed", "closed_by_filer"):
+        raise AskError(409, "item_diverged",
+                       "The agent changed this ask after you opened it; ask it to request "
+                       "the credential again.",
+                       {"sync": _coarse_sync(item)})
+    name = (item.get("context") or {}).get("credential_name")         if isinstance(item.get("context"), dict) else None
+    agent = item.get("agent_name") or ""
+
+    try:
+        await credential_sink.set_env_value(
+            agent, name, value, actor_email=email, ask_id=item_id,
+            actor_ip=actor_ip, endpoint=endpoint, request_id=request_id)
+    except credential_sink.CredentialSinkError as e:
+        raise AskError(e.status_code, e.code, e.message, dict(e.data))
+
+    try:
+        ending = ask_service.answer(
+            item, response="provided", response_text=None,
+            actor=ask_service.Actor(email=email, ip=actor_ip, endpoint=endpoint),
+            responded_by_id=None, via_credential_sink=True,
+        )
+    except (ask_service.AskNotFound, ask_service.AskConflict):
+        raise AskError(409, "already_resolved",
+                       "The credential was stored, but this ask ended before it could be "
+                       "marked answered; the agent will ask again if it still needs it.",
+                       {"credential_written": True})
+    except ask_service.AskNotAddressee as e:
+        raise AskError(403, "not_addressee",
+                       e.role_message() or "This ask was addressed to someone else.")
+    updated = ending.rows[0]
+    logger.info("[WorkspaceAsks] %s answered by %s through the secret field (client=%s)",
+                item_id, email, not is_platform)
     dispatched = bool(ending.observers_ok and _resume_requested(agent))
     return _project(updated, viewer_email=email, resume_requested=dispatched,
                     is_platform=is_platform)

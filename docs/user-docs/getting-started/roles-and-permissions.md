@@ -75,6 +75,8 @@ An agent's **Settings › People** pane can also show a role select on each pers
 
 The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
 
+**Inviting a person.** Where invitations are available, **Settings → Access → User Management** has an **Invite a person** form (name, work email, role, which defaults to `user`, and an expiry, which defaults to 14 days) and a list of every invitation: its status (pending, accepted, expired or revoked), who sent it, when it was sent and accepted, and which terms version the person accepted. Pending invitations can be resent or revoked. Revoking an invitation, or letting it expire, stops that email signing in; an account that never accepted the terms is suspended. When the platform requires terms acceptance, an invited `user` sees the terms on their first sign-in and must accept them (or sign out) before the Workspace opens; publishing a new terms version asks everyone to accept again. While acceptance is required, inviting is refused until a terms version is published.
+
 ## For Agents
 
 User roles are stored in the `users` table. The role is checked on each API request via the `require_role()` dependency.

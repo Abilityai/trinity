@@ -1282,6 +1282,28 @@ def portal_agent_report_detail(
     return report
 
 
+def _refuse_secret_in_message(message: str) -> None:
+    """trinity-enterprise#1066: a message that LOOKS like a credential is refused
+    BEFORE admission — before the reply context, the title decision, the
+    session row, the execution row and (on the streaming route) the
+    Idempotency-Key — so nothing anywhere holds the text. The secret field a
+    `credential` ask opens is where a value goes; the composer is where it
+    must not. The refusal names the SHAPE that matched and never the text.
+    Shared by both chat routes for the ent#403 reason: the two must not
+    disagree about what is admitted.
+    """
+    from utils.credential_sanitizer import secret_shape
+
+    shape = secret_shape(message)
+    if shape is not None:
+        raise HTTPException(status_code=422, detail={
+            "code": "secret_in_message",
+            "shape": shape,
+            "message": "That looks like a secret. Nothing was stored. Ask the agent for the "
+                       "credential and use the secret field it opens.",
+        })
+
+
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
 async def portal_chat(
     agent_name: str,
@@ -1317,6 +1339,9 @@ async def portal_chat(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: a pasted secret is refused here, before anything
+    # below reads, titles or stores the message.
+    _refuse_secret_in_message(body.message)
     # ent#403: normalise blank → None, then authorise, then allow-list. The
     # policy is one function shared with the streaming route below — enforcement
     # at BOTH router entry points, because this route runs an inline path and
@@ -1541,6 +1566,7 @@ async def portal_voice_start(
             email=principal.email,
             is_platform=principal.is_platform,
             portal_session_id=body.portal_session_id,
+            mode=body.mode,
             user_id=user.id,
             user_label=user.email or user.username,
             voice_name=body.voice_name,
@@ -2022,6 +2048,14 @@ async def portal_chat_stream(
     include_owned = principal.is_platform
 
     _require_roster(agent_name, email, include_owned)
+    # trinity-enterprise#1046: a turn may join only the caller's own live Direct call
+    # on this thread. Uniform 404, like any other id the caller cannot see.
+    if body.voice_call_id:
+        from services import direct_voice_service
+        if not principal.is_platform or not direct_voice_service.turn_may_join_call(
+            body.voice_call_id, agent_name=agent_name, email=email, portal_session_id=body.session_id,
+        ):
+            raise HTTPException(status_code=404, detail="Call not found")
     rate_limiter.enforce(
         f"portal_chat:{email}:{agent_name}", PORTAL_CHAT_BURST_LIMIT, 60, detail=_CHAT_LIMIT_DETAIL
     )
@@ -2029,6 +2063,10 @@ async def portal_chat_stream(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: same guard as the synchronous route, and BEFORE
+    # the idempotency scope is built — a refused message must not consume the
+    # key (the ent#403 rule for a refused model).
+    _refuse_secret_in_message(body.message)
     # Invariant #18: a producer boundary that creates an execution accepts an
     # Idempotency-Key. This route creates one, so a retried dispatch — a proxy
     # replay, a client timeout-and-resend — would otherwise run and BILL the
@@ -2101,6 +2139,7 @@ async def portal_chat_stream(
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),
             person_tags=person_tags,   # trinity-enterprise#631, same rule
+            voice_call_id=body.voice_call_id,   # trinity-enterprise#1046, checked above
         )
     except service.ChatTagError as e:
         idempotency_service.fail(decision)
@@ -2163,6 +2202,72 @@ async def portal_terminate_execution(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+async def attach_execution_stream(agent_name: str, execution_id: str, queued_hold):
+    """The agent's stream for one turn, as SSE text. One home for the Workspace's
+    watcher and the Direct call's speech (trinity-enterprise#1046)."""
+    # The agent answers 404 in TWO harmless situations, and treating either
+    # as fatal is what made a mid-turn reload look broken:
+    #
+    #   too early — the client subscribes the instant it gets the 202, but
+    #     the turn passes through admission, capacity and the resume lock
+    #     before the agent registers it. Measured at ~1-2s on a warm agent.
+    #   too late  — the turn is over and the agent has dropped its buffered
+    #     log. Nothing is wrong; the reply is in history.
+    #
+    # So: retry briefly while the turn is still live, and end the stream
+    # cleanly (never `error`) when it simply is not streamable. The client
+    # reads the persisted reply on `stream_end` either way.
+    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+    try:
+        # #3114: on a pull pilot the turn can wait on the durable queue
+        # until a worker claims it. Hold while the row is queued; the attach
+        # window below starts from the claim.
+        async for tick in queued_hold:
+            yield tick
+        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
+        async with agent_httpx_client(agent_name, timeout=None) as client:
+            while True:
+                async with client.stream("GET", agent_url) as response:
+                    if response.status_code == 200:
+                        async for chunk in response.aiter_text():
+                            yield chunk
+                        return
+                    if response.status_code != 404:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                        return
+                # 404 — is this turn still worth waiting for?
+                if not service.get_turn_inflight_matches(execution_id):
+                    # Finished (or never ran). Not an error: end cleanly so
+                    # the client goes and reads the reply.
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                if asyncio.get_event_loop().time() >= deadline:
+                    logger.info(
+                        "[PortalStream] gave up attaching to %s on %s after %ss",
+                        execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
+                    )
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                await asyncio.sleep(_STREAM_ATTACH_POLL_S)
+    except httpx.ConnectError:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+    except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
+        logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+
+
+def direct_call_stream(agent_name: str, execution_id: str):
+    """The same stream, for the Direct call's bridge. The caller has already proved the
+    execution is the person's own."""
+    return attach_execution_stream(
+        agent_name, execution_id,
+        sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name)),
+    )
+
+
 @router.get("/agents/{agent_name}/executions/{execution_id}/stream")
 async def portal_stream_execution(
     agent_name: str,
@@ -2194,64 +2299,9 @@ async def portal_stream_execution(
     if not container or container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
 
-    async def proxy_stream():
-        # The agent answers 404 in TWO harmless situations, and treating either
-        # as fatal is what made a mid-turn reload look broken:
-        #
-        #   too early — the client subscribes the instant it gets the 202, but
-        #     the turn passes through admission, capacity and the resume lock
-        #     before the agent registers it. Measured at ~1-2s on a warm agent.
-        #   too late  — the turn is over and the agent has dropped its buffered
-        #     log. Nothing is wrong; the reply is in history.
-        #
-        # So: retry briefly while the turn is still live, and end the stream
-        # cleanly (never `error`) when it simply is not streamable. The client
-        # reads the persisted reply on `stream_end` either way.
-        agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
-        try:
-            # #3114: on a pull pilot the turn can wait on the durable queue
-            # until a worker claims it. Hold while the row is queued; the attach
-            # window below starts from the claim.
-            async for tick in sync_waiter.wait_while_queued(
-                execution_id, pull_queue_allowance(agent_name)
-            ):
-                yield tick
-            deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
-            async with agent_httpx_client(agent_name, timeout=None) as client:
-                while True:
-                    async with client.stream("GET", agent_url) as response:
-                        if response.status_code == 200:
-                            async for chunk in response.aiter_text():
-                                yield chunk
-                            return
-                        if response.status_code != 404:
-                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                            return
-                    # 404 — is this turn still worth waiting for?
-                    if not service.get_turn_inflight_matches(execution_id):
-                        # Finished (or never ran). Not an error: end cleanly so
-                        # the client goes and reads the reply.
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    if asyncio.get_event_loop().time() >= deadline:
-                        logger.info(
-                            "[PortalStream] gave up attaching to %s on %s after %ss",
-                            execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
-                        )
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    await asyncio.sleep(_STREAM_ATTACH_POLL_S)
-        except httpx.ConnectError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-        except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
-            logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-
+    queued_hold = sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name))
     return StreamingResponse(
-        proxy_stream(),
+        attach_execution_stream(agent_name, execution_id, queued_hold),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
