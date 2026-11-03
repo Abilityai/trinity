@@ -78,13 +78,20 @@ export async function startMicCapture(onData) {
   }
 }
 
+const LEVEL_HOLD_MS = 200
+
 /**
  * Create an audio player for PCM 24kHz mono output with amplitude monitoring.
  *
- * @returns {{ play: Function, getAmplitude: Function, stop: Function }}
+ * @param {object} [opts]
+ * @param {() => number} [opts.now] clock for the level's peak hold (ms)
+ * @returns {{ play: Function, getAmplitude: Function, getLevel: Function, stop: Function }}
  */
-export function createAudioPlayer() {
+export function createAudioPlayer({ now = () => Date.now() } = {}) {
   let audioContext = null
+  let levelData = null
+  let peak = 0
+  let peakAt = 0
   let nextStartTime = 0
   let analyser = null
   let analyserData = null
@@ -149,6 +156,25 @@ export function createAudioPlayer() {
      * Get current output amplitude as 0–1 float.
      * Returns 0 if no audio is playing.
      */
+    /**
+     * Linear RMS of what is playing right now (trinity-enterprise#1087), the unit the
+     * mic's own level is in, so the endpointer can compare the two. `getAmplitude` is
+     * the orb's: dB-scaled frequency bytes, a different unit. Zero while paused, because
+     * a suspended context's analyser holds its last frame and nothing is coming out.
+     * The peak is held briefly so the gap between two words does not drop the bar.
+     */
+    getLevel() {
+      if (!analyser || held) { peak = 0; return 0 }
+      if (!levelData || levelData.length !== analyser.fftSize) levelData = new Float32Array(analyser.fftSize || 256)
+      analyser.getFloatTimeDomainData(levelData)
+      let sum = 0
+      for (let i = 0; i < levelData.length; i++) sum += levelData[i] * levelData[i]
+      const rms = levelData.length ? Math.sqrt(sum / levelData.length) : 0
+      const t = now()
+      if (rms >= peak || t - peakAt > LEVEL_HOLD_MS) { peak = rms; peakAt = t }
+      return peak
+    },
+
     getAmplitude() {
       if (!analyser || !analyserData) return 0
       analyser.getByteFrequencyData(analyserData)

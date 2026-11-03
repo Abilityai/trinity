@@ -13,12 +13,14 @@ import { useAuthStore } from '../stores/auth'
 import { createAudioPlayer, startMicCapture } from '../utils/audio'
 import { createEndpointer, rmsOf, samplesToPcm16Base64, VAD } from '../utils/voiceEndpointing'
 import { startFailureReason, VOICE_INSECURE_REASON, VOICE_NO_MIC_REASON } from '../components/portal/portalVoiceMode'
-import { answersAsk, HOLD_UNFINISHED_MS, isEcho, looksUnfinished } from '../components/portal/portalDirectCall'
+import { answersAsk, HOLD_UNFINISHED_MS, isEcho, isOwnSentence, isStopUtterance, looksUnfinished } from '../components/portal/portalDirectCall'
 
 const SAVED_TIMEOUT_MS = 5000
 const RECENT_SPOKEN = 12
+export const STOPPED_NOTICE = 'Stopped.'
+export const STOPPED_REPLY_IN_CHAT = 'Stopped. The full reply is in the chat.'
 
-export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTurnIdle, now = () => Date.now() } = {}) {
+export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswer, onTurnIdle, isBusy, now = () => Date.now() } = {}) {
   const authStore = useAuthStore()
 
   const active = ref(false)
@@ -47,8 +49,16 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   let savedResolve = null
   let savedTimer = null
   let seq = 0
-  let turnRunning = false
-  let pausedForSpeech = false
+  // Refs, because whether there is anything to stop is shown (ent#1087).
+  const turnRunning = ref(false)
+  const pausedForSpeech = ref(false)
+  // ent#1087: the run the bridge is speaking, so Stop reaches an approved run too, which is
+  // not the composer's turn.
+  let speakingExecutionId = null
+  // Transcripts at or below this seq were on their way when the person stopped.
+  let stopSeq = 0
+  // Between sending `interrupt` and its `audio_flush`, audio already on the wire is stale.
+  let dropAudio = false
   let wasPlaying = false
   let promptEndedAt = null
   let promptArmed = false
@@ -61,6 +71,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   const recentSpoken = []
 
   const isActive = computed(() => active.value)
+  const canStop = computed(() => turnRunning.value || pausedForSpeech.value || status.value === 'speaking' || !!isBusy?.())
 
   function sendFrame(frame) {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -82,14 +93,17 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   }
 
   function resumeIfPaused() {
-    if (pausedForSpeech) { pausedForSpeech = false; player?.resume() }
-    if (!turnRunning && !player?.isPlaying()) resting()
+    if (pausedForSpeech.value) { pausedForSpeech.value = false; player?.resume() }
+    if (!turnRunning.value && !player?.isPlaying()) resting()
   }
 
   function onFrames(samples) {
     if (muted.value || !endpointer) { micLevel = 0; return }
     micLevel = Math.min(1, rmsOf(samples) * 6)
-    endpointer.push(samples, { playing: !!player?.isPlaying() })
+    endpointer.push(samples, {
+      playing: !!player?.isPlaying(),
+      playbackLevel: typeof player?.getLevel === 'function' ? player.getLevel() : undefined,
+    })
   }
 
   function handleUtterance({ samples, duringPlayback }) {
@@ -102,33 +116,49 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
     sendFrame({ type: 'utterance', seq, data: samplesToPcm16Base64(samples) })
   }
 
+  function somethingToStop(meta) {
+    return meta.duringPlayback || turnRunning.value || pausedForSpeech.value || !!player?.isPlaying() || !!isBusy?.()
+  }
+
   function handleTranscript({ seq: id, text }) {
     const meta = utterances.get(id) || { duringPlayback: false, startedAt: now() }
     utterances.delete(id)
+    // ent#1087: said before the person stopped the agent. It must not start a turn.
+    if (typeof id === 'number' && id <= stopSeq) return
+    if (notice.value === STOPPED_NOTICE || notice.value === STOPPED_REPLY_IN_CHAT) notice.value = ''
     const waiting = waitingAsk.value
+    // A stop word, unless it is the agent's own sentence heard back word for word.
+    const stopWord = isStopUtterance(text) && !(meta.duringPlayback && isOwnSentence(text, recentSpoken))
 
     // Echo is judged while something was playing, except when a yes is awaited: the
     // prompt contains the very words the person answers with.
-    if (meta.duringPlayback && !waiting && isEcho(text, recentSpoken)) { resumeIfPaused(); return }
+    if (meta.duringPlayback && !waiting && !stopWord && isEcho(text, recentSpoken)) { resumeIfPaused(); return }
 
     liveText.value = text
 
     const answer = answersAsk({ waiting, text, duringPlayback: meta.duringPlayback,
                                 startedAt: meta.startedAt, promptEndedAt })
     if (answer) {
-      pausedForSpeech = false
+      pausedForSpeech.value = false
       waitingAsk.value = null
       resting()
       onAnswer?.(waiting, answer)
       return
     }
 
+    // ent#1087: "stop" on its own stops the agent and is never sent as a turn. With nothing
+    // to stop it is just words, and goes to the agent like any other.
+    if (stopWord && somethingToStop(meta)) {
+      interrupt()
+      return
+    }
+
     // Real speech over the agent: stop it, and stop the turn it was speaking.
-    if (meta.duringPlayback || turnRunning || pausedForSpeech) {
-      pausedForSpeech = false
+    if (meta.duringPlayback || turnRunning.value || pausedForSpeech.value) {
+      pausedForSpeech.value = false
       player?.stop()
-      sendFrame({ type: 'interrupt' })
-      if (turnRunning) { turnRunning = false; onBargeIn?.() }
+      if (sendFrame({ type: 'interrupt' })) dropAudio = true
+      if (turnRunning.value) { turnRunning.value = false; onBargeIn?.({ executionId: speakingExecutionId }) }
     }
 
     held = held ? `${held} ${text}` : text
@@ -141,12 +171,37 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
     }
   }
 
+  // ent#1087: what talking over the agent does, without a new turn. The Stop button, a
+  // stop word and Escape all come here. `cancelTurn: false` silences and leaves the run
+  // going (Escape, the composer's own Stop which cancels it itself).
+  function interrupt({ cancelTurn = true } = {}) {
+    const hadTurn = turnRunning.value
+    const audible = !!player?.isPlaying() || pausedForSpeech.value
+    pausedForSpeech.value = false
+    player?.stop()
+    if (sendFrame({ type: 'interrupt' })) dropAudio = true
+    stopSeq = seq
+    clearTimeout(holdTimer); holdTimer = null
+    held = ''
+    // A prompt cut off is answered on its card, never by a yes to words not heard.
+    promptArmed = false
+    promptEndedAt = null
+    // The bridge cancels the task that was speaking, so no `speak_state idle` follows.
+    turnRunning.value = false
+    if (cancelTurn && (hadTurn || isBusy?.())) onBargeIn?.({ executionId: speakingExecutionId })
+    speakingExecutionId = null
+    onStop?.({ cancelTurn })
+    notice.value = audible && !(cancelTurn && hadTurn) ? STOPPED_REPLY_IN_CHAT : STOPPED_NOTICE
+    resting()
+  }
+
   function handleFrame(msg) {
     switch (msg.type) {
       case 'audio':
+        if (dropAudio) break
         if (msg.data && player) {
           player.play(msg.data)
-          if (!pausedForSpeech) status.value = 'speaking'
+          if (!pausedForSpeech.value) status.value = 'speaking'
         }
         break
       case 'spoken':
@@ -166,11 +221,13 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
         break
       case 'speak_state':
         if (msg.state === 'thinking') {
-          turnRunning = true
+          speakingExecutionId = msg.execution_id || speakingExecutionId
+          turnRunning.value = true
           tool.value = ''
           status.value = 'thinking'
         } else {
-          turnRunning = false
+          if (msg.execution_id === speakingExecutionId) speakingExecutionId = null
+          turnRunning.value = false
           tool.value = ''
           if (!player?.isPlaying()) resting()
           onTurnIdle?.(msg.execution_id)
@@ -180,6 +237,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
         tool.value = msg.tool || ''
         break
       case 'audio_flush':
+        dropAudio = false
         player?.stop()
         break
       case 'notice':
@@ -207,15 +265,17 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
     }
   }
 
+  function onPlaybackEnded() {
+    if (promptArmed) promptEndedAt = now()
+    if (!turnRunning.value && status.value === 'speaking') resting()
+  }
+
   function startPolling() {
     pollTimer = setInterval(() => {
       if (!player) return
       const playing = player.isPlaying()
       amplitude.value = playing ? player.getAmplitude() : micLevel
-      if (wasPlaying && !playing && !pausedForSpeech) {
-        if (promptArmed) promptEndedAt = now()
-        if (!turnRunning && status.value === 'speaking') resting()
-      }
+      if (wasPlaying && !playing && !pausedForSpeech.value) onPlaybackEnded()
       wasPlaying = playing
     }, 50)
   }
@@ -231,6 +291,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
     error.value = null; notice.value = ''; liveText.value = ''; tool.value = ''; timing.value = null
     endReason.value = null; endMessage.value = ''; waitingAsk.value = null; muted.value = false
     recentSpoken.length = 0; held = ''; promptEndedAt = null; promptArmed = false
+    speakingExecutionId = null; stopSeq = 0; dropAudio = false
     active.value = true
     status.value = 'connecting'
     try {
@@ -248,7 +309,7 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
             player = createAudioPlayer()
             endpointer = createEndpointer({
               onSpeechStart: ({ duringPlayback }) => {
-                if (duringPlayback) { pausedForSpeech = true; player?.pause() }
+                if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
               },
               onUtterance: handleUtterance,
               onDiscard: () => resumeIfPaused(),
@@ -312,8 +373,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
     active.value = false
     status.value = 'idle'
     tool.value = ''
-    turnRunning = false
-    pausedForSpeech = false
+    turnRunning.value = false
+    pausedForSpeech.value = false
     waitingAsk.value = null
     utterances.clear()
     stopMedia()
@@ -326,24 +387,33 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onAnswer, onTur
   if (getCurrentInstance()) onBeforeUnmount(() => { if (active.value) void stop() })
 
   return {
-    active, isActive, status, muted, error, voiceSessionId, portalSessionId,
+    active, isActive, canStop, status, muted, error, voiceSessionId, portalSessionId,
     runtime, provider, earlySpeech, liveText, tool, notice, amplitude, timing,
     endReason, endMessage, waitingAsk,
-    startWith, stop,
+    startWith, stop, interrupt,
+    // Whether the agent's voice is coming out (or held mid-reply) right now: Escape asks.
+    isSpeaking() { return !!player?.isPlaying() || pausedForSpeech.value },
     toggleMute() { muted.value = !muted.value; if (muted.value) endpointer?.reset() },
-    speak(executionId) { turnRunning = true; status.value = 'thinking'; sendFrame({ type: 'speak', execution_id: executionId }) },
+    speak(executionId) {
+      if (notice.value === STOPPED_NOTICE || notice.value === STOPPED_REPLY_IN_CHAT) notice.value = ''
+      speakingExecutionId = executionId
+      turnRunning.value = true
+      status.value = 'thinking'
+      sendFrame({ type: 'speak', execution_id: executionId })
+    },
     promptAsk(ask) {
       // Only an approval can be decided by a yes. A question is read, and answered in words.
       waitingAsk.value = ask.kind === 'approval' ? ask : null
       promptEndedAt = null
       promptArmed = false
       sendFrame({ type: 'speak_ask', ask_id: ask.id })
-      if (waitingAsk.value && !turnRunning && !player?.isPlaying()) status.value = 'awaiting_approval'
+      if (waitingAsk.value && !turnRunning.value && !player?.isPlaying()) status.value = 'awaiting_approval'
     },
     clearAsk() { waitingAsk.value = null; resting() },
     askAnswered(askId, outcome) { sendFrame({ type: 'ask_followup', ask_id: askId, outcome }) },
     // Exposed for specs: the frame handlers are the protocol.
     _handleFrame: handleFrame,
     _handleUtterance: handleUtterance,
+    _promptPlayed: onPlaybackEnded,
   }
 }
