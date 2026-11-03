@@ -1,3 +1,4 @@
+import { isDirectCallId } from './portalDirectCall'
 // Workspace voice mode (trinity-enterprise#534) — the orb takes the conversation.
 //
 // Every rule the conversation and the shell decide about a voice CALL lives
@@ -175,6 +176,8 @@ export const VOICE_TASK_CAPTION = 'asked during a voice call'
 
 export function voiceTaskCaption(message = {}) {
   if (!message?.voiceCallId || message.source === VOICE_SOURCE) return ''
+  // trinity-enterprise#1046: a Direct call's rows are the call itself, not a task it ran.
+  if (isDirectCallId(message.voiceCallId)) return ''
   return message.role === 'user' ? VOICE_TASK_CAPTION : ''
 }
 
@@ -212,12 +215,17 @@ export const VOICE_SOURCE = 'voice'
 // opener may be off-screen — and a typed turn that landed mid-call must not
 // split the block in two. The trailing `system` row the call writes is the
 // label; when the window cut it off, the label is derived from the turns.
-export function groupVoiceBlocks(messages = []) {
+//
+// trinity-enterprise#1046: a Direct call's turns are typed rows carrying a `vd_` id, and
+// they fold too. Except while that call is on: `liveCallId` keeps them in the thread as
+// they happen.
+export function groupVoiceBlocks(messages = [], { liveCallId = null } = {}) {
   const items = []
   const blocks = new Map()
   messages.forEach((m, index) => {
     const callId = m?.voiceCallId || null
-    if (!callId || m.source !== VOICE_SOURCE) { items.push({ kind: 'message', message: m, index }); return }
+    const folds = callId && callId !== liveCallId && (m.source === VOICE_SOURCE || isDirectCallId(callId))
+    if (!folds) { items.push({ kind: 'message', message: m, index }); return }
     let block = blocks.get(callId)
     if (!block) {
       block = { kind: 'voice-call', callId, turns: [], label: '', ended: '' }
@@ -231,7 +239,7 @@ export function groupVoiceBlocks(messages = []) {
     }
   })
   for (const b of blocks.values()) {
-    if (!b.label) b.label = voiceCallLabelFromTurns(b.turns)
+    if (!b.label) b.label = voiceCallLabelFromTurns(b.turns, isDirectCallId(b.callId) ? 'Direct call' : 'Voice call')
   }
   return items
 }
@@ -245,10 +253,10 @@ export function voiceCallLabel(seconds, { capped = false, capMinutes = null } = 
 
 // When the window dropped the call's summary row, name the block by what is
 // left of it — never an invented duration.
-export function voiceCallLabelFromTurns(turns = []) {
+export function voiceCallLabelFromTurns(turns = [], kind = 'Voice call') {
   const n = turns.length
-  if (!n) return 'Voice call'
-  return `Voice call · ${n} spoken ${n === 1 ? 'turn' : 'turns'}`
+  if (!n) return kind
+  return `${kind} · ${n} spoken ${n === 1 ? 'turn' : 'turns'}`
 }
 
 // ---- Escape right after a call --------------------------------------------------

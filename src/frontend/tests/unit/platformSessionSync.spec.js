@@ -431,6 +431,16 @@ describe('one credential source, one handler (source guards — wiring only)', (
     expect(read('../../src/api.js')).toContain('else notifyWorkspaceOnly(error)')
   })
 
+  it('trinity-enterprise#1054 — main.js, api.js and portalHttp wire the terms reaction', () => {
+    // The reaction and the api.js / portalHttp interceptors are executed in
+    // apiTermsRequiredInterceptor.spec.js; these pin the main.js hand-offs a
+    // node-env spec cannot drive.
+    expect(MAIN).toContain('setTermsRefusalHandler((error) => reactToTermsRefusal(error, {')
+    expect(MAIN).toContain('currentPath: () => fullPathForVerdict(router, START_LOCATION, window.location),')
+    expect(MAIN).toContain('push: (location) => router.push(location),')
+    expect(MAIN).toContain('    notifyTermsRefusal(error)\n')
+  })
+
   it('#3406 — a 401 is judged against the address being loaded, not START_LOCATION', () => {
     // `router.currentRoute.value.path` is "/" until the first navigation
     // completes, so `currentRoute.value?.path || window.location.pathname`

@@ -791,7 +791,24 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
     where a Workspace-only member belongs. Every other caller goes through
     `get_current_user`. `test_837_workspace_only_floor.py` pins the caller set,
     so a new door is a reviewed edit rather than a quiet way around the floor.
+
+    trinity-enterprise#1054 — the terms-acceptance gate (`services/terms_gate.py`)
+    is consulted HERE, once, after the credential is fully resolved: this is the
+    one function every door shares, so a Workspace-only person who has not
+    accepted the current terms is refused on all of them (403 `terms_required`),
+    and a route the person must reach before accepting is marked `@terms_route`.
+    Operator and above are never gated; an agent's credential is untouched.
     """
+    user = await _resolve_platform_credential(request, token)
+    from services import terms_gate  # late: the seam imports this module's marker
+    terms_gate.enforce(request, user)
+    return user
+
+
+async def _resolve_platform_credential(request: Request, token: str) -> User:
+    """The credential resolution itself — every scope fence, the revocation and
+    suspension checks — with no gate on top. Only `resolve_platform_user_unfloored`
+    calls this; the gate it adds is the reason the body is split out."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -1166,6 +1183,32 @@ def workspace_route(reason: str):
 
     def mark(endpoint):
         setattr(endpoint, WORKSPACE_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
+TERMS_ROUTE_ATTR = "__trinity_terms_route__"
+
+
+def terms_route(reason: str):
+    """Mark a route a person must reach BEFORE accepting the terms (trinity-enterprise#1054).
+
+    The terms gate (`services/terms_gate.py`) skips a marked route. The set is
+    deliberately tiny: signing out, the identity read the SPA lands on, and the
+    acceptance routes themselves. Same shape and same placement rule as
+    `workspace_route` — keep it BELOW the route decorator::
+
+        @router.post("/terms/accept")
+        @workspace_route("the terms screen is a Workspace page")
+        @terms_route("accepting is what ends the refusal")
+        async def accept_terms(current_user: User = Depends(require_interactive)):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("terms_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, TERMS_ROUTE_ATTR, reason)
         return endpoint
 
     return mark

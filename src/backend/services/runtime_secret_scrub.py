@@ -121,11 +121,12 @@ def _field(value: str) -> str:
 # --- stage side (fail CLOSED) ------------------------------------------------
 
 
-def stage_secret(agent_name: Optional[str], value: str) -> None:
+def stage_secret(agent_name: Optional[str], value: str) -> bool:
     """Stage ``value`` for identity-scrubbing. ``agent_name`` is for the log line
     only — the store is global. Raises ``StagingUnavailable`` on any failure so
     the caller can fail closed. A value shorter than the floor is SKIPPED (not an
-    error) with a WARNING."""
+    error) with a WARNING. Returns True when THIS call added the value (it was
+    not already staged) — what a caller may later `unstage_secret`."""
     if not value or len(value) < _MIN_VALUE_LEN:
         logger.warning(
             "runtime_secret_scrub: value below the %d-char floor NOT staged "
@@ -133,7 +134,7 @@ def stage_secret(agent_name: Optional[str], value: str) -> None:
             _MIN_VALUE_LEN,
             agent_name,
         )
-        return
+        return False
 
     client = _redis()
     if client is None:
@@ -168,6 +169,28 @@ def stage_secret(agent_name: Optional[str], value: str) -> None:
         raise StagingUnavailable(
             f"secret-scrub staging failed: {type(e).__name__}"
         ) from e
+    return not already
+
+
+def unstage_secret(value: str) -> bool:
+    """Remove ``value`` from the staged set (trinity-enterprise#1066: a value
+    staged for a delivery that was then refused before it reached the agent).
+    Only for a value the caller's own `stage_secret` added — removing one that
+    is staged for a delivery that happened would un-arm its scrub. Best-effort
+    and never raises; returns False when the store could not be reached."""
+    if not value:
+        return True
+    client = _redis()
+    if client is None:
+        return False
+    field = _field(value)
+    try:
+        client.hdel(_STAGED_HASH, field)
+        client.zrem(_STAGED_ZSET, field)
+    except Exception as e:  # noqa: BLE001 — best-effort; the 24h TTL still prunes it
+        logger.warning("runtime_secret_scrub: unstage failed: %s", type(e).__name__)
+        return False
+    return True
 
 
 # --- scrub side (fail OPEN) --------------------------------------------------

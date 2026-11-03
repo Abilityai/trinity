@@ -381,7 +381,7 @@ class GitHubService:
 | 29 | `MAX_INSTANCE_ID_RETRIES` | Max reservation retries before `RuntimeError` (5) — S7 Layer 0 |
 | 32-40 | `generate_instance_id()` | Raw 8-char UUID prefix. Kept for the reserve helper; new callers MUST use `reserve_and_generate_instance_id` |
 | 43-45 | `generate_working_branch()` | Generate branch name `trinity/{name}/{id}` |
-| 48-112 | `check_remote_branch_exists()` | `git ls-remote --heads --exit-code` probe (S7 Layer 1) — fails-open on network/timeout because Layer 2 is the real guarantee |
+| 48-112 | `check_remote_branch_exists()` | `git ls-remote --exit-code <url> refs/heads/<ref> refs/tags/<ref>` probe (S7 Layer 1; a tag answers too, trinity#4165) — fails-open on network/timeout because Layer 2 is the real guarantee |
 | 115-206 | `reserve_and_generate_instance_id()` | **S7 Layer 0 single entry point**: UUID + remote probe + DB insert under partial UNIQUE index. Retries `MAX_INSTANCE_ID_RETRIES` times then raises `RuntimeError` |
 | 209-238 | `create_git_config_for_agent()` | Legacy create-without-reserve helper (still used in tests/non-S7 paths) |
 | 430-436 | `GitInitResult` dataclass | Result of git init in container |

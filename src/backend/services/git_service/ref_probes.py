@@ -34,12 +34,34 @@ logger = logging.getLogger(__name__)
 _SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
-def _ref_arg(ref: Optional[str]) -> str:
-    """``None``/``"HEAD"`` → the default branch; a branch name → its full ref,
-    so a tag or a same-named ref elsewhere can never answer for it."""
+def _ref_args(ref: Optional[str]) -> Tuple[str, ...]:
+    """``None``/``"HEAD"`` → the default branch; a name → its full branch
+    AND tag refs (trinity#4165: the ref from ``@ref`` may be a release tag),
+    so a same-named ref elsewhere (``refs/remotes/…``, ``refs/pull/…``) can
+    never answer for it. The order is the preference: a branch wins over a
+    same-named tag, as it does for ``git clone -b``."""
     if not ref or ref == "HEAD":
-        return "HEAD"
-    return f"refs/heads/{ref}"
+        return ("HEAD",)
+    return (f"refs/heads/{ref}", f"refs/tags/{ref}")
+
+
+def _query_args(wanted: Tuple[str, ...]) -> Tuple[str, ...]:
+    """The patterns handed to ``ls-remote``: the wanted refs plus the peeled
+    ``refs/tags/<r>^{}``. git lists a ref only when a pattern matches its own
+    name, and the peeled line's name ends in ``^{}`` — ask for the tag alone
+    and an annotated tag answers with the tag object, not its commit."""
+    return wanted + tuple(f"{w}^{{}}" for w in wanted if w.startswith("refs/tags/"))
+
+
+def _pick_ref(listing: dict, wanted: Tuple[str, ...]) -> Optional[str]:
+    """The object id the clone would check out: the first wanted ref the
+    remote listed; for an annotated tag the peeled ``^{}`` commit (the raw
+    read and a clone both land on the commit, not the tag object), which
+    ``_query_args`` asked for."""
+    for name in wanted:
+        if name in listing:
+            return listing.get(f"{name}^{{}}", listing[name])
+    return None
 
 
 async def _ls_remote_ref(
@@ -47,11 +69,11 @@ async def _ls_remote_ref(
 ) -> Tuple[str, str]:
     base = os.getenv("TRINITY_GIT_BASE_URL", "https://github.com").rstrip("/")
     remote_url = f"{base}/{github_repo}.git"
-    wanted = _ref_arg(ref)
+    wanted = _ref_args(ref)
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "git", "ls-remote", remote_url, wanted,
+            "git", "ls-remote", remote_url, *_query_args(wanted),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -73,16 +95,19 @@ async def _ls_remote_ref(
         return "transient", ""
 
     if proc.returncode == 0:
+        listing = {}
         for line in (stdout or b"").decode("utf-8", errors="replace").splitlines():
             parts = line.strip().split("\t")
-            if len(parts) == 2 and parts[1] == wanted:
-                sha = parts[0].strip().lower()
-                if _SHA_RE.match(sha):
-                    return "ok", sha
-                logger.warning("%s: ls-remote for %s returned a malformed object id",
-                               caller, github_repo)
-                return "transient", ""
-        return "missing_ref", ""
+            if len(parts) == 2:
+                listing[parts[1]] = parts[0].strip().lower()
+        sha = _pick_ref(listing, wanted)
+        if sha is None:
+            return "missing_ref", ""
+        if _SHA_RE.match(sha):
+            return "ok", sha
+        logger.warning("%s: ls-remote for %s returned a malformed object id",
+                       caller, github_repo)
+        return "transient", ""
 
     stderr_text = (stderr or b"").decode("utf-8", errors="replace").lower()
     if any(p in stderr_text for p in provisioning._ANON_PROBE_DEFINITIVE_PATTERNS):
