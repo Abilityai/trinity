@@ -18,9 +18,14 @@ test_ent873_caddy_upgrade.py.
 from __future__ import annotations
 
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
+# Sibling import (the unit dir is a package, not implicitly on sys.path).
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_ent873_caddy_upgrade import PRIOR_CADDYFILE, _BASH, _START, _install, _scratch
 
 pytestmark = [pytest.mark.unit, pytest.mark.skipif(_BASH is None, reason="bash required")]
