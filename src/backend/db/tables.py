@@ -1803,6 +1803,13 @@ access_requests = Table(
     Column("status", Text),
     Column("decided_by", Integer),
     Column("decided_at", Text),
+    # trinity-enterprise#737 — who asked, as the channel saw them (all nullable:
+    # a field the channel does not expose stays empty, never fabricated).
+    Column("requester_channel_id", Text),
+    Column("requester_handle", Text),
+    Column("requester_name", Text),
+    Column("requester_chat_id", Text),
+    Column("requester_thread_id", Text),
 )
 
 audit_log = Table(

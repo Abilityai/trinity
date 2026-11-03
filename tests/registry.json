@@ -12,6 +12,29 @@
       "description": "#4055: a follow-up the platform-alert seam spawns (alert-budget episode, operator_queue_sync broadcast) that raises is logged once at ERROR with kind and agent; a successful one logs nothing."
     },
     {
+      "file": "unit/test_ent737_request_identity.py",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "channels",
+        "access-control"
+      ],
+      "description": "A channel access request names who asked: identity stored, replaced (never inherited) on refresh, kept on decision, blank/overlong values bounded; Telegram/WhatsApp/Slack requester_identity from real parsed messages; the router gate passes it and still records the request when extraction fails; the owner's list carries identity_captured and known_as limited to agents the viewer manages; the list route returns the person."
+    },
+    {
+      "file": "../src/frontend/tests/unit/sharingPanelRequestIdentity.mount.spec.js",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "channels"
+      ],
+      "description": "Sharing tab pending requests show the person: name, @handle, channel id, then email; seen-before chips capped at three with a counted rest; public-link requests read 'Email only', older rows 'Identity not captured'; Approve still decides by id."
+    },
+    {
       "file": "unit/test_ent701_room_people.py",
       "feature": "trinity-enterprise#701",
       "added": "2026-10-26",
@@ -8082,6 +8105,49 @@
         "unit"
       ],
       "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
+    },
+    {
+      "file": "unit/test_3894_account_has_no_email.py",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "A platform account with no email (the built-in admin) is refused by the Workspace with a 403 whose string detail names the remedy (Settings → General) and X-Trinity-Error-Code: account_has_no_email; an account with an email reaches its owned roster, through the real route and get_current_user."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceAccountHasNoEmail.mount.spec.js",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "fetchRoster reads account_has_no_email from X-Trinity-Error-Code (not the message), other 403s are not mistaken for it and a later success clears it; Portal renders the add-an-email state instead of the dead-end shell, and its buttons open Settings › General and retry."
+    },
+    {
+      "file": "unit/test_ent1087_direct_call_interrupt.py",
+      "feature": "ent#1087",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent660_skill_category.py",
+      "feature": "trinity-enterprise#660",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "trinity-enterprise#660: a library skill's `category:` frontmatter reaches the listing. extract_contract keeps it (a trinity: block wins), bounds it to one printable line, and reads garbage as no category with no warning; list_skills, get_skill and the REST listing's explicit SkillInfo(...) carry it."
     }
   ]
 }

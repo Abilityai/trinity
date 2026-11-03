@@ -1,9 +1,14 @@
 <template>
-  <div class="min-h-screen bg-gray-100 dark:bg-gray-900">
+  <div class="bg-gray-100 dark:bg-gray-900" :class="isBoundedTab ? 'min-h-dvh flex flex-col' : 'min-h-screen'">
+    <!-- trinity#3448: on the Skills tab the page is the window. The cards take
+         the height the page chrome leaves and scroll in their own BoundedRegion
+         (design-system p28); below its 20rem floor the page scrolls by the
+         shortfall only. Every link down to it is a flex column growing from a
+         0px basis: see BoundedRegion for why `flex-1` regrows the page. -->
     <NavBar />
 
-    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
-      <div class="px-4 sm:px-0">
+    <main class="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8" :class="{ 'w-full grow basis-0 flex flex-col': isBoundedTab }">
+      <div class="px-4 sm:px-0" :class="{ 'grow basis-0 flex flex-col': isBoundedTab }">
         <div class="flex justify-between items-center mb-8">
           <div>
             <h1 class="text-3xl font-bold text-gray-900 dark:text-white">Library</h1>
@@ -350,7 +355,7 @@
              (ent#182: one skill model, no parallel mechanisms); this section
              owns its own loading/error/empty states, isolated from the
              templates fetch above. -->
-        <section v-if="visited.has('skills')" v-show="activeTab === 'skills'" id="skills" class="mb-8">
+        <section v-if="visited.has('skills')" v-show="activeTab === 'skills'" id="skills" class="mb-8 grow basis-0 flex flex-col">
           <LibrarySkillsSection />
         </section>
       </div>
@@ -447,6 +452,7 @@ const activeTab = ref(resolveTab(requestedTab))
 // `v-show` would mount Skills and Systems for a Templates-only visitor. This
 // also preserves SystemInstallPanel's editor state across switches.
 const visited = ref(new Set([activeTab.value]))
+const isBoundedTab = computed(() => activeTab.value === 'skills')
 
 function selectTab(tab) {
   activeTab.value = tab
