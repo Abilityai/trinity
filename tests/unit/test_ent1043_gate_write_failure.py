@@ -8,7 +8,9 @@ plan validated (a service refusal, a database fault, a lost lease), the skill
 stays assigned and keeps running with no approval gate, or under the previous
 gate, and before this fix the result only said "the gate failed".
 
-The additive contract stands (apply never unassigns): the fix is REPORTING.
+With `apply_unassign_on_failed_gate` off (this file's fixture; the default is
+on, and trinity-enterprise#1068 unassigns such a skill — see
+`test_ent1068_unassign_on_failed_gate.py`) the fix is REPORTING.
 When a gate write for a held skill fails, the `failed[]` reason carries the
 consequence, the member gets a `report` change — `skill_runs_ungated` (no
 gate in force) or `previous_gate_stands` (a stored gate still applies) — one
@@ -80,6 +82,8 @@ def _patch_skill_service(monkeypatch, attr, value):
 @pytest.fixture
 def world(db_backend, monkeypatch, tmp_path):
     w = W.make_world(monkeypatch, tmp_path)
+    # trinity-enterprise#1068: the report-only mode this file pins.
+    db.set_setting("apply_unassign_on_failed_gate", "false")
     w.calls = []
     w.marker = []
 

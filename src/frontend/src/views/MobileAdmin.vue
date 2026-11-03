@@ -345,6 +345,10 @@
                     </div>
                   </div>
                 </template>
+                <!-- trinity-enterprise#1066: answered only in the person's Workspace. -->
+                <p v-else-if="queueResponseKind(item) === 'credential'" class="ops-card-body" data-testid="queue-credential-notice">
+                  Answered in the person's Workspace, through the secret field.
+                </p>
                 <div v-else-if="queueResponseKind(item) === 'acknowledge'" class="ops-card-footer ops-ack-only">
                   <button
                     type="button"
