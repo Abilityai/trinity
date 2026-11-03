@@ -674,7 +674,8 @@ class TestFieldCoverageCensus:
         assert set(table) == expected
         assert {cls for cls, _why in table.values()} <= system_service.APPLY_FIELD_CLASSES
         assert table["SystemAgentConfig.kind"][0] == "create-only"
-        assert self._schedule_keys() == {"name", "cron", "message", "enabled", "timezone", "description"}
+        assert self._schedule_keys() == {"name", "cron", "message", "enabled", "timezone", "description",
+                                         "model"}
 
 
 # ===========================================================================

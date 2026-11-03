@@ -57,6 +57,7 @@ agents:
         message: "Create today's content plan"
         timezone: "UTC"
         enabled: true
+        model: claude-sonnet-4-5   # optional (#4151); omitted = the agent's default model
       - name: hourly-check
         cron: "0 * * * *"
         message: "Check progress and adjust"
@@ -652,7 +653,9 @@ folders only the declared keys; resources a declared key that differs from the e
 (override → label → default) written with `set_resource_limits`, the omitted key's stored value
 kept; template reported `template_differs`; schedules updated in place through `update_schedule`,
 never `enabled`, created as the agent owner, an update the caller cannot make refused up front
-(`schedule_not_updatable_by_caller`); prompt written only by an admin; view found among the
+(`schedule_not_updatable_by_caller`); a schedule's `model` (MODEL-001) is written on create and
+compared on update only when the entry declares it, named in the dry run and the result like any
+other schedule field, and exported only when set (#4151 — it was silently dropped before); prompt written only by an admin; view found among the
 caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
 creates get create's semantics; their template-dependent fields (a same-named template schedule,
 a template resource that overrides a declared one) are resolved after the create, against a fresh
