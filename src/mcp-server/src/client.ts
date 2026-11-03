@@ -4,6 +4,7 @@
  * Typed client for communicating with the Trinity Backend API.
  */
 
+import { turnFetch } from "./turn-context.js";
 import type {
   StartAgentResult,
   Agent,
@@ -681,7 +682,7 @@ export class TrinityClient {
     formData.append("username", username);
     formData.append("password", password);
 
-    const response = await fetch(`${this.baseUrl}/token`, {
+    const response = await turnFetch(`${this.baseUrl}/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -800,7 +801,7 @@ export class TrinityClient {
       debugLog(`[CLIENT] ${method} ${path} - Auth: ${this.token ? 'present' : 'missing'}`);
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await turnFetch(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -1370,7 +1371,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
+      response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
         method: "POST",
         headers,
         body: JSON.stringify({ message }),
@@ -1559,7 +1560,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(
+      const response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(agentName)}/executions?limit=${limit}`,
         {
           method: "GET",
@@ -1700,7 +1701,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
+      response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -1851,7 +1852,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(
+      const response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/executions/${encodeURIComponent(executionId)}/report-back`,
         {
           method: "POST",
@@ -2046,7 +2047,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(
+      response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/fan-out`,
         {
           method: "POST",
@@ -3218,7 +3219,7 @@ export class TrinityClient {
    * Check if the Trinity API is healthy (no auth required)
    */
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
-    const response = await fetch(`${this.baseUrl}/health`);
+    const response = await turnFetch(`${this.baseUrl}/health`);
     if (!response.ok) {
       throw new Error(`Health check failed: ${response.statusText}`);
     }
@@ -3256,7 +3257,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(`${this.baseUrl}${path}`, {
+      return await turnFetch(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: this.internalHeaders(),
         body: JSON.stringify(body),
@@ -3987,7 +3988,7 @@ export class TrinityClient {
       new Blob([buf], { type: "application/x-tar" }),
       "data.tar"
     );
-    const response = await fetch(
+    const response = await turnFetch(
       `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/data/import`,
       {
         method: "POST",
@@ -4211,7 +4212,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.a2aTimeoutMs());
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
+      const response = await turnFetch(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,
