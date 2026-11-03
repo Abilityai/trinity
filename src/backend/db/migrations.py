@@ -4803,7 +4803,7 @@ def _migrate_seat_ask_class_state_table(cursor, conn):
     (`autonomy_dial_service.LEVEL_KEY`). The live conjuncts (level, the agent's
     autonomy switch, the clock) are read, never written.
 
-    Mirrored by the Alembic revision 0108_seat_ask_class_state.
+    Mirrored by the Alembic revision 0113_seat_ask_class_state.
     """
     cursor.execute(
         """
@@ -5790,6 +5790,174 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_memory_facts(cursor, conn):
+    """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
+
+    One row per extracted fact, scoped by ``(agent_name, user_email)`` where
+    ``''`` is the agent scope shared with the owner. The partial unique index on
+    the live ``text_hash`` makes a two-worker duplicate an IntegrityError the
+    writer catches. Schema is also in db/schema.py for fresh installs; mirrored
+    by Alembic revision 0108_agent_memory_facts for PostgreSQL.
+    """
+    cursor.execute("PRAGMA table_info(agent_memory_facts)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_facts (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                embedding BLOB NOT NULL,
+                embedding_model TEXT NOT NULL,
+                source TEXT NOT NULL,
+                execution_id TEXT,
+                recall_count INTEGER DEFAULT 0,
+                last_recalled_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                deleted_at TEXT,
+                deleted_by TEXT
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+        "ON agent_memory_facts(agent_name, user_email, deleted_at)"
+    )
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+        "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL"
+    )
+    conn.commit()
+    print("Created agent_memory_facts table with indexes (trinity-enterprise#1022)")
+
+
+def _migrate_agent_ownership_memory_opt_out(cursor, conn):
+    """trinity-enterprise#1022 — per-agent retrieval-memory opt-out.
+
+    Adds ``memory_opt_out INTEGER DEFAULT 0`` to ``agent_ownership``. The
+    platform switch (``trinity_memory_enabled``, default off) gates globally;
+    this column lets an owner keep one agent out once the platform is on.
+    Mirrored by Alembic revision 0109_agent_ownership_memory_opt_out.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "memory_opt_out",
+        "ALTER TABLE agent_ownership ADD COLUMN memory_opt_out INTEGER DEFAULT 0",
+    )
+    conn.commit()
+
+
+def _migrate_agent_memory_provenance(cursor, conn):
+    """trinity-enterprise#1022 — fact provenance: the journal and the last writer.
+
+    ``agent_memory_fact_events`` is one append-only row per thing that happened
+    to a fact or to a candidate that never became one (add / update / delete /
+    none / screened / prune / recall / forget), keyed to the execution that did
+    it; ``agent_memory_facts.updated_by_execution_id`` is the last run that
+    rewrote or retired the row. Schema is also in db/schema.py for fresh
+    installs; mirrored by Alembic revision 0110_agent_memory_provenance.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_memory_facts",
+        "updated_by_execution_id",
+        "ALTER TABLE agent_memory_facts ADD COLUMN updated_by_execution_id TEXT",
+    )
+    cursor.execute("PRAGMA table_info(agent_memory_fact_events)")
+    if not cursor.fetchall():
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+                id TEXT PRIMARY KEY,
+                agent_name TEXT NOT NULL,
+                user_email TEXT NOT NULL DEFAULT '',
+                fact_id TEXT,
+                op TEXT NOT NULL,
+                execution_id TEXT,
+                candidate_text TEXT,
+                previous_text TEXT,
+                neighbour_ids TEXT,
+                score REAL,
+                actor TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+        "ON agent_memory_fact_events(agent_name, fact_id, created_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+        "ON agent_memory_fact_events(agent_name, execution_id)"
+    )
+    conn.commit()
+    print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+def run_loop_runs_stale_cleanup(run, *, now_iso: str) -> int:
+    """#4058 — close every `running` loop-run row no terminal can advance.
+
+    Shared by both tracks (`run(sql, params, fetch=False)` adapts the
+    driver). The decision is `db.loop_run_hygiene.stale_running_run_ids`, the
+    same one `rearm_lost_dispatch` uses at runtime: duplicates the pre-#4023
+    race inserted, rows numbered below their loop's `runs_completed`, and every
+    `running` row of a loop that has ended. They close `abandoned`, never
+    `failed`, so no loop's `failed_runs` moves. Data only; idempotent (a second
+    run finds no stale `running` row). Returns the number closed.
+    """
+    from db.loop_run_hygiene import ABANDONED, ABANDONED_ERROR, stale_running_run_ids
+
+    terminal = ("completed", "completed_with_errors", "stopped", "failed", "interrupted")
+    loops = run(
+        "SELECT l.id, l.status, l.runs_completed FROM agent_loops l "
+        "WHERE EXISTS (SELECT 1 FROM agent_loop_runs r "
+        "WHERE r.loop_id = l.id AND r.status = 'running')",
+        {}, fetch=True,
+    )
+    closed = 0
+    for loop_id, status, runs_completed in loops:
+        runs = [
+            {"id": r[0], "run_number": r[1], "status": r[2], "started_at": r[3]}
+            for r in run(
+                "SELECT id, run_number, status, started_at FROM agent_loop_runs "
+                "WHERE loop_id = :loop_id",
+                {"loop_id": loop_id}, fetch=True,
+            )
+        ]
+        for run_id in sorted(stale_running_run_ids(
+                loop_is_terminal=status in terminal,
+                runs_completed=runs_completed or 0, runs=runs)):
+            run(
+                "UPDATE agent_loop_runs SET status = :status, error = :error, "
+                "completed_at = :now WHERE id = :id AND status = 'running'",
+                {"status": ABANDONED, "error": ABANDONED_ERROR, "now": now_iso, "id": run_id},
+            )
+            closed += 1
+    return closed
+
+
+def _migrate_loop_runs_stale_duplicates(cursor, conn):
+    """#4058 — close the stale `running` loop-run rows the pre-#4023 race left
+    (`run_loop_runs_stale_cleanup`). On a fresh install the tables do not exist
+    yet on the first pass, and there is nothing to clean. Mirrored by the
+    Alembic revision 0112_loop_runs_stale_duplicates."""
+    cursor.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('agent_loops', 'agent_loop_runs')"
+    )
+    if cursor.fetchone()[0] < 2:
+        return
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    from utils.helpers import utc_now_iso
+    closed = run_loop_runs_stale_cleanup(_run, now_iso=utc_now_iso())
+    conn.commit()
+    if closed:
+        logger.info("Closed %d stale loop-run row(s) as abandoned (#4058)", closed)
+
+
 # trinity-enterprise#529: which pre-existing rows are still the untouched bundled
 # seed, and so follow the platform's pin from now on. Shared verbatim by Alembic
 # 0107_skill_sources_follow_bundled_pin, so the two tracks cannot disagree.
@@ -5852,6 +6020,34 @@ def _migrate_skill_sources_follow_bundled_pin(cursor, conn):
     )
     cursor.execute(SKILL_SOURCE_FOLLOW_BACKFILL_SQL)
     conn.commit()
+
+
+def _migrate_platform_alert_subjects_resweep(cursor, conn):
+    """#3254 — the #3246 upgrade sweep, run a second time. Data only.
+
+    `platform_alert_subjects` swept the platform-alert backlog once, on the
+    upgrade that carried it. The emitters #3254 moves onto the seam kept
+    filing rows with no `subject` until each move landed, and the seam
+    cannot see such a row: `observe` would file a second pending row beside
+    it, `clear` could not end it, and the snooze could not see a person's
+    ending of it. This re-runs the unchanged `run_platform_alert_sweep` over
+    them: the subject's existing holder keeps the slot whatever its age
+    (#3255's rule), else the newest stays; the rest end as one `superseded`
+    batch. Agent-raised and gate rows, and the gitignore and problem-report
+    rows (no subject, no lifetime), are never touched; a git-bloat row gets
+    a lifetime only. A fresh install has no rows and plans nothing; a second
+    run plans nothing. Runs at import, before any emitter starts.
+
+    Mirrored by the Alembic revision 0111_platform_alert_resweep.
+    """
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    counts = run_platform_alert_sweep(_run)
+    conn.commit()
+    if any(counts.values()):
+        logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
 
 
 MIGRATIONS = [
@@ -6031,5 +6227,10 @@ MIGRATIONS = [
     ("idempotency_claim_token", _migrate_idempotency_claim_token),
     ("execution_chat_session_id", _migrate_execution_chat_session_id),
     ("skill_sources_follow_bundled_pin", _migrate_skill_sources_follow_bundled_pin),
+    ("agent_memory_facts", _migrate_agent_memory_facts),
+    ("agent_ownership_memory_opt_out", _migrate_agent_ownership_memory_opt_out),
+    ("agent_memory_provenance", _migrate_agent_memory_provenance),
+    ("platform_alert_subjects_resweep", _migrate_platform_alert_subjects_resweep),
+    ("loop_runs_stale_duplicates", _migrate_loop_runs_stale_duplicates),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
 ]

@@ -287,6 +287,14 @@ async def terminate_agent_execution(
     # 5. Track activity
 ```
 
+### Pull-mode turns (#3618)
+
+On a pull pilot the worker's result POST usually reaches the backend before step 4. The pull result then decides the row's text:
+
+- `pull_worker._run_and_report` relabels a terminated turn `cancelled`. A failed body's `content` becomes "Execution terminated by user". A turn that finished keeps its reply.
+- `pull_coordination_service.handle_task_result` writes a CANCELLED row with `error = "Execution terminated by user"` (the terminate route's text), followed by the walk trail if there is one. `response` keeps the scrubbed `content`.
+- The result body follows `PullTaskResultRequest`. The model has no `error` field, and any key outside it is dropped.
+
 ---
 
 ## Frontend Layer

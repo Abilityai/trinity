@@ -412,6 +412,33 @@ hold-to-dictate (#2212) and spoken replies (#2157) stay as composer affordances.
 by the standing ruling, deliberately ungated.** See
 [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
 
+**Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046).** The
+second call kind, its own button beside the Live call's in the composer (each button
+carries its own reason when it is off; while one call is on the other says so; the Direct
+strip's live mark is `portal/CallBars.vue`, four token-tinted bars: green listening,
+amber working, blue speaking, flat gray dots muted). No model is in the conversational path: the browser endpoints an utterance
+(`utils/voiceEndpointing.js`), the backend transcribes it, and the browser sends the text
+through the **same `POST …/chat/stream` a typed message uses**, carrying the call's `vd_`
+id — so limits, idempotency, skill gates, attachments and attribution are the typed
+path's, and `turn_may_join_call` refuses any id that is not the caller's live call on this
+agent and thread (uniform 404). The browser then sends `speak{execution_id}`; the bridge
+(`services/direct_voice_service.py`, on the shared `/ws/voice/{id}` door, owner-only, no
+admin attach) reads the turn's stream through `client_portal.router.direct_call_stream`
+and speaks it sentence by sentence. **Harness-agnostic by construction:** every reply is
+spoken from the persisted row (`db.get_turn_reply_row`); a runtime whose stream carries
+messages (`normalize_stream_entry`: Claude Code, Codex; Gemini CLI publishes none) only
+starts sooner, and `unspoken_tail` reconciles so nothing repeats. The socket never starts
+a turn and never answers an ask: an ask the turn raised is read aloud (`speak_ask`), and a
+whole-utterance yes/no that starts ≥300 ms after the prompt finished is posted by the
+browser on the person's own `POST /asks/{id}/answer`; an approved run is spoken only if it
+is the caller's own execution. Speech providers sit behind `services/speech/`
+(`SpeechProvider`: Gemini REST STT/TTS, ElevenLabs), resolved per call from
+`GET/PUT /api/settings/direct-voice` (admin, audit-logged). One call per thread across
+both modes: `portal_direct_active:{thread}` is claimed atomically when the socket opens.
+The Direct reply is the agent's own session answering, so it moves the #2694 delta cursor
+(the call's label row stays out of the delta). Flow:
+[workspace-direct-voice.md](../feature-flows/workspace-direct-voice.md).
+
 **Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
 `components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
 `v-html`, the one `.prose-portal` stylesheet, the one delegated code-copy handler — and
@@ -982,6 +1009,49 @@ agent itself (a human sharer's publish places no card at all), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
+
+**A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
+`db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's
+`chat_kind = 'room'` cursor (or the #557 baseline), in one windowed statement that also
+yields the latest arrival and the first unread id. It reaches a message only by JOINing the
+viewer's own **active participant row** in the identity space their credential acts in —
+`service.room_reader_of(principal)`: a platform session is `user` + `PortalPrincipal.username`,
+a Workspace session `workspace_user` + email, anything else no rooms at all (fail closed) —
+because the cursor row is keyed by EMAIL, which the two identity spaces share, and a count read
+any other way would be an oracle over rooms the viewer is not in. `get_chat_state(room_reader=…)`
+fills the room entries' `unread` and emits cursorless member rooms under the same cap rule; the
+rooms list marks each row `member` (an admin lists every room), and the Inbox draws a room only
+when it is true. The rooms' own `last_read_seq` stays the agents' delta cursor. No table, no
+migration, no `/ws` change (ent#531 is untouched: nothing new rides a broadcast).
+
+*Fix round 1 (security review).* Three more places hold the same rule. (1) The stored room
+**rows** are filtered through one batched read, `db.active_room_ids(kind, identity)`: a room row
+comes back only for a room the reader is actively in, and with no reader for none — so a
+platform account no longer receives the id of a room only its same-email Workspace identity is
+in. A platform admin (`service.room_sees_all`: `is_platform and is_admin`), who lists every
+room through `GET /api/rooms` anyway, keeps their own starred rows for rooms they are not in,
+at a count of 0. (2) The **write** — `mark_chat_read(…, room_reader=…)` moves a room cursor only
+when `db.is_active_room_participant` holds; an unknown room, a room the reader is not in or
+left, and a call with no reader all return the same 204 and write nothing. (3) **Departed
+participants** are not members: `shared_sessions.service._require_membership` 404s a
+participant with `left_at` set (uniformly, like a room that does not exist), and
+`db.list_rooms_for_participant` lists active membership only — so a removed agent's own key no
+longer reads, lists or posts into the room. `get_participant` stays unfiltered for the sender
+label. One exception, by caller rather than by principal (round 2): the engine re-entering
+`post_message` with an already-dispatched reply (`_sender_override`, never set by a route)
+passes `allow_departed=True`, because a wake runs under the WAKER's principal — possibly an agent
+that posted `@B` with its own key — and B's paid-for reply must land even if that agent was
+removed mid-turn. The participant row must still exist; only `left_at` is relaxed. The cursor row itself still has no identity-space column, so if one email is a member of
+the SAME room in both spaces, either credential's read clears both — a follow-up, not fixed here.
+
+*Reading a room only when all of it is on screen (fix round 1, code review).*
+`portalInbox.roomTranscriptComplete(held, data)` is the one rule the Inbox pane
+(`PortalInboxRoomCard`) and the room view (`PortalRoom`) read by: a room may be marked read only
+when the messages held reach the `message_count` that `GET /api/rooms/{id}` returns beside its
+bounded, oldest-first page; a response without a usable count is never complete. The pane pages
+up to ten times and, short of the count, shows "too long to show here" and stays unread; the
+room view owes its read from the open (or an agent's message) and pays it once its poll has
+brought the rest (the poll keeps loading a closed room only while that read is owed). `Portal.vue::openRoom` no longer writes the read at the click.
 
 **The frontend.** Route `/workspace/inbox` (`WorkspaceInbox`) renders in the same
 `Portal.vue` shell, as a stage branch `isInboxRoute && stage.state === 'ready'`
@@ -1705,7 +1775,7 @@ capability default, because the mistakes are not symmetrical.
 
 **A negative rating reaches the operator.** ent#366's redaction stands — the rated agent reads
 the score and never the words — so the operator's copy goes straight to `operator_queue`,
-routed through `create_bounded_alert` (the volume is driven by a client clicking, which is the
+reported through `platform_alerts.observe` with the #1677 budget (the volume is driven by a client clicking, which is the
 agent-influenceable side of the #1677 classification) with its own registered type and a
 reserved id prefix, one item per person per target. It fires on EVERY thumbs-down, not only
 commented ones: "this was not useful" is the report and the words are the elaboration.

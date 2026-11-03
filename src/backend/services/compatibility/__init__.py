@@ -133,7 +133,7 @@ async def build_report(agent_name: str, include_ai: bool = False) -> Dict[str, A
     persisted = db.get_compatibility_result(agent_name)
 
     if include_ai:
-        ai_verdicts = await run_ai(snapshot, ai_ids)
+        ai_verdicts = await run_ai(snapshot, ai_ids, agent_name=agent_name)
         ai_ran_at = now
     else:
         # Reuse the last persisted AI verdicts so findings show without re-spend.

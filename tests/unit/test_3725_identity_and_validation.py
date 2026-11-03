@@ -113,7 +113,7 @@ class TestValidateGithubAccess403:
         with pytest.raises(HTTPException) as exc:
             rest.validate(branch="gone")
         assert exc.value.status_code == 400
-        assert "Branch 'gone' not found" in exc.value.detail
+        assert "Branch or tag 'gone' not found" in exc.value.detail
 
     def test_a_401_is_never_rechecked(self, rest):
         """A token GitHub answered 401 is dead on git too: today's 502."""

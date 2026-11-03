@@ -483,14 +483,25 @@ async def respond_to_queue_item(
         # #3242: the reserved "(something else)" decision — named so the caller
         # can act: `instruction_required`, `reserved_value` or `not_off_menu`.
         raise HTTPException(status_code=422, detail={"code": e.code, "message": str(e)})
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask is answered only through
+        # the secret field in the person's Workspace; the respond box would put
+        # the value into the row and the agent's wake. Nothing was written.
+        raise HTTPException(status_code=422, detail={
+            "code": e.code,
+            "message": "This ask is answered in the person's Workspace through the secret "
+                       "field it opened; a typed response cannot answer it.",
+        })
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
-    except ask_service.AskNotAddressee:
+    except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: a gated-skill approval is decided only by a
-        # person it was addressed to.
+        # person it was addressed to; #1042: an ask to a canon role only by a
+        # person seated in it — named by the role's label, never a person.
         raise HTTPException(status_code=403, detail={
             "code": "not_addressee",
-            "message": "This approval was addressed to someone else; only they can decide it.",
+            "message": e.role_message()
+            or "This approval was addressed to someone else; only they can decide it.",
         })
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
@@ -548,12 +559,13 @@ async def cancel_queue_item(
         )
     except ask_service.AskNotFound:
         raise HTTPException(status_code=404, detail="Queue item not found")
-    except ask_service.AskNotAddressee:
+    except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: only its addressee or an admin cancels a
-        # gated-skill approval.
+        # gated-skill approval (#1042: named by its role when it has one).
         raise HTTPException(status_code=403, detail={
             "code": "not_addressee",
-            "message": "This approval was addressed to someone else; only they or an admin can cancel it.",
+            "message": e.role_message(cancelling=True)
+            or "This approval was addressed to someone else; only they or an admin can cancel it.",
         })
     except ask_service.AskConflict as conflict:
         raise HTTPException(

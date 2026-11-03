@@ -14,30 +14,39 @@ Polling cycle:
   6. Handle expired entries
 """
 
-import asyncio
-import base64
+# #3785: this external block stays whole, first, even where `__init__` itself
+# no longer reads a name. A submodule may import at module level only what is
+# already imported here (test_3785's G13), so an ImportError fires before any
+# `_oq`-holding submodule has loaded; and several names here are read through
+# the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
+import asyncio  # noqa: F401 — kept for G13 (poller imports it)
+import base64  # noqa: F401 — kept for G13 (listing imports it)
 import hashlib
 import json
 import logging
 import os
 import re
 import time
-import uuid
+import uuid  # noqa: F401 — kept for G13 (listing and poller import it)
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence, Tuple
 
-from database import db
-from db import operator_queue as _queue_db
-from dependencies import principal_reach
-from redis_breaker_util import get_breaker_redis
-from services import ask_service, rate_limiter
+from services import rate_limiter
 from services.operator_queue_choices import (
     OPTIONS_DROPPED_MARKER,
     options_cap_violation,
     title_cap_violation,
 )
-from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+
+# #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
+# `deps`, and read as `deps.X`, never bound here — a stale
+# `monkeypatch.setattr(oqs, "db", …)` raises; patch `oqs.deps.X`. Imported
+# after every external import, so a failed first import leaves nothing stale.
+from . import deps
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +127,9 @@ OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
 OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
     os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
 )
+# #3254 R9: a persisting flood episode is re-read at most this often, the #3255
+# base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+OPERATOR_QUEUE_FLOOD_REREAD_SECONDS = 6 * 60 * 60
 
 # =========================================================================
 # #1677: budget for agent-INFLUENCEABLE platform alert emitters.
@@ -400,6 +412,29 @@ def is_addressee_only(item: dict) -> bool:
     return str(candidate).strip().lower().startswith(ADDRESSEE_ONLY_ID_PREFIXES)
 
 
+# trinity-enterprise#981: the one sub-family of addressee-only rows that reaches
+# its addressee BY ADDRESS in the Workspace, with no roster check. The platform
+# chose this row's addressee; the roster was never its fence — such a row is
+# raised under a platform agent nobody is shared with, about the person it is
+# addressed to. Deliberately narrower than `ADDRESSEE_ONLY_ID_PREFIXES`: the
+# wider family (a proposal to a project's creator) keeps its roster fence, so a
+# share revoked afterwards still stops showing it. Inside that family, so the
+# Operating Room's addressee-only listing applies unchanged; under `gate-`, so
+# no agent can mint one. `is_addressee_reach` is the Python twin of the SQL
+# branch in `db/operator_queue._list_conditions`; both also require the row's
+# own `raised_by` column to say `gate` — the prefix alone is never the key.
+ADDRESSEE_REACH_ID_PREFIXES = ("gate-addressee-only-reach-",)
+
+
+def is_addressee_reach(item: dict) -> bool:
+    """Does this row reach its addressee by address alone
+    (trinity-enterprise#981)? The reserved sub-prefix AND `raised_by == 'gate'`
+    on the column itself. Who the addressee is stays `is_addressed_to`."""
+    candidate = item.get("request_id") or ""
+    return (item.get("raised_by") == "gate"
+            and str(candidate).strip().lower().startswith(ADDRESSEE_REACH_ID_PREFIXES))
+
+
 def is_addressed_to(item: dict, email: Optional[str]) -> bool:
     """Is `email` this row's addressee — its single `addressed_to_email` or one
     of its `resolved_to` — compared case-insensitively? The Python twin of the
@@ -419,346 +454,6 @@ def is_addressed_to(item: dict, email: Optional[str]) -> bool:
     if not isinstance(resolved, list):
         return False
     return viewer in {str(p).strip().lower() for p in resolved}
-
-
-# ============================================================================
-# trinity-enterprise#815 — a broad listing is complete before the limit
-# ============================================================================
-
-class QueueListError(Exception):
-    """A refusal `list_for_principal` names; the router maps it to HTTP."""
-
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
-
-
-# `agent_names` (trinity-enterprise#815): the MCP passes its own permit set,
-# one query parameter per name. Bounded so a request line stays well inside
-# every HTTP server's limit; the MCP refuses a larger set before sending.
-AGENT_NAMES_MAX = 500
-
-
-def narrow_to_agent_key(current_user, accessible):
-    """The agents an AGENT-scoped key's queue read covers: its reach
-    (`dependencies.principal_reach`: itself, its edges, the agents it spawned,
-    trinity-enterprise#872) intersected with its owner's accessible set (or the
-    bare set when the owner is an admin, `accessible is None`). Every other principal — a person's JWT
-    or user key, a system key, the event loopback — gets `accessible` back
-    unchanged (trinity-enterprise#815).
-
-    Narrowing for COMPLETENESS, not an authorization point: an agent key
-    resolves to its owner, so its broad read used to rank the owner's whole
-    fleet, cut it at `limit`, and leave the MCP to drop the rows the agent may
-    not see — its own rows could sit below the cut. The MCP's `checkAgentAccess`
-    stays the gate; enforcement on the raw routes is ent#629.
-
-    Keyed on `mcp_scope` / `agent_name` directly, never `acting_agent_name()`,
-    which maps a system key to `trinity-system` and would narrow the system
-    agent. Pure DB (`agent_permissions`, the ent#727 precedent): no Docker read,
-    so a Docker fault cannot shrink the set; a failed read keeps only itself.
-    """
-    if getattr(current_user, "mcp_scope", None) != "agent":
-        return accessible
-    allowed = principal_reach(current_user)
-    if allowed is None:
-        raise QueueListError(403, "agent key carries no agent identity")
-    return allowed if accessible is None else allowed & set(accessible)
-
-
-def _effective_agents(narrowed, agent_names):
-    """`agent_names` only ever narrows: intersected with what the caller may
-    see, or taken as given when the caller sees every agent."""
-    if agent_names is None:
-        return narrowed
-    if len(agent_names) > AGENT_NAMES_MAX:
-        raise QueueListError(422, f"agent_names: at most {AGENT_NAMES_MAX} names")
-    if any(not name or not name.strip() for name in agent_names):
-        raise QueueListError(422, "agent_names: a blank name is not allowed")
-    wanted = set(agent_names)
-    return wanted if narrowed is None else narrowed & wanted
-
-
-# --- the keyset (cursor) walk ------------------------------------------------
-#
-# A walk starts with `cursor=start` and continues with each `next_cursor`.
-# Within one walk no id is returned twice, and every row that matches both when
-# the walk starts and when the walk reaches it is returned exactly once, under
-# concurrent inserts, endings and platform-alert priority changes. The bound:
-# an ending must commit within `db.operator_queue.WALK_WATERMARK_MARGIN_S` of
-# the timestamp it stamped (a breach is logged at error there).
-#
-# The token is `base64url(JSON {"v":1,"w":W,"k":[sec,prk,st,id],"f":fp,"s":walk})`.
-# It is NOT signed and carries no authority: every page re-applies the caller's
-# visibility, so a forged token can only choose a position over rows the caller
-# may already see. `s` names the walk's priority snapshot in Redis (TTL 1 h).
-
-WALK_SNAPSHOT_TTL_S = 3600
-_WALK_KEY = "opqueue:walk:{}"
-_WALK_SENTINEL = "_"
-CURSOR_MAX_BYTES = 4096
-CURSOR_KEY_TEXT_MAX = 1024
-_WALK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
-_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_FILTER_KEYS = ("status", "type", "priority", "agent_name", "since")
-
-
-def filter_fingerprint(filters: dict) -> str:
-    """The caller-chosen filters a cursor belongs to. `agent_names`, `limit` and
-    the principal's narrowed set are deliberately NOT in it: the MCP re-reads its
-    permits every page, and a permission change must not break a walk — it
-    changes which agents' rows match, never the order of the others."""
-    canon = json.dumps({k: filters.get(k) for k in _FILTER_KEYS},
-                       sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
-
-
-def _key_text_ok(value) -> bool:
-    return (isinstance(value, str) and len(value) <= CURSOR_KEY_TEXT_MAX
-            and not any(ord(c) < 0x20 or 0xD800 <= ord(c) <= 0xDFFF for c in value))
-
-
-def encode_cursor(watermark: str, key, fingerprint: str, walk_id: str) -> Optional[str]:
-    """The `next_cursor` for a page whose last row has `key`, or None when that
-    key cannot be carried (a legacy agent-authored id or `created_at` longer
-    than the decoder allows, holding a control character, or whose escaped
-    JSON would exceed `CURSOR_MAX_BYTES`) — the caller then says so instead of
-    truncating a key or quietly ending the walk.
-
-    The byte check is on the encoded JSON, not only per-field characters:
-    `json.dumps` escapes a non-ASCII character to six bytes and `"` / a backslash to
-    two, so a 700-character legacy id could pass the per-field check and still
-    produce a token `decode_cursor` refuses (ent#815 fix 2). Within the cap the
-    token is also within the decoder's base64 length bound."""
-    sec, prk, st, item_id = key
-    if not (_key_text_ok(st) and _key_text_ok(item_id)):
-        return None
-    raw = json.dumps({"v": 1, "w": watermark, "k": [sec, prk, st, item_id],
-                      "f": fingerprint, "s": walk_id}, separators=(",", ":"))
-    if len(raw.encode("utf-8")) > CURSOR_MAX_BYTES:
-        return None
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).rstrip(b"=").decode("ascii")
-
-
-def _bad_cursor(why: str) -> QueueListError:
-    return QueueListError(422, f"cursor: {why}; pass cursor=start to begin a walk, "
-                               "then the next_cursor of each page")
-
-
-def decode_cursor(token: str) -> dict:
-    """Strict: every malformed token is a 422 naming `cursor`, never a silent
-    restart (which would re-return rows the caller already has)."""
-    if not _B64URL_RE.match(token) or len(token) > (CURSOR_MAX_BYTES * 4 + 2) // 3 + 4:
-        raise _bad_cursor("not a token this server issued")
-    try:
-        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
-    except (ValueError, TypeError):
-        raise _bad_cursor("not a token this server issued")
-    if len(raw) > CURSOR_MAX_BYTES:
-        raise _bad_cursor(f"longer than {CURSOR_MAX_BYTES} bytes")
-    try:
-        tok = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise _bad_cursor("not a token this server issued")
-    if not isinstance(tok, dict) or set(tok) != {"v", "w", "k", "f", "s"}:
-        raise _bad_cursor("not a token this server issued")
-    if tok["v"] != 1:
-        raise _bad_cursor("an unsupported version")
-    w = tok["w"]
-    if not isinstance(w, str) or not _ISO_Z_RE.match(w):
-        raise _bad_cursor("a malformed watermark")
-    try:
-        parse_iso_timestamp(w)
-    except ValueError:
-        raise _bad_cursor("a malformed watermark")
-    k = tok["k"]
-    if not (isinstance(k, list) and len(k) == 4):
-        raise _bad_cursor("a malformed position")
-    sec, prk, st, item_id = k
-    if type(sec) is not int or sec not in (0, 1) or type(prk) is not int or not 0 <= prk <= 4:
-        raise _bad_cursor("a malformed position")
-    if not (_key_text_ok(st) and _key_text_ok(item_id)):
-        raise _bad_cursor("a malformed position")
-    if not isinstance(tok["f"], str) or not isinstance(tok["s"], str) \
-            or not _WALK_ID_RE.match(tok["s"]):
-        raise _bad_cursor("not a token this server issued")
-    return {"w": w, "after": (sec, prk, st, item_id), "f": tok["f"], "walk": tok["s"]}
-
-
-def _walk_redis():
-    r = get_breaker_redis()
-    if r is None:
-        raise QueueListError(
-            503, "cursor walks need Redis, which is unreachable; retry, or page with offset")
-    return r
-
-
-def _start_walk_snapshot(snapshot: dict) -> str:
-    """Record the walk's platform-alert priorities under a new walk id (option B,
-    ent#815). The sentinel keeps an empty snapshot distinguishable from an
-    expired one."""
-    walk_id = uuid.uuid4().hex
-    key = _WALK_KEY.format(walk_id)
-    try:
-        r = _walk_redis()
-        pipe = r.pipeline()
-        pipe.hset(key, mapping={_WALK_SENTINEL: "1", **{k: str(v) for k, v in snapshot.items()}})
-        pipe.expire(key, WALK_SNAPSHOT_TTL_S)
-        pipe.execute()
-    except QueueListError:
-        raise
-    except Exception as e:  # a Redis fault mid-call: same answer as unreachable
-        raise QueueListError(503, f"cursor walks need Redis, which failed ({type(e).__name__}); "
-                                  "retry, or page with offset")
-    return walk_id
-
-
-def _load_walk_snapshot(walk_id: str) -> dict:
-    try:
-        stored = _walk_redis().hgetall(_WALK_KEY.format(walk_id))
-    except QueueListError:
-        raise
-    except Exception as e:
-        raise QueueListError(503, f"cursor walks need Redis, which failed ({type(e).__name__}); "
-                                  "retry, or page with offset")
-    if not stored or _WALK_SENTINEL not in stored:
-        raise QueueListError(410, "this walk has expired; restart with cursor=start")
-    return {k: int(v) for k, v in stored.items() if k != _WALK_SENTINEL}
-
-
-_UNCARRIABLE_KEY_WARNING = (
-    "a row's sort key is too long to page past (id {prefix}…); "
-    "use offset paging for this filter"
-)
-
-
-_BELT_DROP_WARNING = (
-    "{n} item(s) on this page were withheld after the read (a stored request_id "
-    "the database filter could not match); total not verified"
-)
-
-
-def list_for_principal(
-    current_user,
-    *,
-    accessible,
-    exclude_about_a_person: bool,
-    project,
-    filters: dict,
-    limit: int,
-    offset: int = 0,
-    agent_names=None,
-    cursor: Optional[str] = None,
-    owned_agents=None,
-    addressee_email=None,
-) -> dict:
-    """One page of `GET /api/operator-queue` for this caller, with the fields
-    that make it honest (trinity-enterprise#815).
-
-    `owned_agents` (trinity-enterprise#866): the agents this caller OWNS, or None
-    when the owner-only rule does not apply (an admin). With a set, an
-    owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
-    a SQL condition like every other visibility filter, so `total` stays exact.
-
-    `addressee_email` (trinity-enterprise#980): this caller's email, or None
-    when the addressee-only rule does not apply (an admin). With a value, an
-    addressee-only row (`ADDRESSEE_ONLY_ID_PREFIXES`) is listed only when it is
-    addressed to them — the same kind of SQL condition.
-
-    Every visibility filter is a SQL condition on the one WHERE builder, so the
-    page, `total` and the flags are computed over the same rows:
-    - `has_more` is read off the page itself (`limit + 1` rows asked for), never
-      a separate count, so a row landing between the two cannot make it lie;
-    - `next_offset` is `offset + limit` while `has_more`, else None;
-    - `total` is a `COUNT` over the same filters — a snapshot.
-
-    The agent set is `narrow_to_agent_key` (an agent key: `{self} ∪ permitted`)
-    further narrowed by `agent_names`; it applies to the page, `total` and the
-    flags alike.
-
-    With `cursor` the page is a step of a keyset walk (see `encode_cursor`):
-    `next_cursor` continues it and `next_offset` is None. Without it the route
-    is in offset mode, ordered exactly as before, and `next_cursor` is None.
-
-    `project` is the router's per-principal projection (`_for_principal`). It
-    stays a BELT: on SQLite and a UTF-8, non-Turkic PostgreSQL the SQL
-    exclusion equals `is_about_a_person` exactly, so it should never fire;
-    under a Turkic collation a legacy upper-case row can reach it. If it drops
-    a row the SQL page returned, `total` becomes None and `warnings` says so. The paging fields are
-    unaffected — they describe the SQL page.
-    """
-    agents = _effective_agents(narrow_to_agent_key(current_user, accessible), agent_names)
-    exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
-    where = dict(filters, accessible_agent_names=agents,
-                 exclude_request_id_prefixes=exclude)
-    if owned_agents is not None:
-        where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
-                     owner_agent_names=set(owned_agents))
-    if addressee_email is not None:
-        where.update(addressee_only_request_id_prefixes=ADDRESSEE_ONLY_ID_PREFIXES,
-                     addressee_email=addressee_email)
-    warnings = []
-    next_cursor = None
-    if cursor is None:
-        rows = db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
-        has_more = len(rows) > limit
-        page = rows[:limit]
-        next_offset = offset + limit if has_more else None
-    else:
-        if offset:
-            raise QueueListError(
-                422, "cursor and offset cannot be combined: page a walk with cursor alone")
-        fingerprint = filter_fingerprint(filters)
-        if cursor == "start":
-            watermark = iso_cutoff(seconds=_queue_db.WALK_WATERMARK_MARGIN_S)
-            snapshot = db.operator_queue_walk_alert_priorities(watermark=watermark, **where)
-            walk_id = _start_walk_snapshot(snapshot)
-            after = None
-        else:
-            token = decode_cursor(cursor)
-            if token["f"] != fingerprint:
-                raise QueueListError(422, "cursor does not match these filters; "
-                                          "restart with cursor=start")
-            watermark, after, walk_id = token["w"], token["after"], token["walk"]
-            snapshot = _load_walk_snapshot(walk_id)
-        keyed = db.list_operator_queue_items_walk(
-            watermark=watermark, snapshot=snapshot, after=after, limit=limit + 1, **where)
-        has_more = len(keyed) > limit
-        keyed = keyed[:limit]
-        page = [item for item, _ in keyed]
-        next_offset = None
-        if has_more:
-            last_key = keyed[-1][1]
-            next_cursor = encode_cursor(watermark, last_key, fingerprint, walk_id)
-            if next_cursor is None:
-                warnings.append(_UNCARRIABLE_KEY_WARNING.format(prefix=str(last_key[3])[:32]))
-    total = db.count_operator_queue_items(**where)
-    flags = db.count_operator_queue_flags(accessible_agent_names=agents)
-
-    items = project(page)
-    dropped = len(page) - len(items)
-    if dropped:
-        total = None
-        warnings.append(_BELT_DROP_WARNING.format(n=dropped))
-        logger.warning(
-            "[operator-queue] list: the projection withheld %d row(s) the SQL "
-            "exclusion kept (ent#815); total reported as null", dropped,
-        )
-    body = {
-        "items": items,
-        "count": len(items),
-        "total": total,
-        "has_more": has_more,
-        "next_offset": next_offset,
-        "next_cursor": next_cursor,
-        "undelivered_count": flags["undelivered"],
-        "closed_by_filer_count": flags["closed_by_filer"],
-    }
-    if warnings:
-        body["warnings"] = warnings
-    return body
 
 
 def _truncate_with_marker(text: str, max_len: int) -> str:
@@ -789,6 +484,21 @@ def _scalar_text(value):
     if isinstance(value, (bool, int, float)) and value:
         return str(value)
     return value
+
+
+def _primary_addressee(agent_name: str, email: str) -> Optional[str]:
+    """``email`` if it is the ONE person who fills ``agent_name``'s primary
+    role, else None (trinity-enterprise#1066). Fails CLOSED and never raises,
+    like `_validated_addressee`."""
+    try:
+        from services import role_addressing
+
+        single = role_addressing.resolve(agent_name, "primary").single
+    except Exception:  # noqa: BLE001 — unresolvable → unaddressed, per #1632
+        logger.warning("[OperatorQueue] primary of %s unresolvable; credential item "
+                       "left unaddressed (ent#1066)", agent_name, exc_info=True)
+        return None
+    return email if single and single.strip().lower() == email else None
 
 
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
@@ -847,10 +557,18 @@ _WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
 # Separate from the two keys above on purpose: discussing an ask moves neither
 # where it was raised nor where a background ask's reply goes.
 _WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
+# trinity-enterprise#981: the project attachment of a row the platform raised
+# about a person — which project, which task, which event. Written only through
+# `ask_service.raise_ask(platform_context=...)` on a gate raise; read by
+# `client_portal/asks/service.py::_project` as the client-facing `project`.
+_WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
+_WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
+_WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
+    _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
 })
 
 
@@ -987,6 +705,11 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     # the addressee's thread id INTO context — doing it afterwards would add
     # bytes the size cap had already signed off on.
     out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+    if out.get("type") == "credential" and out["addressed_to_email"]:
+        # trinity-enterprise#1066: this channel never reaches `_validated_ask`,
+        # which holds the kind to primary on the platform door. A secret field
+        # opens for the agent's primary person only; anyone else → unaddressed.
+        out["addressed_to_email"] = _primary_addressee(agent_name, out["addressed_to_email"])
 
     context = out.get("context")
     if not isinstance(context, dict):
@@ -1369,7 +1092,7 @@ def _is_our_answer(req: dict, resp: dict) -> bool:
 def aging_hours() -> int:
     """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
     try:
-        raw = db.get_setting_value(
+        raw = deps.db.get_setting_value(
             OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
         )
         return max(0, int(str(raw).strip()))
@@ -1414,23 +1137,6 @@ def annotate_aging(items: list, hours: Optional[int] = None) -> list:
     return items
 
 
-async def _audit_sync(action: str, agent_name: str, item_id: str, details: dict) -> None:
-    """Accountability transitions only (ingested · diverged · reconciled ·
-    written_back · undeliverable) — ids and enums, never agent text; best-effort."""
-    try:
-        from services.platform_audit_service import platform_audit_service, AuditEventType
-        await platform_audit_service.log(
-            event_type=AuditEventType.OPERATOR_QUEUE,
-            event_action=action,
-            source="system",
-            target_type="operator_queue",
-            target_id=str(item_id),
-            details={"agent_name": agent_name, **details},
-        )
-    except Exception as e:  # noqa: BLE001 — audit never breaks the sync
-        logger.debug("[OperatorQueue] audit %s for %s skipped: %s", action, item_id, e)
-
-
 def set_websocket_manager(manager):
     """Set the WebSocket manager for broadcasting events."""
     global _websocket_manager
@@ -1471,35 +1177,47 @@ async def create_bounded_alert(agent_name: str, item: dict) -> bool:
 
 
 async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
-    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters.
+    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters,
+    since #3254 a thin delegate of ``platform_alerts.observe``.
 
-    Platform-only emitters (edge-triggered, idempotent-id, operator-cadence
-    creates) keep calling ``db.create_operator_queue_item`` directly; an
-    emitter whose volume an agent can drive routes through here instead. The
-    budget type is derived from ``item["type"]`` — never a separate parameter
-    (two sources of one fact silently void the bound) — and MUST be a static
-    literal registered in ``_BUDGETED_ALERT_TYPES`` (a caller-interpolated
-    type would mint a fresh budget per distinct string).
+    Every in-repo budgeted emitter now reports through ``observe`` itself, which
+    composes the same per-(agent, registered-type) pending budget inside its
+    locked create (``OPERATOR_ALERT_MAX_PENDING_PER_TYPE``) and spawns the budget
+    episode on a refusal. This helper keeps its signature and its outcome
+    contract for any caller still on it; the #3246 ratchet counts each such
+    caller as off the seam, which steers new code to ``observe``.
 
-    Four-outcome contract (never raises):
-      * type not registered      → ERROR log, ``False`` (fail-closed, no create,
-        no episode alert — register the type, a one-line reviewed act);
-      * pending-count read raises → ERROR log, ``False`` (fail-closed, NO
-        episode alert: that path is "DB broken", not "at cap" — the #1632
-        mirror, whose depth count also runs outside the per-item try; the
-        FAILED execution rows remain the primary observability surface);
-      * count ≥ cap               → ONE cooldown-gated, bucketed-id episode
-        alert per window (``_maybe_emit_alert_budget_episode``), ``False``;
-      * else                      → create; ``True`` on success, ERROR log +
-        ``False`` on a create raise (NO episode alert).
+    The budget type is derived from ``item["type"]`` (never a separate
+    parameter: two sources of one fact silently void the bound) and MUST be a
+    static literal registered in ``_BUDGETED_ALERT_TYPES``. That type names its
+    platform-alert kind (the kind whose ``budgeted_type`` it is), and the key is
+    read back from ``item["id"]`` + ``item["context"]`` by
+    ``platform_alerts.derive_legacy_subject``, which must resolve to that same
+    kind. The two kinds whose ids carry no derivable subject (the gitignore
+    sweep's alert and the Workspace problem report) are keyed by the request id
+    minus the kind's prefix: for the problem report that is the per-person /
+    target / day digest its own emitter keys by; for gitignore it is the old
+    per-call id, so a call still files one row.
 
-    Returns one of the ``ALERT_*`` outcome constants (the bullets above map
-    onto them in order); ``create_bounded_alert`` is the bool view.
+    Outcomes (never raises; every refused or failed arm logs ``[#1677 budget]``):
+      * type not registered          → ``ALERT_REFUSED_UNREGISTERED`` (fail-closed,
+        nothing written: register the type, a one-line reviewed act);
+      * the id does not read back as the type's kind, or carries no key
+                                     → ``ALERT_FAILED_CREATE`` (fail-closed);
+      * else ``observe``'s outcome: ``ALERT_CREATED``; ``"updated"`` (the
+        subject's pending row was rewritten in place); ``"snoozed"`` (a person
+        ended the subject inside the snooze window, nothing written);
+        ``ALERT_REFUSED_AT_BUDGET`` (the budget was full; the episode alert is
+        spawned by ``observe``); ``ALERT_FAILED_CREATE`` for its ``"failed"``.
 
-    Callers gate every paired side-effect (e.g. the skill-not-found
-    notification) on the returned bool, so a secondary surface can never
-    outlive its queue item.
+    ``ALERT_FAILED_COUNT`` stays importable and is no longer returned: the
+    per-type count now runs inside the seam's locked create, where a failed
+    count and a failed create are one exception path. ``create_bounded_alert``
+    is the bool view and is true for ``ALERT_CREATED`` only, so a paired side
+    effect (a notification) never fires twice for one pending row.
     """
+    from services import platform_alerts
+
     item_type = item.get("type") if isinstance(item, dict) else None
     if item_type not in _BUDGETED_ALERT_TYPES:
         logger.error(
@@ -1511,74 +1229,79 @@ async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
         )
         return ALERT_REFUSED_UNREGISTERED
 
-    try:
-        pending = int(
-            db.count_operator_queue_pending_for_agent(agent_name, item_type=item_type)
-        )
-    except Exception as e:
+    kind = next(
+        (k for k in platform_alerts.KINDS.values() if k.budgeted_type == item_type), None
+    )
+    match = platform_alerts.derive_legacy_subject(item.get("id"), item.get("context"))
+    key = None
+    if kind is not None and match is not None and match.kind == kind.name:
+        if match.subject is not None:
+            key = match.subject[len(kind.name) + 1:]
+        elif kind.name in ("gitignore_untracked", "workspace_problem_report"):
+            key = item["id"][len(kind.prefix):] or None
+    if key is None:
         logger.error(
-            "[#1677 budget] pending-count read failed for %s/%s (%s) — alert "
-            "suppressed (fail-closed, NO episode alert; the FAILED execution "
-            "rows remain the primary surface)",
-            agent_name, item_type, e,
-        )
-        return ALERT_FAILED_COUNT
-
-    if pending >= OPERATOR_ALERT_MAX_PENDING_PER_TYPE:
-        context = item.get("context")
-        last_triggered_by = (
-            context.get("triggered_by") if isinstance(context, dict) else None
-        )
-        # Guarded so the four-outcome never-raises contract holds structurally:
-        # the episode alert is a secondary signal over an already-refused item,
-        # and a raise here (review fix: the cooldown-knob=0 ZeroDivisionError
-        # in the bucket computation was one such path) must never leak into a
-        # caller that trusts the docstring.
-        try:
-            await _maybe_emit_alert_budget_episode(
-                agent_name, item_type, last_triggered_by
-            )
-        except Exception as e:
-            logger.error(
-                "[#1677 budget] episode-alert emit raised for %s/%s (%s) — "
-                "swallowed (the refusal itself stands)",
-                agent_name, item_type, e,
-            )
-        return ALERT_REFUSED_AT_BUDGET
-
-    # NO `await` between the count read above and this create — the
-    # check-then-act overshoot window stays cross-worker-only (bounded by the
-    # number of concurrent terminal writers for one agent), never widened by a
-    # yield on this worker.
-    try:
-        db.create_operator_queue_item(agent_name, item)
-    except Exception as e:
-        logger.error(
-            "[#1677 budget] operator alert create failed for %s/%s (%s) — "
-            "suppressed (fail-closed, NO episode alert)",
-            agent_name, item_type, e,
+            "[#1677 budget] refusing operator alert for '%s': id %r does not read "
+            "back as a keyed %r alert, the kind its type %r registers "
+            "(fail-closed; no item created)",
+            agent_name, item.get("id"), kind.name if kind else None, item_type,
         )
         return ALERT_FAILED_CREATE
-    return ALERT_CREATED
+
+    outcome = platform_alerts.observe(
+        agent_name, kind.name, key,
+        title=item.get("title") or "",
+        question=item.get("question") or "",
+        priority=item.get("priority") or "high",
+        context=item.get("context"),
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
+        logger.error(
+            "[#1677 budget] operator alert create failed for %s/%s — suppressed "
+            "(fail-closed; the seam logged the cause)",
+            agent_name, item_type,
+        )
+        return ALERT_FAILED_CREATE
+    if outcome == ALERT_REFUSED_AT_BUDGET:
+        logger.warning(
+            "[#1677 budget] alert budget full for %s/%s (cap=%d) — refused; the "
+            "budget episode alert reports it",
+            agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        )
+    return outcome
 
 
 async def _maybe_emit_alert_budget_episode(
     agent_name: str, item_type: str, last_triggered_by=None
 ) -> None:
-    """#1677: ONE aggregated budget-hit episode alert per cooldown window.
+    """#1677: ONE budget-hit episode reading per cooldown window.
 
-    Mirrors `_maybe_emit_flood_alert`'s pattern (cooldown stamped BEFORE the
-    create, direct DB create, swallowed emit failure, best-effort WS
-    broadcast) with two deliberate differences: module-level cooldown state
-    (see `_alert_budget_cooldown`) and a **deterministic time-bucketed id** —
-    `alert-budget-{agent}-{type}-b{bucket}` — so under `--workers 2` / worker
-    churn every worker computes the SAME id within a window and the DB
-    `(agent_name, request_id)` on_conflict_do_nothing target dedups the
-    duplicate at the sink (#1816 bucketed-id precedent). A boundary-straddling
-    episode may emit 2 alerts — the same acceptance as the #1632 cooldown.
-    The `alert-budget-` prefix is in `_RESERVED_ID_PREFIXES`, so an agent
-    cannot pre-create (and thereby on-conflict-suppress) the alert.
+    Reported through ``platform_alerts.observe`` as kind ``alert_budget`` keyed by
+    the budgeted type (#3254): one pending row per (agent, type), subject
+    ``alert_budget:<type>``, which a later refusal outside the window rewrites
+    in place rather than filing again. No emitter observes the budget freeing
+    up (it is measured only inside the seam's own create), so a row nobody
+    re-reads ends with its 14-day lifetime (``NO_CLEAR_SITE`` in the #3246
+    registry test). Two workers' readings land on the one subject row, which is
+    what the old time-bucketed id approximated.
+
+    The episode is the set of pending rows that fill the budget: each reading
+    carries a digest of their ids (``filled_by``, a material key of the kind).
+    After a person ends the episode alert, a reading of the same full budget is
+    snoozed for the snooze window; once a slot frees and a new row fills it,
+    the condition cleared and came back, the digest differs and the reading
+    files. A failed read of the set logs an ERROR and leaves ``filled_by``
+    None, which no digest equals, so the reading files.
+
+    The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
+    BEFORE the reading, so a persistently failing write backs off for the
+    window instead of retrying on every refusal (#1632 shape). The kind is
+    unbudgeted, so the episode can never recurse into the budget. ``observe``
+    never raises and sends the thin ``operator_queue_sync`` trigger (#918) when
+    a rendered field changed.
     """
+    from services import platform_alerts
+
     now = time.monotonic()
     key = (agent_name, item_type)
     # `None` = never alerted (the #1632 sentinel shape — a 0.0 default would
@@ -1586,15 +1309,8 @@ async def _maybe_emit_alert_budget_episode(
     last = _alert_budget_cooldown.get(key)
     if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
         return  # already alerted this episode
-    # Stamped BEFORE the create so a persistently-failing create backs off for
-    # the window instead of retrying on every refusal (#1632 shape).
     _alert_budget_cooldown[key] = now
 
-    # max(1, …): the cooldown knob at 0 (the natural "no cooldown" spelling)
-    # must degrade to a 1s bucket — matching the flood alert's alert-every-
-    # episode behavior at 0 — never a ZeroDivisionError on the at-cap path.
-    bucket = int(time.time() // max(1, OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS))
-    now_iso = utc_now_iso()
     title = f"Agent '{agent_name}' exceeded its '{item_type}' alert budget"
     # No `held` count (untruthful at a first-trip emit — true volume lives in
     # the FAILED executions list) and no agent-controlled text (no command
@@ -1608,10 +1324,21 @@ async def _maybe_emit_alert_budget_episode(
         f"compromised agent — review its recent activity before acting on its "
         f"requests."
     )
+    try:
+        filling = deps.db.list_operator_queue_items(
+            agent_name=agent_name, status="pending", type=item_type, limit=1000)
+        filled_by = hashlib.sha256(
+            "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — the alarm still files, as a new episode
+        logger.error("[#1677 budget] could not read the rows filling %s/%s's budget",
+                     agent_name, item_type, exc_info=True)
+        filled_by = None
     context = {
         "reason": "platform_alert_budget",
         "alert_type": item_type,
         "cap": OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "filled_by": filled_by,
     }
     # Triage aid for the cross-agent budget-fill scenario (a permitted peer
     # spraying at the victim): the platform trigger enum only, shape-guarded.
@@ -1620,313 +1347,36 @@ async def _maybe_emit_alert_budget_episode(
     ):
         context["last_triggered_by"] = last_triggered_by
 
-    alert = {
-        "id": f"alert-budget-{agent_name}-{item_type}-b{bucket}",
-        "type": "alert",
-        "status": "pending",
-        "priority": "high",
-        "title": title,
-        "question": question,
-        "context": context,
-        "created_at": now_iso,
-    }
-
-    # Direct DB create — a PLATFORM-only emitter by construction (this
-    # function never re-enters create_bounded_alert, so the budget cannot
-    # recurse into itself). Emit failure swallowed: the episode alert is a
-    # secondary signal over an already-suppressed alert.
-    try:
-        db.create_operator_queue_item(agent_name, alert)
-    except Exception as e:
+    outcome = platform_alerts.observe(
+        agent_name, "alert_budget", item_type,
+        title=title, question=question, priority="high", context=context,
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
         logger.error(
-            "[#1677 budget] failed to emit budget episode alert for %s/%s: %s",
-            agent_name, item_type, e,
+            "[#1677 budget] failed to emit budget episode alert for %s/%s "
+            "(the seam logged the cause)",
+            agent_name, item_type,
         )
         return
-
     logger.warning(
-        "[#1677 budget] alert budget hit for %s/%s (cap=%d) — episode alert emitted",
-        agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "[#1677 budget] alert budget hit for %s/%s (cap=%d) — episode alert %s",
+        agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE, outcome,
     )
 
-    if _websocket_manager:
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "operator_queue_new",
-                "data": {
-                    "id": alert["id"],
-                    "agent_name": agent_name,
-                    "type": "alert",
-                    "priority": "high",
-                    "title": alert["title"],
-                    "created_at": alert["created_at"],
-                },
-            }))
-        except Exception as e:
-            logger.error(
-                "[#1677 budget] failed to broadcast budget episode alert for %s: %s",
-                agent_name, e,
-            )
+
+# #3785: the package's own submodules, imported after the names they read
+# from `__init__` (test_3785's G6 and G13).
+from . import listing  # noqa: E402,F401 — loads the submodule here, in G6 order
+
+# #3785: the poller core (instance state, start/stop, the leader lease, the
+# loop and the cycle) lives in `poller.PollerCoreMixin`. Imported after every
+# O1 definition: its `__init__` default reads `_oq.DEFAULT_POLL_INTERVAL` at
+# import time.
+from . import poller  # noqa: E402
 
 
-class OperatorQueueSyncService:
+class OperatorQueueSyncService(poller.PollerCoreMixin):
     """Background service that syncs operator queue files with the database."""
-
-    def __init__(self, poll_interval: int = DEFAULT_POLL_INTERVAL):
-        self.poll_interval = poll_interval
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
-        # #1525: (agent_name, req_id) → consecutive create-failure count. Bounds
-        # the retry loop for a request whose DB create keeps raising (malformed
-        # input, a DB error, …) so it can't hot-loop forever. Entry is dropped on
-        # success. #1631: keyed by the (agent, id) TUPLE — two agents can now
-        # share a req_id, so a bare-id key would let agent A's failing id
-        # quarantine agent B's distinct, healthy request.
-        self._create_failures: dict[tuple[str, str], int] = {}
-        # #1631: (agent, req_id) already warned about for a reserved-prefix
-        # hijack attempt — logged once, not every ~5s cycle. Bounded like the
-        # quarantine map so a crafted stream of unique reserved ids can't grow it
-        # without bound.
-        self._rejected_reserved: set[tuple[str, str]] = set()
-        # trinity-enterprise#611: (agent, req_id) already logged for a file entry
-        # that re-uses the id of an ask the agent raised over the platform, and
-        # the agents already told the file channel is deprecated. Logged once
-        # per process each, bounded like the sets above.
-        self._skipped_native: set[tuple[str, str]] = set()
-        # #3243: (agent, req_id) already logged for an entry held over the
-        # authoring caps — once per process, bounded like the sets above.
-        self._cap_held_logged: set[tuple[str, str]] = set()
-        self._file_channel_noticed: set[str] = set()
-        # #1632: unique per worker process so the cross-worker leader lock only
-        # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
-        self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
-        self._is_leader = False  # last observed leadership, for transition logs
-        # #1632: agent_name → monotonic ts of the last flood alert — now the
-        # minimum spacing between episodes, so a flapping cap cannot re-alert
-        # every cycle.
-        self._flood_alert_cooldown: dict[str, float] = {}
-        # #3130: (agent_name, reason) pairs whose over-cap episode has already
-        # been alerted. An episode ends when a cycle reads the file and holds
-        # nothing (`ingestion_cap`) or reads a sane-size file (`oversize_file`);
-        # only then can the next one alert. In-memory like the cooldown: a
-        # leader failover may re-alert once, and the #1677 budget bounds that.
-        self._flood_episodes: set = set()
-        # #3130: agent_name → the queue-file sha a `platform.ingestion` write was
-        # refused against. Retried only once the file has changed, so a 412
-        # from an agent still rewriting its file is not a write every 5 s.
-        self._ingestion_write_refused: dict[str, str] = {}
-        # #2915: consecutive failed reads per agent — hysteresis before a row is
-        # called `unconfirmed` (a busy container times out intermittently).
-        self._read_failures: dict[str, int] = {}
-        # #2915: did any row's sync/delivery state change this cycle? ONE thin WS
-        # trigger per cycle, never per agent or per item.
-        self._changed_this_cycle = False
-
-    def start(self):
-        """Start the background polling loop."""
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._poll_loop())
-        logger.info(f"Operator queue sync service started (interval={self.poll_interval}s)")
-
-    def stop(self):
-        """Stop the background polling loop."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
-        # #1632: hand leadership off immediately on graceful shutdown instead of
-        # leaving a sibling worker idle until the TTL expires. Never raises.
-        self._release_leadership()
-        logger.info("Operator queue sync service stopped")
-
-    def _leader_ttl(self) -> int:
-        """Lease TTL. Refreshed once at the TOP of each `_poll_cycle`, so it must
-        comfortably outlast ONE worst-case cycle plus the inter-cycle sleep — or
-        the lease expires mid-cycle, a sibling grabs it, and leadership flaps
-        (both workers run an overlapping cycle → the flood alert double-emits,
-        since its id carries `utc_now_iso()` and so isn't deduped by
-        `on_conflict`). A `_sync_agent` can take a fast read + `write_file`
-        (10s timeout, `_write_responses_to_agent`), and the loop then sleeps
-        `poll_interval`, so the bare `poll_interval * 3` (15s at the 5s default)
-        has ~zero headroom over a single slow-writing agent. Floor at 30s so one
-        slow write can't drop leadership. (Monitoring #1464 mirrors this pattern
-        but at a 30s interval, where `* 3` already dwarfs its cycle.)"""
-        return max(self.poll_interval * 3, 30)
-
-    def _try_acquire_leadership(self) -> bool:
-        """#1632 — cross-worker leader election for the sync loop (mirror
-        monitoring #1464). Returns True iff this worker holds the lease for this
-        cycle. Fail-open: if Redis is unreachable, act as leader (single-worker
-        dev keeps syncing; in a Redis-down prod the DB depth cap still bounds a
-        double feed, and duplicate creates are idempotent via on_conflict)."""
-        r = get_breaker_redis()
-        if r is None:
-            return True  # fail-open: no Redis → behave as the sole worker
-        ttl = self._leader_ttl()
-        try:
-            if r.set(_LEADER_KEY, self._worker_id, nx=True, ex=ttl):
-                return True
-            # Already held — refresh the TTL only if the lease is OURS.
-            if r.get(_LEADER_KEY) == self._worker_id:
-                r.expire(_LEADER_KEY, ttl)
-                return True
-            return False
-        except Exception as e:
-            logger.warning("operator-queue leader lock check failed-open (%s)", e)
-            return True
-
-    def _release_leadership(self) -> None:
-        """Delete the lease iff we hold it (best-effort, never raises)."""
-        try:
-            r = get_breaker_redis()
-            if r is not None and r.get(_LEADER_KEY) == self._worker_id:
-                r.delete(_LEADER_KEY)
-        except Exception:
-            pass
-
-    async def _poll_loop(self):
-        """Main polling loop."""
-        while self._running:
-            try:
-                await self._poll_cycle()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Operator queue sync error: {e}")
-
-            try:
-                await asyncio.sleep(self.poll_interval)
-            except asyncio.CancelledError:
-                break
-
-    async def _poll_cycle(self):
-        """Single poll cycle: sync all running agents."""
-        # #1632: only the lease-holding worker syncs (mirror monitoring #1464),
-        # so `--workers 2` doesn't double-charge the rate limiter, double-scan
-        # agent files, or double-broadcast the flood alert.
-        leader = self._try_acquire_leadership()
-        if leader and not self._is_leader:
-            logger.info("Operator queue sync acquired leadership (worker %s)", self._worker_id)
-        elif not leader and self._is_leader:
-            logger.info("Operator queue sync yielded leadership (worker %s)", self._worker_id)
-        self._is_leader = leader
-        if not leader:
-            return
-
-        from services.docker_service import agent_container_states
-
-        # Reset BEFORE expiry (trinity-enterprise#611): an expiry is a change, and
-        # the reset used to sit below it, so an expired ask reached the UI only on
-        # its 15 s poll.
-        self._changed_this_cycle = False
-
-        # Expire items past their deadline — BEFORE the running-agents gate
-        # (#2915): the early return below used to sit above this, so an
-        # all-stopped fleet never expired anything. Through the ask sink
-        # (trinity-enterprise#611): the ledger (`disposed_by = 'timeout'`), one
-        # audit row per ask, and the wake for each filer; the sink sends no
-        # trigger of its own — this cycle's ONE trigger announces it.
-        try:
-            expired = ask_service.expire().rows
-            if expired:
-                self._changed_this_cycle = True
-                logger.info(f"Expired {len(expired)} operator queue items")
-        except Exception as e:
-            logger.error(f"Operator queue expiry failed: {e}")
-
-        # trinity-enterprise#751: gated-skill approvals whose ending no observer
-        # consumed, and approved runs lost between claim and start. Compare-and-
-        # sets throughout, so every worker may run it; a miss waits a cycle and
-        # never dispatches anything wrongly.
-        try:
-            from services import skill_gate_service
-            await skill_gate_service.sweep()
-        except Exception as e:
-            logger.error(f"Skill gate sweep failed: {e}")
-
-        # #2915: TRI-state, deliberately (#2196 class). `list_all_agents_fast`
-        # collapses "Docker unreadable" into "no agents"; keyed on that, one
-        # daemon blip would flip every open row fleet-wide to
-        # `unconfirmed:agent_not_running` and back. `None` here means "could
-        # not look" — nothing is swept and nothing is synced this cycle.
-        try:
-            states = agent_container_states()
-        except Exception as e:
-            logger.debug(f"Could not read agent container states: {e}")
-            states = None
-        if states is None:
-            # Nothing is swept or synced — but an expiry that already happened
-            # is still announced.
-            if self._changed_this_cycle:
-                await self._broadcast_sync()
-            return
-
-        running_agents = sorted(name for name, state in states.items() if state == "running")
-        now = utc_now_iso()
-
-        # Sweep: every open row of an agent that is NOT running is
-        # `unconfirmed:agent_not_running`. Edge-triggered — at steady state the
-        # WHERE matches nothing. An empty running list sweeps every open row
-        # (an explicit branch in the accessor; never `notin_([])`).
-        try:
-            swept = db.mark_operator_queue_unconfirmed(
-                "agent_not_running", now, exclude_agents=running_agents,
-                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
-            )
-            if swept:
-                self._changed_this_cycle = True
-        except Exception as e:
-            logger.error(f"Operator queue not-running sweep failed: {e}")
-
-        # #2989 review (AC3): an answer or terminal flip waiting on an agent that
-        # is NOT running cannot reach its file — the row says so,
-        # `undelivered:agent_not_running`, not merely `unconfirmed`. Edge-triggered
-        # and audited once per transition; the write-back flips it to `delivered`
-        # when the agent is back. Platform alarms (`not_applicable`) are skipped.
-        try:
-            stalled = db.mark_operator_queue_undelivered_for_stopped_agents(
-                now, running_agents=running_agents,
-                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
-            )
-        except Exception as e:
-            logger.error(f"Operator queue not-running delivery sweep failed: {e}")
-            stalled = []
-        for row in stalled:
-            self._changed_this_cycle = True
-            await _audit_sync("undeliverable", row.get("agent_name") or "", row["id"],
-                              {"status": row.get("status"), "detail": "agent_not_running"})
-
-        if running_agents:
-            # Sync each agent concurrently (with a reasonable limit)
-            tasks = [self._sync_agent(name) for name in running_agents]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            # #3313: `return_exceptions=True` keeps one agent's failure from
-            # cancelling the others, but it also dropped the error unlogged.
-            for name, result in zip(running_agents, results):
-                if isinstance(result, Exception):
-                    logger.error(
-                        f"Operator queue sync failed for '{name}': "
-                        f"{type(result).__name__}: {result}"
-                    )
-
-        if self._changed_this_cycle:
-            await self._broadcast_sync()
-
-    async def _broadcast_sync(self):
-        """ONE thin trigger per cycle (#918: identifiers only — here none; the
-        store refetches the access-controlled list). Never per agent or per
-        item: a fleet restart would otherwise fire hundreds of refetches."""
-        if not _websocket_manager:
-            return
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "operator_queue_sync",
-                "data": {},
-            }))
-        except Exception as e:
-            logger.error(f"Failed to broadcast operator-queue sync: {e}")
 
     async def _apply_sync_state(self, agent_name: str, row: dict, state: str,
                                 detail: Optional[str], now: str) -> bool:
@@ -1947,7 +1397,7 @@ class OperatorQueueSyncService:
         if prior == state and (row.get("sync_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_sync_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_sync_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record sync state for {row.get('id')}: {e}")
             return False
@@ -1957,10 +1407,10 @@ class OperatorQueueSyncService:
         row["sync_detail"] = detail
         self._changed_this_cycle = True
         if state in DIVERGED_STATES:
-            await _audit_sync("diverged", agent_name, row["id"],
-                              {"from": prior, "to": state, "detail": detail})
+            await deps._audit_sync("diverged", agent_name, row["id"],
+                                   {"from": prior, "to": state, "detail": detail})
         elif state == SYNC_CONFIRMED and prior in DIVERGED_STATES:
-            await _audit_sync("reconciled", agent_name, row["id"], {"from": prior})
+            await deps._audit_sync("reconciled", agent_name, row["id"], {"from": prior})
         return True
 
     async def _apply_delivery_state(self, agent_name: str, row: dict, state: str,
@@ -1973,7 +1423,7 @@ class OperatorQueueSyncService:
         if row.get("delivery_state") == state and (row.get("delivery_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_delivery_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_delivery_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record delivery state for {row.get('id')}: {e}")
             return False
@@ -1983,10 +1433,10 @@ class OperatorQueueSyncService:
         row["delivery_detail"] = detail
         self._changed_this_cycle = True
         if state == DELIVERY_DELIVERED:
-            await _audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
+            await deps._audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
         elif state == DELIVERY_UNDELIVERED:
-            await _audit_sync("undeliverable", agent_name, row["id"],
-                              {"status": row.get("status"), "detail": detail})
+            await deps._audit_sync("undeliverable", agent_name, row["id"],
+                                   {"status": row.get("status"), "detail": detail})
         return True
 
     def _notice_file_channel(self, agent_name: str) -> None:
@@ -2005,7 +1455,7 @@ class OperatorQueueSyncService:
 
     async def _sync_agent(self, agent_name: str):
         """Sync a single agent's operator queue file."""
-        client = AgentClient(agent_name)
+        client = deps.AgentClient(agent_name)
         now = utc_now_iso()
 
         # 1. Read the queue file from the agent
@@ -2025,7 +1475,7 @@ class OperatorQueueSyncService:
             self._read_failures[agent_name] = failures
             if failures >= READ_FAILURE_THRESHOLD:
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         _read_failure_detail(result), now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2050,7 +1500,7 @@ class OperatorQueueSyncService:
             )
             await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
             try:
-                if db.mark_operator_queue_unconfirmed(
+                if deps.db.mark_operator_queue_unconfirmed(
                     "oversize_file", now, agent_name=agent_name,
                     exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                 ):
@@ -2061,7 +1511,7 @@ class OperatorQueueSyncService:
 
         if file_exists:
             # #3130: a sane-size read ends an oversize episode.
-            self._flood_episodes.discard((agent_name, "oversize_file"))
+            self._end_flood_episode(agent_name, "oversize_file")
             try:
                 queue_data = json.loads(content)
             except json.JSONDecodeError:
@@ -2071,7 +1521,7 @@ class OperatorQueueSyncService:
                 # file with the reconstructed responses alone.
                 logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "invalid_json", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2085,7 +1535,7 @@ class OperatorQueueSyncService:
                     f"(an object with a `requests` list); not reconciling, not writing"
                 )
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "wrong_shape", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2109,7 +1559,7 @@ class OperatorQueueSyncService:
         # silently: a phantom admit against the depth cap and a "new" broadcast
         # every cycle). Replaces the per-entry `exists()` probe.
         try:
-            index = db.get_operator_queue_sync_index_for_agent(agent_name)
+            index = deps.db.get_operator_queue_sync_index_for_agent(agent_name)
         except Exception as e:
             logger.error(f"Failed to read the sync index for {agent_name}: {e}")
             return
@@ -2132,7 +1582,7 @@ class OperatorQueueSyncService:
         # cycle's creates so the cap holds without re-counting per item.
         # #3130: the agent's OWN rows only — a platform row about the agent (its
         # flood alarm above all) never spends the agent's budget.
-        pending_count = db.count_operator_queue_pending_for_agent(
+        pending_count = deps.db.count_operator_queue_pending_for_agent(
             agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
         )
         admitted = 0
@@ -2230,7 +1680,7 @@ class OperatorQueueSyncService:
                 # platform uuid (returned here), not the agent's `req_id` — the
                 # frontend store keys items by uuid `id`, so an ack keyed on
                 # request_id would never match a live item.
-                ack_uuid = db.mark_operator_queue_acknowledged(agent_name, req_id)
+                ack_uuid = deps.db.mark_operator_queue_acknowledged(agent_name, req_id)
                 if ack_uuid:
                     acknowledged_items.append(ack_uuid)
                     open_by_rid.pop(req_id, None)  # it just went terminal
@@ -2391,7 +1841,7 @@ class OperatorQueueSyncService:
                 # trinity-enterprise#611: provenance from what the POLLER knows,
                 # keyword-only — never from the entry, which could claim any
                 # channel it likes.
-                new_id, inserted = db.create_operator_queue_item_with_outcome(
+                new_id, inserted = deps.db.create_operator_queue_item_with_outcome(
                     agent_name, clamped, channel="file", raised_by="agent",
                 )
                 self._create_failures.pop(fail_key, None)  # recovered — clear count
@@ -2435,8 +1885,8 @@ class OperatorQueueSyncService:
             # audit row is durable operator-visible state (G-04), so it carries
             # the folded token or `other` — never the string itself. `req_id`
             # passed the `_ID_RE` shape check above.
-            await _audit_sync("ingested", agent_name, new_id,
-                              {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
+            await deps._audit_sync("ingested", agent_name, new_id,
+                                   {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
 
         # #2915: open rows the file no longer carries. The entry was pruned or the
         # file is gone — the platform used to keep showing a live card for it.
@@ -2458,7 +1908,7 @@ class OperatorQueueSyncService:
         # #2915: "last confirmed at HH:MM" without a write per row per cycle —
         # one batched UPDATE per agent, for confirmed rows older than a minute.
         try:
-            db.refresh_operator_queue_last_confirmed(
+            deps.db.refresh_operator_queue_last_confirmed(
                 agent_name, now, iso_cutoff(minutes=LAST_CONFIRMED_REFRESH_SECONDS // 60)
             )
         except Exception as e:
@@ -2470,7 +1920,7 @@ class OperatorQueueSyncService:
             await self._maybe_emit_flood_alert(agent_name, held=held)
         else:
             # #3130: nothing held — the episode is over; the next one alerts.
-            self._flood_episodes.discard((agent_name, "ingestion_cap"))
+            self._end_flood_episode(agent_name, "ingestion_cap")
 
         # 3. Broadcast new items via WebSocket
         if new_items and _websocket_manager:
@@ -2508,8 +1958,8 @@ class OperatorQueueSyncService:
         # them — as in-place status flips on entries still in the file; an
         # entry that is gone is recorded `undelivered:entry_missing` (#2915),
         # never silently skipped. The aging receipt rides the same write.
-        responded_items = db.get_operator_queue_responded_for_agent(agent_name)
-        terminal_items = db.get_operator_queue_terminal_for_agent(agent_name)
+        responded_items = deps.db.get_operator_queue_responded_for_agent(agent_name)
+        terminal_items = deps.db.get_operator_queue_terminal_for_agent(agent_name)
         # #3130: tell a held file so — but only when the marker it carries is not
         # already the one wanted, and never again against a file a write was
         # already refused on.
@@ -2535,7 +1985,7 @@ class OperatorQueueSyncService:
     async def _write_responses_to_agent(
         self,
         agent_name: str,
-        client: AgentClient,
+        client: deps.AgentClient,
         queue_data: dict,
         responded_items: list,
         terminal_items: Optional[list] = None,
@@ -2784,49 +2234,92 @@ class OperatorQueueSyncService:
 
         Edge-triggered (#3130): an episode alerts once, however many cycles or
         cooldown windows it lasts, and the next alert needs the condition to
-        have cleared first (`_sync_agent` ends the episode). It used to be one
+        have cleared first (`_sync_agent` ends the episode through
+        `_end_flood_episode`, which ends its alert too). That holds after a
+        person acknowledges the alert too: each reading carries the episode's
+        start (`episode_started_at`, a material key of the kind), so the
+        snooze silences re-reads of the acknowledged episode for the snooze
+        window and a NEW episode files at once. A leader failover or restart
+        loses the in-memory episode, so a persisting flood counts as a new
+        episode there and may file once more. The marker is worker-local too:
+        with Redis down the leader lease fails open
+        (`_try_acquire_leadership`), each worker stamps its own
+        `episode_started_at`, and another worker's re-read can file past a
+        person's ending, at most one extra row per extra worker per re-read
+        window. It used to be one
         alert per cooldown window for as long as the condition held — and since
         the alert counted toward the very depth it reported, the condition never
         cleared: 241 alerts in one day on one agent. The cooldown stays as the
         minimum spacing between episodes, so a cap that flaps cannot re-alert
         every cycle.
 
-        Budgeted (#1677, #3130): created through `create_bounded_alert` as type
-        `queue_flood` — an agent's own filing volume drives this emitter, which
-        is the test that classification applies. The budget is the backstop for
-        what the in-memory episode state cannot see (a leader failover re-alerts
-        once). Excluded from the agent's own depth read by its reserved prefix.
+        Reported through `platform_alerts.observe` (#3254) as kind
+        `queue_flood`, keyed by the reason: one pending row per (agent, reason),
+        rewritten in place. Budgeted (#1677, #3130): the kind's budgeted type is
+        `queue_flood`, so `observe` applies the per-(agent, type) budget — an
+        agent's own filing volume drives this emitter, which is the test that
+        classification applies. The budget is the backstop for what the
+        in-memory episode state cannot see (a leader failover re-reads once,
+        onto the same row). Excluded from the agent's own depth read by its
+        reserved prefix. Softened wording to avoid cry-wolf (C9).
 
-        An **un-guessable** `queue-flood-{agent}-{utc_now_iso()}` id so the
-        agent can't pre-suppress it (C2); softened wording to avoid cry-wolf
-        (C9). Never raises — an emit failure must not kill the sync.
+        Re-read while it lasts (#3254 R9): an episode that persists is observed
+        again at most every `OPERATOR_QUEUE_FLOOD_REREAD_SECONDS` (6 hours), so
+        the kind's 14-day lifetime ends only a row nobody re-read (a lost
+        clear), never one whose condition still holds. The refresh time and the
+        episode start per (agent, reason) live in dicts this method creates on
+        the instance for itself (`_flood_refreshed_at`,
+        `_flood_episode_started_at`).
 
-        The cooldown and the episode are stamped BEFORE the create. Outcomes:
-          * created → the episode is consumed (one alert per episode);
-          * FAILED (count read or create raised) → the episode is RELEASED so
-            the alarm is retried, and the cooldown stamp spaces those retries
-            to at most one per window (review I1: holding the episode on a
-            failure silenced the alarm until the condition cleared — for a
-            runaway agent, never);
-          * REFUSED at budget → the episode is consumed. The agent already has
+        The episode and its refresh time are stamped BEFORE every reading; the
+        per-agent cooldown only before an episode's first reading, since it
+        spaces episodes and a re-read is not one. Outcomes:
+          * created / updated / snoozed → the episode is consumed (one alert per
+            episode; a snoozed reading is a person's ending of this episode,
+            which stands for the snooze window);
+          * failed on the episode's first reading → the episode is RELEASED so
+            the alarm is retried, and the cooldown stamp spaces those retries to
+            at most one per window (review I1: holding the episode on a failure
+            silenced the alarm until the condition cleared — for a runaway agent,
+            never);
+          * failed on a re-read → the episode is KEPT: an earlier reading filed
+            its alert, and only a live episode lets `_end_flood_episode` end it
+            when the condition clears (AC 2). The re-read is retried after the
+            cooldown, not after the full 6 hours;
+          * refused at budget → the episode is consumed. The agent already has
             a full budget of pending flood alerts and the budget emits its own
             `alert-budget-` episode alert, so re-knocking every window would
-            add nothing but budget-episode churn. Unregistered type is the same
-            (a code defect retrying cannot fix).
+            add nothing but budget-episode churn. An unregistered kind is the
+            same (a code defect retrying cannot fix).
+        Never raises (`observe` never does): an alert must not kill the sync.
         """
+        from services import platform_alerts
+
         key = (agent_name, reason)
-        if key in self._flood_episodes:
-            return  # this episode already alerted
         now = time.monotonic()
-        # `None` = never alerted for this agent. A `0.0` default would be wrong:
-        # `time.monotonic()` is seconds from an arbitrary reference and can be
-        # < COOLDOWN on a freshly-booted process, so `now - 0.0 < COOLDOWN` would
-        # suppress the FIRST-ever alert for the first COOLDOWN seconds of uptime.
-        last = self._flood_alert_cooldown.get(agent_name)
-        if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
-            return  # too soon after the last episode — the next cycle retries
-        self._flood_alert_cooldown[agent_name] = now
-        self._flood_episodes.add(key)
+        refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        started = vars(self).setdefault("_flood_episode_started_at", {})
+        rereading = key in self._flood_episodes
+        if rereading:
+            # R9: the re-read of a persisting episode.
+            last_read = refreshed.get(key)
+            if last_read is not None and now - last_read < OPERATOR_QUEUE_FLOOD_REREAD_SECONDS:
+                return  # this episode already alerted and was read recently
+        else:
+            # `None` = never alerted for this agent. A `0.0` default would be
+            # wrong: `time.monotonic()` is seconds from an arbitrary reference
+            # and can be < COOLDOWN on a freshly-booted process, so
+            # `now - 0.0 < COOLDOWN` would suppress the FIRST-ever alert for
+            # the first COOLDOWN seconds of uptime.
+            last = self._flood_alert_cooldown.get(agent_name)
+            if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
+                return  # too soon after the last episode — the next cycle retries
+            self._flood_episodes.add(key)
+            started[key] = utc_now_iso()
+            # Stamped before the first reading, so a failed one — released
+            # below — is retried no sooner than the cooldown (I1).
+            self._flood_alert_cooldown[agent_name] = now
+        refreshed[key] = now
 
         if reason == "oversize_file":
             title = f"Agent '{agent_name}' produced an oversized operator-queue file"
@@ -2847,49 +2340,62 @@ class OperatorQueueSyncService:
                 f"recent activity before acting on its requests."
             )
 
-        alert = {
-            "id": f"queue-flood-{agent_name}-{utc_now_iso()}",
-            "type": "queue_flood",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": {"held": held, "reason": reason},
-            "created_at": utc_now_iso(),
-        }
-
-        try:
-            outcome = await create_bounded_alert_outcome(agent_name, alert)
-        except Exception as e:  # the helper never raises; belt for the sync loop
-            logger.error(f"Failed to emit operator-queue flood alert for {agent_name}: {e}")
-            outcome = ALERT_FAILED_CREATE
-        if outcome in (ALERT_FAILED_COUNT, ALERT_FAILED_CREATE):
-            self._flood_episodes.discard(key)  # retry next window (I1)
-            return
-        if outcome != ALERT_CREATED:
-            return  # refused: the episode stays consumed
-
-        logger.warning(
-            f"Operator-queue flood alert emitted for {agent_name} "
-            f"(reason={reason}, held={held})"
+        outcome = platform_alerts.observe(
+            agent_name, "queue_flood", reason,
+            title=title, question=question, priority="high",
+            context={"held": held, "reason": reason, "episode_started_at": started.get(key)},
         )
+        if outcome == platform_alerts.OBSERVED_FAILED:
+            if rereading:
+                # keep the episode so its end still clears the alert; retry the
+                # re-read once the cooldown has passed
+                refreshed[key] = (now - OPERATOR_QUEUE_FLOOD_REREAD_SECONDS
+                                  + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+            else:
+                self._flood_episodes.discard(key)  # retry next window (I1)
+                refreshed.pop(key, None)
+            return
+        if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
+            logger.warning(
+                f"Operator-queue flood alert {outcome} for {agent_name} "
+                f"(reason={reason}, held={held})"
+            )
 
-        if _websocket_manager:
-            try:
-                await _websocket_manager.broadcast(json.dumps({
-                    "type": "operator_queue_new",
-                    "data": {
-                        "id": alert["id"],
-                        "agent_name": agent_name,
-                        "type": alert["type"],
-                        "priority": "high",
-                        "title": alert["title"],
-                        "created_at": alert["created_at"],
-                    }
-                }))
-            except Exception as e:
-                logger.error(f"Failed to broadcast flood alert for {agent_name}: {e}")
+    def _end_flood_episode(self, agent_name: str, reason: str) -> None:
+        """#3130 / #3254: the over-cap condition behind `reason` cleared.
+
+        Called from `_sync_agent` where it knows (a sane-size read ends an
+        oversize episode; a cycle that held nothing ends an ingestion-cap one).
+        Ends the episode, so the next over-cap reading alerts again, and, only
+        when one was running, ends its alert as the platform
+        (`platform_alerts.clear`, a compare-and-set on pending: a person's
+        ending is never overwritten). Every cycle without an episode costs no
+        read. Never raises (`clear` never does).
+        """
+        key = (agent_name, reason)
+        if key not in self._flood_episodes:
+            return
+        self._flood_episodes.discard(key)
+        from services import platform_alerts
+        platform_alerts.clear(agent_name, "queue_flood", reason)
 
 
 # Global service instance
 operator_queue_service = OperatorQueueSyncService()
+
+
+# ---------------------------------------------------------------------------
+# Re-exports (#3785, O3): only names read from outside the package, by
+# production code or by a test that calls or compares one (never patches it).
+# Inside the package every reader names the owning module.
+# ---------------------------------------------------------------------------
+
+# listing: the router's engine and refusal; the cursor codec tests drive.
+from .listing import (  # noqa: E402,F401
+    CURSOR_MAX_BYTES,
+    QueueListError,
+    decode_cursor,
+    encode_cursor,
+    list_for_principal,
+    narrow_to_agent_key,
+)

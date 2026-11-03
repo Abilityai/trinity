@@ -1293,6 +1293,18 @@ def _integrate_source(home_dir: Path, branch: str, source: str) -> Optional[str]
     return _with_stash(home_dir, branch, step)
 
 
+def _rebase_in_progress(home_dir: Path) -> bool:
+    """Has a rebase stopped part-way (its state directory exists)? A stopped
+    rebase also leaves HEAD detached, and must not read as a pinned ref."""
+    for name in ("rebase-merge", "rebase-apply"):
+        probe = run_registered(["git", "rev-parse", "--git-path", name],
+                               cwd=str(home_dir), timeout=10)
+        path = (probe.stdout or "").strip()
+        if probe.returncode == 0 and path and (home_dir / path).exists():
+            return True
+    return False
+
+
 class _PullCountError(Exception):
     """The pull cycle could not count a branch against origin."""
 
@@ -1341,7 +1353,14 @@ def _run_pull_once(home_dir: Path) -> Dict:
             cwd=str(home_dir), timeout=10,
         ).stdout.strip()
         if not branch:
-            return _record_pull(home_dir, "failed", error="detached HEAD: nothing to pull onto")
+            if _rebase_in_progress(home_dir):
+                return _record_pull(home_dir, "failed", error=(
+                    "detached HEAD: a rebase stopped part-way; resolve or abort it"))
+            # A clone of `@<tag>` runs on a detached HEAD by design: the agent
+            # is pinned to that release. Nothing to pull onto is the pin
+            # working, not a failure every cycle (trinity#4165).
+            return _record_pull(home_dir, "skipped", error=(
+                "detached HEAD (pinned to a tag or commit): nothing to pull onto"))
         unmerged = _unmerged_paths(home_dir)
         if unmerged:
             return _record_pull(home_dir, "failed", error=(

@@ -36,10 +36,15 @@ Dispatch topology, not policy. `pull_pilot.PULL_REACHABLE_TRIGGERS` is the sourc
 
 | | triggers | state |
 |---|---|---|
-| **On `dev` today** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop` | 6 of 9 |
-| **Adds with Phase 4** | `fan_out`, `a2a`, `operator_response` | → 9 of 9 |
+| **Autonomous (`PULL_REACHABLE_TRIGGERS`)** | `agent`, `event`, `schedule`, `webhook`, `reminder`, `loop`, `fan_out`, `a2a`, `operator_response`, `operator_ending`, `retry` (#2845), `self_task` (#4105), `skill_gate` (#4105) | every autonomous trigger is pulled on pilots |
 | **Interactive (#3114, #3127)** | `manual`, `mcp`, `chat`, `session`, `public`, `voice`, `voip`, `room`, `user`, `paid`, `slack`, `telegram`, `whatsapp`, plus `validation` (`pull_pilot.PULL_REACHABLE_NON_AUTONOMOUS`) | routed on pilots; sync callers wait through `dispatch_and_await_terminal`. Every interactive path is pulled |
-| **Unreached, unclassified** | `retry` | in neither trigger set — #2845. 4.7% of `eu2` traffic; looks like an oversight, not a decision |
+| **Excluded on purpose (`PULL_UNPULLED_TRIGGERS`)** | none | each entry carries its reason in code |
+
+`tests/unit/test_4105_pull_trigger_census.py` fails on any trigger a producer writes that is in none of the three rows. A trigger
+passed through a runtime variable escapes that scan; on a pilot it logs once (`[#2048] pull pilot … neither pull trigger set`)
+from `execute_task` or `capacity_manager.acquire`.
+
+A sync `/task` an agent sends to itself on a pilot waits for a free worker; with `max_parallel_tasks=1` it waits out its timeout.
 
 `schedule` / `webhook` / `reminder` landed with #2391; `loop` with #2523. Before #2391 the pilot flag was
 inert for the fleet's dominant traffic class, so a cron-driven agent was not a viable pilot. It is now.

@@ -712,7 +712,8 @@ READ_SITES = {
     ("routers/public.py", "public_stream_execution"): "public link token binds the session",
     ("routers/public.py", "public_execution_status"): "public link token binds the session",
     ("routers/public.py", "public_terminate_execution"): "public link token binds the session",
-    ("routers/public_memory.py", "write_user_memory"): "reads the row to find the seat it writes memory for",
+    ("routers/agent_memory.py", "search_retrieval_memory_agent_endpoint"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule); the row only names whose memory, none of it is returned",
+    ("routers/public_memory.py", "write_user_memory"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule, #4121); the row names whose notes are written, and only that address comes back",
     ("routers/seat_decisions.py", "_seat_for"): "reads the row to find the seat a decision belongs to",
 }
 

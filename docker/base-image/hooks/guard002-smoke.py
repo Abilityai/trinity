@@ -9,7 +9,7 @@ cannot import under its registered interpreter and flags exits 1, which
 Claude Code treats as "let the tool run": this is where that is caught.
 
 Run by the Dockerfile as root, before /logs is created for the agent user.
-It removes the log file and the read-only config it writes.
+It removes the log file, the read-only config and the skill-gate marker it writes.
 """
 import json
 import os
@@ -19,6 +19,7 @@ import sys
 MANAGED = "/etc/claude-code/managed-settings.json"
 READ_ONLY_CONFIG = "/opt/trinity/read-only-config.json"
 LOG_PATH = "/logs/guardrails.jsonl"
+SKILL_GATES_MARKER = "/opt/trinity/skill-gates-active"
 
 SECRET = "sk-ant-api03-" + "A" * 93
 CASES = {
@@ -44,6 +45,24 @@ CASES = {
 }
 
 
+def _check_gated_rows(argv: list, failures: list) -> None:
+    """trinity-enterprise#1002: `gated_bash_deny` applies with the marker only.
+    The marker never survives this: it would make the skill-gate hook fail
+    closed on every agent built from the image."""
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": "claude -p hi"}})
+    for gated, want in ((False, 0), (True, 2)):
+        if gated:
+            open(SKILL_GATES_MARKER, "w").close()
+        try:
+            r = subprocess.run(argv, input=payload, capture_output=True, text=True, timeout=30)
+        finally:
+            if gated:
+                os.remove(SKILL_GATES_MARKER)
+        if r.returncode != want:
+            failures.append(f"gated rows, marker={gated}: exit {r.returncode}, want {want}: "
+                            f"{r.stderr.strip()[:200]}")
+
+
 def main() -> int:
     with open(MANAGED) as f:
         managed = json.load(f)
@@ -63,6 +82,8 @@ def main() -> int:
                                    text=True, timeout=30)
                 if r.returncode != want:
                     failures.append(f"{hook}: exit {r.returncode}, want {want}: {r.stderr.strip()[:200]}")
+            if hook == "bash-guardrail.py":
+                _check_gated_rows(argv, failures)
         if "output-scanner.py" in seen:
             with open(LOG_PATH) as f:
                 if '"credential_pattern_in_output"' not in f.read():
