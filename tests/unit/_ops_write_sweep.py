@@ -321,6 +321,8 @@ def door_calls(token):
         "heartbeat": call("POST", f"/api/agents/{AGENT}/heartbeat", token, json={}),
         "result_callback": call("POST", f"/api/agents/{AGENT}/executions/{eid}/result", token,
                                 json={"status": "success", "response": "x"}),
+        # trinity-enterprise#926: the in-container guard hook's question.
+        "turn_tier": call("GET", f"/api/agents/{AGENT}/executions/{eid}/turn-tier", token),
         "pull_next_task": call("GET", f"/api/internal/next-task?agent_name={AGENT}&worker_id=w-3180", token),
         "pull_task_result": call("POST", f"/api/internal/tasks/{eid}/result", token,
                                  json={"claim_token": "c-3180", "status": "success", "content": "x"}),
