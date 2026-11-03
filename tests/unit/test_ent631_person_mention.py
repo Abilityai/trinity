@@ -333,6 +333,30 @@ def test_a_reader_who_can_see_the_room_gets_the_message_with_context(mention_db,
     assert detail.conversation.id == room["id"]
 
 
+def test_a_tag_preview_never_shows_what_the_reader_joined_after(mention_db, quiet_room):
+    """trinity-enterprise#701: a person seated mid-conversation reads from their
+    join point — and the Inbox preview of a tag is a read of the room, so it
+    is held to the same floor. It showed the lines before the join."""
+    from services import person_mention_service as pms
+    from shared_sessions import db as rdb
+    from utils.helpers import utc_now_iso
+    room = _room()
+    _post(room["id"], "BEFORE-JOIN secret line")
+    rdb.seat_person(room["id"], "user", "bob", "collaborator",
+                    rdb.max_seq(room["id"]) + 1, utc_now_iso())
+    _post(room["id"], "after the join")
+    _post(room["id"], "@Bob Baker please look", tags=[BOB])
+    item = pms.list_for_reader(_reader(BOB))[0]
+    detail = pms.open_for_reader(_reader(BOB), item.id)
+    assert detail.can_see is True
+    assert [m.content for m in detail.context if "BEFORE-JOIN" in m.content] == []
+    assert any(m.content == "after the join" for m in detail.context)
+    # A backscroll grant opens it, as it does in the room.
+    rdb.set_visible_from(room["id"], "user", "bob", 0)
+    detail = pms.open_for_reader(_reader(BOB), item.id)
+    assert any("BEFORE-JOIN" in m.content for m in detail.context)
+
+
 def test_the_admin_bypass_is_the_platform_doors_only(mention_db, quiet_room):
     """#78: a portal session for the admin's address is not the admin."""
     from services import person_mention_service as pms
