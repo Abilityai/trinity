@@ -104,7 +104,7 @@ def test_list_skills_carries_it(service):
 
 def test_a_skill_whose_parse_blows_up_has_no_category(service, monkeypatch):
     """`_parse_skill_info` swallows a parse failure and returns its defaults,
-    which must include the key or the listing route would raise on it."""
+    which must include the key, or the listing would silently omit it."""
     monkeypatch.setattr(skill_service_module.pkg, "extract_contract",
                         MagicMock(side_effect=RuntimeError("boom")))
     by_name = {s["name"]: s for s in service.list_skills()}

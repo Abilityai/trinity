@@ -30,9 +30,15 @@ export function categoryKey(value) {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
-/** "project-management" as a person reads it: "Project management". */
-export function categoryLabel(key) {
-  const text = String(key || '').replace(/-/g, ' ')
+/**
+ * A category as a person reads it, in sentence case: "project-management" and
+ * "Project Management" both read "Project management". A word the author wrote
+ * in capitals is an acronym and keeps them: "AI & ML", not "Ai & ml".
+ */
+export function categoryLabel(value) {
+  const text = String(value || '').trim().split(/[\s_-]+/).filter(Boolean)
+    .map((word) => (/^[A-Z0-9&]{2,}$/.test(word) && /[A-Z]/.test(word) ? word : word.toLowerCase()))
+    .join(' ')
   return text ? text[0].toUpperCase() + text.slice(1) : ''
 }
 
@@ -50,12 +56,15 @@ export function sourceOptions(skills = []) {
   return sortedByLabel(options)
 }
 
-/** @returns {Array<{value: string, label: string}>} the categories present, each once */
+/**
+ * @returns {Array<{value: string, label: string}>} the categories present, each
+ * once, labelled from the first spelling seen (so an author's acronym survives)
+ */
 export function categoryOptions(skills = []) {
   const options = new Map()
   for (const skill of skills) {
     const value = categoryKey(skill.category)
-    if (value && !options.has(value)) options.set(value, { value, label: categoryLabel(value) })
+    if (value && !options.has(value)) options.set(value, { value, label: categoryLabel(skill.category) })
   }
   return sortedByLabel(options)
 }

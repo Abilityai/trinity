@@ -26,6 +26,10 @@ import { test, expect } from '@playwright/test'
  *   - The gap is measured in ONE evaluate, and `elementFromPoint` on the box's last
  *     pixel row says what a reader actually sees there.
  *
+ * A third shape, from the PR review: BaseModal centres its panel, so a dialog list
+ * that shrank while the reader typed would move the input under the cursor. The
+ * list keeps one height for that; jsdom can only read its class names.
+ *
  * CI scope: `@smoke`, hermetic. Every Skills read and the agent are synthetic
  * (`page.route`), so the zero-agent CI stack runs it.
  */
@@ -163,16 +167,16 @@ test.describe('Library → Skills never grows the page (trinity#3448)', () => {
   }
 })
 
-test.describe('the agent Skills tab (trinity#3448, trinity-enterprise#660)', () => {
-  async function openTab(page, width, height, state = { skills: 30, own: 24 }) {
-    await page.setViewportSize({ width, height })
-    await stubSkills(page, state)
-    await stubAgent(page, state)
-    await page.goto(`/agents/${AGENT}?tab=skills`)
-    await expect(page.getByTestId('skills-tab-total')).toHaveText(`${state.own} own · 5 shared`)
-    await expect(page.getByTestId('skill-card-shared-e2e-skill-005')).toBeAttached()
-  }
+async function openTab(page, width, height, state = { skills: 30, own: 24 }) {
+  await page.setViewportSize({ width, height })
+  await stubSkills(page, state)
+  await stubAgent(page, state)
+  await page.goto(`/agents/${AGENT}?tab=skills`)
+  await expect(page.getByTestId('skills-tab-total')).toHaveText(`${state.own} own · 5 shared`)
+  await expect(page.getByTestId('skill-card-shared-e2e-skill-005')).toBeAttached()
+}
 
+test.describe('the agent Skills tab (trinity#3448, trinity-enterprise#660)', () => {
   for (const [width, height] of WINDOWS) {
     test(`@smoke the page follows the window, not the list, at ${width}x${height}`, async ({ page }) => {
       const state = { skills: 30, own: 24 }
@@ -218,4 +222,45 @@ test.describe('the agent Skills tab (trinity#3448, trinity-enterprise#660)', () 
     await scrollBox(page, 'end')
     expect(Math.abs((await dockGeometry(page)).gapAbove), 'it still sticks at the top').toBeLessThan(0.5)
   })
+})
+
+// The input, the list and the panel, in one frame.
+function dialogGeometry(page) {
+  return page.evaluate(() => {
+    const input = document.querySelector('[data-testid="skill-assign-filter"]').getBoundingClientRect()
+    const listEl = document.querySelector('[data-testid="skill-assign-list"]')
+    const panel = listEl.parentElement.getBoundingClientRect()
+    return {
+      window: document.documentElement.clientHeight,
+      inputTop: input.top,
+      listHeight: listEl.getBoundingClientRect().height,
+      panelTop: panel.top,
+      panelBottom: panel.bottom,
+    }
+  })
+}
+
+test.describe('the Assign skills dialog keeps its size while the filter narrows (trinity-enterprise#660)', () => {
+  for (const [width, height] of [[1440, 900], [375, 667]]) {
+    test(`@smoke the filter stays under the cursor, at ${width}x${height}`, async ({ page }) => {
+      await openTab(page, width, height, { skills: 60, own: 2 })
+      await page.getByTestId('skills-assign-open').click()
+      const filter = page.getByTestId('skill-assign-filter')
+      await expect(filter).toBeFocused()
+      await expect(page.getByTestId('skill-assign-count')).toHaveText('60 skills in the library')
+      const before = await dialogGeometry(page)
+
+      // The whole panel is on screen, even on a phone: nothing clipped above it.
+      expect(before.panelTop).toBeGreaterThanOrEqual(0)
+      expect(before.panelBottom).toBeLessThanOrEqual(before.window)
+
+      for (const [text, count] of [['e2e-skill-01', '10 shown'], ['no such skill', '0 shown']]) {
+        await filter.fill(text)
+        await expect(page.getByTestId('skill-assign-count')).toHaveText(`60 in the library · ${count}`)
+        const now = await dialogGeometry(page)
+        expect(Math.abs(now.inputTop - before.inputTop), `the input moved after "${text}"`).toBeLessThan(0.5)
+        expect(Math.abs(now.listHeight - before.listHeight), `the list resized after "${text}"`).toBeLessThan(0.5)
+      }
+    })
+  }
 })

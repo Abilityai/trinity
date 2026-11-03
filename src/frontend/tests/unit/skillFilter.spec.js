@@ -79,6 +79,18 @@ describe('which categories a list offers', () => {
   it('a key reads as a sentence-case label', () => {
     expect(categoryLabel('documents-and-data')).toBe('Documents and data')
   })
+
+  it('an acronym the author capitalised stays capitalised (PR review)', () => {
+    expect(categoryLabel('AI & ML')).toBe('AI & ML')
+    expect(categoryLabel('Research and UX')).toBe('Research and UX')
+    expect(categoryLabel('Project Management')).toBe('Project management')
+  })
+
+  it('the label is the first spelling seen, and later spellings join it', () => {
+    expect(categoryOptions([
+      { name: 'a', category: 'AI & ML' }, { name: 'b', category: 'ai & ml' }, { name: 'c', category: 'ai-&-ml' },
+    ])).toEqual([{ value: 'ai-&-ml', label: 'AI & ML' }])
+  })
 })
 
 describe('how the three narrow a list', () => {
