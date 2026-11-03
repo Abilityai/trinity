@@ -947,3 +947,136 @@ def test_what_is_spoken_is_scrubbed_of_staged_secrets(monkeypatch):
     _, bridge = _bridge(provider)
     asyncio.run(bridge._speak_sentence(0, "The token is s3cret-value."))
     assert provider.said and "s3cret-value" not in provider.said[0]
+
+
+# -- an execution is spoken once (merge-train 2026-11-02: a re-sent `speak` restarted
+#    the SpokenBudget and bought the same reply's synthesis again)
+
+class _NxRedis:
+    def __init__(self, held=()):
+        self.keys = set(held)
+
+    def set(self, key, _value, nx=False, ex=None):
+        if nx and key in self.keys:
+            return None
+        self.keys.add(key)
+        return True
+
+
+def _counting_bridge(monkeypatch, redis):
+    monkeypatch.setattr(dvs, "_redis", lambda: redis)
+    _, bridge = _bridge()
+    monkeypatch.setattr(bridge, "_authorized_execution", lambda _e: True)
+    spoken = []
+
+    async def fake_speak(execution_id):
+        spoken.append(execution_id)
+
+    monkeypatch.setattr(bridge, "speak_execution", fake_speak)
+    return bridge, spoken
+
+
+def test_a_resent_speak_frame_never_speaks_the_same_run_twice(monkeypatch):
+    bridge, spoken = _counting_bridge(monkeypatch, _NxRedis())
+
+    async def go():
+        for _ in range(5):
+            await bridge.handle({"type": "speak", "execution_id": "e1"})
+            await asyncio.sleep(0)
+        await bridge.handle({"type": "speak", "execution_id": "e2"})
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert spoken == ["e1", "e2"]
+
+
+def test_a_run_spoken_on_another_call_is_not_spoken_again(monkeypatch):
+    bridge, spoken = _counting_bridge(monkeypatch, _NxRedis(held={"voice_direct_spoken:e1"}))
+
+    async def go():
+        await bridge.handle({"type": "speak", "execution_id": "e1"})
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert spoken == []
+
+
+def test_without_redis_one_socket_still_speaks_a_run_once(monkeypatch):
+    class Down:
+        def set(self, *a, **k):
+            raise ConnectionError("down")
+
+    bridge, spoken = _counting_bridge(monkeypatch, Down())
+
+    async def go():
+        for _ in range(3):
+            await bridge.handle({"type": "speak", "execution_id": "e1"})
+            await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert spoken == ["e1"]
+
+
+def test_the_spoken_claim_outlives_the_reply_wait():
+    assert dvs.SPOKEN_EXECUTION_TTL >= dvs.REPLY_WAIT_SECONDS
+
+
+# -- the backend half of the store↔backend contract (merge-train 2026-11-02): each
+#    line below could be deleted with every test green
+
+def test_the_start_route_hands_the_requested_mode_to_the_call(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from client_portal import router, voice as workspace_voice
+    from client_portal.models import PortalVoiceStartRequest
+    from client_portal.portal_auth import PortalPrincipal
+    from services import rate_limiter
+
+    seen = {}
+
+    async def fake_start(**kwargs):
+        seen.update(kwargs)
+        return {"voice_session_id": "vd_x", "websocket_url": "/ws/voice/vd_x",
+                "portal_session_id": kwargs["portal_session_id"], "max_duration_seconds": 60,
+                "mode": kwargs["mode"]}
+
+    async def fake_user(_request, _token):
+        return SimpleNamespace(id=7, email="alice@example.com", username="alice")
+
+    monkeypatch.setattr(router, "_require_roster", lambda *a, **k: None)
+    monkeypatch.setattr(rate_limiter, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(router, "resolve_platform_user_unfloored", fake_user)
+    monkeypatch.setattr(workspace_voice, "start_workspace_voice", fake_start)
+    out = asyncio.run(router.portal_voice_start(
+        "scout", PortalVoiceStartRequest(portal_session_id="ps1", mode="direct"),
+        request=MagicMock(), principal=PortalPrincipal("alice@example.com", True), token="t"))
+    assert seen["mode"] == "direct" and out.mode == "direct"
+
+
+def test_the_roster_carries_the_direct_voice_capability(monkeypatch):
+    from types import SimpleNamespace
+    from client_portal import service as svc, voice as workspace_voice
+
+    async def none_map(_names):
+        return {}
+
+    async def stt(_ready):
+        return False
+
+    from services import tts_service
+    monkeypatch.setattr(tts_service, "is_available", lambda: False)
+    monkeypatch.setattr(svc, "_stt_ready", stt)
+    monkeypatch.setattr(svc, "_default_voice_id", lambda: None)
+    monkeypatch.setattr(svc, "_multi_agent_chat_available", lambda: False)
+    monkeypatch.setattr(svc, "_roster_rows", lambda *a: [])
+    monkeypatch.setattr(svc, "_availability_map", none_map)
+    monkeypatch.setattr(svc, "_runtime_map", none_map)
+    monkeypatch.setattr(svc, "_projects_available", lambda *a: False)
+    off = workspace_voice.realtime_voice_capability(True).model_copy(
+        update={"available": False, "reason": "off"})
+    monkeypatch.setattr(workspace_voice, "realtime_voice_capability", lambda _p: off)
+    marker = workspace_voice.direct_voice_capability(True).model_copy(
+        update={"available": True, "reason": None, "provider": "gemini"})
+    monkeypatch.setattr(workspace_voice, "direct_voice_capability", lambda _p: marker)
+    roster = asyncio.run(svc.get_roster("alice@example.com", include_owned=True))
+    assert roster.direct_voice.available is True and roster.direct_voice.provider == "gemini"

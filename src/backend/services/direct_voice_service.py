@@ -47,6 +47,9 @@ STILL_WORKING_AFTER_SECONDS = 45.0
 SESSION_GRACE_SECONDS = 120
 MARKER_LEASE_SECONDS = 60
 MARKER_TICK_SECONDS = 15.0
+# How long an execution stays "already spoken". Covers a reply's whole wait plus the
+# call's grace, so a re-sent `speak` cannot buy a second synthesis while either lives.
+SPOKEN_EXECUTION_TTL = REPLY_WAIT_SECONDS + SESSION_GRACE_SECONDS
 
 LINE_NOT_HEARD = "I didn't catch that."
 LINE_TURN_FAILED = "The agent couldn't answer that."
@@ -340,6 +343,7 @@ class DirectBridge:
         self._last_spoke_at = 0.0
         self._last_status_at = 0.0
         self._ask_lines: set[str] = set()
+        self._spoken: set[str] = set()
 
     # -- plumbing
 
@@ -467,7 +471,29 @@ class DirectBridge:
         self.turns += 1
         self._start_turn(execution_id)
 
+    def _claim_execution(self, execution_id: str) -> bool:
+        """An execution is spoken once. Each turn's SpokenBudget bounds one synthesis;
+        without this, re-sending `speak` for the same run restarts the budget and buys
+        the same reply again, across calls and workers. Redis carries the claim between
+        them; this bridge's own set holds when Redis cannot answer (fail-open, like
+        every limiter here, but never twice on one socket)."""
+        if execution_id in self._spoken:
+            return False
+        self._spoken.add(execution_id)
+        try:
+            client = _redis()
+            if client is not None:
+                key = f"voice_direct_spoken:{execution_id}"
+                if not client.set(key, "1", nx=True, ex=SPOKEN_EXECUTION_TTL):
+                    return False
+        except Exception as e:  # noqa: BLE001
+            logger.warning("direct voice: spoken-claim read failed: %s", e)
+        return True
+
     def _start_turn(self, execution_id: str) -> None:
+        if not self._claim_execution(execution_id):
+            logger.warning("direct voice: refused to speak execution %s a second time", execution_id)
+            return
         if self._turn is not None and not self._turn.done():
             self._turn.cancel()
         self._turn = self._spawn(self.speak_execution(execution_id))
