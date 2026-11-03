@@ -221,6 +221,10 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     # volumes. `settings.local.json` is covered by the `*.local.json` rule below.
     ".claude/remote-settings.json",
     ".claude/policy-limits.json",
+    # #3727: Claude Code writes this beside policy-limits.json (per the issue).
+    # Runtime state, never the agent's work; the exact line above does not
+    # cover it.
+    ".claude/policy-limits.json.stamp.json",
     ".claude/backups/",
     ".claude/.last-cleanup",
     # Temporary files
