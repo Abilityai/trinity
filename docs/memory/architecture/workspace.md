@@ -28,7 +28,8 @@ person or an `otp`-minted session may self-approve a gated skill — see `featur
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
 every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
-`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal` (which also authenticates
+the `/api/enterprise/rooms/` paths that seat people in a room, ent#701), the Workspace voice start —
 resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
 surface exactly as before, roster included (shared agents plus any they own). The handful of
 operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
@@ -749,6 +750,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **People in a room (trinity-enterprise#701).** A room can hold more than one person. Each
+  person has a read floor (`visible_from_seq`: the first seq they may read, 0 = all) that
+  `get_room` applies, and leaving is real: `_require_membership` gives a person whose row has
+  `left_at` the uniform 404, `list_rooms` drops the room for them, and `db.seat_person` is the
+  people-only upsert that seats someone again (clearing `left_at`). Agents keep their own
+  rules: `add_participant` never clears `left_at`, which the #2610 keep set relies on. The
+  room payload carries `you`, `people` and `can_seat_people` (UI capability only — offered to
+  a platform moderator of an open room when seating is provided through the entitlement seam).
+  With two or more people present the turn prompt names them and what each may decide, and an
+  `@username` of a seated person becomes a tag through the #631 path, never a wake.
+  `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
@@ -856,6 +868,56 @@ ambiguity fails open and is logged. The rollout is a one-time data seed on both 
 `changed_by = rollout:ent#689`, insert-if-absent, for every live agent with autonomy on and an
 enabled seat brief at deploy. `effective_readiness` reports that stamp as `source: "rollout"` with no person; the card's
 `brief_held` (platform viewers only; false when autonomy is off) says a seat brief is paused.
+
+## The autonomy dial — what a companion may do unprompted (ent#641, P12)
+
+Autonomy was one switch per agent. The dial adds two scopes above and below it.
+**Above**: one instance LEVEL (canon `tandem-06` §2.3 — L0 Continuity, L1
+Companion, L2 Delegated classes, L3 Load-bearing judgment), stored as one
+validated `system_settings` key and written only through
+`PUT /api/settings/autonomy-dial` (admin **and** interactive — raising the
+ceiling is what lets anything run unprompted, so it is a grant; the generic
+`/{key}` catch-all refuses the key, the ent#297 shape). **Below**: a state per
+(seat, ask class) in `seat_ask_class_state`, earned from the seat's decision
+record — ≥3 non-expired records from ≥3 distinct conversations (each distinct
+`source_execution_id` is one; each person-written record is its own), ONE
+normalized criterion, no reversals in the window — plus a clean rating history for that seat in the last 30 days.
+Promotion is earned; there is no promote control. A person may HOLD a class
+(a refusal anyone may make for their own seat); only the agent's owner may
+RELEASE one (a grant).
+
+**The shape is a stored earned-state × three read-time conjuncts** — the
+instance level, the agent's `autonomy_enabled`, and `now <= evidence_expires_at`
+(the EARLIEST `review_by` in the window). Written instead of read, each is a
+silent failure: a class whose records all lapse at UTC midnight fires no event,
+so a materialised verdict would outlive its own evidence with nobody watching,
+and re-evaluating the fleet inside a level change is an unbounded fan-out with
+no fleet-wide seat query to drive it. As conjuncts, a level drop needs zero
+writes and restores exactly what each class had earned when it goes back up.
+Writes happen only on real events (a decision recorded or acted on, a rating by
+the seat, a hold/release), CAS'd on an evidence hash; reads persist nothing.
+
+**Reversals count over the window, not over all history.** `effective_status`
+returns `reversed` unconditionally, so a reversed record never expires — counted
+that way, one reversal would block a class forever and `on_request` would be the
+only reachable steady state. #638 shipped `stats().reversals` as this issue's
+INPUT and deferred the verdict; `autonomy_dial_service.class_evidence` is the
+verdict, and #638's contract is unchanged.
+
+**The rating query's three shapes were each a defect first**: it matches
+`operator:<email>` as well as `workspace:<email>` (on a single-operator install
+the seat person IS the platform principal, so their thumbs-down lands under the
+other prefix and the class could never demote); it reads
+`COALESCE(updated_at, created_at)` (an up→down flip updates only `updated_at`,
+and that flip is exactly a demotion); and the window is a FIXED 30-day span, not
+"since the oldest surviving record", which would let a blocking rating fall out
+as records expire — promotion by the clock, which R25 forbids.
+
+The companion is told: `autonomy_dial_service.prompt_lines` rides the seat's
+memory block, so the model reads which classes it may act on unprompted and, for
+the rest, the same sentence the panel shows. `PortalAgentAutonomy.vue` in Agent
+details; `get_autonomy` on MCP (seat from `execution_id`, never a parameter).
+Requirement §5.40 of `core-agent.md`; flow in `workspace-autonomy-dial.md`.
 
 ## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
 

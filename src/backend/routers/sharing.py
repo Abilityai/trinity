@@ -301,7 +301,8 @@ async def list_access_requests_endpoint(
     """List access requests for this agent (owner-only)."""
     # trinity-enterprise#737: each request names who asked, as the channel saw
     # them, and where the viewer has seen that identity before.
-    rows = access_request_service.list_access_requests(agent_name, status, current_user.username)
+    rows = access_request_service.list_access_requests(
+        agent_name, status, current_user.username, principal=current_user)
     return [AccessRequest(**r) for r in rows]
 
 

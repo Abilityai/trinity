@@ -189,6 +189,22 @@ class TestOwnersView:
         assert ("b-one", "approved", "carol@example.com") in {
             (k["agent_name"], k["status"], k["email"]) for k in _list(ADMIN)["carol@example.com"]["known_as"]}
 
+    def test_an_agent_key_sees_only_the_history_within_its_reach(self, world):
+        """ent#629: a-one's own key resolves to alice, whose share right covers
+        a-two too; without the reach narrowing it would read a-two's history."""
+        from types import SimpleNamespace
+        from services import access_request_service
+
+        prior = world.upsert_access_request("a-two", "carol@work.example", "telegram", identity=IDENTITY)
+        world.decide_access_request(prior["id"], True, 1)
+        world.upsert_access_request("a-one", "carol@example.com", "telegram", identity=IDENTITY)
+        key = SimpleNamespace(username=ALICE, role="creator", agent_name="a-one", mcp_scope="agent")
+        as_key = access_request_service.list_access_requests("a-one", "pending", ALICE, principal=key)
+        as_alice = access_request_service.list_access_requests("a-one", "pending", ALICE)
+        names = lambda rows: {k["agent_name"] for r in rows for k in r["known_as"]}
+        assert "a-two" in names(as_alice)
+        assert "a-two" not in names(as_key)
+
     def test_the_request_itself_is_not_its_own_history(self, world):
         world.create_telegram_binding(agent_name="a-one", bot_token="t:1", bot_id="1")
         tg = world.get_telegram_binding("a-one")["id"]

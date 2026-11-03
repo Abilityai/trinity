@@ -5,17 +5,17 @@ stable user id, the handle, the display name, and the chat / thread the request
 came from. All nullable — a field the channel does not expose stays empty.
 
 Mirrors the SQLite ``access_requests_requester_identity`` migration. Chained
-after 0112 so the version-line keeps ONE head (#2068).
+after 0114 so the version-line keeps ONE head (#2068).
 
-Revision ID: 0113_access_requests_requester_identity
-Revises: 0112_loop_runs_stale_duplicates
+Revision ID: 0115_access_requests_requester_identity
+Revises: 0114_room_participant_visible_from
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0113_access_requests_requester_identity"
-down_revision = "0112_loop_runs_stale_duplicates"
+revision = "0115_access_requests_requester_identity"
+down_revision = "0114_room_participant_visible_from"
 branch_labels = None
 depends_on = None
 

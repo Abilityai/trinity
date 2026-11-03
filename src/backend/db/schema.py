@@ -16,7 +16,7 @@ Tables are organized by feature area:
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
-- Tandem: agent_role_readiness, seat_decisions
+- Tandem: agent_role_readiness, seat_decisions, seat_ask_class_state
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -764,7 +764,7 @@ TABLES = {
             room_id TEXT NOT NULL,
             kind TEXT NOT NULL,                        -- agent | user | workspace_user
             identity TEXT NOT NULL,                    -- agent name, user id, or verified email
-            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator
+            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator | collaborator
             joined_at TEXT NOT NULL,
             left_at TEXT,
             -- THE delta-injection cursor: the highest seq this participant has seen.
@@ -773,6 +773,10 @@ TABLES = {
             -- Session-tab cold-fallback counter.
             cached_session_id TEXT,
             consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- trinity-enterprise#701: the first seq a PERSON may read. 0 = the
+            -- whole transcript (the creator, every row before #701); a person
+            -- seated mid-conversation starts at the seq after the last message.
+            visible_from_seq INTEGER NOT NULL DEFAULT 0,
             UNIQUE(room_id, kind, identity)
         )
     """,
@@ -1133,6 +1137,39 @@ TABLES = {
             status TEXT NOT NULL,
             changed_at TEXT NOT NULL,
             changed_by TEXT NOT NULL
+        )
+    """,
+
+    # ent#641 (P12): the autonomy dial's earned half — one row per (agent,
+    # seat, ask class). The row records what was EARNED: the state, the
+    # evidence it rests on, and `evidence_expires_at` (the EARLIEST review_by
+    # of the window — evidence stops existing when its first record does).
+    # Everything that can change underneath it — the instance level, the
+    # agent's autonomy switch, the clock — is ANDed at READ time
+    # (`services/autonomy_dial_service.live_verdict`), never written here: a
+    # materialised verdict outlives its own evidence silently, and a level
+    # change would otherwise be an unbounded fleet-wide write. The instance
+    # LEVEL is not here at all — it is one validated `system_settings` key.
+    "seat_ask_class_state": """
+        CREATE TABLE IF NOT EXISTS seat_ask_class_state (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            ask_class TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'on_request',
+            blocked_by TEXT NOT NULL DEFAULT '[]',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            evidence_hash TEXT,
+            evidence_expires_at TEXT,
+            guard_metric TEXT NOT NULL DEFAULT 'not_assessed',
+            held INTEGER NOT NULL DEFAULT 0,
+            held_by TEXT,
+            held_at TEXT,
+            promoted_at TEXT,
+            demoted_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, seat_email, ask_class)
         )
     """,
 
@@ -2424,6 +2461,9 @@ INDEXES = [
     # Seat decisions (ent#638)
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)",
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)",
+
+    # Autonomy dial (ent#641)
+    "CREATE INDEX IF NOT EXISTS idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",

@@ -619,6 +619,7 @@ enterprise_room_participants = Table(
     Column("last_read_seq", Integer),
     Column("cached_session_id", Text),
     Column("consecutive_resume_failures", Integer),
+    Column("visible_from_seq", Integer),
 )
 
 enterprise_room_messages = Table(
@@ -1074,6 +1075,29 @@ seat_decisions = Table(
     Column("closed_by", Text),
     Column("reconfirmed_at", Text),
     Column("source_execution_id", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
+# ent#641 (P12): the autonomy dial's earned half — see the note in db/schema.py.
+seat_ask_class_state = Table(
+    "seat_ask_class_state",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("seat_email", Text),
+    Column("ask_class", Text),
+    Column("state", Text),
+    Column("blocked_by", Text),
+    Column("evidence", Text),
+    Column("evidence_hash", Text),
+    Column("evidence_expires_at", Text),
+    Column("guard_metric", Text),
+    Column("held", Integer),
+    Column("held_by", Text),
+    Column("held_at", Text),
+    Column("promoted_at", Text),
+    Column("demoted_at", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
 )

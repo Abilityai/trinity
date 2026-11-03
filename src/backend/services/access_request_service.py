@@ -28,14 +28,21 @@ _VERIFIED_LINK_SOURCES = {
 _MAX_KNOWN_AS = 10
 
 
-def list_access_requests(agent_name: str, status: Optional[str], viewer_username: str) -> List[dict]:
+def list_access_requests(agent_name: str, status: Optional[str], viewer_username: str,
+                         principal=None) -> List[dict]:
+    """``principal`` is the caller: an agent key resolves to its owner's
+    username, so the owner's share right alone would show it every sibling the
+    owner holds; ``agent_may_reach`` narrows it to its own reach (ent#629)."""
+    from dependencies import agent_may_reach
+
     rows = db.list_access_requests(agent_name, status)
     may_manage: Dict[str, bool] = {}
 
     def visible(name: str) -> bool:
         if name not in may_manage:
             try:
-                may_manage[name] = bool(db.can_user_share_agent(viewer_username, name))
+                may_manage[name] = bool(db.can_user_share_agent(viewer_username, name)) and (
+                    principal is None or agent_may_reach(principal, name, manage=True))
             except Exception:  # noqa: BLE001 — unknown agent, deleted owner
                 may_manage[name] = False
         return may_manage[name]
