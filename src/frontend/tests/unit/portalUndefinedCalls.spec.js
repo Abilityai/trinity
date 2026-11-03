@@ -28,7 +28,7 @@ const AMBIENT = new Set([
   'function', 'super', 'this', 'Array', 'Object', 'String', 'Number', 'Boolean',
   'Math', 'JSON', 'Date', 'Promise', 'Error', 'Set', 'Map', 'RegExp', 'BigInt',
   'parseInt', 'parseFloat', 'isNaN', 'encodeURIComponent', 'decodeURIComponent',
-  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame',
+  'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame',
   'fetch', 'console', 'window', 'document', 'navigator', 'localStorage', 'alert',
   'FormData', 'File', 'Blob', 'FileReader', 'URL', 'TextDecoder', 'AbortController',
   'defineProps', 'defineEmits', 'defineExpose', 'withDefaults', 'MediaRecorder',

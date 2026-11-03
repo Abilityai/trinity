@@ -642,6 +642,9 @@
                   </p>
                 </div>
 
+                <!-- Workspace Direct calls (trinity-enterprise#1046) -->
+                <DirectVoiceSettings v-if="isAdmin" />
+
                 <!-- ElevenLabs / Voice platform settings (trinity-enterprise#117) -->
                 <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
                   <h3 class="text-sm font-medium text-gray-900 dark:text-white">Voice (ElevenLabs)</h3>
@@ -2362,6 +2365,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'
 import BaseSelect from '../components/base/BaseSelect.vue'
+import DirectVoiceSettings from '../components/settings/DirectVoiceSettings.vue'
 import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'

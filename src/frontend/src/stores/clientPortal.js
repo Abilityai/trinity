@@ -375,6 +375,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // control is not rendered at all. Named for the capability, not the
     // provider (ent#354).
     realtimeVoice: { available: false, reason: null },
+    // trinity-enterprise#1046. Same fail-closed reading as the field above.
+    directVoice: { available: false, reason: null, provider: null },
     // ent#403 — the curated model list the composer may offer, from the roster.
     // Instance-level, so it rides the roster and not every card; empty is the
     // fail-closed value and renders no control, exactly like the two flags
@@ -644,6 +646,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.realtimeVoice = { available: false, reason: null }
+      this.directVoice = { available: false, reason: null, provider: null }
       // ent#403: a per-session capability like the two above — a different
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
@@ -813,7 +816,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
                     { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
-                      attachments = null, tags = null } = {}) {
+                      attachments = null, tags = null, voiceCallId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -833,6 +836,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // keeps only names in this caller's own uploads, and stores them on
           // the user row so a reload shows them.
           attachments: attachments && attachments.length ? attachments : null,
+          // trinity-enterprise#1046 — this turn is part of the live Direct call.
+          voice_call_id: voiceCallId || null,
           // trinity-enterprise#631 — the people this message tags (addresses,
           // as picked). Only when there are some: every other body is unchanged.
           ...(tags && tags.length ? { tags } : {}),
@@ -1724,10 +1729,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#534 — start a real-time voice call bound to a Workspace thread. The
     // platform-principal route (uniform 404 for anyone else); the audio socket
     // the response names is the OSS one and takes the platform JWT.
-    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
+    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null, mode = 'live') {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/voice/start`,
-        { portal_session_id: portalSessionId, voice_name: voiceName },
+        { portal_session_id: portalSessionId, voice_name: voiceName, mode },
         { headers: this.authHeader }
       )
       return data
@@ -2576,6 +2581,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.realtimeVoice = {
           available: data.realtime_voice?.available === true,
           reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
+        }
+        this.directVoice = {
+          available: data.direct_voice?.available === true,
+          reason: typeof data.direct_voice?.reason === 'string' ? data.direct_voice.reason : null,
+          provider: typeof data.direct_voice?.provider === 'string' ? data.direct_voice.provider : null,
         }
         // ent#403: same strictness, same fail-closed direction — an older
         // backend without the field, or a shape that is not an array, reads as
