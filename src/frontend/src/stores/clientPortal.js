@@ -291,6 +291,13 @@ function dismissedLocally(ask) {
   return { ...ask, status: 'dismissed', ended_by: 'you', ended_at: new Date().toISOString() }
 }
 
+// The machine-readable refusal code beside a human `detail`
+// (`X-Trinity-Error-Code`, the convention `utils/skillGate.js` reads).
+function refusalCode(err) {
+  const headers = err?.response?.headers || {}
+  return (typeof headers.get === 'function' ? headers.get('x-trinity-error-code') : headers['x-trinity-error-code']) || null
+}
+
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
     // ent#555 — agent name → the canvas id the rail currently shows.
@@ -312,6 +319,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // re-appearing, which is indistinguishable from "you were never signed in"
     // and reads as the app having lost the thread.
     sessionExpired: false,
+    // trinity#3894: the platform account has no email, so the Workspace cannot
+    // seat it (the backend names the case with `X-Trinity-Error-Code`). The
+    // Workspace shows the remedy instead of a roster that can never load.
+    accountHasNoEmail: false,
     // #2261 — while true, a platform session does NOT re-derive a workspace
     // session in this tab. Set when a CLIENT session expires here, so the
     // browser that was a client's does not silently become the operator's; the
@@ -659,6 +670,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      // #3894: the no-email verdict is this session's roster refusal — the next
+      // client signing in must not see the "Add an email" page before its own
+      // roster answers.
+      this.accountHasNoEmail = false
       // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
       // so the list must not outlive the session it belongs to — or the next
       // client's first failed read shows them the previous client's asks.
@@ -2667,6 +2682,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
+        this.accountHasNoEmail = false
         // #2163: the roster no longer CARRIES the briefing — every card
         // arrives `briefing_state: "pending"` and the description + hint
         // cards (#138 / ent#380) are hydrated by `GET /briefings` below. That
@@ -2734,6 +2750,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // operator whose entitlement had lapsed saw "No agents shared with you
         // yet" with no way to tell that from an actually-empty share list.
         this.unavailable = err.response?.status === 404
+        this.accountHasNoEmail = refusalCode(err) === 'account_has_no_email'
         this.error = this.unavailable
           ? 'The workspace is not available on this instance.'
           : (err.response?.data?.detail || 'Failed to load your agents.')
