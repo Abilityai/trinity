@@ -1010,7 +1010,7 @@
                         Failed: {{ githubPatPropagation.failed.map(a => a.agent_name).join(', ') }}
                       </div>
                       <div v-if="githubPatPropagation.skipped.length" class="mt-1 text-gray-500 dark:text-gray-400">
-                        Skipped: {{ githubPatPropagation.skipped.map(a => `${a.agent_name} (${a.status === 'skipped_per_agent_pat' ? 'per-agent PAT' : 'no GITHUB_PAT'})`).join(', ') }}
+                        Skipped: {{ githubPatPropagation.skipped.map(a => `${a.agent_name} (${a.status === 'skipped_per_agent_pat' ? 'per-agent PAT' : a.status === 'skipped_env_unreadable' ? '.env not readable — left untouched' : 'no GITHUB_PAT'})`).join(', ') }}
                       </div>
                     </template>
                   </div>

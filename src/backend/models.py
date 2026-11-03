@@ -1845,7 +1845,8 @@ class CredentialRequirementsResponse(BaseModel):
 class AgentPropagationStatus(BaseModel):
     """Per-agent result when propagating the global GitHub PAT."""
     agent_name: str
-    # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed"
+    # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed",
+    # "skipped_env_unreadable" (trinity-enterprise#1073: .env not readable as text, left untouched)
     status: str
     error: Optional[str] = None
     # #1967: whether the LIVE git remote was re-templated. The `.env` write only
