@@ -67,3 +67,28 @@ describe('ent#980 — a proposal waiting on the creator', () => {
     expect(line(card(older)).exists()).toBe(false)
   })
 })
+
+// trinity-enterprise#1089 — the request waits on the agent's primary contact,
+// who may be several people (one ask, first answer wins). The page read gives
+// the list as `waiting_on_people`; "waits on me" is membership of it.
+describe('ent#1089 — a request waiting on the agent\'s primary contact', () => {
+  const TWO = { id: 'ppr_2', proposed_by: 'scout', proposed_at: '2026-11-03T09:00:00Z',
+    waiting_on: `ann@example.com, ${ME}`, waiting_on_people: ['ann@example.com', ME], ask_id: 'oq-8' }
+
+  it('any one of several primaries reads that it waits on them', () => {
+    const w = card(project({ proposal: TWO }))
+    expect(w.find('[data-testid="project-steward-proposal-heading"]').text()).toBe('Waiting on you')
+    expect(w.find('[data-testid="project-steward-proposal-review"]').exists()).toBe(true)
+  })
+
+  it('someone who is not among them reads the people, with nothing to act on', () => {
+    const w = card(project({ proposal: TWO }), 'bob@example.com')
+    expect(w.find('[data-testid="project-steward-proposal-heading"]').text()).toBe(`Waiting on ann@example.com, ${ME}`)
+    expect(w.find('[data-testid="project-steward-proposal-review"]').exists()).toBe(false)
+  })
+
+  it('with nobody named yet, it says the agent\'s primary contact — never "the creator"', () => {
+    const w = card(project({ proposal: { ...TWO, waiting_on: null, waiting_on_people: [] } }), 'bob@example.com')
+    expect(w.find('[data-testid="project-steward-proposal-heading"]').text()).toBe("Waiting on the agent's primary contact")
+  })
+})
