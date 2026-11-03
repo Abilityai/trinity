@@ -24,11 +24,11 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from models import RecordDecisionRequest
+from models import RecordDecisionRequest, TaskExecutionStatus
 from database import db
 from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
-from services import idempotency_service, rate_limiter, schedule_seat_memory, seat_decision_service
+from services import idempotency_service, memory_service, rate_limiter, schedule_seat_memory, seat_decision_service
 from services.assignment_provider import resolve_assignment, resolve_served_seat
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,19 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _OWN_DECISIONS = "Agent-scoped key may only record and read its own agent's seat decisions"
 
 
+def _agent_only(current_user: User) -> None:
+    """trinity-enterprise#1062: the agent's own door, as the memory doors are
+    (#4121). The run named decides whose seat is read or written, so a human
+    the agent is merely shared with could name any person's run. A person reads
+    and decides through the client-portal routes, never through these."""
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. An agent records and reads a person's "
+                       "decisions during that person's turn.",
+        })
+
+
 def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     """The seat an execution serves, or a named HTTP error. Mirrors
     `public_memory.write_user_memory` — one rule for "which person"."""
@@ -58,6 +71,17 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
         raise HTTPException(status_code=404, detail="Execution not found")
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
+    # trinity-enterprise#1062: the door serves the turn the agent is IN. Nothing
+    # proves which turn a request comes from (ent#926: the ledger is the fact),
+    # so a run that is not running, whoever it served, is refused. Same rule as
+    # the memory doors (#4121).
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        logger.info(f"[SeatDecision] Refused on {agent_name} (decision_turn_not_live, execution={execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "decision_turn_not_live",
+            "message": "That run is not running, so nothing was recorded or read. Decisions are recorded "
+                       "during the turn they serve. Tell the person the decision was not recorded.",
+        })
     triggered_by = (execution.triggered_by or "").lower()
     seat = schedule_seat_memory.seat_for_execution(execution)
     if seat:
@@ -87,7 +111,21 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     if not email or not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail={"code": "no_seat",
                                                      "message": "No verified person on this execution."})
-    return email.lower(), execution
+    email = email.lower()
+    # The other half of the ledger rule: no other live turn on this agent may
+    # resolve to a different scope. While one does, nothing tells the two turns
+    # apart, so the door fails closed. The cost, as on the memory doors: two
+    # live turns for different people refuse each other.
+    scope = memory_service.scope_for(agent_name, email)
+    if memory_service.another_live_scope(agent_name, execution.id, scope):
+        logger.info(f"[SeatDecision] Refused on {agent_name} (decision_turn_ambiguous, execution={execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "decision_turn_ambiguous",
+            "message": ("Another turn that does not serve this person is running on this agent right now, so "
+                        "whose decisions these are cannot be told apart. Nothing was recorded or read. Tell the "
+                        "person the decision was not recorded; it can be recorded on a later turn."),
+        })
+    return email, execution
 
 
 @router.post("/{agent_name}/decisions")
@@ -99,6 +137,7 @@ async def record_seat_decision(
 ):
     """Record a decision for the seat this execution serves."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    _agent_only(current_user)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
     seat_email, execution = _seat_for(agent_name, body.execution_id)
@@ -153,6 +192,7 @@ async def list_seat_decisions(
     """The seat's standing decisions (criterion first), for reuse and citing.
     `include_history` adds superseded / closed / reversed / expired rows."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    _agent_only(current_user)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     seat_email, _ = _seat_for(agent_name, execution_id)
     rows = db.list_seat_decisions(agent_name, seat_email, limit=seat_decision_service.MAX_ROWS_PER_SEAT)

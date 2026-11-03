@@ -1,6 +1,27 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "The seat-decision and voice-reply doors serve the turn the agent is in, over the real routes with a real agent key: a finished run is refused (decision_turn_not_live / turn_not_live) and nothing is stored, returned or sent; another live turn resolving to a different scope or destination refuses (decision_turn_ambiguous / turn_ambiguous), an unreadable ledger fails closed; the decision doors are agents-only (agent_only for the owner's session and a user key)."
+    },
+    {
+      "file": "integration/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "integration",
+        "auth"
+      ],
+      "description": "The same rule over the network on a sibling stack, with a real agent key seeded inside the backend: the live turn records and reads its seat, a finished run records and reads nothing, two live people refuse each other, a human session and a user key are sent away, voice never reaches a finished run and is ambiguous beside another live conversation."
+    },
+    {
       "file": "unit/test_ent871_capability_used_audit.py",
       "feature": "trinity-enterprise#871",
       "added": "2026-11-02",

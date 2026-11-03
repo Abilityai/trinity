@@ -19,11 +19,11 @@
  * Drives the real execute() with a fake TrinityClient (requireApiKey=false).
  * Runner: node:test → `node --import tsx --test src/tools/*.test.ts`.
  */
-import { describe, it } from "node:test";
+import { afterEach, describe, it, mock } from "node:test";
 import { strict as assert } from "node:assert";
 import { createDecisionTools } from "./decisions.js";
 import { policyFor } from "../access.js";
-import { ApiError } from "../client.js";
+import { ApiError, TrinityClient as RealClient } from "../client.js";
 import type { TrinityClient } from "../client.js";
 
 type Recorded = { method: string; agent: string; body?: unknown; key?: string; execId?: string; history?: boolean };
@@ -132,4 +132,71 @@ describe("an agent key names only itself (trinity-enterprise#839)", () => {
       assert.equal(calls.length, 0);
     });
   }
+});
+
+describe("the turn's own execution id wins (trinity-enterprise#1062)", () => {
+  // The backend now refuses a run that is not live, so a typed id copied from a
+  // resumed session would lose a real decision. The header the platform writes
+  // (`resolveExecutionId`) is sent instead; the typed id is only the fallback.
+  afterEach(() => mock.restoreAll());
+  const session = (executionId?: string) => ({
+    session: { scope: "agent", agentName: "analyst", mcpApiKey: "trinity_mcp_test", executionId },
+  });
+
+  function spy() {
+    const sent: Array<{ method: string; execId?: string; body?: Record<string, unknown>; key?: string }> = [];
+    mock.method(RealClient.prototype, "recordSeatDecision", async (_a: string, body: Record<string, unknown>, key?: string) => {
+      sent.push({ method: "record", body, key });
+      return { success: true, decision: { id: "d1" } };
+    });
+    mock.method(RealClient.prototype, "listSeatDecisions", async (_a: string, execId: string) => {
+      sent.push({ method: "list", execId });
+      return { decisions: [] };
+    });
+    return sent;
+  }
+  const fake = { getBaseUrl: () => "http://backend:8000" } as unknown as TrinityClient;
+
+  it("record_decision sends the header's turn, not a stale typed id, and keys on it", async () => {
+    const sent = spy();
+    const tools = createDecisionTools(fake, true) as any;
+    await tools.recordDecision.execute({ ...RECORD, execution_id: "exec-stale" }, session("exec-live"));
+    const again = spy();
+    await tools.recordDecision.execute({ ...RECORD, execution_id: "exec-other-stale" }, session("exec-live"));
+    assert.equal(sent[0].body?.execution_id, "exec-live");
+    assert.equal(again[0].key, sent[0].key, "the idempotency key follows the turn, not the typed id");
+  });
+
+  it("list_seat_decisions sends the header's turn", async () => {
+    const sent = spy();
+    const tools = createDecisionTools(fake, true) as any;
+    await tools.listSeatDecisions.execute({ execution_id: "exec-stale" }, session("exec-live"));
+    assert.equal(sent[0].execId, "exec-live");
+  });
+
+  it("a typed id is the fallback when the platform supplies none", async () => {
+    const sent = spy();
+    const tools = createDecisionTools(fake, true) as any;
+    await tools.listSeatDecisions.execute({ execution_id: "exec-typed" }, session(undefined));
+    assert.equal(sent[0].execId, "exec-typed");
+  });
+
+  it("with neither, nothing is called and the agent is told nothing was recorded", async () => {
+    const sent = spy();
+    const tools = createDecisionTools(fake, true) as any;
+    const { execution_id: _omit, ...noId } = RECORD;
+    const out = JSON.parse(await tools.recordDecision.execute(noId, session(undefined)));
+    assert.equal(out.success, false);
+    assert.match(out.error, /nothing was recorded/);
+    assert.equal(sent.length, 0);
+  });
+
+  it("the descriptions name the refusals", () => {
+    const tools = createDecisionTools(fake, false) as any;
+    for (const tool of [tools.recordDecision, tools.listSeatDecisions]) {
+      assert.match(tool.description, /decision_turn_not_live/);
+      assert.match(tool.description, /decision_turn_ambiguous/);
+    }
+    assert.match(tools.recordDecision.description, /tell the person/i);
+  });
 });

@@ -110,8 +110,11 @@ def test_the_keys_own_agent_passes_the_gate(harness, method):
 
 
 @pytest.mark.parametrize("method", ["POST", "GET"])
-def test_a_person_passes_the_gate(harness, method):
+def test_a_person_is_refused_as_not_the_agent(harness, method):
+    """trinity-enterprise#1062: these are the agent's own doors (a person reads
+    and decides through the client-portal routes), refused before any lookup."""
     call, seen = harness
     res = call(_person(), method)
-    assert res.status_code == 418, res.text
-    assert ("seat_for", VICTIM) in seen
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"]["code"] == "agent_only"
+    assert seen == []

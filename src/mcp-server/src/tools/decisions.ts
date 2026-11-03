@@ -17,6 +17,7 @@
  */
 
 import { z } from "zod";
+import { resolveExecutionId } from "./execution_id.js";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
@@ -83,9 +84,15 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         "**Direction is not a seat decision**: pricing, positioning, roadmap → pass `scope: \"direction\"`; it is " +
         "kept as `routed` and you take it to canon as a proposal.\n\n" +
         "Works in a user-facing session (public link, Slack, Telegram, WhatsApp) or a scheduled run addressed to " +
-        "one person. Supply your `execution_id` from the Execution Context block.",
+        "one person, and only for the turn you are in: a run that is not live is refused `decision_turn_not_live`; " +
+        "while another person's turn or a headless run is live on this agent, `decision_turn_ambiguous`. A refused " +
+        "decision is NOT recorded — tell the person so, and record it on a later turn.",
       parameters: z.object({
-        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        execution_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Your current execution_id (Execution Context block). The platform supplies the turn's own id; this is the fallback."),
         outcome: z.enum(["approved", "deferred", "killed"]).describe("What happened to the thing decided."),
         decided: z.string().min(1).max(2000).describe("What was decided — one line."),
         alternatives: z
@@ -112,7 +119,7 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
       }),
       execute: async (
         args: {
-          execution_id: string;
+          execution_id?: string;
           outcome: "approved" | "deferred" | "killed";
           decided: string;
           alternatives: string[];
@@ -136,11 +143,19 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();
 
-        const { agent_name: _omit, ...body } = args;
+        // trinity-enterprise#1062: the turn the agent is IN, from the header the
+        // platform writes; a typed id is the fallback (a resumed session copies
+        // stale ones, and the backend refuses a run that is not live).
+        const turn = resolveExecutionId(authContext, args.execution_id);
+        if (!turn) {
+          return JSON.stringify({ success: false, error: "No execution_id for this turn; nothing was recorded." }, null, 2);
+        }
+        const { agent_name: _omit, ...rest } = args;
+        const body = { ...rest, execution_id: turn };
         const idempotencyKey = deriveMcpIdempotencyKey([
-          "record_decision", resolvedAgent, args.execution_id, args.decided,
+          "record_decision", resolvedAgent, turn, args.decided,
         ]);
-        console.log(`[record_decision] ${resolvedAgent} execution=${args.execution_id} outcome=${args.outcome}`);
+        console.log(`[record_decision] ${resolvedAgent} execution=${turn} outcome=${args.outcome}`);
         try {
           const result = await apiClient.recordSeatDecision(resolvedAgent, body, idempotencyKey);
           return JSON.stringify(result, null, 2);
@@ -158,9 +173,15 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         "The standing decisions of the seat you are serving — criterion first — so you can apply the same " +
         "criterion to the same kind of ask and cite the id in record_decision. Returns the seat's active " +
         "records (set include_history for superseded / closed / reversed / expired) and the seat's evidence " +
-        "stats (recorded, reused, per ask class: criteria, reversals, stable). No person emails are returned.",
+        "stats (recorded, reused, per ask class: criteria, reversals, stable). No person emails are returned. " +
+        "Only for the turn you are in: a run that is not live is refused `decision_turn_not_live`, and while " +
+        "another person's turn is live on this agent, `decision_turn_ambiguous`.",
       parameters: z.object({
-        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        execution_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Your current execution_id (Execution Context block). The platform supplies the turn's own id; this is the fallback."),
         include_history: z.boolean().optional().describe("Also return non-active records (default false)."),
         agent_name: z
           .string()
@@ -168,7 +189,7 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
           .describe("For a user-scoped key only. An agent-scoped key always reads its own agent; naming another is refused."),
       }),
       execute: async (
-        args: { execution_id: string; include_history?: boolean; agent_name?: string },
+        args: { execution_id?: string; include_history?: boolean; agent_name?: string },
         context: any
       ) => {
         const authContext = requireApiKey ? context?.session : undefined;
@@ -177,8 +198,12 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         const apiClient = getClient(authContext);
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();
+        const turn = resolveExecutionId(authContext, args.execution_id);
+        if (!turn) {
+          return JSON.stringify({ success: false, error: "No execution_id for this turn." }, null, 2);
+        }
         try {
-          const result = await apiClient.listSeatDecisions(resolvedAgent, args.execution_id, !!args.include_history);
+          const result = await apiClient.listSeatDecisions(resolvedAgent, turn, !!args.include_history);
           return JSON.stringify(result, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);

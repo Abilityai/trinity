@@ -10,6 +10,7 @@ Related routers (same /api/agents prefix):
 - agent_rename.py  — rename endpoint
 - agent_ssh.py     — SSH access
 """
+import asyncio
 import json
 import logging
 import random
@@ -1571,6 +1572,12 @@ async def send_voice_reply_endpoint(
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
         return {"delivered": False, "reason": "execution_not_found"}
+    # trinity-enterprise#1062: a voice note goes to the conversation of the turn
+    # the agent is IN. A run that is not running is never that turn, so nothing
+    # is sent; the agent answers in text, which reaches the right conversation.
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        return {"delivered": False, "reason": "turn_not_live",
+                "guidance": "That run is not running, so no voice note was sent. Reply in text."}
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
@@ -1627,6 +1634,13 @@ async def send_voice_reply_endpoint(
         return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
     if not execution.source_channel_chat_id:
         return {"delivered": False, "channel": channel, "reason": "no_destination"}
+    # The other half of the ledger rule (ent#926): while another live turn on
+    # this agent would speak into a different conversation, nothing tells the
+    # two apart, so no voice note is sent and the agent answers in text.
+    if await asyncio.to_thread(voice_reply_service.another_live_destination, agent_name, execution):
+        return {"delivered": False, "channel": channel, "reason": "turn_ambiguous",
+                "guidance": ("Another conversation on this agent is live right now, so this voice note could "
+                             "not be matched to yours and was not sent. Reply in text.")}
 
     try:
         result = await voice_reply_service.send_voice_reply(
