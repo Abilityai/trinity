@@ -66,9 +66,13 @@ function verifyCode(auth) {
   auth.user = { email: 'x@example.com', role: 'user' }
 }
 
-/** One first sign-in, as the reporter saw it. Returns the route it ends on. */
-async function firstSignIn() {
-  wireLikeMainJs()
+/**
+ * One first sign-in, as the reporter saw it. Returns the route it ends on.
+ * `rewire: false` keeps the handler — and the gate state — of the sign-in
+ * before it, as a sign-out and sign-in within one page session does.
+ */
+async function firstSignIn({ rewire = true } = {}) {
+  if (rewire) wireLikeMainJs()
   const auth = signedOut()
   await router.replace('/login')
   expect(here().path).toBe('/login')
@@ -135,6 +139,16 @@ describe('first sign-in reaches /terms', () => {
     const landed = []
     for (let i = 0; i < 10; i++) {
       landed.push((await firstSignIn()).path)
+      clock += 100
+    }
+    expect(landed).toEqual(Array(10).fill('/terms'))
+  })
+
+  it('ten sign-ins in one page session, the handler registered once, all reach /terms', async () => {
+    wireLikeMainJs()
+    const landed = []
+    for (let i = 0; i < 10; i++) {
+      landed.push((await firstSignIn({ rewire: false })).path)
       clock += 100
     }
     expect(landed).toEqual(Array(10).fill('/terms'))
